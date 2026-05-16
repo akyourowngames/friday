@@ -1,0 +1,9 @@
++-----------------------------------+
+|                                   |
+|     KING   — your AI assistant    |
+|                                   |
++-----------------------------------+
+  /debug  /tools  /model <name>  /new  /exit
+
+[bold yellow]> [/bold yellow] 
+Goodbye!
