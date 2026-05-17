@@ -1,5 +1,4 @@
 import json
-import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -20,22 +19,14 @@ _SMALL_TALK_TEXT = (
 )
 _SMALL_TALK_MARGIN = 0.10
 
-_LAUNCH_KEYWORDS = re.compile(
-    r"^\s*(open|launch|start|run)\b", re.IGNORECASE
-)
+# Parse file-generating tools from config
+def _parse_file_generating_tools():
+    """Parse KING_FILE_GENERATING_TOOLS from config format: tool1,tool2,tool3"""
+    if not settings.file_generating_tools:
+        return set()
+    return {t.strip() for t in settings.file_generating_tools.split(",") if t.strip()}
 
-_FALLBACK_KEYWORDS = [
-    (re.compile(r"(gen|img|imagine|draw|generate|paint|sketch|photo|picture|image|create\s+(a|an)\s+(picture|image|photo))", re.IGNORECASE), "imagine"),
-    (re.compile(r"(gallery|saved\s*image|my\s*(pictures|images|photos))", re.IGNORECASE), "gallery"),
-    (re.compile(r"^\s*(search|find|look\s*up|what\s+is|who\s+is|weather|news)\b", re.IGNORECASE), "web_search"),
-    (re.compile(r"(play|song|music|listen)", re.IGNORECASE), "youtube_play"),
-]
-
-
-@lru_cache(maxsize=256)
-def _has_launch_keyword_cached(query: str) -> bool:
-    """Cached keyword check."""
-    return bool(_LAUNCH_KEYWORDS.match(query.strip()))
+_FILE_GENERATING_TOOLS = _parse_file_generating_tools()
 
 
 class ToolRouter:
@@ -47,6 +38,7 @@ class ToolRouter:
         self._tool_names = []
         self._tool_texts = []
         self._small_talk_emb = None
+        self._last_generated_file = None  # Track generated files for viewing
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     def _get_small_talk_emb(self):
@@ -87,18 +79,11 @@ class ToolRouter:
             json.dumps(self._tool_texts, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-    def _match_keywords(self, query: str):
-        matched = set()
-        for pattern, tool_name in _FALLBACK_KEYWORDS:
-            if pattern.search(query):
-                tool = get_tool(tool_name)
-                if tool:
-                    matched.add(tool_name)
-        return [get_tool(n) for n in matched if get_tool(n)]
-
     def select_tools(self, query, q_emb=None):
+        """Select tools purely based on semantic similarity. No regex, no rules."""
+        # Short queries skip embedding cost - just return nothing
         if len(query.strip()) < settings.embedding_min_chars:
-            return self._match_keywords(query)
+            return []
 
         if self._tool_embeddings is None or len(get_tools()) != len(self._tool_names):
             self._embed_tools()
@@ -112,33 +97,30 @@ class ToolRouter:
         similarities = np.dot(self._tool_embeddings, q_emb)
         max_tool_sim = float(np.max(similarities))
 
+        # Check if this is just casual chat
         small_talk_sim = float(np.dot(self._get_small_talk_emb(), q_emb))
         if small_talk_sim > 0.65 and small_talk_sim > max_tool_sim + _SMALL_TALK_MARGIN:
-            return self._match_keywords(query)
+            return []  # Just chat, no tools needed
 
         if max_tool_sim < self.threshold:
-            return self._match_keywords(query)
+            return []  # No matching tools
 
+        # Get top matches
         top_indices = np.argsort(similarities)[::-1]
+        
+        # Apply winner margin (pick clear winners)
         if len(top_indices) > 1:
             best = float(similarities[top_indices[0]])
             second = float(similarities[top_indices[1]])
             if self.winner_margin > 0 and best >= self.threshold and best >= second + self.winner_margin:
                 top_indices = top_indices[:1]
 
+        # Filter by threshold and limit to top_k
         top_indices = [i for i in top_indices if similarities[i] >= self.threshold][:self.top_k]
 
         selected = []
         for idx in top_indices:
             name = self._tool_names[idx]
             selected.append(get_tool(name))
-
-        if not selected:
-            return self._match_keywords(query)
-
-        if _has_launch_keyword_cached(query):
-            term = get_tool("terminal")
-            if term and "terminal" not in {t["name"] for t in selected}:
-                selected.append(term)
 
         return selected

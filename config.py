@@ -73,6 +73,12 @@ class Settings:
     tavily_api_key: str = _env("TAVILY_API_KEY", "")
     voice_enabled: bool = _env_bool("KING_VOICE_ENABLED", False)
     voice_language: str = _env("KING_VOICE_LANGUAGE", "en-IN")
+    
+    # File-generating tools that trigger terminal viewing
+    file_generating_tools: str = _env(
+        "KING_FILE_GENERATING_TOOLS",
+        "imagine,web_scrape,download,generate,create,gallery"
+    )
 
 
 settings = Settings()

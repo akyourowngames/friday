@@ -10,7 +10,7 @@ from config import settings
 from tools.registry import get_tools, execute_tool, get_tool_schemas
 from .embedder import embed
 from .llm import NIMClient
-from .router import ToolRouter
+from .router import ToolRouter, _FILE_GENERATING_TOOLS
 from .tokenizer import count_messages_tokens
 from .validator import ToolValidator
 from memory.brain import Brain
@@ -33,22 +33,28 @@ def _system_header() -> str:
     return f"{_load_persona()}\nCurrent date and time: {now.strftime('%A, %B %d, %Y  %I:%M:%S %p  %Z')}."
 
 USE_TOOLS = (
-    "CRITICAL: You MUST use the available tools whenever the user's request maps to a tool's purpose. "
-    "Never answer from training data when a tool can provide a real answer. "
-    "DO NOT just talk about what you could do — actually call the tool. "
-    "Never pretend you already did something. If you haven't called a tool yet, you haven't done anything. "
-    "If the user says 'open', 'launch', 'start', 'run', 'show', 'list', "
-    "or asks to do anything actionable on the system, you MUST use the terminal tool. "
-    "If a tool returns an error, report it to the user and move on — do not retry the same tool. "
-    "For complex requests that need multiple steps, call one tool at a time "
-    "and use the result of each step to decide the next."
-    "After receiving a tool result, think ahead: what can I do next with this result? "
-    "Can I chain another tool to help the user further? "
-    "Examples: terminal output lists files → use file_read to show contents; "
-    "web search found a download link → use terminal to download and open it; "
-    "terminal ran a command with output → analyze and suggest next steps; "
-    "a file was created → offer to open it or write more content; "
-    "a search returned results → ask if user wants to drill deeper."
+    "CRITICAL: You MUST use available tools to perform ANY action. Never just describe what you could do. "
+    "If you haven't called a tool, you haven't done anything. Never fake tool results. "
+    "\n"
+    "TERMINAL TOOL MUST BE USED FOR: "
+    "- View/open/display any file (image, video, text, document) → use terminal with 'start' or 'open' command "
+    "- List/show directory contents → use terminal with 'dir', 'ls', or 'Get-ChildItem' "
+    "- Execute any command on system → use terminal tool "
+    "- Download/fetch files from web → use terminal (curl, wget, etc.) "
+    "- Check if file exists → use terminal "
+    "- Any actionable request (open, show, display, view, launch, start, run, execute) → use terminal "
+    "\n"
+    "CHAIN TOOLS: After a tool returns results, check what you can do next: "
+    "- Got a file path? Use terminal to open/view it "
+    "- Got search results? Offer to download or display them "
+    "- Got directory listing? Offer to show specific files "
+    "- Image was generated? Immediately open it with terminal "
+    "\n"
+    "ABSOLUTE RULES: "
+    "1. User says 'view/show/open/display' + file → CALL TERMINAL WITH 'start <filepath>' or 'open <filepath>' "
+    "2. User confirms action (yes, ok, sure) after file operation → CALL TERMINAL TO EXECUTE IT "
+    "3. Never respond 'I'll open...' without actually calling terminal tool "
+    "4. If tool returns error, report it and suggest alternative "
 )
 
 MAX_CONTEXT_TOKENS = 6000
@@ -206,6 +212,7 @@ class Agent:
             })
 
             results = {}
+            
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {}
                 for fc in formatted_calls:
@@ -243,6 +250,10 @@ class Agent:
                     "tool_call_id": fc["id"],
                     "content": result,
                 })
+                
+                # Track file-generating tools for terminal viewing
+                if fc["function"]["name"] in _FILE_GENERATING_TOOLS:
+                    self.router._last_generated_file = result
 
             if settings.direct_single_tool_result and len(formatted_calls) == 1:
                 direct_result = results.get(formatted_calls[0]["id"], "")
