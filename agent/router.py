@@ -1,4 +1,6 @@
 import json
+import re
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +19,23 @@ _SMALL_TALK_TEXT = (
     "saying hello, pleasantries, how are you, checking in"
 )
 _SMALL_TALK_MARGIN = 0.10
+
+_LAUNCH_KEYWORDS = re.compile(
+    r"^\s*(open|launch|start|run)\b", re.IGNORECASE
+)
+
+_FALLBACK_KEYWORDS = [
+    (re.compile(r"(gen|img|imagine|draw|generate|paint|sketch|photo|picture|image|create\s+(a|an)\s+(picture|image|photo))", re.IGNORECASE), "imagine"),
+    (re.compile(r"(gallery|saved\s*image|my\s*(pictures|images|photos))", re.IGNORECASE), "gallery"),
+    (re.compile(r"^\s*(search|find|look\s*up|what\s+is|who\s+is|weather|news)\b", re.IGNORECASE), "web_search"),
+    (re.compile(r"(play|song|music|listen)", re.IGNORECASE), "youtube_play"),
+]
+
+
+@lru_cache(maxsize=256)
+def _has_launch_keyword_cached(query: str) -> bool:
+    """Cached keyword check."""
+    return bool(_LAUNCH_KEYWORDS.match(query.strip()))
 
 
 class ToolRouter:
@@ -68,9 +87,18 @@ class ToolRouter:
             json.dumps(self._tool_texts, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
+    def _match_keywords(self, query: str):
+        matched = set()
+        for pattern, tool_name in _FALLBACK_KEYWORDS:
+            if pattern.search(query):
+                tool = get_tool(tool_name)
+                if tool:
+                    matched.add(tool_name)
+        return [get_tool(n) for n in matched if get_tool(n)]
+
     def select_tools(self, query, q_emb=None):
         if len(query.strip()) < settings.embedding_min_chars:
-            return []
+            return self._match_keywords(query)
 
         if self._tool_embeddings is None or len(get_tools()) != len(self._tool_names):
             self._embed_tools()
@@ -86,10 +114,10 @@ class ToolRouter:
 
         small_talk_sim = float(np.dot(self._get_small_talk_emb(), q_emb))
         if small_talk_sim > 0.65 and small_talk_sim > max_tool_sim + _SMALL_TALK_MARGIN:
-            return []
+            return self._match_keywords(query)
 
         if max_tool_sim < self.threshold:
-            return []
+            return self._match_keywords(query)
 
         top_indices = np.argsort(similarities)[::-1]
         if len(top_indices) > 1:
@@ -104,5 +132,13 @@ class ToolRouter:
         for idx in top_indices:
             name = self._tool_names[idx]
             selected.append(get_tool(name))
+
+        if not selected:
+            return self._match_keywords(query)
+
+        if _has_launch_keyword_cached(query):
+            term = get_tool("terminal")
+            if term and "terminal" not in {t["name"] for t in selected}:
+                selected.append(term)
 
         return selected

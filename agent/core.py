@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 from rich.console import Console
@@ -19,21 +20,35 @@ console = Console()
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona.md"
 
 
+@lru_cache(maxsize=1)
 def _load_persona() -> str:
+    """Cached persona loading."""
     if PERSONA_PATH.exists():
         return PERSONA_PATH.read_text(encoding="utf-8").strip()
     return "You are KING, an AI assistant. Respond naturally in plain language."
 
 
-_today = datetime.now().strftime("%B %d, %Y")
-BASE_SYSTEM = f"{_load_persona()}\nToday's date: {_today}."
+def _system_header() -> str:
+    now = datetime.now().astimezone()
+    return f"{_load_persona()}\nCurrent date and time: {now.strftime('%A, %B %d, %Y  %I:%M:%S %p  %Z')}."
 
 USE_TOOLS = (
     "CRITICAL: You MUST use the available tools whenever the user's request maps to a tool's purpose. "
     "Never answer from training data when a tool can provide a real answer. "
+    "DO NOT just talk about what you could do — actually call the tool. "
+    "Never pretend you already did something. If you haven't called a tool yet, you haven't done anything. "
+    "If the user says 'open', 'launch', 'start', 'run', 'show', 'list', "
+    "or asks to do anything actionable on the system, you MUST use the terminal tool. "
     "If a tool returns an error, report it to the user and move on — do not retry the same tool. "
     "For complex requests that need multiple steps, call one tool at a time "
     "and use the result of each step to decide the next."
+    "After receiving a tool result, think ahead: what can I do next with this result? "
+    "Can I chain another tool to help the user further? "
+    "Examples: terminal output lists files → use file_read to show contents; "
+    "web search found a download link → use terminal to download and open it; "
+    "terminal ran a command with output → analyze and suggest next steps; "
+    "a file was created → offer to open it or write more content; "
+    "a search returned results → ask if user wants to drill deeper."
 )
 
 MAX_CONTEXT_TOKENS = 6000
@@ -42,8 +57,8 @@ MAX_TOOL_RESULT_CHARS = 2000
 
 def _build_system_prompt(selected_tools):
     if not selected_tools:
-        return BASE_SYSTEM
-    lines = [BASE_SYSTEM, "", USE_TOOLS, "", "Available tools:"]
+        return _system_header()
+    lines = [_system_header(), "", USE_TOOLS, "", "Available tools:"]
     for t in selected_tools:
         params = ", ".join(t["parameters"]["properties"])
         lines.append(f"- {t['name']}({params}): {t['description']}")
@@ -52,7 +67,7 @@ def _build_system_prompt(selected_tools):
 
 class Agent:
     def __init__(self):
-        self.messages = [{"role": "system", "content": BASE_SYSTEM}]
+        self.messages = [{"role": "system", "content": _system_header()}]
         self.llm = NIMClient()
         self.router = ToolRouter()
         self.validator = ToolValidator()

@@ -1,8 +1,15 @@
 import json
+from functools import lru_cache
 
 from openai import OpenAI, APIError, APITimeoutError, RateLimitError
 
 from config import settings
+
+
+@lru_cache(maxsize=1)
+def _check_api_key_cached(api_key: str) -> bool:
+    """Cached API key validation."""
+    return bool(api_key.strip())
 
 
 class NIMClient:
@@ -15,9 +22,7 @@ class NIMClient:
         )
 
     def check_api_key(self):
-        if not settings.nim_api_key:
-            return False
-        return True
+        return _check_api_key_cached(settings.nim_api_key)
 
     def stream(self, messages, tools=None):
         kwargs = {

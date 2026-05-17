@@ -18,5 +18,40 @@
     "text": "User's playlist contains Luis Fonsi - Despacito ft. Daddy Yankee",
     "importance": 0.5,
     "ts": "11:25:24"
+  },
+  {
+    "text": "User is not feeling well",
+    "importance": 0.5,
+    "ts": "14:41:06"
+  },
+  {
+    "text": "User has medical records",
+    "importance": 0.5,
+    "ts": "14:41:07"
+  },
+  {
+    "text": "User lives in an area with available doctor's offices or urgent care centers",
+    "importance": 0.5,
+    "ts": "14:41:08"
+  },
+  {
+    "text": "User's playlist contains Despacito",
+    "importance": 0.5,
+    "ts": "14:41:42"
+  },
+  {
+    "text": "User's playlist contains Pal Pal",
+    "importance": 0.5,
+    "ts": "14:41:43"
+  },
+  {
+    "text": "User's playlist contains Afusic ft. @Talwiinder",
+    "importance": 0.5,
+    "ts": "14:41:58"
+  },
+  {
+    "text": "User name is Krish Verma",
+    "importance": 0.5,
+    "ts": "21:05:24"
   }
 ]

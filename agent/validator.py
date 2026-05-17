@@ -1,5 +1,3 @@
-import json
-
 from tools.registry import get_tool, get_tools, execute_tool
 
 
@@ -12,22 +10,33 @@ class ToolValidator:
 
         schema = tool.get("parameters", {})
         required = schema.get("required", [])
+        props = schema.get("properties", {})
 
         for param in required:
             if param not in args:
                 return False, f"Missing required parameter '{param}' for '{name}'"
 
-        props = schema.get("properties", {})
-        type_map = {"string": str, "integer": int, "number": float, "boolean": bool, "array": list, "object": dict}
-
-        for param, value in args.items():
-            if param in props:
-                expected = props[param].get("type", "string")
-                if expected == "integer" and type(value) is bool:
-                    return False, f"Parameter '{param}' should be integer, got boolean"
-                py_type = type_map.get(expected)
-                if py_type and not isinstance(value, py_type):
-                    return False, f"Parameter '{param}' should be {expected}, got {type(value).__name__}"
+        for param, value in list(args.items()):
+            if param not in props:
+                continue
+            expected = props[param].get("type", "string")
+            if expected == "integer" and type(value) is bool:
+                return False, f"Parameter '{param}' should be integer, got boolean"
+            if expected == "integer" and isinstance(value, str):
+                try:
+                    args[param] = int(value)
+                except ValueError:
+                    return False, f"Parameter '{param}' should be integer, got string"
+            elif expected == "number" and isinstance(value, str):
+                try:
+                    args[param] = float(value)
+                except ValueError:
+                    return False, f"Parameter '{param}' should be number, got string"
+            elif expected == "boolean" and isinstance(value, str):
+                if value.lower() in ("true", "1", "yes"):
+                    args[param] = True
+                elif value.lower() in ("false", "0", "no"):
+                    args[param] = False
 
         return True, None
 

@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -15,10 +16,12 @@ def _load_env():
 _load_env()
 
 
+@lru_cache(maxsize=128)
 def _env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+@lru_cache(maxsize=128)
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -26,6 +29,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+@lru_cache(maxsize=128)
 def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None:
@@ -36,6 +40,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+@lru_cache(maxsize=128)
 def _env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None:
@@ -52,10 +57,12 @@ class Settings:
     model_name: str = _env("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
     debug: bool = _env_bool("KING_DEBUG", False)
     tool_top_k: int = _env_int("KING_TOOL_TOP_K", 3)
-    tool_similarity_threshold: float = _env_float("KING_TOOL_SIMILARITY_THRESHOLD", 0.36)
+    tool_similarity_threshold: float = _env_float("KING_TOOL_SIMILARITY_THRESHOLD", 0.23)
     tool_winner_margin: float = _env_float("KING_TOOL_WINNER_MARGIN", 0.15)
     max_tool_rounds: int = _env_int("KING_MAX_TOOL_ROUNDS", 6)
-    direct_single_tool_result: bool = _env_bool("KING_DIRECT_SINGLE_TOOL_RESULT", True)
+    direct_single_tool_result: bool = _env_bool("KING_DIRECT_SINGLE_TOOL_RESULT", False)
+    terminal_default_timeout: int = _env_int("KING_TERMINAL_TIMEOUT", 30)
+    terminal_max_timeout: int = _env_int("KING_TERMINAL_MAX_TIMEOUT", 300)
     embedding_model: str = _env("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embed-v1")
     embedding_min_chars: int = _env_int("KING_EMBEDDING_MIN_CHARS", 7)
     query_embedding_cache_size: int = _env_int("KING_QUERY_EMBEDDING_CACHE_SIZE", 128)

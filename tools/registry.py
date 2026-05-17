@@ -89,8 +89,23 @@ def get_tool_schemas():
 def execute_tool(name, **kwargs):
     if name not in _tools:
         return f"Error: Tool '{name}' not found"
+    func = _tools[name]["function"]
+    sig = inspect.signature(func)
+    valid = set(sig.parameters.keys())
+    unknown = set(kwargs.keys()) - valid
+    if unknown:
+        return (
+            f"Error: '{name}' received unknown parameter(s): {', '.join(sorted(unknown))}. "
+            f"Accepted: {', '.join(sorted(valid))}"
+        )
     try:
-        result = _tools[name]["function"](**kwargs)
+        result = func(**kwargs)
         return str(result) if result is not None else "Done"
+    except TypeError as e:
+        sig_str = ", ".join(
+            f"{p}: {_TYPE_MAP.get(sig.parameters[p].annotation, '?')}"
+            for p in sig.parameters
+        )
+        return f"Error executing '{name}': {e}. Signature: {name}({sig_str})"
     except Exception as e:
         return f"Error executing '{name}': {e}"

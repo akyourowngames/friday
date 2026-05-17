@@ -64,11 +64,10 @@ def _format_post(data: dict) -> str:
     comments = data.get("num_comments", 0)
     sub = data.get("subreddit", "?")
     time_str = _relative_time(data.get("created_utc", 0))
-    ups = data.get("ups", 0)
-    downs = data.get("downs", 0)
     ratio = data.get("upvote_ratio", 0.5)
+    post_id = data.get("id", "")
     return (
-        f"[{score} pts] {title} → r/{sub}\n"
+        f"[{score} pts] {title} → r/{sub}  (id: {post_id})\n"
         f"   by u/{author} {time_str} | {ratio*100:.0f}% upvoted | {comments} comments"
     )
 
@@ -192,19 +191,23 @@ def _fetch_user(username: str, limit: int) -> str:
         "top posts from r/wallstreetbets this week",
         "search reddit for AI news",
         "comments from r/AskReddit for post abc123",
+        "deepdive into reddit post by id",
         "show reddit user spez",
     ],
     param_descriptions={
         "action": "front (default), hot, new, top, comments, search, user",
         "subreddit": "Subreddit name (without r/) for hot/new/top/comments",
         "query": "Search term for search, post ID for comments, username for user",
+        "id": "Alias for query — post ID to get comments for",
         "limit": "Number of results (1-25, default 10)",
         "time": "Time filter for top: hour, day, week (default), month, year, all",
     },
 )
-def reddit(action: str = "front", subreddit: str = "", query: str = "", limit: int = 10, time: str = "week") -> str:
+def reddit(action: str = "front", subreddit: str = "", query: str = "", limit: int = 10, time: str = "week", id: str = "") -> str:
     limit = max(1, min(25, limit))
     action = action.strip().lower()
+    if id and not query:
+        query = id
 
     if action == "search":
         if not query:

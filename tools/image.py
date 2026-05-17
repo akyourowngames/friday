@@ -1,114 +1,137 @@
 import base64
 import time
+import urllib.parse
+import warnings
 from datetime import datetime
 from pathlib import Path
 
 import httpx
+
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 from config import settings
 from tools.registry import tool
 
 _IMAGE_DIR = Path("storage/images")
 _VALID_SIZES = {"1024x1024", "1216x832", "832x1216"}
-_DEFAULT_MODEL = "sdxl"
+_DEFAULT_MODEL = "pollinations"
 
-_MODEL_ENDPOINTS = {
-    "sdxl": "https://api.nvidia.com/v1/genai/stabilityai/sdxl",
-    "playground-v2.5": "https://api.nvidia.com/v1/genai/playgroundai/playground-v2.5-1024px-aesthetic",
-    "sdxl-turbo": "https://api.nvidia.com/v1/genai/stabilityai/sdxl-turbo",
-}
+_POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
 
 
-def _nvidia_genai(prompt: str, width: int, height: int, model: str) -> str:
-    endpoint = _MODEL_ENDPOINTS.get(model)
-    if not endpoint:
+def _pollinations_genai(prompt: str, width: int, height: int) -> str | None:
+    encoded = urllib.parse.quote(prompt)
+    url = f"{_POLLINATIONS_BASE}/{encoded}?width={width}&height={height}&seed={int(time.time()) % 100000}&nologo=true"
+    try:
+        r = httpx.get(url, timeout=120, verify=False)
+        if r.status_code == 200 and len(r.content) > 1000:
+            return base64.b64encode(r.content).decode()
+        return None
+    except Exception:
         return None
 
-    try:
-        r = httpx.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {settings.nim_api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            json={
-                "text_prompts": [{"text": prompt, "weight": 1}],
-                "height": height,
-                "width": width,
-                "samples": 1,
-                "steps": 25,
-            },
-            timeout=120,
-        )
-    except Exception as e:
-        return f"Request failed: {e}"
 
-    if r.status_code == 202:
-        poll_url = r.headers.get("Location") or r.headers.get("Content-Location")
-        if poll_url:
-            for _ in range(60):
-                time.sleep(2)
-                try:
-                    pr = httpx.get(
-                        poll_url,
-                        headers={"Authorization": f"Bearer {settings.nim_api_key}", "Accept": "application/json"},
-                        timeout=30,
-                    )
-                except Exception:
-                    continue
-                if pr.status_code == 200:
-                    r = pr
-                    break
-            else:
-                return "Image generation timed out"
+def _nvidia_genai(prompt: str, width: int, height: int, model: str) -> str | None:
+    endpoints = {
+        "sdxl": [
+            "https://integrate.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-xl-base-1.0",
+        ],
+        "playground-v2.5": [
+            "https://integrate.api.nvidia.com/v1/genai/playgroundai/playground-v2.5-1024px-aesthetic",
+        ],
+        "sdxl-turbo": [
+            "https://integrate.api.nvidia.com/v1/genai/stabilityai/sdxl-turbo",
+        ],
+    }
+    urls = endpoints.get(model, [])
+    if not urls:
+        return None
 
-    if r.status_code == 400:
-        body = r.json()
-        msg = body.get("detail") or body.get("message") or str(body)
-        return f"Model rejected the request: {msg}"
+    headers = {
+        "Authorization": f"Bearer {settings.nim_api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "text_prompts": [{"text": prompt, "weight": 1}],
+        "height": height,
+        "width": width,
+        "samples": 1,
+        "steps": 25,
+        "cfg_scale": 7,
+    }
 
-    if r.status_code == 401:
-        return "NVIDIA API authentication failed. Check your API key."
-
-    if r.status_code == 404:
-        return f"Model '{model}' not available at NVIDIA NIM"
-
-    if r.status_code != 200 and r.status_code != 201:
+    for url in urls:
         try:
-            detail = r.json().get("detail", str(r.text[:200]))
+            r = httpx.post(url, headers=headers, json=payload, timeout=120, verify=False)
         except Exception:
-            detail = r.text[:200]
-        return f"Image generation failed (HTTP {r.status_code}): {detail}"
+            continue
+        if r.status_code in (200, 201):
+            return _extract_b64_from_nvidia(r)
+        if r.status_code == 202:
+            poll_url = r.headers.get("Location") or r.headers.get("Content-Location")
+            if poll_url:
+                for _ in range(30):
+                    time.sleep(2)
+                    try:
+                        pr = httpx.get(
+                            poll_url,
+                            headers={"Authorization": f"Bearer {settings.nim_api_key}", "Accept": "application/json"},
+                            timeout=30, verify=False,
+                        )
+                    except Exception:
+                        continue
+                    if pr.status_code == 200:
+                        return _extract_b64_from_nvidia(pr)
+        break
+    return None
 
+
+def _extract_b64_from_nvidia(r) -> str | None:
     try:
         body = r.json()
     except Exception:
-        return "Failed to parse image generation response"
-
+        return None
     artifacts = body.get("artifacts")
     if artifacts and len(artifacts) > 0:
         b64 = artifacts[0].get("base64")
         if b64:
             return b64
-        finish = artifacts[0].get("finishReason", "unknown")
-        if finish != "SUCCESS":
-            return f"Image generation finished with reason: {finish}"
-
-    b64 = body.get("base64") or body.get("image") or body.get("data")
-    if b64:
-        return b64
-
-    url = body.get("url") or body.get("image_url")
-    if url:
+    for key in ("base64", "image", "data"):
+        val = body.get(key)
+        if val:
+            return val
+    img_url = body.get("url") or body.get("image_url")
+    if img_url:
         try:
-            ir = httpx.get(url, timeout=30)
+            ir = httpx.get(img_url, timeout=30, verify=False)
             ir.raise_for_status()
             return base64.b64encode(ir.content).decode()
-        except Exception as e:
-            return f"Failed to download generated image from URL: {e}"
+        except Exception:
+            pass
+    return None
 
-    return f"Unexpected response format from image model"
+
+def _generate(prompt: str, width: int, height: int, model: str) -> str:
+    if model == "pollinations":
+        result = _pollinations_genai(prompt, width, height)
+        if result:
+            return result
+        return "Pollinations generation failed. Try again."
+
+    result = _nvidia_genai(prompt, width, height, model)
+    if result:
+        return result
+
+    alt = "playground-v2.5" if model in ("sdxl", "sdxl-turbo") else "sdxl"
+    result = _nvidia_genai(prompt, width, height, alt)
+    if result:
+        return result
+
+    result = _pollinations_genai(prompt, width, height)
+    if result:
+        return result
+    return "All image generation backends failed. Check API key or try again later."
 
 
 def _save_image(b64_data: str, prompt_slug: str) -> Path:
@@ -123,17 +146,28 @@ def _save_image(b64_data: str, prompt_slug: str) -> Path:
 
 @tool(
     name="imagine",
-    description="Generate an image from a text prompt using NVIDIA NIM. Supports SDXL and Playground v2.5. Saves to storage/images/ and returns the file path",
+    description="Generate an image from a text description. Uses Pollinations.ai (free, no API key needed) with NVIDIA NIM fallback. Keywords: image, picture, photo, img, art, drawing, illustration, render, create, make, generate, draw, imagine, paint, sketch, visual. This is the ONLY tool for creating new images",
     examples=[
         "generate an image of a cyberpunk cat",
         "imagine a mountain landscape at sunset digital art",
         "create a logo for my startup a blue geometric fox",
         "draw a pixel art spaceship",
+        "make me a picture of a sports car",
+        "gen me an image of a dragon",
+        "generate a photo of a sunset beach",
+        "create an illustration of a futuristic city",
+        "img of a cat sitting on a couch",
+        "render a 3D model of a robot",
+        "paint a portrait of a wizard",
+        "sketch a fantasy landscape",
+        "generate a wallpaper of mountains",
+        "make a logo for my brand",
+        "create digital art of a cyberpunk street",
     ],
     param_descriptions={
         "prompt": "Text description of the image to generate (5+ characters)",
-        "size": "Image size: 1024x1024 (square), 1216x832 (landscape), or 832x1216 (portrait)",
-        "model": "Model name: sdxl (default), playground-v2.5, or sdxl-turbo",
+        "size": "Image size: 1024x1024 (square, default), 1216x832 (landscape), or 832x1216 (portrait)",
+        "model": "Model: pollinations (default, free), sdxl, playground-v2.5, or sdxl-turbo",
     },
 )
 def imagine(prompt: str, size: str = "1024x1024", model: str = _DEFAULT_MODEL) -> str:
@@ -147,32 +181,16 @@ def imagine(prompt: str, size: str = "1024x1024", model: str = _DEFAULT_MODEL) -
     parts = size.split("x")
     width, height = int(parts[0]), int(parts[1])
 
-    for attempt in (model,):
-        result = _nvidia_genai(prompt.strip(), width, height, attempt)
-        if result is None:
-            alt = "playground-v2.5" if attempt == _DEFAULT_MODEL else _DEFAULT_MODEL
-            result = _nvidia_genai(prompt.strip(), width, height, alt)
-            if result is None:
-                return f"Neither {attempt} nor {alt} is available"
+    result = _generate(prompt.strip(), width, height, model)
 
-        if result.startswith("Image generation ") or result.startswith("Model ") or result.startswith("NVIDIA "):
-            if attempt == model:
-                alt = "playground-v2.5" if model == _DEFAULT_MODEL else _DEFAULT_MODEL
-                fallback = _nvidia_genai(prompt.strip(), width, height, alt)
-                if fallback and not any(f.startswith(p) for p in ("Image generation ", "Model ", "NVIDIA ", "Request ", "Failed ")):
-                    result = fallback
-                else:
-                    return result
-            else:
-                return result
+    if result.startswith("All ") or result.startswith("Pollinations ") or result.startswith("NVIDIA "):
+        return result
 
-        try:
-            path = _save_image(result, prompt)
-            return str(path.resolve())
-        except Exception:
-            return f"Failed to save generated image"
-
-    return "Image generation failed after all attempts"
+    try:
+        path = _save_image(result, prompt)
+        return f"Image saved: {path.resolve()}"
+    except Exception:
+        return "Failed to save generated image"
 
 
 def _find_image(name: str) -> str | None:
@@ -203,18 +221,17 @@ def _find_image(name: str) -> str | None:
 
 
 @tool(
-    name="images",
-    description="Browse, search, and manage previously generated images in storage/images/. Actions: list, search <name>, remove <name/number>, view <name/number>",
+    name="gallery",
+    description="Browse and manage your gallery of previously generated saved images: list all, search by name, view file path, or delete. Keywords: saved images, generated pictures, image collection, view image, delete image, browse gallery, list images. NOT for creating new images — use 'imagine' for that",
     examples=[
-        "show my generated images",
-        "list saved images",
+        "show my saved images",
+        "list my image gallery",
         "find images about cyberpunk",
         "delete image 3",
         "remove the mountain landscape image",
-        "show me the pixel art spaceship image",
     ],
     param_descriptions={
-        "action": "What to do: list (all images), search (find by name), remove (delete by name/number), view (get path by name/number)",
+        "action": "list (all images), search (find by name), remove (delete by name/number), view (get path by name/number)",
         "query": "Image name or number for search/remove/view actions",
     },
 )

@@ -175,16 +175,20 @@ def _search_hn(query: str, limit: int) -> str:
         "show me Ask HN posts",
         "search hacker news for rust",
         "get comments for story 432423",
+        "deepdive into hn story by id",
         "show hn user whoishiring",
     ],
     param_descriptions={
         "action": "top (default), new, best, ask, show, comments, user, search",
         "limit": "Number of results (1-30, default 10)",
         "query": "Story ID for comments, username for user, or search term for search",
+        "id": "Alias for query — story ID to get comments for",
     },
 )
-def hackernews(action: str = "top", limit: int = 10, query: str = "") -> str:
+def hackernews(action: str = "top", limit: int = 10, query: str = "", id: str = "") -> str:
     limit = max(1, min(30, limit))
+    if id and not query:
+        query = id
 
     if action == "comments":
         if not query:
