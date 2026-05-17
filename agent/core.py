@@ -85,7 +85,7 @@ class Agent:
             self.messages = keep + recent
 
     def process(self, user_input: str):
-        need_context = len(user_input.strip()) > 6
+        need_context = len(user_input.strip()) >= settings.embedding_min_chars
         q_emb = embed(user_input) if need_context else None
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -228,6 +228,16 @@ class Agent:
                     "tool_call_id": fc["id"],
                     "content": result,
                 })
+
+            if settings.direct_single_tool_result and len(formatted_calls) == 1:
+                direct_result = results.get(formatted_calls[0]["id"], "")
+                if direct_result:
+                    if len(direct_result) > MAX_TOOL_RESULT_CHARS:
+                        direct_result = direct_result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
+                    print(direct_result)
+                    content = direct_result
+                    self.messages.append({"role": "assistant", "content": direct_result})
+                    break
 
         if content and len(user_input.strip()) > 15:
             self._executor.submit(self._extract_and_store, user_input, content)

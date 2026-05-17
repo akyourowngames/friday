@@ -7,7 +7,7 @@ from config import settings
 from tools.registry import get_tools, get_tool
 from .embedder import embed
 
-_CACHE_DIR = Path("storage")
+_CACHE_DIR = Path(settings.storage_dir)
 _TOOL_CACHE = _CACHE_DIR / "tool_embeddings.npy"
 _TOOL_TEXTS_CACHE = _CACHE_DIR / "tool_texts.json"
 _ST_CACHE = _CACHE_DIR / "small_talk_emb.npy"
@@ -23,6 +23,7 @@ class ToolRouter:
     def __init__(self, top_k=None):
         self.top_k = top_k or settings.tool_top_k
         self.threshold = settings.tool_similarity_threshold
+        self.winner_margin = settings.tool_winner_margin
         self._tool_embeddings = None
         self._tool_names = []
         self._tool_texts = []
@@ -68,7 +69,7 @@ class ToolRouter:
         )
 
     def select_tools(self, query, q_emb=None):
-        if len(query.strip()) <= 6:
+        if len(query.strip()) < settings.embedding_min_chars:
             return []
 
         if self._tool_embeddings is None or len(get_tools()) != len(self._tool_names):
@@ -91,6 +92,12 @@ class ToolRouter:
             return []
 
         top_indices = np.argsort(similarities)[::-1]
+        if len(top_indices) > 1:
+            best = float(similarities[top_indices[0]])
+            second = float(similarities[top_indices[1]])
+            if self.winner_margin > 0 and best >= self.threshold and best >= second + self.winner_margin:
+                top_indices = top_indices[:1]
+
         top_indices = [i for i in top_indices if similarities[i] >= self.threshold][:self.top_k]
 
         selected = []

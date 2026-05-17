@@ -7,7 +7,7 @@ import numpy as np
 from config import settings
 from agent.embedder import embed
 
-MEMORY_DIR = Path(__file__).resolve().parent.parent / "storage" / "memories"
+MEMORY_DIR = Path(settings.memory_dir)
 
 
 class Brain:
@@ -98,7 +98,7 @@ class Brain:
         weighted = sims * np.array([m.get("importance", 0.5) for m in self.memories])
 
         top_idx = np.argsort(weighted)[-k:][::-1]
-        top_idx = [i for i in top_idx if sims[i] > 0.15]
+        top_idx = [i for i in top_idx if sims[i] >= settings.memory_similarity_threshold]
 
         if not top_idx:
             return ""
