@@ -39,6 +39,23 @@ class NIMClient:
         except APIError as e:
             raise RuntimeError(f"NVIDIA NIM API error: {e}")
 
+    def extract_summary(self, messages: list) -> str:
+        prompt = (
+            "Summarize the key information from this conversation concisely "
+            "(2-3 sentences). Focus on: user identity, facts discussed, "
+            "tasks completed, decisions made. Omit greetings and pleasantries."
+        )
+        try:
+            resp = self.client.chat.completions.create(
+                model=settings.model_name,
+                messages=[{"role": "system", "content": prompt}] + messages[-6:],
+                temperature=0,
+                max_tokens=200,
+            )
+            return resp.choices[0].message.content.strip()
+        except (APIError, RateLimitError, APITimeoutError):
+            return ""
+
     def extract_facts(self, user_input: str, assistant_response: str):
         body = (
             "Extract personal facts about the user worth remembering. "

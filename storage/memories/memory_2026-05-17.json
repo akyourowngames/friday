@@ -1,0 +1,22 @@
+[
+  {
+    "text": "User listened to 'Luis Fonsi - Despacito ft. Daddy Yankee' by Luis Fonsi",
+    "importance": 0.3,
+    "ts": "11:14:44"
+  },
+  {
+    "text": "User listened to 'Afusic - Pal Pal with @Talwiinder  (Official Visualiser) Prod. @AliSoomroMusic' by AFUSIC and AliSoomroMusic",
+    "importance": 0.3,
+    "ts": "11:16:08"
+  },
+  {
+    "text": "User's playlist contains Afusic - Pal Pal with @Talwiinder",
+    "importance": 0.5,
+    "ts": "11:25:23"
+  },
+  {
+    "text": "User's playlist contains Luis Fonsi - Despacito ft. Daddy Yankee",
+    "importance": 0.5,
+    "ts": "11:25:24"
+  }
+]

@@ -3,6 +3,8 @@ import os
 import tempfile
 import threading
 
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+
 import edge_tts
 import pygame
 

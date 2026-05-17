@@ -14,6 +14,7 @@ class Brain:
     def __init__(self):
         self.memories = []
         self._embeddings = None
+        self._npy_path = MEMORY_DIR / "embeddings.npy"
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         self._load_all()
 
@@ -25,6 +26,22 @@ class Brain:
             for item in data:
                 item["_date"] = date_str
             self.memories.extend(data)
+        self._load_embeddings()
+
+    def _load_embeddings(self):
+        if self._npy_path.exists() and len(self.memories) > 0:
+            cached = np.load(self._npy_path)
+            if len(cached) == len(self.memories):
+                self._embeddings = cached
+                return
+        if len(self.memories) > 0:
+            texts = [m["text"] for m in self.memories]
+            self._embeddings = embed(texts)
+            np.save(self._npy_path, self._embeddings)
+
+    def _save_embeddings(self):
+        if self._embeddings is not None:
+            np.save(self._npy_path, self._embeddings)
 
     def _today_path(self):
         return MEMORY_DIR / f"memory_{date.today().isoformat()}.json"
@@ -63,16 +80,20 @@ class Brain:
             emb = embed(text).reshape(1, -1)
             self._embeddings = np.vstack([self._embeddings, emb])
         self._save_today()
+        self._save_embeddings()
 
-    def recall(self, query: str, k: int = 5) -> str:
+    def recall(self, query: str, k: int = 5, q_emb=None) -> str:
         if not self.memories:
             return ""
 
         if self._embeddings is None:
             texts = [m["text"] for m in self.memories]
             self._embeddings = embed(texts)
+            self._save_embeddings()
 
-        q_emb = embed(query)
+        if q_emb is None:
+            q_emb = embed(query)
+
         sims = np.dot(self._embeddings, q_emb)
         weighted = sims * np.array([m.get("importance", 0.5) for m in self.memories])
 

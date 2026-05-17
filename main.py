@@ -1,5 +1,7 @@
+import json
 import sys
 import threading
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -102,8 +104,27 @@ def main():
                     voice_loop(agent)
                 else:
                     console.print("[cyan]Voice mode off.[/cyan]")
+            elif base == "playlist":
+                playlist_path = Path("storage/playlist.json")
+                if not playlist_path.exists():
+                    console.print("[yellow]No playlist yet. Play some music first![/yellow]")
+                else:
+                    try:
+                        items = json.loads(playlist_path.read_text(encoding="utf-8"))
+                        if not items:
+                            console.print("[yellow]Playlist is empty[/yellow]")
+                        else:
+                            console.print("[bold cyan]Your Playlist:[/bold cyan]")
+                            for i, item in enumerate(items, 1):
+                                fav = "⭐ " if item.get("favorite") else "   "
+                                views = f"{item.get('view_count', 0):,}" if item.get("view_count") else ""
+                                title = item.get("title", "?")
+                                channel = item.get("channel", "?")
+                                console.print(f"  {fav}{i}. {title} — {channel} [dim]({views} views)[/dim]")
+                    except Exception as e:
+                        console.print(f"[red]Could not load playlist: {e}[/red]")
             elif base == "help":
-                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /voice  /new  /help  /exit")
+                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /voice  /playlist  /new  /help  /exit")
             else:
                 console.print(f"[red]Unknown command: /{base}. Try /help[/red]")
             continue

@@ -31,7 +31,10 @@ def file_read(path: str) -> str:
             return f"Not a file: {path}"
         if _is_binary(p):
             return f"Cannot read binary file: {path}"
-        return p.read_text(encoding="utf-8")
+        text = p.read_text(encoding="utf-8")
+        if len(text) > 3000:
+            text = text[:3000] + "\n...[truncated]"
+        return text
     except Exception:
         return "Error reading file"
 

@@ -14,7 +14,7 @@ _TYPE_MAP = {
 }
 
 
-def tool(name=None, description=None, examples=None):
+def tool(name=None, description=None, examples=None, param_descriptions=None):
     def decorator(func):
         nonlocal name, description
         if name is None:
@@ -32,9 +32,10 @@ def tool(name=None, description=None, examples=None):
             param_type = param.annotation if param.annotation is not inspect.Parameter.empty else str
             json_type = _TYPE_MAP.get(param_type, "string")
 
+            pd = (param_descriptions or {}).get(param_name, param_name)
             properties[param_name] = {
                 "type": json_type,
-                "description": f"{param_name}",
+                "description": pd,
             }
 
             if param.default is inspect.Parameter.empty:

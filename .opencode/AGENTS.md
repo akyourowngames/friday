@@ -1,10 +1,15 @@
 # KING Agent Instructions
 
+## Golden Rule
+- **NEVER hardcode anything.** Do not hardcode tool calls, tool names, responses, dates, paths, or any content meant to be dynamic. Everything must be read from config, file, or external source.
+- This applies to AI personality (`persona.md`), tool schemas (registry), settings (`config.py`), and user data (storage). If it can change, it must not be hardcoded.
+
 ## Project Structure
 - `main.py` - CLI entry point
 - `config.py` - Settings (API key, model, debug flag)
+- `persona.md` - **AI personality definition** (FRIDAY/JARVIS-style). Modify this to change how KING speaks and behaves — no code changes needed.
 - `agent/` - Core agent logic
-  - `core.py` - Agent loop (LLM → tool → repeat)
+  - `core.py` - Agent loop (LLM → tool → repeat). Loads persona from `persona.md`.
   - `llm.py` - NVIDIA NIM client with streaming
   - `router.py` - Semantic tool selector (embeddings)
   - `validator.py` - Tool call validation

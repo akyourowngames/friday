@@ -1,24 +1,43 @@
 import json
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from rich.console import Console
 
 from config import settings
 from tools.registry import get_tools, execute_tool, get_tool_schemas
+from .embedder import embed
 from .llm import NIMClient
 from .router import ToolRouter
+from .tokenizer import count_messages_tokens
 from .validator import ToolValidator
 from memory.brain import Brain
 
 console = Console()
 
-BASE_SYSTEM = "You are KING, an AI assistant. Respond naturally in plain language. No JSON. Today: May 16, 2026."
+PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona.md"
+
+
+def _load_persona() -> str:
+    if PERSONA_PATH.exists():
+        return PERSONA_PATH.read_text(encoding="utf-8").strip()
+    return "You are KING, an AI assistant. Respond naturally in plain language."
+
+
+_today = datetime.now().strftime("%B %d, %Y")
+BASE_SYSTEM = f"{_load_persona()}\nToday's date: {_today}."
 
 USE_TOOLS = (
-    "When you have tools available and the user's request matches what a tool does, USE IT. "
-    "Don't guess or make up answers — call the tool. "
-    "If the user is just chatting or sharing personal info, respond naturally without tools."
+    "CRITICAL: You MUST use the available tools whenever the user's request maps to a tool's purpose. "
+    "Never answer from training data when a tool can provide a real answer. "
+    "If a tool returns an error, report it to the user and move on — do not retry the same tool. "
+    "For complex requests that need multiple steps, call one tool at a time "
+    "and use the result of each step to decide the next."
 )
+
+MAX_CONTEXT_TOKENS = 6000
+MAX_TOOL_RESULT_CHARS = 2000
 
 
 def _build_system_prompt(selected_tools):
@@ -38,14 +57,44 @@ class Agent:
         self.router = ToolRouter()
         self.validator = ToolValidator()
         self.brain = Brain()
+        self._executor = ThreadPoolExecutor(max_workers=3)
 
         if not self.llm.check_api_key():
             console.print("[red]NVIDIA_API_KEY not set![/red]")
 
         console.print("[dim]Ready[/dim]")
 
+    def _maybe_summarize(self):
+        if count_messages_tokens(self.messages) < MAX_CONTEXT_TOKENS:
+            return
+
+        keep = self.messages[:1]
+        recent = self.messages[-4:] if len(self.messages) > 4 else self.messages[1:]
+        older = self.messages[1:-4] if len(self.messages) > 4 else []
+
+        if not older:
+            return
+
+        summary = self.llm.extract_summary(older)
+        if summary:
+            console.print(f"[dim]Summarized {len(older)} messages[/dim]")
+            self.messages = keep + [
+                {"role": "system", "content": f"Previous conversation summary: {summary}"}
+            ] + recent
+        else:
+            self.messages = keep + recent
+
     def process(self, user_input: str):
-        context = self.brain.recall(user_input)
+        need_context = len(user_input.strip()) > 6
+        q_emb = embed(user_input) if need_context else None
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            router_future = pool.submit(self.router.select_tools, user_input, q_emb)
+            brain_future = pool.submit(self.brain.recall, user_input, 5, q_emb) if need_context else None
+
+            selected_tools = router_future.result()
+            context = brain_future.result() if brain_future else None
+
         if context:
             msg = f"[Memory: {context}]\n{user_input}"
         else:
@@ -53,17 +102,18 @@ class Agent:
 
         self.messages.append({"role": "user", "content": msg})
 
-        selected_tools = self.router.select_tools(user_input)
         self.messages[0] = {"role": "system", "content": _build_system_prompt(selected_tools)}
 
-        tool_schemas = get_tool_schemas() if settings.debug else [
+        tool_schemas = [
             t for t in get_tool_schemas()
             if t["function"]["name"] in {x["name"] for x in selected_tools}
         ]
 
         if settings.debug:
-            names = [t["function"]["name"] for t in tool_schemas]
-            console.print(f"[dim] Tools: {', '.join(names) or 'none'}[/dim]")
+            all_names = [t["function"]["name"] for t in get_tool_schemas()]
+            sel_names = [t["function"]["name"] for t in tool_schemas]
+            console.print(f"[dim] All: {', '.join(all_names)}[/dim]")
+            console.print(f"[dim] Selected: {', '.join(sel_names) or 'none'}[/dim]")
 
         tool_rounds = 0
         content = ""
@@ -167,6 +217,8 @@ class Agent:
 
             for fc in formatted_calls:
                 result = results[fc["id"]]
+                if len(result) > MAX_TOOL_RESULT_CHARS:
+                    result = result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
                 if settings.debug:
                     preview = result[:200].replace("\n", " ")
                     console.print(f"[dim] Result: {preview}[/dim]")
@@ -178,10 +230,15 @@ class Agent:
                 })
 
         if content and len(user_input.strip()) > 15:
-            facts = self.llm.extract_facts(user_input, content)
-            if facts:
-                for fact in facts:
-                    self.brain.commit(fact)
-                console.print(f"[dim]Stored {len(facts)} memory[/dim]")
+            self._executor.submit(self._extract_and_store, user_input, content)
+
+        self._maybe_summarize()
 
         return content
+
+    def _extract_and_store(self, user_input, response):
+        facts = self.llm.extract_facts(user_input, response)
+        if facts:
+            for fact in facts:
+                self.brain.commit(fact)
+            console.print(f"[dim]Stored {len(facts)} memory[/dim]")
