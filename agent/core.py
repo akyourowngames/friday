@@ -71,16 +71,33 @@ CANNOT_DO = (
     "called a tool and got a successful result. Say: 'I'm sorry, I don't have the ability to do that.'"
 )
 
+def _find_json(text: str) -> str | None:
+    """Extract the outermost JSON object from text using brace-depth tracking."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    return None
+
+
 def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
     """Detect JSON-formatted tool call leaked as text content.
     Returns (tool_call_dict, None) on success,
     (None, error_message) if parsed but tool unknown,
     (None, None) if not a JSON tool call."""
     stripped = text.strip()
-    if not stripped.startswith("{"):
+    json_str = stripped if stripped.startswith("{") else _find_json(stripped)
+    if not json_str:
         return None, None
     try:
-        parsed = json.loads(stripped)
+        parsed = json.loads(json_str)
     except (json.JSONDecodeError, TypeError):
         return None, None
     if not isinstance(parsed, dict):
@@ -161,6 +178,13 @@ def _build_system_prompt(selected_tools):
         for t in selected_tools:
             params = ", ".join(t["parameters"]["properties"])
             lines.append(f"- {t['name']}({params}): {t['description']}")
+        lines.append("")
+        lines.append(
+            "OUTPUT FORMAT: When you need to perform an action, output a JSON tool call "
+            "on its own line: {\"name\": \"tool_name\", \"parameters\": {\"param\": \"value\"}}. "
+            "Example: {\"name\": \"terminal\", \"parameters\": {\"command\": \"start notepad\"}}. "
+            "The system will execute it. Do not describe what the tool does in text."
+        )
     else:
         lines.append("")
         lines.append(CANNOT_DO)
