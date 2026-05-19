@@ -22,6 +22,15 @@ _gesture_detector = None
 _gesture_enabled = False
 
 
+def _configure_output_encoding():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
+
 def print_welcome():
     title = Panel.fit(
         "[bold cyan] KING [/bold cyan]  [dim]— your AI assistant[/dim]",
@@ -90,6 +99,7 @@ def gesture_loop(agent: Agent):
 
 
 def main():
+    _configure_output_encoding()
     print_welcome()
     agent = Agent()
 

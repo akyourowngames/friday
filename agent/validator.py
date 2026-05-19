@@ -11,14 +11,19 @@ class ToolValidator:
         schema = tool.get("parameters", {})
         required = schema.get("required", [])
         props = schema.get("properties", {})
+        unknown = sorted(param for param in args if param not in props)
+        if unknown:
+            accepted = ", ".join(sorted(props)) if props else "none"
+            return (
+                False,
+                f"Unknown parameter(s) for '{name}': {', '.join(unknown)}. Accepted: {accepted}",
+            )
 
         for param in required:
             if param not in args:
                 return False, f"Missing required parameter '{param}' for '{name}'"
 
         for param, value in list(args.items()):
-            if param not in props:
-                continue
             expected = props[param].get("type", "string")
             if expected == "integer" and type(value) is bool:
                 return False, f"Parameter '{param}' should be integer, got boolean"

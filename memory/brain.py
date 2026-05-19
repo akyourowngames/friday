@@ -1,5 +1,4 @@
 import json
-import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -49,9 +48,22 @@ def _contradiction_category(text: str) -> str | None:
 
 
 def _normalize_fact(text: str) -> str:
-    text = re.sub(r"\bnow\s+(lives|is|has)\b", r"\1", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b(?:actually|currently)\s+", "", text, flags=re.IGNORECASE)
-    return text.strip()
+    words = text.strip().split()
+    normalized = []
+    i = 0
+    while i < len(words):
+        current = words[i]
+        current_key = current.strip(".,;:!?").casefold()
+        next_key = words[i + 1].strip(".,;:!?").casefold() if i + 1 < len(words) else ""
+        if current_key == "now" and next_key in {"lives", "is", "has"}:
+            i += 1
+            continue
+        if current_key in {"actually", "currently"}:
+            i += 1
+            continue
+        normalized.append(current)
+        i += 1
+    return " ".join(normalized).strip()
 
 
 class Brain:
@@ -107,6 +119,13 @@ class Brain:
                 return True
         return False
 
+    def _is_exact_duplicate(self, text):
+        lower = text.lower()
+        for m in self.memories:
+            if m["text"].lower() == lower:
+                return True
+        return False
+
     def _remove_contradictions(self, text):
         category = _contradiction_category(text)
         if not category:
@@ -122,11 +141,13 @@ class Brain:
 
     def commit(self, text: str, importance: float = 0.5):
         if _is_vague(text):
-            return
+            return False
         text = _normalize_fact(text)
+        if self._is_exact_duplicate(text):
+            return False
         self._remove_contradictions(text)
         if self._is_duplicate(text):
-            return
+            return False
         item = {
             "text": text,
             "importance": importance,
@@ -135,6 +156,7 @@ class Brain:
         }
         self.memories.append(item)
         self._save_all()
+        return True
 
     def recall(self, query: str, k: int = 5, q_emb=None) -> str:
         if not self.memories:
@@ -158,7 +180,24 @@ class Brain:
         if not top_idx:
             return ""
 
+        unique_idx = []
+        seen = set()
+        for i in top_idx:
+            key = self.memories[i]["text"].strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_idx.append(i)
+        top_idx = unique_idx
+
+        if len(top_idx) > 1:
+            best = top_idx[0]
+            second = top_idx[1]
+            if sims[best] >= sims[second] + settings.memory_winner_margin:
+                top_idx = [best]
+
         parts = []
         for i in top_idx:
-            parts.append(self.memories[i]["text"])
+            text = self.memories[i]["text"]
+            parts.append(text)
         return " | ".join(parts)

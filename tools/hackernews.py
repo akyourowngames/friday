@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+from config import settings
 from tools.registry import tool
 
 _API_BASE = "https://hacker-news.firebaseio.com/v0"
@@ -19,15 +20,41 @@ _USER_AGENT = "KING/1.0 (AI assistant)"
 
 _cache = {}
 _cache_ts = {}
+_cache_error = {}
+
+
+def _request_json(url: str, params: dict | None = None) -> tuple[dict | list | None, str]:
+    attempts = max(1, settings.external_request_attempts)
+    delay = max(0.0, settings.external_retry_delay)
+    last_error = "provider unavailable"
+    for attempt in range(attempts):
+        try:
+            r = httpx.get(url, params=params, timeout=15, headers={"User-Agent": _USER_AGENT})
+            r.raise_for_status()
+            return r.json(), ""
+        except httpx.TimeoutException:
+            last_error = "timeout"
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else "unknown"
+            last_error = f"http {status}"
+            if isinstance(status, int) and 400 <= status < 500:
+                break
+        except httpx.HTTPError as e:
+            last_error = e.__class__.__name__
+        except Exception as e:
+            last_error = e.__class__.__name__
+        if attempt < attempts - 1 and delay:
+            time.sleep(delay)
+    return None, f"{last_error} after {attempts} attempt(s)"
 
 
 def _get(url: str) -> dict | list | None:
-    try:
-        r = httpx.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
+    data, error = _request_json(url)
+    if error:
+        _cache_error[url] = error
+    else:
+        _cache_error.pop(url, None)
+    return data
 
 
 def _cached_ids(endpoint: str) -> list[int]:
@@ -36,8 +63,13 @@ def _cached_ids(endpoint: str) -> list[int]:
     if key in _cache and now - _cache_ts.get(key, 0) < _CACHE_TTL:
         return _cache[key]
     fb_endpoint = _ENDPOINT_MAP.get(endpoint, endpoint)
-    data = _get(f"{_API_BASE}/{fb_endpoint}.json")
-    ids = data if isinstance(data, list) else []
+    url = f"{_API_BASE}/{fb_endpoint}.json"
+    data = _get(url)
+    if not isinstance(data, list):
+        _cache_error[key] = _cache_error.get(url, "unexpected response")
+        return []
+    ids = data
+    _cache_error.pop(key, None)
     _cache[key] = ids
     _cache_ts[key] = now
     return ids
@@ -71,11 +103,17 @@ def _format_story(item: dict) -> str:
     comments = item.get("descendants", 0)
     url = item.get("url", f"https://news.ycombinator.com/item?id={item['id']}")
     domain = url.split("/")[2] if "//" in url else "news.ycombinator.com"
-    return f"[{score} pts] {title} ({domain})\n   by {by} {time_str} | {comments} comments"
+    hn_url = f"https://news.ycombinator.com/item?id={item['id']}"
+    return f"[{score} pts] {title} ({domain})\n   id: {item['id']} | by {by} {time_str} | {comments} comments\n   {url}\n   {hn_url}"
 
 
 def _fetch_stories(endpoint: str, limit: int) -> str:
     ids = _cached_ids(endpoint)[:limit]
+    if not ids:
+        key = f"ids_{endpoint}"
+        error = _cache_error.get(key)
+        if error:
+            return f"Hacker News {endpoint} unavailable: {error}"
     stories = []
     for sid in ids:
         item = _fetch_item(sid)
@@ -141,28 +179,27 @@ def _fetch_user(username: str) -> str:
 
 def _search_hn(query: str, limit: int) -> str:
     search_url = _ALGOLIA + "_by_date"
-    try:
-        r = httpx.get(
-            search_url,
-            params={"query": query.strip(), "hitsPerPage": limit},
-            timeout=15,
-            headers={"User-Agent": _USER_AGENT},
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return "Search unavailable"
+    data, error = _request_json(
+        search_url,
+        params={"query": query.strip(), "hitsPerPage": limit, "tags": "story"},
+    )
+    if error or not isinstance(data, dict):
+        detail = error or "unexpected response"
+        return f"Search unavailable: {detail}"
     hits = data.get("hits", [])
     if not hits:
         return f"No results for '{query}'"
     lines = []
     for i, hit in enumerate(hits[:limit], 1):
-        title = hit.get("title", "Untitled")
+        title = hit.get("title") or hit.get("story_title") or "Untitled"
         points = hit.get("points", 0)
         author = hit.get("author", "?")
         time_str = _relative_time(hit.get("created_at_i", 0))
         comments = hit.get("num_comments", 0)
-        lines.append(f"{i}. [{points} pts] {title}\n   by {author} {time_str} | {comments} comments")
+        item_id = hit.get("objectID", "")
+        url = hit.get("url") or hit.get("story_url") or f"https://news.ycombinator.com/item?id={item_id}"
+        hn_url = f"https://news.ycombinator.com/item?id={item_id}" if item_id else ""
+        lines.append(f"{i}. [{points} pts] {title}\n   id: {item_id} | by {author} {time_str} | {comments} comments\n   {url}\n   {hn_url}")
     return "\n\n".join(lines)
 
 

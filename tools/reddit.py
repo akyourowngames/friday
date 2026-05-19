@@ -2,6 +2,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
+from ddgs import DDGS
 
 from tools.registry import tool
 
@@ -44,6 +45,23 @@ def _cache_set(key: str, value: object):
     _cache_ts[key] = time.time()
 
 
+def _fallback_search(query: str, limit: int) -> str:
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=min(limit, 10)))
+    except Exception:
+        results = []
+    if not results:
+        return "Reddit is blocked from this network and fallback search returned no results"
+    lines = ["Reddit API is blocked from this network. Fallback web results:"]
+    for i, result in enumerate(results, 1):
+        title = result.get("title", "Untitled")
+        body = result.get("body", "")
+        href = result.get("href", "")
+        lines.append(f"{i}. {title}\n   {body}\n   {href}")
+    return "\n\n".join(lines)
+
+
 def _relative_time(timestamp: int) -> str:
     delta = int(datetime.now(timezone.utc).timestamp()) - timestamp
     if delta < 60:
@@ -66,9 +84,12 @@ def _format_post(data: dict) -> str:
     time_str = _relative_time(data.get("created_utc", 0))
     ratio = data.get("upvote_ratio", 0.5)
     post_id = data.get("id", "")
+    permalink = data.get("permalink", "")
+    url = f"https://www.reddit.com{permalink}" if permalink else data.get("url", "")
     return (
         f"[{score} pts] {title} → r/{sub}  (id: {post_id})\n"
-        f"   by u/{author} {time_str} | {ratio*100:.0f}% upvoted | {comments} comments"
+        f"   by u/{author} {time_str} | {ratio*100:.0f}% upvoted | {comments} comments\n"
+        f"   {url}"
     )
 
 
@@ -108,7 +129,7 @@ def _fetch_listing(path: str, limit: int, extra_params: dict = None) -> str:
     if isinstance(data, dict) and data.get("_rate_limited"):
         return "Reddit rate limited — try again in a moment"
     if isinstance(data, dict) and data.get("_error"):
-        return f"Reddit error: {data['_error']}"
+        return _fallback_search(f"site:reddit.com{path} reddit posts", limit)
 
     posts = _extract_posts(data, limit)
     if not posts:
@@ -146,15 +167,20 @@ def _fetch_comments(subreddit: str, post_id: str, limit: int) -> str:
     return header + "\n\nNo comments yet"
 
 
-def _search_reddit(query: str, subreddit: str, limit: int) -> str:
-    cache_key = f"search_{query}_{subreddit}_{limit}"
+def _search_reddit(query: str, subreddit: str, limit: int, sort: str) -> str:
+    if sort not in ("relevance", "hot", "top", "new", "comments"):
+        sort = "relevance"
+    cache_key = f"search_{query}_{subreddit}_{limit}_{sort}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
     path = f"/r/{subreddit}/search" if subreddit else "/search"
-    data = _get(path, {"q": query.strip(), "limit": min(limit, 25), "raw_json": 1, "sort": "relevance"})
+    data = _get(path, {"q": query.strip(), "limit": min(limit, 25), "raw_json": 1, "sort": sort})
     if data is None:
         return "No results found"
+    if isinstance(data, dict) and data.get("_error"):
+        scope = f"r/{subreddit} " if subreddit else ""
+        return _fallback_search(f"site:reddit.com {scope}{query}", limit)
     posts = _extract_posts(data, limit)
     if not posts:
         return f"No results for '{query}'"
@@ -201,9 +227,10 @@ def _fetch_user(username: str, limit: int) -> str:
         "id": "Alias for query — post ID to get comments for",
         "limit": "Number of results (1-25, default 10)",
         "time": "Time filter for top: hour, day, week (default), month, year, all",
+        "sort": "Search sort: relevance, hot, top, new, or comments",
     },
 )
-def reddit(action: str = "front", subreddit: str = "", query: str = "", limit: int = 10, time: str = "week", id: str = "") -> str:
+def reddit(action: str = "front", subreddit: str = "", query: str = "", limit: int = 10, time: str = "week", id: str = "", sort: str = "relevance") -> str:
     limit = max(1, min(25, limit))
     action = action.strip().lower()
     if id and not query:
@@ -212,7 +239,7 @@ def reddit(action: str = "front", subreddit: str = "", query: str = "", limit: i
     if action == "search":
         if not query:
             return "Provide a search term"
-        return _search_reddit(query, subreddit, limit)
+        return _search_reddit(query, subreddit, limit, sort)
 
     if action == "comments":
         if not subreddit:

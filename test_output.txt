@@ -1,6 +1,6 @@
 +-----------------------------------+
 |                                   |
-|     KING   — your AI assistant    |
+|     KING   - your AI assistant    |
 |                                   |
 +-----------------------------------+
   /debug  /tools  /model <name>  /new  /exit

@@ -5,10 +5,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 from rich.console import Console
 
 from config import settings
-from tools.registry import get_tools, execute_tool, get_tool_schemas
+from tools.registry import get_tools, execute_tool, get_tool_schemas, get_tool
 from .embedder import embed
 from .llm import NIMClient
 from .router import ToolRouter, _FILE_GENERATING_TOOLS
@@ -20,6 +21,7 @@ from memory.brain import Brain
 console = Console()
 
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona.md"
+TOOL_POLICY_PATH = Path(__file__).resolve().parent.parent / "tool_policy.md"
 
 
 @lru_cache(maxsize=1)
@@ -30,46 +32,24 @@ def _load_persona() -> str:
     return "You are KING, an AI assistant. Respond naturally in plain language."
 
 
+@lru_cache(maxsize=1)
+def _load_tool_policy() -> str:
+    """Cached tool policy loading from markdown."""
+    if TOOL_POLICY_PATH.exists():
+        return TOOL_POLICY_PATH.read_text(encoding="utf-8").strip()
+    return (
+        "Use selected tools for actionable requests. Never claim an action happened "
+        "unless an actual tool result proves it. Ask for missing targets instead of guessing."
+    )
+
+
 def _system_header() -> str:
     now = datetime.now().astimezone()
     return f"{_load_persona()}\nCurrent date and time: {now.strftime('%A, %B %d, %Y  %I:%M:%S %p  %Z')}."
 
-USE_TOOLS = (
-    "CRITICAL: You MUST use available tools to perform ANY action. Never just describe what you could do. "
-    "If you haven't called a tool, you haven't done anything. Never fake tool results. "
-    "\n"
-    "TERMINAL TOOL MUST BE USED FOR: "
-    "- View/open/display any file (image, video, text, document) → use terminal with 'start' or 'open' command "
-    "- List/show directory contents → use terminal with 'dir', 'ls', or 'Get-ChildItem' "
-    "- Execute any command on system → use terminal tool "
-    "- Download/fetch files from web → use terminal (curl, wget, etc.) "
-    "- Check if file exists → use terminal "
-    "- Any actionable request (open, show, display, view, launch, start, run, execute) → use terminal "
-    "\n"
-    "CHAIN TOOLS: After a tool returns results, check what you can do next: "
-    "- Got a file path? Use terminal to open/view it "
-    "- Got search results? Offer to download or display them "
-    "- Got directory listing? Offer to show specific files "
-    "- Image was generated? Immediately open it with terminal "
-    "\n"
-    "ABSOLUTE RULES: "
-    "1. User says 'view/show/open/display' + file → CALL TERMINAL WITH 'start <filepath>' or 'open <filepath>' "
-    "2. User confirms action (yes, ok, sure) after file operation → CALL TERMINAL TO EXECUTE IT "
-    "3. Never respond 'I'll open...' without actually calling terminal tool "
-    "4. If tool returns error, report it and suggest alternative "
-    "5. NEVER output JSON or function call syntax in your text responses. The tool calling mechanism is handled automatically by the system -- you just use it."
-)
-
 MAX_CONTEXT_TOKENS = 6000
 MAX_TOOL_RESULT_CHARS = 2000
 TYPING_SPEED = 0.008
-
-CANNOT_DO = (
-    "CRITICAL: If no tools are available to fulfill the user's request, "
-    "you MUST explicitly say you cannot do it. Never pretend to perform an action. "
-    "Never claim 'done', 'completed', 'launched', 'adjusted', etc. unless you actually "
-    "called a tool and got a successful result. Say: 'I'm sorry, I don't have the ability to do that.'"
-)
 
 def _find_json(text: str) -> str | None:
     """Extract the outermost JSON object from text using brace-depth tracking."""
@@ -133,11 +113,6 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
 
     known = {t["function"]["name"].lower(): t["function"]["name"] for t in schemas}
     actual = known.get(func_name.lower())
-    if not actual:
-        for kl, ka in known.items():
-            if func_name.lower() in kl or kl in func_name.lower():
-                actual = ka
-                break
 
     if not actual:
         available = ", ".join(sorted(known.values()))
@@ -151,27 +126,56 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
     }, None
 
 
-import re as _re
-
-
 def _has_backtick_tool_call(text: str, schemas: list) -> bool:
-    """Detect backtick-quoted tool calls or shell commands."""
-    blocks = _re.findall(r"`([^`]+)`", text)
+    """Detect backtick-quoted tool calls by selected schema similarity."""
+    blocks = []
+    start = None
+    for idx, char in enumerate(text):
+        if char != "`":
+            continue
+        if start is None:
+            start = idx + 1
+        else:
+            blocks.append(text[start:idx])
+            start = None
     if not blocks:
         return False
     tool_names = {t["function"]["name"] for t in schemas}
+    schema_texts = []
+    for schema in schemas:
+        function = schema.get("function", {})
+        params = function.get("parameters", {}).get("properties", {})
+        parts = [function.get("name", ""), function.get("description", "")]
+        for param_name, param_schema in params.items():
+            parts.append(param_name)
+            parts.append(param_schema.get("description", ""))
+        registered = get_tool(function.get("name", ""))
+        if registered:
+            parts.extend(registered.get("examples", []))
+        schema_texts.extend(part for part in parts if part)
+
     for block in blocks:
         stripped = block.strip()
         for name in tool_names:
             if stripped.startswith(f"{name}("):
                 return True
-        if _re.match(r"^(start|open|run)\s", stripped, _re.IGNORECASE):
+        if not stripped or "\n" in stripped or not schema_texts:
+            continue
+        try:
+            block_emb = embed(stripped)
+            schema_embs = embed(schema_texts)
+            if getattr(schema_embs, "ndim", 1) == 1:
+                schema_embs = schema_embs.reshape(1, -1)
+            similarity = float(np.max(np.dot(schema_embs, block_emb)))
+        except Exception:
+            continue
+        if similarity >= settings.backtick_tool_similarity_threshold:
             return True
     return False
 
 
 def _build_system_prompt(selected_tools):
-    lines = [_system_header(), "", USE_TOOLS]
+    lines = [_system_header(), "", _load_tool_policy()]
     if selected_tools:
         lines.append("")
         lines.append("Available tools:")
@@ -187,8 +191,49 @@ def _build_system_prompt(selected_tools):
         )
     else:
         lines.append("")
-        lines.append(CANNOT_DO)
+        lines.append(
+            "No tools are selected for this turn. Answer normally for conversation; "
+            "if the user requested an action, say no selected tool is available instead of pretending."
+        )
     return "\n".join(lines)
+
+
+def _recent_tool_context(messages, limit=3):
+    parts = []
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content") or ""
+        if content:
+            parts.append(content)
+        if len(parts) >= limit:
+            break
+    return "\n".join(reversed(parts))
+
+
+def _tool_call_grounded(user_input: str, args: dict, messages: list, tool_name: str = "") -> bool:
+    values = [tool_name] if tool_name else []
+    for value in args.values():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        values.append(str(value))
+    if not values:
+        return True
+    grounding_text = user_input
+    recent_tool_context = _recent_tool_context(messages)
+    if recent_tool_context:
+        grounding_text = f"{grounding_text}\n{recent_tool_context}"
+    try:
+        grounding_emb = embed(grounding_text)
+        value_embs = embed(values)
+        if getattr(value_embs, "ndim", 1) == 1:
+            value_embs = value_embs.reshape(1, -1)
+        similarity = float(np.max(np.dot(value_embs, grounding_emb)))
+    except Exception:
+        return True
+    return similarity >= settings.tool_argument_grounding_threshold
 
 
 class Agent:
@@ -259,18 +304,23 @@ class Agent:
 
         tool_rounds = 0
         hallucination_retries = 0
+        correction_retries = 0
         tools_called_this_input = False
+        current_turn_called = []
+        current_turn_tool_msgs = []
+        grounding_rejected = False
         content = ""
 
         while True:
             tool_rounds += 1
             console.print("[dim]Thinking...[/dim]", end="\r")
-            for attempt in range(2):
+            stream_attempts = max(1, settings.llm_stream_attempts)
+            for attempt in range(stream_attempts):
                 try:
                     stream = self.llm.stream(self.messages, tool_schemas)
                     break
                 except RuntimeError as e:
-                    if attempt == 0:
+                    if attempt < stream_attempts - 1:
                         console.print(f"[yellow]{e} Retrying...[/yellow]")
                         time.sleep(3)
                     else:
@@ -327,6 +377,11 @@ class Agent:
                     lines_up = max(content.count("\n") + 1, 1)
                     clear = "\033[A\033[K" * lines_up
                     print(f"\r{clear}\r", end="")
+                    if correction_retries >= settings.tool_call_retries:
+                        content = err
+                        self.messages.append({"role": "assistant", "content": content})
+                        break
+                    correction_retries += 1
                     msg = f"{err}\nOutput your response directly without calling a tool if you cannot call one."
                     self.messages.append({"role": "system", "content": msg})
                     continue
@@ -334,6 +389,12 @@ class Agent:
                     lines_up = max(content.count("\n") + 1, 1)
                     clear = "\033[A\033[K" * lines_up
                     print(f"\r{clear}\r", end="")
+                    if correction_retries >= settings.tool_call_retries:
+                        available = [t["function"]["name"] for t in tool_schemas]
+                        content = f"I need to use one of these tools directly, sir: {', '.join(available)}."
+                        self.messages.append({"role": "assistant", "content": content})
+                        break
+                    correction_retries += 1
                     available = [t["function"]["name"] for t in tool_schemas]
                     self.messages.append({
                         "role": "system",
@@ -346,7 +407,7 @@ class Agent:
                     is_action = False
                     if tool_schemas and not tools_called_this_input:
                         is_action = self.verifier.verify(content, [], [], tool_schemas) != "PASS"
-                    if is_action and hallucination_retries < 2:
+                    if is_action and hallucination_retries < settings.tool_call_retries:
                         hallucination_retries += 1
                         lines_up = max(content.count("\n") + 1, 1)
                         clear = "\033[A\033[K" * lines_up
@@ -401,6 +462,10 @@ class Agent:
                     if not valid:
                         results[fc["id"]] = error
                         continue
+                    if not _tool_call_grounded(user_input, args, self.messages, name):
+                        results[fc["id"]] = "Error: Tool call rejected because its arguments were not grounded in the user request or recent tool results. Ask for the missing target instead of guessing."
+                        grounding_rejected = True
+                        continue
                     future = pool.submit(execute_tool, name, **args)
                     futures[future] = fc
 
@@ -425,6 +490,8 @@ class Agent:
                     "tool_call_id": fc["id"],
                     "content": result,
                 })
+                current_turn_called.append(fc["function"]["name"])
+                current_turn_tool_msgs.append(result)
                 
                 # Track file-generating tools for terminal viewing
                 if fc["function"]["name"] in _FILE_GENERATING_TOOLS:
@@ -432,7 +499,13 @@ class Agent:
 
             tools_called_this_input = True
 
-            if len(formatted_calls) == 1:
+            if grounding_rejected:
+                content = "I need the exact target before I can use that tool, sir."
+                print(content)
+                self.messages.append({"role": "assistant", "content": content})
+                break
+
+            if settings.direct_single_tool_result and len(formatted_calls) == 1:
                 direct_result = results.get(formatted_calls[0]["id"], "")
                 if direct_result and not direct_result.startswith("Error"):
                     if len(direct_result) > MAX_TOOL_RESULT_CHARS:
@@ -443,13 +516,7 @@ class Agent:
                     break
 
         if tool_schemas and content:
-            called = []
-            for m in self.messages:
-                if m.get("tool_calls"):
-                    for tc in m["tool_calls"]:
-                        called.append(tc["function"]["name"])
-            tool_msgs = [m["content"] for m in self.messages if m["role"] == "tool"] if called else []
-            verdict = self.verifier.verify(content, called, tool_msgs, tool_schemas)
+            verdict = self.verifier.verify(content, current_turn_called, current_turn_tool_msgs, tool_schemas)
             if verdict != "PASS":
                 refusal = "I'm sorry, I don't have the ability to do that."
                 print(f"\n[{refusal}]")
@@ -467,6 +534,9 @@ class Agent:
     def _extract_and_store(self, user_input, response):
         facts = self.llm.extract_facts(user_input, response)
         if facts:
+            stored = 0
             for fact in facts:
-                self.brain.commit(fact)
-            console.print(f"[dim]Stored {len(facts)} memory[/dim]")
+                if self.brain.commit(fact):
+                    stored += 1
+            if stored:
+                console.print(f"[dim]Stored {stored} memory[/dim]")

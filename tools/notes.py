@@ -56,6 +56,19 @@ def _format_preview(text: str, max_len: int = 80) -> str:
     return text[:max_len] + "..." if len(text) > max_len else text
 
 
+def _find_note_title(notes: dict, title: str) -> tuple[str | None, str | None]:
+    if title in notes:
+        return title, None
+    wanted = title.strip().lower()
+    matches = [k for k in notes if wanted and wanted in k.lower()]
+    if not matches:
+        return None, None
+    if len(matches) > 1:
+        shown = "\n".join(f"- {match}" for match in matches)
+        return None, f"Ambiguous note title '{title}'. Matches:\n{shown}"
+    return matches[0], None
+
+
 @tool(
     name="note_save",
     description="Save a note with a title, content, and optional tags. Overwrites existing note with same title",
@@ -99,21 +112,18 @@ def note_save(title: str, content: str, tags: str = "") -> str:
 def note_read(title: str) -> str:
     notes = _load_notes()
     notes = _migrate(notes)
-    if title in notes:
-        n = notes[title]
+    match, error = _find_note_title(notes, title)
+    if error:
+        return error
+    if match:
+        n = notes[match]
         parts = [n["content"]]
+        if match != title:
+            parts.insert(0, f"[{match}]\n")
         if n.get("tags"):
             parts.append(f"\nTags: {', '.join(n['tags'])}")
         parts.append(f"\nCreated: {n.get('created', '?')}  |  Updated: {n.get('updated', '?')}")
         return "".join(parts)
-    for k in notes:
-        if title.lower() in k.lower():
-            n = notes[k]
-            parts = [f"[{k}]\n{n['content']}"]
-            if n.get("tags"):
-                parts.append(f"\nTags: {', '.join(n['tags'])}")
-            parts.append(f"\nCreated: {n.get('created', '?')}  |  Updated: {n.get('updated', '?')}")
-            return "".join(parts)
     if not notes:
         return "No notes saved"
     return f"Note '{title}' not found. Titles:\n" + "\n".join(f"- {t}" for t in notes)
@@ -136,21 +146,19 @@ def note_read(title: str) -> str:
 def note_update(title: str, content: str = "", tags: str = "") -> str:
     notes = _load_notes()
     notes = _migrate(notes)
-    if title not in notes:
-        for k in notes:
-            if title.lower() in k.lower():
-                title = k
-                break
-        else:
-            return f"Note '{title}' not found"
-    n = notes[title]
+    match, error = _find_note_title(notes, title)
+    if error:
+        return error
+    if not match:
+        return f"Note '{title}' not found"
+    n = notes[match]
     if content:
         n["content"] = content
     if tags:
         n["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     n["updated"] = _now()
     _save_notes(notes)
-    return f"Updated note '{title}'"
+    return f"Updated note '{match}'"
 
 
 @tool(
@@ -165,15 +173,13 @@ def note_update(title: str, content: str = "", tags: str = "") -> str:
 def note_delete(title: str) -> str:
     notes = _load_notes()
     notes = _migrate(notes)
-    if title in notes:
-        del notes[title]
+    match, error = _find_note_title(notes, title)
+    if error:
+        return error
+    if match:
+        del notes[match]
         _save_notes(notes)
-        return f"Deleted note '{title}'"
-    for k in list(notes):
-        if title.lower() in k.lower():
-            del notes[k]
-            _save_notes(notes)
-            return f"Deleted note '{k}'"
+        return f"Deleted note '{match}'"
     if not notes:
         return "No notes saved"
     return f"Note '{title}' not found. Titles:\n" + "\n".join(f"- {t}" for t in notes)

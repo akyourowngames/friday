@@ -1,12 +1,23 @@
 [
   {
+    "title": "Pal Pal Dil Ke Paas - Title | Arijit Singh | Karan Deol, Sahher | Parampara, Sachet, Rishi Rich",
+    "url": "https://www.youtube.com/watch?v=lgTHGZF3BQw",
+    "channel": "Zee Music Company",
+    "view_count": 328709052,
+    "like_count": 3788929,
+    "duration": 183.0,
+    "favorite": false,
+    "play_count": 1,
+    "played_at": "2026-05-19T12:17:03.980351"
+  },
+  {
     "title": "Test Song C",
     "url": "https://youtu.be/c",
     "channel": "Artist C",
     "view_count": 300,
     "like_count": 30,
     "favorite": false,
-    "play_count": 2,
-    "played_at": "2026-05-17T11:38:57.483980"
+    "play_count": 3,
+    "played_at": "2026-05-17T21:17:52.402711"
   }
 ]

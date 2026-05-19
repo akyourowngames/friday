@@ -88,7 +88,7 @@ def _rank_results(entries: list[dict]) -> dict | None:
     return max(candidates, key=score)
 
 
-def _play_audio_background(url: str, title: str):
+def _start_playback_attempt(url: str, title: str) -> str:
     def _play():
         ffmpeg = _get_ffmpeg()
         if not ffmpeg:
@@ -141,7 +141,16 @@ def _play_audio_background(url: str, title: str):
             except Exception:
                 pass
 
+    ffmpeg = _get_ffmpeg()
+    if not ffmpeg:
+        import webbrowser
+        opened = webbrowser.open(url)
+        if opened:
+            return f"Opened YouTube page for '{title}': {url}"
+        return f"Could not open YouTube page for '{title}': {url}"
+
     threading.Thread(target=_play, daemon=True).start()
+    return f"Started playback attempt for '{title}'. Local audio is handled in the background; if it fails, the YouTube page will be opened."
 
 
 def _normalize_title(title: str) -> str:
@@ -252,21 +261,13 @@ def youtube_play(query: str) -> str:
         "duration": best.get("duration", 0),
     })
 
-    _play_audio_background(best["url"], best["title"])
-
-    try:
-        from memory.brain import Brain
-        Brain().commit(
-            f"User listened to '{best['title']}' by {best['channel']}",
-            importance=0.3,
-        )
-    except Exception:
-        pass
+    playback_status = _start_playback_attempt(best["url"], best["title"])
 
     likes = _fmt_count(best.get("like_count", 0))
     views = _fmt_count(best.get("view_count", 0))
     return (
-        f"▶ Playing '{best['title']}' — {best['channel']} "
+        f"{playback_status}\n"
+        f"Selected: '{best['title']}' — {best['channel']} "
         f"({views} views, {likes} likes)"
     )
 
@@ -345,6 +346,8 @@ def playlist_manage(action: str, query: str = "") -> str:
 
     if action == "play":
         items = _load_playlist()
+        if not items:
+            return "No saved songs to play"
         if not query:
             favs = [i for i in items if i.get("favorite")]
             target = favs[0] if favs else items[0]
@@ -355,8 +358,11 @@ def playlist_manage(action: str, query: str = "") -> str:
         target["play_count"] = target.get("play_count", 0) + 1
         target["played_at"] = datetime.now().isoformat()
         _save_playlist(items)
-        _play_audio_background(target["url"], target["title"])
-        return f"▶ Playing '{target['title']}' — {target['channel']}"
+        playback_status = _start_playback_attempt(target["url"], target["title"])
+        return (
+            f"{playback_status}\n"
+            f"Selected saved track: '{target['title']}' — {target['channel']}"
+        )
 
     if action == "remove":
         if not query:
@@ -398,8 +404,11 @@ def playlist_manage(action: str, query: str = "") -> str:
         target["play_count"] = target.get("play_count", 0) + 1
         target["played_at"] = datetime.now().isoformat()
         _save_playlist(items)
-        _play_audio_background(target["url"], target["title"])
-        return f"▶ Shuffled to '{target['title']}' — {target['channel']}"
+        playback_status = _start_playback_attempt(target["url"], target["title"])
+        return (
+            f"{playback_status}\n"
+            f"Shuffled selected track: '{target['title']}' — {target['channel']}"
+        )
 
     if action == "stop":
         try:
@@ -407,7 +416,7 @@ def playlist_manage(action: str, query: str = "") -> str:
             pygame.mixer.music.stop()
         except Exception:
             pass
-        return "Playback stopped"
+        return "Playback stop signal sent"
 
     available = "list, top, favorite <title>, unfavorite <title>, play <title>, stop, remove <title>, clear, search <term>, shuffle"
     return f"Unknown action '{action}'. Available: {available}"

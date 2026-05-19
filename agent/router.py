@@ -11,12 +11,19 @@ _CACHE_DIR = Path(settings.storage_dir)
 _TOOL_CACHE = _CACHE_DIR / "tool_embeddings.npy"
 _TOOL_TEXTS_CACHE = _CACHE_DIR / "tool_texts.json"
 _ST_CACHE = _CACHE_DIR / "small_talk_emb.npy"
+_ST_TEXT_CACHE = _CACHE_DIR / "small_talk_text.txt"
+ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.md"
 
-_SMALL_TALK_TEXT = (
-    "just chatting, casual conversation, greetings, small talk, "
-    "saying hello, pleasantries, how are you, checking in"
-)
 _SMALL_TALK_MARGIN = 0.10
+
+
+def _load_small_talk_text() -> str:
+    if ROUTING_POLICY_PATH.exists():
+        return ROUTING_POLICY_PATH.read_text(encoding="utf-8").strip()
+    return (
+        "Conversational turn with no request for external data, local action, "
+        "memory access, file access, search, playback, generation, or side effects."
+    )
 
 # Parse file-generating tools from config
 def _parse_file_generating_tools():
@@ -42,11 +49,14 @@ class ToolRouter:
 
     def _get_small_talk_emb(self):
         if self._small_talk_emb is None:
-            if _ST_CACHE.exists():
+            text = _load_small_talk_text()
+            cached_text = _ST_TEXT_CACHE.read_text(encoding="utf-8") if _ST_TEXT_CACHE.exists() else None
+            if _ST_CACHE.exists() and cached_text == text:
                 self._small_talk_emb = np.load(_ST_CACHE)
             else:
-                self._small_talk_emb = embed(_SMALL_TALK_TEXT)
+                self._small_talk_emb = embed(text)
                 np.save(_ST_CACHE, self._small_talk_emb)
+                _ST_TEXT_CACHE.write_text(text, encoding="utf-8")
         return self._small_talk_emb
 
     def _embed_tools(self):
@@ -114,8 +124,12 @@ class ToolRouter:
             if self.winner_margin > 0 and best >= self.threshold and best >= second + self.winner_margin:
                 top_indices = top_indices[:1]
 
-        # Filter by threshold and limit to top_k
-        top_indices = [i for i in top_indices if similarities[i] >= self.threshold][:self.top_k]
+        # Filter by absolute threshold, then keep candidates close enough to the best match.
+        # This keeps low-confidence follow-ups usable while avoiding broad accidental tool dumps.
+        absolute_matches = [i for i in top_indices if similarities[i] >= self.threshold]
+        relative_floor = max_tool_sim * settings.tool_relative_floor
+        relative_matches = [i for i in absolute_matches if similarities[i] >= relative_floor]
+        top_indices = (relative_matches or absolute_matches)[:self.top_k]
 
         selected = []
         for idx in top_indices:
