@@ -134,6 +134,25 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
     }, None
 
 
+import re as _re
+
+
+def _has_backtick_tool_call(text: str, schemas: list) -> bool:
+    """Detect backtick-quoted tool calls or shell commands."""
+    blocks = _re.findall(r"`([^`]+)`", text)
+    if not blocks:
+        return False
+    tool_names = {t["function"]["name"] for t in schemas}
+    for block in blocks:
+        stripped = block.strip()
+        for name in tool_names:
+            if stripped.startswith(f"{name}("):
+                return True
+        if _re.match(r"^(start|open|run)\s", stripped, _re.IGNORECASE):
+            return True
+    return False
+
+
 def _build_system_prompt(selected_tools):
     lines = [_system_header(), "", USE_TOOLS]
     if selected_tools:
@@ -216,6 +235,7 @@ class Agent:
 
         tool_rounds = 0
         hallucination_retries = 0
+        tools_called_this_input = False
         content = ""
 
         while True:
@@ -286,11 +306,21 @@ class Agent:
                     msg = f"{err}\nOutput your response directly without calling a tool if you cannot call one."
                     self.messages.append({"role": "system", "content": msg})
                     continue
+                elif _has_backtick_tool_call(content, tool_schemas):
+                    lines_up = max(content.count("\n") + 1, 1)
+                    clear = "\033[A\033[K" * lines_up
+                    print(f"\r{clear}\r", end="")
+                    available = [t["function"]["name"] for t in tool_schemas]
+                    self.messages.append({
+                        "role": "system",
+                        "content": f"You wrote a tool command in backticks instead of calling it. Use the actual tool call mechanism for: {', '.join(available)}."
+                    })
+                    continue
 
             if not tool_calls:
                 if content:
                     is_action = False
-                    if tool_schemas:
+                    if tool_schemas and not tools_called_this_input:
                         is_action = self.verifier.verify(content, [], [], tool_schemas) != "PASS"
                     if is_action and hallucination_retries < 2:
                         hallucination_retries += 1
@@ -376,9 +406,11 @@ class Agent:
                 if fc["function"]["name"] in _FILE_GENERATING_TOOLS:
                     self.router._last_generated_file = result
 
-            if settings.direct_single_tool_result and len(formatted_calls) == 1:
+            tools_called_this_input = True
+
+            if len(formatted_calls) == 1:
                 direct_result = results.get(formatted_calls[0]["id"], "")
-                if direct_result:
+                if direct_result and not direct_result.startswith("Error"):
                     if len(direct_result) > MAX_TOOL_RESULT_CHARS:
                         direct_result = direct_result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
                     print(direct_result)
