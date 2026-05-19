@@ -303,10 +303,6 @@ class Agent:
                             "content": f"You described an action without calling a tool. Available tools: {', '.join(available)}. Call one of them to actually perform the action. Try again."
                         })
                         continue
-                    if is_action:
-                        refusal = "I'm sorry, I don't have the ability to do that."
-                        print(refusal)
-                        content = refusal
                     self.messages.append({"role": "assistant", "content": content})
                 break
 
