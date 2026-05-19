@@ -44,12 +44,20 @@ def error_payload(code: str, message: str, field: str, value, expected: str, ret
     }
 
 
-def normalize_int(value, field: str, default: int, minimum: int, maximum: int, suggestion: str):
+def normalize_int(
+    value,
+    field: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+    suggestion: str,
+    code: str = "INVALID_INTEGER",
+):
     if value is None:
         return default, None
     if isinstance(value, bool):
         return None, error_payload(
-            "INVALID_INTEGER",
+            code,
             f"{field} must be an integer between {minimum} and {maximum}.",
             field,
             value,
@@ -61,7 +69,7 @@ def normalize_int(value, field: str, default: int, minimum: int, maximum: int, s
         normalized = int(value)
     except (TypeError, ValueError):
         return None, error_payload(
-            "INVALID_INTEGER",
+            code,
             f"{field} must be an integer between {minimum} and {maximum}.",
             field,
             value,
@@ -71,7 +79,7 @@ def normalize_int(value, field: str, default: int, minimum: int, maximum: int, s
         )
     if normalized < minimum or normalized > maximum:
         return None, error_payload(
-            "INVALID_INTEGER",
+            code,
             f"{field} is outside the supported range.",
             field,
             value,
