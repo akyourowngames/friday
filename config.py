@@ -65,10 +65,10 @@ class Settings:
     terminal_max_timeout: int = _env_int("KING_TERMINAL_MAX_TIMEOUT", 300)
     embedding_model: str = _env("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embed-v1")
     embedding_min_chars: int = _env_int("KING_EMBEDDING_MIN_CHARS", 7)
-    query_embedding_cache_size: int = _env_int("KING_QUERY_EMBEDDING_CACHE_SIZE", 128)
+
     storage_dir: str = _env("KING_STORAGE_DIR", "storage")
     memory_dir: str = _env("KING_MEMORY_DIR", "storage/memories")
-    memory_similarity_threshold: float = _env_float("KING_MEMORY_SIMILARITY_THRESHOLD", 0.40)
+    memory_similarity_threshold: float = _env_float("KING_MEMORY_SIMILARITY_THRESHOLD", 0.25)
     sarvam_api_key: str = _env("SARVAM_API_KEY", "")
     tavily_api_key: str = _env("TAVILY_API_KEY", "")
     voice_enabled: bool = _env_bool("KING_VOICE_ENABLED", False)

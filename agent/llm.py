@@ -17,14 +17,14 @@ class NIMClient:
         self.client = OpenAI(
             base_url=settings.nim_base_url,
             api_key=settings.nim_api_key,
-            timeout=30,
-            max_retries=1,
+            timeout=120,
+            max_retries=2,
         )
 
     def check_api_key(self):
         return _check_api_key_cached(settings.nim_api_key)
 
-    def stream(self, messages, tools=None):
+    def stream(self, messages, tools=None, tool_choice=None):
         kwargs = {
             "model": settings.model_name,
             "messages": messages,
@@ -34,6 +34,8 @@ class NIMClient:
         }
         if tools:
             kwargs["tools"] = tools
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
 
         try:
             return self.client.chat.completions.create(**kwargs)
@@ -69,10 +71,15 @@ class NIMClient:
             "Do NOT extract: descriptions of the assistant's behavior, general advice, "
             "common knowledge, pleasantries, or vague statements. "
             "Focus on: names, locations, health issues, preferences, relationships, work. "
+            "IMPORTANT: When user corrects or updates a fact (e.g. new location, recovered health), "
+            "extract the NEW fact, not the old one. "
             'Examples of GOOD: ["User name is Krish", "User lives in Bangalore", '
-            '"User has heat stroke"] '
+            '"User has heat stroke", "User has recovered from illness", '
+            '"User now lives in Delhi", "User is feeling better"] '
             'Examples of BAD: ["Assistant offered support", "Stay calm", '
-            '"User is feeling uncertain"] '
+            '"User is feeling uncertain", "User has medical records"] '
+            'Also BAD: vague health statements like "medical records", '
+            '"doctor\'s offices", "urgent care", "area with available" '
             "Return [] if nothing worth remembering."
         )
         messages = [

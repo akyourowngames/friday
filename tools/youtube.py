@@ -144,6 +144,35 @@ def _play_audio_background(url: str, title: str):
     threading.Thread(target=_play, daemon=True).start()
 
 
+def _normalize_title(title: str) -> str:
+    t = title.lower().strip()
+    for sep in [" — ", " – ", " - ", " ft. ", " feat. ", " ft ", " feat "]:
+        t = t.split(sep)[0]
+    return t.strip()
+
+
+def _deduplicate_playlist(items: list[dict]) -> list[dict]:
+    seen = {}
+    deduped = []
+    for item in items:
+        key = _normalize_title(item["title"])
+        if key in seen:
+            existing = seen[key]
+            existing["play_count"] = existing.get("play_count", 0) + item.get("play_count", 0)
+            if item.get("view_count", 0) > existing.get("view_count", 0):
+                existing["view_count"] = item["view_count"]
+                existing["like_count"] = item.get("like_count", 0)
+                existing["channel"] = item.get("channel", existing["channel"])
+            existing["played_at"] = max(
+                existing.get("played_at", ""), item.get("played_at", "")
+            )
+        else:
+            copy = dict(item)
+            seen[key] = copy
+            deduped.append(copy)
+    return deduped
+
+
 def _load_playlist() -> list[dict]:
     if PLAYLIST_PATH.exists():
         return json.loads(PLAYLIST_PATH.read_text(encoding="utf-8"))
@@ -159,8 +188,9 @@ def _save_playlist(items: list[dict]):
 
 def _add_to_playlist(entry: dict) -> bool:
     items = _load_playlist()
+    norm = _normalize_title(entry["title"])
     for item in items:
-        if item["url"] == entry["url"]:
+        if item["url"] == entry["url"] or _normalize_title(item["title"]) == norm:
             item["play_count"] = item.get("play_count", 0) + 1
             item["played_at"] = datetime.now().isoformat()
             _save_playlist(items)
@@ -270,7 +300,7 @@ def playlist_manage(action: str, query: str = "") -> str:
     action = action.strip().lower()
 
     if action == "list":
-        items = _load_playlist()
+        items = _deduplicate_playlist(_load_playlist())
         if not items:
             return "Your playlist is empty. Play some music first!"
         return _format_playlist(items)

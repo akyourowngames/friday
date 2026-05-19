@@ -1,4 +1,6 @@
 import base64
+import subprocess
+import sys
 import time
 import urllib.parse
 import warnings
@@ -188,7 +190,17 @@ def imagine(prompt: str, size: str = "1024x1024", model: str = _DEFAULT_MODEL) -
 
     try:
         path = _save_image(result, prompt)
-        return f"Image saved: {path.resolve()}"
+        resolved = str(path.resolve())
+        try:
+            if sys.platform == "win32":
+                os.startfile(resolved)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", resolved], capture_output=True, timeout=10)
+            else:
+                subprocess.run(["xdg-open", resolved], capture_output=True, timeout=10)
+        except Exception:
+            pass
+        return f"Image saved: {resolved}"
     except Exception:
         return "Failed to save generated image"
 

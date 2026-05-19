@@ -12,8 +12,14 @@ from config import settings
 from tools.registry import get_tools
 from voice.listener import Listener
 from voice.speaker import speak
+from gesture.collector import collect as gesture_collect
+from gesture.trainer import train as gesture_train
+from gesture.detector import GestureDetector
+from gesture.controller import execute as gesture_execute
 
 console = Console()
+_gesture_detector = None
+_gesture_enabled = False
 
 
 def print_welcome():
@@ -66,6 +72,21 @@ def voice_loop(agent: Agent):
                 speak(response)
         else:
             threading.Event().wait(0.1)
+
+
+def gesture_loop(agent: Agent):
+    global _gesture_detector, _gesture_enabled
+    mode = _gesture_detector.mode
+    console.print(f"[cyan]Gesture control active. Mode: {mode}. ESC on camera or /gesture stop to exit.[/cyan]")
+    if mode == "nav":
+        console.print("  [point=down] [thumbs_down=up] [pinch=enter] [peace=open]")
+        console.print("  [fist=delete] [thumbs_up=parent] [open_palm=refresh]")
+    while _gesture_enabled:
+        action = _gesture_detector.get_action(timeout=0.1)
+        if action:
+            result = gesture_execute(action)
+            if result:
+                console.print(f"[green]{result}[/green]")
 
 
 def main():
@@ -123,8 +144,42 @@ def main():
                                 console.print(f"  {fav}{i}. {title} — {channel} [dim]({views} views)[/dim]")
                     except Exception as e:
                         console.print(f"[red]Could not load playlist: {e}[/red]")
+            elif base == "gesture":
+                global _gesture_detector, _gesture_enabled
+                sub = cmd[1].lower() if len(cmd) > 1 else "status"
+                if sub == "status":
+                    if _gesture_enabled:
+                        mode = _gesture_detector.mode if _gesture_detector else "?"
+                        console.print(f"[green]Gesture control: ON[/green] — mode: {mode}")
+                    else:
+                        console.print("[yellow]Gesture control: OFF[/yellow]")
+                    console.print("  /gesture nav      — file list navigation mode (default)")
+                    console.print("  /gesture mouse    — virtual mouse cursor mode")
+                    console.print("  /gesture collect  — record training data")
+                    console.print("  /gesture train    — train classifier")
+                    console.print("  /gesture start    — begin live detection")
+                    console.print("  /gesture stop     — stop live detection")
+                elif sub == "collect":
+                    gesture_collect()
+                elif sub == "train":
+                    gesture_train()
+                elif sub in ("start", "nav", "mouse"):
+                    if _gesture_detector is None:
+                        _gesture_detector = GestureDetector()
+                    _gesture_detector.mode = "mouse" if sub == "mouse" else "nav"
+                    _gesture_detector.start()
+                    _gesture_enabled = True
+                    gesture_thread = threading.Thread(target=gesture_loop, args=(agent,), daemon=True)
+                    gesture_thread.start()
+                elif sub == "stop":
+                    _gesture_enabled = False
+                    if _gesture_detector:
+                        _gesture_detector.stop()
+                    console.print("[cyan]Gesture control off.[/cyan]")
+                else:
+                    console.print(f"[red]Unknown gesture subcommand: {sub}. Try /gesture[/red]")
             elif base == "help":
-                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /voice  /playlist  /new  /help  /exit")
+                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /voice  /gesture  /playlist  /new  /help  /exit")
             else:
                 console.print(f"[red]Unknown command: /{base}. Try /help[/red]")
             continue

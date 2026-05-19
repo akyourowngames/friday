@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
@@ -13,6 +14,7 @@ from .llm import NIMClient
 from .router import ToolRouter, _FILE_GENERATING_TOOLS
 from .tokenizer import count_messages_tokens
 from .validator import ToolValidator
+from .verifier import Verifier
 from memory.brain import Brain
 
 console = Console()
@@ -55,19 +57,94 @@ USE_TOOLS = (
     "2. User confirms action (yes, ok, sure) after file operation → CALL TERMINAL TO EXECUTE IT "
     "3. Never respond 'I'll open...' without actually calling terminal tool "
     "4. If tool returns error, report it and suggest alternative "
+    "5. NEVER output JSON or function call syntax in your text responses. The tool calling mechanism is handled automatically by the system -- you just use it."
 )
 
 MAX_CONTEXT_TOKENS = 6000
 MAX_TOOL_RESULT_CHARS = 2000
+TYPING_SPEED = 0.008
+
+CANNOT_DO = (
+    "CRITICAL: If no tools are available to fulfill the user's request, "
+    "you MUST explicitly say you cannot do it. Never pretend to perform an action. "
+    "Never claim 'done', 'completed', 'launched', 'adjusted', etc. unless you actually "
+    "called a tool and got a successful result. Say: 'I'm sorry, I don't have the ability to do that.'"
+)
+
+def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
+    """Detect JSON-formatted tool call leaked as text content.
+    Returns (tool_call_dict, None) on success,
+    (None, error_message) if parsed but tool unknown,
+    (None, None) if not a JSON tool call."""
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return None, None
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+
+    func_name = None
+    func_args = None
+
+    if "name" in parsed and "parameters" in parsed:
+        func_name = parsed["name"]
+        func_args = parsed["parameters"]
+    elif "name" in parsed and "arguments" in parsed:
+        func_name = parsed["name"]
+        func_args = parsed["arguments"]
+    elif parsed.get("function", {}).get("name"):
+        func_name = parsed["function"]["name"]
+        try:
+            func_args = json.loads(parsed["function"].get("arguments", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            func_args = {}
+
+    if not func_name:
+        return None, None
+
+    if isinstance(func_args, str):
+        try:
+            func_args = json.loads(func_args)
+        except (json.JSONDecodeError, TypeError):
+            func_args = {}
+
+    if not isinstance(func_args, dict):
+        return None, None
+
+    known = {t["function"]["name"].lower(): t["function"]["name"] for t in schemas}
+    actual = known.get(func_name.lower())
+    if not actual:
+        for kl, ka in known.items():
+            if func_name.lower() in kl or kl in func_name.lower():
+                actual = ka
+                break
+
+    if not actual:
+        available = ", ".join(sorted(known.values()))
+        msg = f"'{func_name}' is not an available tool. Available: {available}. Use one of them."
+        return None, msg
+
+    return {
+        "id": f"call_{int(time.time() * 1000)}",
+        "name": actual,
+        "arguments": json.dumps(func_args),
+    }, None
 
 
 def _build_system_prompt(selected_tools):
-    if not selected_tools:
-        return _system_header()
-    lines = [_system_header(), "", USE_TOOLS, "", "Available tools:"]
-    for t in selected_tools:
-        params = ", ".join(t["parameters"]["properties"])
-        lines.append(f"- {t['name']}({params}): {t['description']}")
+    lines = [_system_header(), "", USE_TOOLS]
+    if selected_tools:
+        lines.append("")
+        lines.append("Available tools:")
+        for t in selected_tools:
+            params = ", ".join(t["parameters"]["properties"])
+            lines.append(f"- {t['name']}({params}): {t['description']}")
+    else:
+        lines.append("")
+        lines.append(CANNOT_DO)
     return "\n".join(lines)
 
 
@@ -77,6 +154,7 @@ class Agent:
         self.llm = NIMClient()
         self.router = ToolRouter()
         self.validator = ToolValidator()
+        self.verifier = Verifier()
         self.brain = Brain()
         self._executor = ThreadPoolExecutor(max_workers=3)
 
@@ -117,7 +195,7 @@ class Agent:
             context = brain_future.result() if brain_future else None
 
         if context:
-            msg = f"[Memory: {context}]\n{user_input}"
+            msg = f"[FACT (this is the truth — do not contradict or add to it): {context}]\n{user_input}"
         else:
             msg = user_input
 
@@ -137,15 +215,25 @@ class Agent:
             console.print(f"[dim] Selected: {', '.join(sel_names) or 'none'}[/dim]")
 
         tool_rounds = 0
+        hallucination_retries = 0
         content = ""
 
         while True:
             tool_rounds += 1
             console.print("[dim]Thinking...[/dim]", end="\r")
-            try:
-                stream = self.llm.stream(self.messages, tool_schemas)
-            except RuntimeError as e:
-                console.print(f"[red]{e}[/red]")
+            for attempt in range(2):
+                try:
+                    stream = self.llm.stream(self.messages, tool_schemas)
+                    break
+                except RuntimeError as e:
+                    if attempt == 0:
+                        console.print(f"[yellow]{e} Retrying...[/yellow]")
+                        time.sleep(3)
+                    else:
+                        console.print(f"[red]{e}[/red]")
+                        stream = None
+                        break
+            if stream is None:
                 break
 
             content = ""
@@ -162,7 +250,10 @@ class Agent:
                         started = True
                         console.print("          ", end="\r")
                     content += delta.content
-                    print(delta.content, end="", flush=True)
+                    for char in delta.content:
+                        print(char, end="", flush=True)
+                        if char not in ('\n', '\r'):
+                            time.sleep(TYPING_SPEED)
 
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
@@ -180,8 +271,42 @@ class Agent:
             if started:
                 print()
 
+            if not tool_calls and content and tool_schemas:
+                json_tc, err = _try_parse_json_tool_call(content, tool_schemas)
+                if json_tc:
+                    lines_up = max(content.count("\n") + 1, 1)
+                    clear = "\033[A\033[K" * lines_up
+                    print(f"\r{clear}\r", end="")
+                    started = False
+                    tool_calls[0] = json_tc
+                elif err:
+                    lines_up = max(content.count("\n") + 1, 1)
+                    clear = "\033[A\033[K" * lines_up
+                    print(f"\r{clear}\r", end="")
+                    msg = f"{err}\nOutput your response directly without calling a tool if you cannot call one."
+                    self.messages.append({"role": "system", "content": msg})
+                    continue
+
             if not tool_calls:
                 if content:
+                    is_action = False
+                    if tool_schemas:
+                        is_action = self.verifier.verify(content, [], [], tool_schemas) != "PASS"
+                    if is_action and hallucination_retries < 2:
+                        hallucination_retries += 1
+                        lines_up = max(content.count("\n") + 1, 1)
+                        clear = "\033[A\033[K" * lines_up
+                        print(f"\r{clear}\r", end="")
+                        available = [t["function"]["name"] for t in tool_schemas]
+                        self.messages.append({
+                            "role": "system",
+                            "content": f"You described an action without calling a tool. Available tools: {', '.join(available)}. Call one of them to actually perform the action. Try again."
+                        })
+                        continue
+                    if is_action:
+                        refusal = "I'm sorry, I don't have the ability to do that."
+                        print(refusal)
+                        content = refusal
                     self.messages.append({"role": "assistant", "content": content})
                 break
 
@@ -264,6 +389,21 @@ class Agent:
                     content = direct_result
                     self.messages.append({"role": "assistant", "content": direct_result})
                     break
+
+        if tool_schemas and content:
+            called = []
+            for m in self.messages:
+                if m.get("tool_calls"):
+                    for tc in m["tool_calls"]:
+                        called.append(tc["function"]["name"])
+            tool_msgs = [m["content"] for m in self.messages if m["role"] == "tool"] if called else []
+            verdict = self.verifier.verify(content, called, tool_msgs, tool_schemas)
+            if verdict != "PASS":
+                refusal = "I'm sorry, I don't have the ability to do that."
+                print(f"\n[{refusal}]")
+                content = refusal
+                if self.messages and self.messages[-1]["role"] == "assistant":
+                    self.messages[-1]["content"] = refusal
 
         if content and len(user_input.strip()) > 15:
             self._executor.submit(self._extract_and_store, user_input, content)

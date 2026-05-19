@@ -69,7 +69,7 @@ def _format_result(res: dict) -> str:
 
 @tool(
     name="terminal",
-    description="Open any application, run any command or script, launch programs and files. Full system access. Use for: opening apps (notepad, chrome, code, explorer, word, excel, calculator, cmd), running scripts (python, node, npm, pip), launching programs (file explorer, task manager, control panel), shell commands, package management, system info, process management, file operations. Returns command output or error details. This is the tool to use when the user says 'open', 'launch', 'start', or 'run' anything",
+    description="Open any application, run any command or script, launch programs and files. Full system access. Use for: opening apps (notepad, chrome, code, explorer, word, excel, calculator, cmd), running scripts (python, node, npm, pip), launching programs (file explorer, task manager, control panel), shell commands, package management, system info, process management, file operations, system settings (volume, brightness, display, network), checking or changing ANY system state via command line. Returns command output or error details. This is the tool to use when the user says 'open', 'launch', 'start', 'run', 'change', 'set', 'adjust', 'check', or 'show' anything about the system",
     examples=[
         "open notepad",
         "open me notepad",
@@ -78,6 +78,9 @@ def _format_result(res: dict) -> str:
         "launch chrome",
         "launch calculator",
         "start command prompt",
+        "open image.png",
+        "open the generated image",
+        "show imagine_20260517_xxx.png",
         "run python script.py",
         "run npm install express",
         "run pip install requests",
@@ -87,6 +90,11 @@ def _format_result(res: dict) -> str:
         "list files in current directory",
         "whoami",
         "systeminfo",
+        "what is the current system volume",
+        "increase the volume to 75",
+        "set volume to 50 percent",
+        "check remaining battery",
+        "show wifi signal strength",
     ],
     param_descriptions={
         "command": "Shell command to execute (PowerShell syntax on Windows, bash on Linux/macOS)",

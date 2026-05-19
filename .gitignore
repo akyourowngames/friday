@@ -2,3 +2,11 @@
 node_modules/
 .next/
 *.tsbuildinfo
+__pycache__/
+*.pyc
+*.pyo
+storage/onnx_models/
+storage/images/
+storage/gesture_data/
+storage/gesture_model.pkl
+storage/gesture_scaler.pkl

@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -9,12 +10,53 @@ from agent.embedder import embed
 
 MEMORY_DIR = Path(settings.memory_dir)
 
+_VAGUE_PATTERNS = [
+    "medical records",
+    "doctor's offices",
+    "urgent care",
+    "area with available",
+    "listened to",
+    "playlist contains",
+]
+
+_CONTRADICTION_CATEGORIES = {
+    "name": ["name is", "name :", "full name", "called "],
+    "location": ["lives in", "live in", "lives at", "is from", "living in"],
+    "age": ["year", "years old", "age is", " yrs"],
+    "health": ["not feeling", "feeling sick", "feeling bad", "feels sick", "feels bad",
+               "recovered", "feeling better", "feeling well", "is well", "is better",
+               "is not well", "is sick", "is healthy"],
+}
+
+
+def _is_vague(text: str) -> bool:
+    lower = text.lower()
+    if len(text) < 15:
+        return True
+    for pat in _VAGUE_PATTERNS:
+        if pat in lower:
+            return True
+    return False
+
+
+def _contradiction_category(text: str) -> str | None:
+    lower = text.lower()
+    for category, keywords in _CONTRADICTION_CATEGORIES.items():
+        for kw in keywords:
+            if kw in lower:
+                return category
+    return None
+
+
+def _normalize_fact(text: str) -> str:
+    text = re.sub(r"\bnow\s+(lives|is|has)\b", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:actually|currently)\s+", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
 
 class Brain:
     def __init__(self):
         self.memories = []
-        self._embeddings = None
-        self._npy_path = MEMORY_DIR / "embeddings.npy"
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         self._load_all()
 
@@ -26,22 +68,6 @@ class Brain:
             for item in data:
                 item["_date"] = date_str
             self.memories.extend(data)
-        self._load_embeddings()
-
-    def _load_embeddings(self):
-        if self._npy_path.exists() and len(self.memories) > 0:
-            cached = np.load(self._npy_path)
-            if len(cached) == len(self.memories):
-                self._embeddings = cached
-                return
-        if len(self.memories) > 0:
-            texts = [m["text"] for m in self.memories]
-            self._embeddings = embed(texts)
-            np.save(self._npy_path, self._embeddings)
-
-    def _save_embeddings(self):
-        if self._embeddings is not None:
-            np.save(self._npy_path, self._embeddings)
 
     def _today_path(self):
         return MEMORY_DIR / f"memory_{date.today().isoformat()}.json"
@@ -55,18 +81,50 @@ class Brain:
             save.append({"text": item["text"], "importance": item["importance"], "ts": item["ts"]})
         path.write_text(json.dumps(save, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    def _save_all(self):
+        grouped = {}
+        for m in self.memories:
+            d = m.get("_date", date.today().isoformat())
+            grouped.setdefault(d, []).append(m)
+        for d, items in grouped.items():
+            path = MEMORY_DIR / f"memory_{d}.json"
+            save = [{"text": i["text"], "importance": i["importance"], "ts": i["ts"]} for i in items]
+            path.write_text(json.dumps(save, indent=2, ensure_ascii=False), encoding="utf-8")
+
     def _is_duplicate(self, text):
         lower = text.lower()
+        words = set(lower.split())
         for m in self.memories:
-            if m["text"].lower() == lower:
+            existing = m["text"].lower()
+            if existing == lower:
                 return True
-            if len(text) > 20 and lower in m["text"].lower():
-                return True
-            if len(m["text"]) > 20 and m["text"].lower() in lower:
+            if len(text) > 25 and len(existing) > 25:
+                if lower in existing or existing in lower:
+                    return True
+            existing_words = set(existing.split())
+            overlap = words & existing_words
+            if len(overlap) >= min(len(words), len(existing_words)) * 0.85:
                 return True
         return False
 
+    def _remove_contradictions(self, text):
+        category = _contradiction_category(text)
+        if not category:
+            return
+        keywords = _CONTRADICTION_CATEGORIES[category]
+        to_remove = []
+        for i, m in enumerate(self.memories):
+            lower_existing = m["text"].lower()
+            if any(kw in lower_existing for kw in keywords):
+                to_remove.append(i)
+        for i in reversed(to_remove):
+            self.memories.pop(i)
+
     def commit(self, text: str, importance: float = 0.5):
+        if _is_vague(text):
+            return
+        text = _normalize_fact(text)
+        self._remove_contradictions(text)
         if self._is_duplicate(text):
             return
         item = {
@@ -76,25 +134,22 @@ class Brain:
             "_date": date.today().isoformat(),
         }
         self.memories.append(item)
-        if self._embeddings is not None:
-            emb = embed(text).reshape(1, -1)
-            self._embeddings = np.vstack([self._embeddings, emb])
-        self._save_today()
-        self._save_embeddings()
+        self._save_all()
 
     def recall(self, query: str, k: int = 5, q_emb=None) -> str:
         if not self.memories:
             return ""
 
-        if self._embeddings is None:
-            texts = [m["text"] for m in self.memories]
-            self._embeddings = embed(texts)
-            self._save_embeddings()
-
         if q_emb is None:
             q_emb = embed(query)
 
-        sims = np.dot(self._embeddings, q_emb)
+        texts = [m["text"] for m in self.memories]
+        mem_embs = embed(texts)
+
+        if mem_embs.ndim == 1:
+            mem_embs = mem_embs.reshape(1, -1)
+
+        sims = np.dot(mem_embs, q_emb)
         weighted = sims * np.array([m.get("importance", 0.5) for m in self.memories])
 
         top_idx = np.argsort(weighted)[-k:][::-1]
