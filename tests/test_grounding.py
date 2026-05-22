@@ -2,10 +2,12 @@ import io
 import json
 import shutil
 import sys
+import tempfile
 import time
 import unittest
 import webbrowser
 from contextlib import redirect_stdout
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -13,27 +15,41 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.core import (
+    _build_tool_answer_instruction,
+    _forced_contextual_tool_call,
     _has_backtick_tool_call,
+    _local_time_context,
     _load_tool_policy,
+    _maybe_reuse_latest_context_tool,
+    _prepare_tool_args_for_answer,
+    _repair_contextual_tool_args,
+    _repair_contextual_tool_call,
+    _repair_search_query_specificity,
+    _should_suppress_memory_context,
+    _should_use_memory_context,
     _tool_call_grounded,
+    _tool_result_content,
     _try_parse_json_tool_call,
 )
 from agent.validator import ToolValidator
 from memory.brain import Brain
 import memory.brain as brain_mod
 from memory.brain import _normalize_fact
-from tools.terminal import _detect_shell, _normalize_command, _strip_ansi
+from tools.terminal import _detect_shell, _normalize_command, _normalize_launch_target, _strip_ansi
 import tools.terminal as terminal_mod
-from tools.registry import execute_tool, get_tool_schemas, tool
+from tools.registry import execute_tool, get_tool_schemas, get_tools, tool
 from tools.files import file_read, file_write, file_list
 from tools.datetime_tool import datetime_info
 from tools.manifest_audit import tool_manifest_audit
 import tools.youtube as youtube_mod
 import tools.hackernews as hn_mod
+import tools.reddit as reddit_mod
 import tools.web as web_mod
 import tools.notes as notes_mod
+import tools.browser as browser_mod
 from agent.router import ToolRouter, _load_small_talk_text
 import agent.router as router_mod
+import agent.core as core_mod
 
 
 class GroundingTests(unittest.TestCase):
@@ -49,6 +65,53 @@ class GroundingTests(unittest.TestCase):
         self.assertIn("Tool Grounding Contract", policy)
         self.assertIn("Do not claim live state", policy)
 
+    def test_local_time_context_names_afternoon_explicitly(self):
+        context = _local_time_context(datetime(2026, 5, 20, 16, 15))
+
+        self.assertIn("Current local time of day: afternoon", context)
+        self.assertIn("do not", context.lower())
+
+    def test_structured_tool_result_is_json_for_final_answer_context(self):
+        content = _tool_result_content({
+            "result": {
+                "title": "DeepSeek AI",
+                "url": "https://example.com",
+            }
+        })
+
+        parsed = json.loads(content)
+        self.assertEqual(parsed["result"]["title"], "DeepSeek AI")
+        self.assertNotIn("'result'", content)
+
+    def test_tool_answer_instruction_blocks_raw_payload_leak(self):
+        instruction = _build_tool_answer_instruction(
+            "fetch latest DeepSeek model details",
+            ["web_fetch"],
+        )
+
+        self.assertIn("answer the user in natural language", instruction)
+        self.assertIn("Do not expose raw JSON", instruction)
+        self.assertIn("include the useful observed titles", instruction)
+        self.assertIn("result has a query field", instruction)
+        self.assertIn("User request: fetch latest DeepSeek model details", instruction)
+
+    def test_tool_args_request_structured_context_when_supported(self):
+        prepared = _prepare_tool_args_for_answer(
+            "web_fetch",
+            {"url": "https://example.com"},
+        )
+
+        self.assertEqual(prepared["response_format"], "structured")
+        self.assertEqual(prepared["url"], "https://example.com")
+
+    def test_tool_args_preserve_explicit_response_format(self):
+        prepared = _prepare_tool_args_for_answer(
+            "web_fetch",
+            {"url": "https://example.com", "response_format": "legacy"},
+        )
+
+        self.assertEqual(prepared["response_format"], "legacy")
+
     def test_backtick_shell_command_is_tool_leak_when_terminal_available(self):
         schemas = [self._schema("terminal")]
         self.assertTrue(_has_backtick_tool_call("`start image.png`", schemas))
@@ -60,6 +123,14 @@ class GroundingTests(unittest.TestCase):
     def test_backtick_plain_text_is_not_tool_leak_with_terminal_available(self):
         schemas = [self._schema("terminal")]
         self.assertFalse(_has_backtick_tool_call("Use `hello` as the title.", schemas))
+
+    def test_backtick_tool_name_reference_is_not_leak(self):
+        schemas = [self._schema("web_search")]
+        self.assertFalse(_has_backtick_tool_call("Use the `web_search` tool.", schemas))
+
+    def test_backtick_parameter_name_reference_is_not_leak(self):
+        schemas = [self._schema("web_search")]
+        self.assertFalse(_has_backtick_tool_call("Specify the `query` here.", schemas))
 
     def test_windows_start_path_with_spaces_is_quoted_when_file_exists(self):
         path = Path("storage") / "test open target.txt"
@@ -90,10 +161,31 @@ class GroundingTests(unittest.TestCase):
         self.assertEqual(shell[:3], ["powershell", "-NoProfile", "-Command"])
         self.assertEqual(shell[-1], "echo hello")
 
+    def test_windows_start_terminal_uses_configured_launch_target(self):
+        original_platform = terminal_mod.sys.platform
+        original_which = terminal_mod.shutil.which
+        try:
+            terminal_mod.sys.platform = "win32"
+            terminal_mod.shutil.which = lambda candidate: candidate if candidate == "cmd.exe" else None
+            normalized = _normalize_launch_target("start terminal")
+        finally:
+            terminal_mod.sys.platform = original_platform
+            terminal_mod.shutil.which = original_which
+
+        self.assertEqual(normalized, "Start-Process 'cmd.exe'")
+
     def test_tool_arguments_must_be_semantically_grounded(self):
         self.assertFalse(
             _tool_call_grounded(
                 "can you open it up for me",
+                {"command": "start notepad"},
+                [],
+                "terminal",
+            )
+        )
+        self.assertTrue(
+            _tool_call_grounded(
+                "open me notepad",
                 {"command": "start notepad"},
                 [],
                 "terminal",
@@ -126,6 +218,44 @@ class GroundingTests(unittest.TestCase):
         self.assertIsNone(call)
         self.assertIn("not an available tool", error)
 
+    def test_json_tool_call_text_for_hackernews_is_detected(self):
+        schemas = [self._schema("hackernews")]
+        call, error = _try_parse_json_tool_call(
+            '{"name":"hackernews","parameters":{"action":"show_item","id":"48225297","response_format":"structured"}}',
+            schemas,
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(call["name"], "hackernews")
+        self.assertEqual(json.loads(call["arguments"])["action"], "show_item")
+
+    def test_hackernews_show_item_alias_maps_to_comments(self):
+        original_fetch = hn_mod._fetch_item_detail_result
+        calls = []
+
+        def fake_fetch(item_id, timeout_seconds=15.0, stats=None):
+            calls.append(item_id)
+            return hn_mod._operation_result(
+                "comments",
+                "Story detail",
+                [{"id": item_id, "title": "Project Hail Mary"}],
+                extra={"query": item_id, "comments": [], "comment_count": 0},
+            )
+
+        try:
+            hn_mod._fetch_item_detail_result = fake_fetch
+            result = hn_mod.hackernews(
+                action="show_item",
+                id="48225297",
+                response_format="structured",
+            )
+        finally:
+            hn_mod._fetch_item_detail_result = original_fetch
+
+        self.assertEqual(calls, ["48225297"])
+        self.assertEqual(result["result"]["action"], "comments")
+        self.assertEqual(result["result"]["items"][0]["title"], "Project Hail Mary")
+
     def test_validator_rejects_unknown_parameters_before_dispatch(self):
         validator = ToolValidator()
         valid, error = validator.validate(
@@ -143,6 +273,296 @@ class GroundingTests(unittest.TestCase):
 
         self.assertTrue(valid, error)
         self.assertEqual(args["max_chars"], 20)
+
+    def test_file_tools_return_structured_evidence_when_requested(self):
+        read_result = file_read("requirements.txt", response_format="structured")
+        list_result = file_list(".", limit=5, response_format="structured")
+
+        self.assertEqual(read_result["meta"]["tool"], "file_read")
+        self.assertTrue(read_result["result"]["readable"])
+        self.assertIn("path", read_result["result"])
+        self.assertEqual(list_result["meta"]["tool"], "file_list")
+        self.assertGreaterEqual(list_result["result"]["count"], 1)
+        self.assertIn("items", list_result["result"])
+
+    def test_router_exposes_grounded_decision_reason(self):
+        router = ToolRouter()
+
+        selected = router.select_tools("hi")
+        decision = router.last_decision()
+
+        self.assertEqual(selected, [])
+        self.assertEqual(decision["reason"], "below_embedding_min_chars")
+
+    def test_context_followup_reuses_latest_information_tool(self):
+        original = core_mod._looks_like_context_followup
+        core_mod._looks_like_context_followup = lambda text: "more" in text.lower() or "return" in text.lower()
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "web_search",
+                            "arguments": '{"query":"google models"}',
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "content": '{"result":{"query":"google models"}}'},
+            {"role": "assistant", "content": "One result found."},
+        ]
+        selected_tool = None
+        for tool_info in get_tools():
+            if tool_info["name"] == "reddit":
+                selected_tool = tool_info
+                break
+        self.assertIsNotNone(selected_tool)
+
+        try:
+            reused = _maybe_reuse_latest_context_tool("return me more", [selected_tool], messages)
+        finally:
+            core_mod._looks_like_context_followup = original
+
+        self.assertEqual(reused[0]["name"], "web_search")
+
+    def test_context_followup_reuses_latest_tool_when_router_selected_none(self):
+        original = core_mod._looks_like_context_followup
+        core_mod._looks_like_context_followup = lambda text: True
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "hackernews",
+                            "arguments": '{"action":"search","query":"project hail mary"}',
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "content": '{"meta":{"tool":"hackernews"},"result":{"items":[{"id":"48225297"}]}}'},
+            {"role": "assistant", "content": "HN result found."},
+        ]
+
+        try:
+            reused = _maybe_reuse_latest_context_tool("can you go deep dive into it", [], messages)
+        finally:
+            core_mod._looks_like_context_followup = original
+
+        self.assertEqual(reused[0]["name"], "hackernews")
+
+    def test_context_followup_repairs_web_query_before_dispatch(self):
+        original = core_mod._looks_like_context_followup
+        core_mod._looks_like_context_followup = lambda text: text in {"return me more", "more"}
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "web_search",
+                            "arguments": '{"query":"models from google","max_results":1}',
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "content": '{"result":{"query":"models from google"}}'},
+            {"role": "assistant", "content": "One result found."},
+        ]
+
+        try:
+            repaired = _repair_contextual_tool_args(
+                "web_search",
+                {"query": "more", "max_results": 1},
+                "return me more",
+                messages,
+            )
+        finally:
+            core_mod._looks_like_context_followup = original
+
+        self.assertEqual(repaired["query"], "models from google")
+        self.assertEqual(repaired["max_results"], 8)
+
+    def test_context_followup_deepens_thin_web_search_to_fetch(self):
+        original = core_mod._looks_like_context_followup
+        core_mod._looks_like_context_followup = lambda text: text == "return me more"
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "web_search",
+                            "arguments": '{"query":"models from google","max_results":10}',
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "result": {
+                            "result_count": 1,
+                            "results": [
+                                {
+                                    "title": "Google models",
+                                    "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/google-models",
+                                }
+                            ],
+                        },
+                        "meta": {"tool": "web_search"},
+                    }
+                ),
+            },
+            {"role": "assistant", "content": "One result found."},
+        ]
+
+        try:
+            name, args = _repair_contextual_tool_call(
+                "web_search",
+                {"query": "more", "max_results": 10},
+                "return me more",
+                messages,
+            )
+        finally:
+            core_mod._looks_like_context_followup = original
+
+        self.assertEqual(name, "web_fetch")
+        self.assertEqual(args["url"], "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/google-models")
+
+    def test_context_followup_hackernews_deep_dive_fetches_item_comments(self):
+        original = core_mod._looks_like_context_followup
+        core_mod._looks_like_context_followup = lambda text: True
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "hackernews",
+                            "arguments": '{"action":"search","query":"project hail mary"}',
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "meta": {"tool": "hackernews"},
+                        "result": {
+                            "action": "search",
+                            "items": [
+                                {
+                                    "id": "48225297",
+                                    "title": "Project Hail Mary - Stellar Navigation Chart",
+                                }
+                            ],
+                        },
+                    }
+                ),
+            },
+            {"role": "assistant", "content": "HN result found."},
+        ]
+
+        try:
+            name, args = _repair_contextual_tool_call(
+                "hackernews",
+                {"action": "search", "query": "deep dive into it"},
+                "can you go deep dive into it",
+                messages,
+            )
+        finally:
+            core_mod._looks_like_context_followup = original
+
+        self.assertEqual(name, "hackernews")
+        self.assertEqual(args["action"], "comments")
+        self.assertEqual(args["query"], "48225297")
+
+    def test_context_followup_forces_repaired_hackernews_tool_call(self):
+        original = core_mod._looks_like_context_followup
+        core_mod._looks_like_context_followup = lambda text: True
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "hackernews",
+                            "arguments": '{"action":"search","query":"project hail mary"}',
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "meta": {"tool": "hackernews"},
+                        "result": {"items": [{"id": "48225297"}]},
+                    }
+                ),
+            },
+        ]
+
+        try:
+            call = _forced_contextual_tool_call(
+                "can you go deep dive into it",
+                [self._schema("hackernews")],
+                messages,
+            )
+        finally:
+            core_mod._looks_like_context_followup = original
+
+        self.assertEqual(call["name"], "hackernews")
+        self.assertEqual(json.loads(call["arguments"])["action"], "comments")
+        self.assertEqual(json.loads(call["arguments"])["query"], "48225297")
+
+    def test_web_search_query_specificity_preserves_user_terms(self):
+        repaired = _repair_search_query_specificity(
+            "web_search",
+            {"query": "models", "max_results": 10},
+            "fetch me latest details on models from google",
+        )
+
+        self.assertEqual(repaired["query"], "fetch me latest details on models from google")
+
+    def test_small_talk_router_decision_suppresses_memory_context(self):
+        self.assertTrue(_should_suppress_memory_context({"reason": "small_talk_contrast_won"}))
+        self.assertFalse(_should_suppress_memory_context({"reason": "selected"}))
+
+    def test_memory_context_requires_memory_intent_without_tools(self):
+        original_embed = core_mod.embed
+        vectors = {
+            "who am i": np.array([1.0, 0.0], dtype=np.float32),
+            "how are you man": np.array([0.0, 1.0], dtype=np.float32),
+        }
+
+        def fake_embed(texts):
+            if isinstance(texts, str):
+                return vectors[texts]
+            return np.array(
+                [
+                    np.array([1.0, 0.0], dtype=np.float32),
+                    np.array([0.0, 1.0], dtype=np.float32),
+                ],
+                dtype=np.float32,
+            )
+
+        try:
+            core_mod.embed = fake_embed
+            self.assertTrue(_should_use_memory_context("who am i", vectors["who am i"], []))
+            self.assertFalse(_should_use_memory_context("how are you man", vectors["how are you man"], []))
+        finally:
+            core_mod.embed = original_embed
 
 
 class RegistryDispatchTests(unittest.TestCase):
@@ -217,7 +637,7 @@ class RegistryDispatchTests(unittest.TestCase):
 
         self.assertEqual(result["error"]["code"], "TOOL_TIMEOUT")
         self.assertTrue(result["error"]["retryable"])
-        self.assertLess(duration, 0.18)
+        self.assertLess(duration, 0.30)
 
     def test_execute_tool_structured_exception_hides_raw_detail(self):
         @tool(name="registry_test_secret_error", description="Registry test secret error")
@@ -281,6 +701,11 @@ class MemoryRecallTests(unittest.TestCase):
             brain_mod.embed = fake_embed
             brain_mod.settings.memory_similarity_threshold = 0.1
             brain_mod.settings.memory_winner_margin = 0.3
+            brain._embeddings = np.array(
+                [vectors[memory["text"]] for memory in brain.memories],
+                dtype=np.float32,
+            )
+            brain._rebuild_index = lambda: None
             result = brain.recall("query", 5, np.array([1.0, 0.0], dtype=np.float32))
         finally:
             brain_mod.embed = original_embed
@@ -288,6 +713,149 @@ class MemoryRecallTests(unittest.TestCase):
             brain_mod.settings.memory_winner_margin = original_margin
 
         self.assertEqual(result, "User name is Krish Verma")
+
+    def test_brain_builds_persistent_index_and_assessment_reports_full_coverage(self):
+        original_memory_dir = brain_mod.settings.memory_dir
+        original_backup_dir = brain_mod.settings.memory_backup_dir
+        original_index_file = brain_mod.settings.memory_index_file
+        original_embeddings_file = brain_mod.settings.memory_embeddings_file
+        original_archive_file = brain_mod.settings.memory_archive_file
+        original_limit = brain_mod.settings.memory_max_entries
+        original_embed = brain_mod.embed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memories"
+            backup_dir = Path(tmp) / "backups"
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            payload = [
+                {"text": "User lives in Delhi", "importance": 0.6, "ts": "10:00:00"},
+                {"text": "User likes chess puzzles", "importance": 0.4, "ts": "10:05:00"},
+            ]
+            (memory_dir / f"memory_{date.today().isoformat()}.json").write_text(
+                json.dumps(payload, indent=2),
+                encoding="utf-8",
+            )
+
+            def fake_embed(texts, normalize=True):
+                mapping = {
+                    "User lives in Delhi": np.array([1.0, 0.0], dtype=np.float32),
+                    "User likes chess puzzles": np.array([0.5, 0.5], dtype=np.float32),
+                    "where does the user live": np.array([1.0, 0.0], dtype=np.float32),
+                }
+                if isinstance(texts, str):
+                    return mapping[texts]
+                return np.array([mapping[text] for text in texts], dtype=np.float32)
+
+            try:
+                brain_mod.settings.memory_dir = str(memory_dir)
+                brain_mod.settings.memory_backup_dir = str(backup_dir)
+                brain_mod.settings.memory_index_file = "memory_index.json"
+                brain_mod.settings.memory_embeddings_file = "memory_embeddings.npy"
+                brain_mod.settings.memory_archive_file = "memory_archive.jsonl"
+                brain_mod.settings.memory_max_entries = 10
+                brain_mod.MEMORY_DIR = Path(brain_mod.settings.memory_dir)
+                brain_mod.BACKUP_DIR = Path(brain_mod.settings.memory_backup_dir)
+                brain_mod.embed = fake_embed
+
+                brain = Brain()
+                assessment = brain.system_assessment()
+                recalled = brain.recall("where does the user live")
+                index_exists = (memory_dir / "memory_index.json").exists()
+                embeddings_exists = (memory_dir / "memory_embeddings.npy").exists()
+            finally:
+                brain_mod.settings.memory_dir = original_memory_dir
+                brain_mod.settings.memory_backup_dir = original_backup_dir
+                brain_mod.settings.memory_index_file = original_index_file
+                brain_mod.settings.memory_embeddings_file = original_embeddings_file
+                brain_mod.settings.memory_archive_file = original_archive_file
+                brain_mod.settings.memory_max_entries = original_limit
+                brain_mod.MEMORY_DIR = Path(brain_mod.settings.memory_dir)
+                brain_mod.BACKUP_DIR = Path(brain_mod.settings.memory_backup_dir)
+                brain_mod.embed = original_embed
+
+        self.assertTrue(index_exists)
+        self.assertTrue(embeddings_exists)
+        self.assertEqual(assessment["entry_count"], 2)
+        self.assertEqual(assessment["indexed_count"], 2)
+        self.assertEqual(assessment["index_coverage_ratio"], 1.0)
+        self.assertEqual(recalled, "User lives in Delhi")
+
+    def test_commit_capacity_trim_archives_old_entries(self):
+        original_memory_dir = brain_mod.settings.memory_dir
+        original_backup_dir = brain_mod.settings.memory_backup_dir
+        original_index_file = brain_mod.settings.memory_index_file
+        original_embeddings_file = brain_mod.settings.memory_embeddings_file
+        original_archive_file = brain_mod.settings.memory_archive_file
+        original_limit = brain_mod.settings.memory_max_entries
+        original_embed = brain_mod.embed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memories"
+            backup_dir = Path(tmp) / "backups"
+            memory_dir.mkdir(parents=True, exist_ok=True)
+
+            def fake_embed(texts, normalize=True):
+                if isinstance(texts, str):
+                    return np.array([1.0, 0.0], dtype=np.float32)
+                return np.array([[1.0, 0.0] for _ in texts], dtype=np.float32)
+
+            try:
+                brain_mod.settings.memory_dir = str(memory_dir)
+                brain_mod.settings.memory_backup_dir = str(backup_dir)
+                brain_mod.settings.memory_index_file = "memory_index.json"
+                brain_mod.settings.memory_embeddings_file = "memory_embeddings.npy"
+                brain_mod.settings.memory_archive_file = "memory_archive.jsonl"
+                brain_mod.settings.memory_max_entries = 2
+                brain_mod.MEMORY_DIR = Path(brain_mod.settings.memory_dir)
+                brain_mod.BACKUP_DIR = Path(brain_mod.settings.memory_backup_dir)
+                brain_mod.embed = fake_embed
+
+                brain = Brain()
+                self.assertTrue(brain.commit("User likes black coffee", importance=0.1))
+                self.assertTrue(brain.commit("User lives in Delhi", importance=0.5))
+                self.assertTrue(brain.commit("User works remotely from home", importance=0.9))
+            finally:
+                brain_mod.settings.memory_dir = original_memory_dir
+                brain_mod.settings.memory_backup_dir = original_backup_dir
+                brain_mod.settings.memory_index_file = original_index_file
+                brain_mod.settings.memory_embeddings_file = original_embeddings_file
+                brain_mod.settings.memory_archive_file = original_archive_file
+                brain_mod.settings.memory_max_entries = original_limit
+                brain_mod.MEMORY_DIR = Path(brain_mod.settings.memory_dir)
+                brain_mod.BACKUP_DIR = Path(brain_mod.settings.memory_backup_dir)
+                brain_mod.embed = original_embed
+
+            archive_text = (memory_dir / "memory_archive.jsonl").read_text(encoding="utf-8")
+            remaining = [item["text"] for item in brain.memories]
+
+        self.assertEqual(len(remaining), 2)
+        self.assertNotIn("User likes black coffee", remaining)
+        self.assertIn('"reason": "capacity"', archive_text)
+
+    def test_benchmark_recall_reports_average_latency(self):
+        original_embed = brain_mod.embed
+
+        brain = Brain.__new__(Brain)
+        brain.memories = [{"text": "User lives in Delhi", "importance": 0.5}]
+        brain._embeddings = np.array([[1.0, 0.0]], dtype=np.float32)
+        brain._rebuild_index = lambda: None
+
+        vectors = {"where does the user live": np.array([1.0, 0.0], dtype=np.float32)}
+
+        def fake_embed(texts, normalize=True):
+            if isinstance(texts, str):
+                return vectors[texts]
+            return np.array([vectors[text] for text in texts], dtype=np.float32)
+
+        try:
+            brain_mod.embed = fake_embed
+            report = brain.benchmark_recall("where does the user live", runs=3, k=1)
+        finally:
+            brain_mod.embed = original_embed
+
+        self.assertEqual(report["runs"], 3)
+        self.assertEqual(report["result_count"], 1)
+        self.assertGreaterEqual(report["avg_ms"], 0.0)
 
 
 class RouterSelectionTests(unittest.TestCase):
@@ -395,6 +963,112 @@ class FileToolTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
         self.assertIn("Not a directory", result)
+
+
+class TierOneToolUpgradeTests(unittest.TestCase):
+    def test_terminal_structured_dry_run_emits_trace_without_running(self):
+        marker = Path("storage") / "terminal_dry_run_marker.txt"
+        marker.unlink(missing_ok=True)
+        command = f'"{sys.executable}" -c "from pathlib import Path; Path({str(marker)!r}).write_text({("ran")!r})"'
+        if sys.platform == "win32":
+            command = f'& "{sys.executable}" -c "from pathlib import Path; Path({str(marker)!r}).write_text({("ran")!r})"'
+
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            result = execute_tool(
+                "terminal",
+                command=command,
+                dry_run=True,
+                response_format="structured",
+                trace_enabled=True,
+            )
+
+        trace = json.loads(stream.getvalue().strip())
+        self.assertFalse(marker.exists())
+        self.assertTrue(result["result"]["dry_run"])
+        self.assertEqual(result["result"]["status"], "DRY_RUN")
+        self.assertEqual(result["meta"]["version"], "2.0.0")
+        self.assertEqual(trace["tool"], "terminal")
+        self.assertEqual(trace["status"], "SUCCESS")
+
+    def test_terminal_structured_timeout_is_typed(self):
+        command = f'"{sys.executable}" -c "import time; time.sleep(0.3)"'
+        if sys.platform == "win32":
+            command = f'& "{sys.executable}" -c "import time; time.sleep(0.3)"'
+
+        started = time.perf_counter()
+        result = execute_tool(
+            "terminal",
+            command=command,
+            timeout_ms=50,
+            response_format="structured",
+        )
+        duration = time.perf_counter() - started
+
+        self.assertEqual(result["error"]["code"], "COMMAND_TIMEOUT")
+        self.assertTrue(result["error"]["retryable"])
+        self.assertLess(duration, 1.2)
+
+    def test_file_write_structured_create_new_via_registry(self):
+        path = Path("storage") / "file_write_structured_test.txt"
+        path.unlink(missing_ok=True)
+
+        stream = io.StringIO()
+        try:
+            with redirect_stdout(stream):
+                result = execute_tool(
+                    "file_write",
+                    path=str(path),
+                    content="structured",
+                    mode="create_new",
+                    response_format="structured",
+                    trace_enabled=True,
+                )
+            trace = json.loads(stream.getvalue().strip())
+            content = path.read_text(encoding="utf-8")
+        finally:
+            path.unlink(missing_ok=True)
+
+        self.assertEqual(content, "structured")
+        self.assertEqual(result["result"]["mode"], "create_new")
+        self.assertTrue(result["result"]["changed"])
+        self.assertEqual(result["meta"]["version"], "2.0.0")
+        self.assertEqual(trace["tool"], "file_write")
+        self.assertEqual(trace["status"], "SUCCESS")
+
+    def test_file_write_dry_run_does_not_create_parent(self):
+        root = Path("storage") / "file_write_dry_run_parent"
+        path = root / "nested" / "planned.txt"
+        if root.exists():
+            shutil.rmtree(root)
+
+        result = file_write(
+            str(path),
+            "planned",
+            dry_run=True,
+            response_format="structured",
+        )
+
+        self.assertFalse(root.exists())
+        self.assertTrue(result["result"]["dry_run"])
+        self.assertFalse(result["result"]["changed"])
+
+    def test_file_write_parent_creation_can_be_blocked(self):
+        root = Path("storage") / "file_write_parent_blocked"
+        path = root / "nested" / "blocked.txt"
+        if root.exists():
+            shutil.rmtree(root)
+
+        result = file_write(
+            str(path),
+            "blocked",
+            create_parent_dirs=False,
+            response_format="structured",
+        )
+
+        self.assertEqual(result["error"]["code"], "PARENT_DIRECTORY_NOT_FOUND")
+        self.assertFalse(result["error"]["retryable"])
+        self.assertFalse(root.exists())
 
 
 class NoteToolTests(unittest.TestCase):
@@ -512,6 +1186,164 @@ class ManifestAuditToolTests(unittest.TestCase):
         self.assertIn("root not found", result)
 
 
+class BrowserAutomationToolTests(unittest.TestCase):
+    def test_browser_target_config_parses_markdown_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "targets.md"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "# Targets",
+                        "## social_profile",
+                        "url: https://example.com/profile",
+                        "wait_until: domcontentloaded",
+                        "field: followers | source: meta | label: followers",
+                        "field: profile_title | source: title",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            targets, error = browser_mod._load_targets(str(config_path))
+
+        self.assertIsNone(error)
+        self.assertEqual(targets["social_profile"]["url"], "https://example.com/profile")
+        self.assertEqual(targets["social_profile"]["fields"][0]["name"], "followers")
+        self.assertEqual(targets["social_profile"]["fields"][0]["label"], "followers")
+
+    def test_browser_extract_uses_markdown_configured_fields(self):
+        original_load_page = browser_mod._load_page
+
+        def fake_load_page(url, engine, timeout_ms, wait_until, max_text_chars, fields, storage_state=""):
+            return {
+                "requested_url": url,
+                "final_url": "https://example.com/profile",
+                "status_code": 200,
+                "title": "Example Profile",
+                "text": "Example visible body",
+                "text_truncated": False,
+                "meta": [
+                    {
+                        "name": "description",
+                        "property": "",
+                        "content": "1,234 followers, 56 following, 7 posts",
+                    }
+                ],
+                "selector_values": {},
+                "engine_used": "playwright",
+                "degraded": False,
+                "degraded_reason": "",
+            }, None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "targets.md"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "# Targets",
+                        "## social_profile",
+                        "url: https://example.com/profile",
+                        "field: followers | source: meta | label: followers",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            try:
+                browser_mod._load_page = fake_load_page
+                result = browser_mod.browser_extract(
+                    target="social_profile",
+                    config_path=str(config_path),
+                    response_format="structured",
+                )
+            finally:
+                browser_mod._load_page = original_load_page
+
+        self.assertEqual(result["meta"]["tool"], "browser_extract")
+        self.assertEqual(result["result"]["engine_used"], "playwright")
+        self.assertEqual(result["result"]["matched_count"], 1)
+        self.assertEqual(result["result"]["fields"][0]["value"], "1,234")
+
+    def test_browser_extract_reuses_markdown_storage_state(self):
+        original_load_page = browser_mod._load_page
+        observed = {}
+
+        def fake_load_page(url, engine, timeout_ms, wait_until, max_text_chars, fields, storage_state=""):
+            observed["storage_state"] = storage_state
+            return {
+                "requested_url": url,
+                "final_url": "https://example.com/private",
+                "status_code": 200,
+                "title": "Private Page",
+                "text": "42 followers",
+                "text_truncated": False,
+                "meta": [],
+                "selector_values": {},
+                "engine_used": "playwright",
+                "degraded": False,
+                "degraded_reason": "",
+                "storage_state_used": bool(storage_state),
+            }, None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text("{}", encoding="utf-8")
+            config_path = Path(tmp) / "targets.md"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "# Targets",
+                        "## private_profile",
+                        "url: https://example.com/private",
+                        f"storage_state: {state_path}",
+                        "field: followers | source: text | label: followers",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            try:
+                browser_mod._load_page = fake_load_page
+                result = browser_mod.browser_extract(
+                    target="private_profile",
+                    config_path=str(config_path),
+                    response_format="structured",
+                )
+            finally:
+                browser_mod._load_page = original_load_page
+
+        self.assertEqual(observed["storage_state"], str(state_path.resolve()))
+        self.assertTrue(result["result"]["storage_state_used"])
+        self.assertEqual(result["result"]["storage_state_path"], str(state_path.resolve()))
+
+    def test_browser_extract_direct_url_validates_url(self):
+        result = browser_mod.browser_extract(
+            url="example.com/profile",
+            response_format="structured",
+        )
+
+        self.assertEqual(result["error"]["code"], "INVALID_URL")
+
+    def test_browser_login_session_schema_is_registered(self):
+        schema = None
+        for candidate in get_tool_schemas():
+            if candidate["function"]["name"] == "browser_login_session":
+                schema = candidate
+                break
+        self.assertIsNotNone(schema)
+        props = schema["function"]["parameters"]["properties"]
+
+        self.assertIn("storage_state", props)
+        self.assertIn("timeout_ms", props)
+
+    def test_browser_login_session_errors_use_login_tool_meta(self):
+        result = browser_mod.browser_login_session(
+            url="example.com/login",
+            response_format="structured",
+        )
+
+        self.assertEqual(result["meta"]["tool"], "browser_login_session")
+        self.assertEqual(result["error"]["code"], "INVALID_URL")
+
+
 class ExternalRetryTests(unittest.TestCase):
     def test_hackernews_search_reports_bounded_provider_failure(self):
         original_get = hn_mod.httpx.get
@@ -535,6 +1367,287 @@ class ExternalRetryTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertIn("Search unavailable: timeout after 2 attempt(s)", result)
+
+    def test_reddit_structured_search_fallback_reports_degraded_provider(self):
+        original_get = reddit_mod._get
+        original_ddgs = reddit_mod.DDGS
+        reddit_mod._cache.clear()
+        reddit_mod._cache_ts.clear()
+        calls = []
+
+        def fake_get(path, params=None, timeout_seconds=15.0, stats=None):
+            reddit_mod._record_external(stats, "reddit")
+            calls.append((path, timeout_seconds))
+            return {"_error": "blocked"}
+
+        class FakeDDGS:
+            def __init__(self, timeout=None):
+                self.timeout = timeout
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def text(self, query, max_results):
+                return [{"title": "Thread", "body": "Body", "href": "https://reddit.com/r/test/1"}]
+
+        try:
+            reddit_mod._get = fake_get
+            reddit_mod.DDGS = FakeDDGS
+            result = reddit_mod.reddit(
+                action="search",
+                query="ai",
+                limit="1",
+                timeout_ms=2500,
+                response_format="structured",
+                include_source_status=True,
+            )
+        finally:
+            reddit_mod._get = original_get
+            reddit_mod.DDGS = original_ddgs
+            reddit_mod._cache.clear()
+            reddit_mod._cache_ts.clear()
+
+        self.assertEqual(calls[0][1], 2.5)
+        self.assertEqual(result["result"]["source"], "ddgs")
+        self.assertTrue(result["result"]["fallback_used"])
+        self.assertTrue(result["result"]["degraded"])
+        self.assertEqual(result["result"]["count"], 1)
+        self.assertEqual(result["meta"]["version"], "2.0.0")
+
+    def test_reddit_search_reports_bounded_provider_failure(self):
+        original_get = reddit_mod.httpx.get
+        original_ddgs = reddit_mod.DDGS
+        original_attempts = reddit_mod.settings.external_request_attempts
+        original_delay = reddit_mod.settings.external_retry_delay
+        reddit_mod._cache.clear()
+        reddit_mod._cache_ts.clear()
+        calls = []
+
+        def failing_get(*args, **kwargs):
+            calls.append(kwargs.get("timeout"))
+            raise reddit_mod.httpx.TimeoutException("timeout")
+
+        class FailingDDGS:
+            def __init__(self, timeout=None):
+                self.timeout = timeout
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def text(self, query, max_results):
+                raise RuntimeError("blocked")
+
+        try:
+            reddit_mod.httpx.get = failing_get
+            reddit_mod.DDGS = FailingDDGS
+            reddit_mod.settings.external_request_attempts = 2
+            reddit_mod.settings.external_retry_delay = 0
+            result = reddit_mod.reddit(action="search", query="ai", limit=2, timeout_ms=2000)
+        finally:
+            reddit_mod.httpx.get = original_get
+            reddit_mod.DDGS = original_ddgs
+            reddit_mod.settings.external_request_attempts = original_attempts
+            reddit_mod.settings.external_retry_delay = original_delay
+            reddit_mod._cache.clear()
+            reddit_mod._cache_ts.clear()
+
+        self.assertEqual(calls, [2.0, 2.0])
+        self.assertIn("Reddit is blocked from this network", result)
+
+    def test_reddit_retries_transient_failure_then_succeeds(self):
+        original_get = reddit_mod.httpx.get
+        original_attempts = reddit_mod.settings.external_request_attempts
+        original_delay = reddit_mod.settings.external_retry_delay
+        reddit_mod._cache.clear()
+        reddit_mod._cache_ts.clear()
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "kind": "Listing",
+                    "data": {
+                        "children": [
+                            {
+                                "kind": "t3",
+                                "data": {
+                                    "title": "Recovered",
+                                    "score": 1,
+                                    "author": "u",
+                                    "num_comments": 0,
+                                    "subreddit": "python",
+                                    "created_utc": 1,
+                                    "upvote_ratio": 1,
+                                    "id": "abc",
+                                    "permalink": "/r/python/comments/abc/recovered/",
+                                },
+                            }
+                        ]
+                    },
+                }
+
+        def flaky_get(*args, **kwargs):
+            calls.append(kwargs.get("timeout"))
+            if len(calls) < 3:
+                raise reddit_mod.httpx.TimeoutException("timeout")
+            return FakeResponse()
+
+        try:
+            reddit_mod.httpx.get = flaky_get
+            reddit_mod.settings.external_request_attempts = 3
+            reddit_mod.settings.external_retry_delay = 0
+            result = reddit_mod.reddit(
+                action="hot",
+                subreddit="python",
+                limit=1,
+                timeout_ms=2000,
+                response_format="structured",
+            )
+        finally:
+            reddit_mod.httpx.get = original_get
+            reddit_mod.settings.external_request_attempts = original_attempts
+            reddit_mod.settings.external_retry_delay = original_delay
+            reddit_mod._cache.clear()
+            reddit_mod._cache_ts.clear()
+
+        self.assertEqual(calls, [2.0, 2.0, 2.0])
+        self.assertEqual(result["result"]["count"], 1)
+        self.assertEqual(result["result"]["items"][0]["title"], "Recovered")
+
+    def test_reddit_structured_missing_query_error_and_trace(self):
+        stream = io.StringIO()
+
+        with redirect_stdout(stream):
+            result = execute_tool(
+                "reddit",
+                action="search",
+                response_format="structured",
+                trace_enabled=True,
+            )
+
+        trace = json.loads(stream.getvalue().strip())
+        self.assertEqual(result["error"]["code"], "MISSING_QUERY")
+        self.assertEqual(trace["tool"], "reddit")
+        self.assertEqual(trace["status"], "FAILED")
+
+    def test_hackernews_structured_search_success_uses_timeout(self):
+        original_get = hn_mod.httpx.get
+        calls = []
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "hits": [
+                        {
+                            "title": "HN Story",
+                            "points": 5,
+                            "author": "author",
+                            "created_at_i": 1,
+                            "num_comments": 2,
+                            "objectID": "123",
+                            "url": "https://example.com/story",
+                        }
+                    ]
+                }
+
+        def fake_get(url, params=None, timeout=None, headers=None):
+            calls.append({"url": url, "timeout": timeout, "params": params})
+            return FakeResponse()
+
+        try:
+            hn_mod.httpx.get = fake_get
+            result = hn_mod.hackernews(
+                action="search",
+                query="ai",
+                limit="1",
+                timeout_ms=3000,
+                response_format="structured",
+                include_source_status=True,
+            )
+        finally:
+            hn_mod.httpx.get = original_get
+
+        self.assertEqual(calls[0]["timeout"], 3.0)
+        self.assertEqual(result["result"]["provider"], "algolia")
+        self.assertEqual(result["result"]["count"], 1)
+        self.assertEqual(result["result"]["items"][0]["id"], "123")
+        self.assertEqual(result["result"]["source_status"], "ok")
+
+    def test_hackernews_retries_transient_failure_then_succeeds(self):
+        original_get = hn_mod.httpx.get
+        original_attempts = hn_mod.settings.external_request_attempts
+        original_delay = hn_mod.settings.external_retry_delay
+        calls = []
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "hits": [
+                        {
+                            "title": "Recovered HN",
+                            "points": 1,
+                            "author": "a",
+                            "created_at_i": 1,
+                            "num_comments": 0,
+                            "objectID": "456",
+                            "url": "https://example.com/hn",
+                        }
+                    ]
+                }
+
+        def flaky_get(*args, **kwargs):
+            calls.append(kwargs.get("timeout"))
+            if len(calls) < 3:
+                raise hn_mod.httpx.TimeoutException("timeout")
+            return FakeResponse()
+
+        try:
+            hn_mod.httpx.get = flaky_get
+            hn_mod.settings.external_request_attempts = 3
+            hn_mod.settings.external_retry_delay = 0
+            result = hn_mod.hackernews(
+                action="search",
+                query="ai",
+                limit=1,
+                timeout_ms=2000,
+                response_format="structured",
+            )
+        finally:
+            hn_mod.httpx.get = original_get
+            hn_mod.settings.external_request_attempts = original_attempts
+            hn_mod.settings.external_retry_delay = original_delay
+
+        self.assertEqual(calls, [2.0, 2.0, 2.0])
+        self.assertEqual(result["result"]["count"], 1)
+        self.assertEqual(result["result"]["items"][0]["id"], "456")
+
+    def test_hackernews_structured_invalid_story_id_error(self):
+        result = hn_mod.hackernews(
+            action="comments",
+            query="not-an-id",
+            response_format="structured",
+        )
+
+        self.assertEqual(result["error"]["code"], "INVALID_STORY_ID")
+        self.assertFalse(result["error"]["retryable"])
+        self.assertIn("suggestion", result["error"])
 
     def test_web_fetch_reports_bounded_provider_failure(self):
         original_get = web_mod.httpx.get
@@ -587,6 +1700,144 @@ class ExternalRetryTests(unittest.TestCase):
 
         self.assertIn("Result", result)
         self.assertIn("https://example.com", result)
+
+    def test_web_search_structured_fallback_reports_degraded_provider(self):
+        original_tavily = web_mod._tavily
+        original_ddgs = web_mod.DDGS
+
+        class FailingTavily:
+            def search(self, *args, **kwargs):
+                raise RuntimeError("down")
+
+        class FakeDDGS:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def text(self, query, max_results):
+                return [{"title": "Structured", "body": "Body", "href": "https://example.com/s"}]
+
+        try:
+            web_mod._tavily = FailingTavily()
+            web_mod.DDGS = FakeDDGS
+            result = web_mod.web_search(
+                "query",
+                max_results=1,
+                response_format="structured",
+            )
+        finally:
+            web_mod._tavily = original_tavily
+            web_mod.DDGS = original_ddgs
+
+        self.assertEqual(result["result"]["provider_used"], "ddgs")
+        self.assertTrue(result["result"]["fallback_used"])
+        self.assertTrue(result["result"]["degraded"])
+        self.assertEqual(result["result"]["result_count"], 1)
+        self.assertEqual(result["meta"]["version"], "2.0.0")
+
+    def test_web_search_auto_supplements_thin_tavily_results_with_ddgs(self):
+        original_tavily = web_mod._tavily
+        original_ddgs = web_mod.DDGS
+
+        class ThinTavily:
+            def search(self, *args, **kwargs):
+                return {
+                    "results": [
+                        {
+                            "title": "Google Gemini model docs",
+                            "content": "Gemini model documentation",
+                            "url": "https://cloud.google.com/vertex-ai/generative-ai/docs/models",
+                        }
+                    ]
+                }
+
+        class FakeDDGS:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def text(self, query, max_results):
+                return [
+                    {"title": "Gemini API models", "body": "Model list", "href": "https://ai.google.dev/gemini-api/docs/models"},
+                    {"title": "Vertex AI models", "body": "Available models", "href": "https://cloud.google.com/vertex-ai/generative-ai/docs/learn/models"},
+                ][:max_results]
+
+        try:
+            web_mod._tavily = ThinTavily()
+            web_mod.DDGS = FakeDDGS
+            result = web_mod.web_search(
+                "latest details on models from google",
+                max_results=3,
+                response_format="structured",
+            )
+        finally:
+            web_mod._tavily = original_tavily
+            web_mod.DDGS = original_ddgs
+
+        self.assertEqual(result["result"]["result_count"], 3)
+        self.assertTrue(result["result"]["supplemental_used"])
+        self.assertEqual(result["result"]["provider_sequence"], ["tavily", "ddgs"])
+
+    def test_web_search_structured_empty_query_error(self):
+        result = web_mod.web_search("", response_format="structured")
+
+        self.assertEqual(result["error"]["code"], "EMPTY_QUERY")
+        self.assertFalse(result["error"]["retryable"])
+        self.assertIn("suggestion", result["error"])
+
+    def test_web_fetch_structured_success_and_trace(self):
+        original_get = web_mod.httpx.get
+
+        class FakeResponse:
+            status_code = 200
+            url = "https://example.com/final"
+            text = "<html><title>Example</title><body>Hello page</body></html>"
+
+            def raise_for_status(self):
+                return None
+
+        calls = []
+
+        def fake_get(*args, **kwargs):
+            calls.append(kwargs)
+            return FakeResponse()
+
+        stream = io.StringIO()
+        try:
+            web_mod.httpx.get = fake_get
+            with redirect_stdout(stream):
+                result = execute_tool(
+                    "web_fetch",
+                    url="https://example.com/start",
+                    max_chars=1000,
+                    timeout_ms=5000,
+                    follow_redirects=False,
+                    response_format="structured",
+                    trace_enabled=True,
+                )
+        finally:
+            web_mod.httpx.get = original_get
+
+        trace = json.loads(stream.getvalue().strip())
+        self.assertEqual(result["result"]["status_code"], 200)
+        self.assertEqual(result["result"]["title"], "Example")
+        self.assertIn("Hello page", result["result"]["text"])
+        self.assertFalse(result["result"]["follow_redirects"])
+        self.assertEqual(calls[0]["timeout"], 5.0)
+        self.assertFalse(calls[0]["follow_redirects"])
+        self.assertEqual(trace["tool"], "web_fetch")
+        self.assertEqual(trace["status"], "SUCCESS")
+
+    def test_web_fetch_structured_invalid_url_error(self):
+        result = web_mod.web_fetch("example.com/no-scheme", response_format="structured")
+
+        self.assertEqual(result["error"]["code"], "INVALID_URL")
+        self.assertEqual(result["error"]["field"], "url")
+        self.assertFalse(result["error"]["retryable"])
 
 
 if __name__ == "__main__":

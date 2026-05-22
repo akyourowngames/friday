@@ -1,4 +1,7 @@
 from pathlib import Path
+import contextlib
+import io
+import logging
 from typing import Union
 
 import numpy as np
@@ -6,9 +9,26 @@ from openai import OpenAI, APITimeoutError, APIStatusError
 
 from config import settings
 
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
 _client = None
 _EMBED_DIM = 384
 _local_model = None
+_local_tokenizer = None
+_MODEL_REPO = "sentence-transformers/all-MiniLM-L6-v2"
+_MODEL_CACHE = Path(settings.storage_dir) / "onnx_models"
+
+
+def _quiet_call(func, *args, **kwargs):
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return func(*args, **kwargs)
+
+
+def _cached_hf_file(filename: str) -> Path | None:
+    for path in _MODEL_CACHE.rglob(Path(filename).name):
+        if str(path).replace("\\", "/").endswith(filename):
+            return path
+    return None
 
 
 def _get_client():
@@ -28,14 +48,18 @@ def _get_local_model():
     if _local_model is None:
         try:
             import onnxruntime as rt
-            from huggingface_hub import hf_hub_download
 
-            model_path = hf_hub_download(
-                repo_id="sentence-transformers/all-MiniLM-L6-v2",
-                filename="onnx/model.onnx",
-                cache_dir=Path(settings.storage_dir) / "onnx_models",
-            )
-            _local_model = rt.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            model_path = _cached_hf_file("onnx/model.onnx")
+            if model_path is None:
+                from huggingface_hub import hf_hub_download
+
+                model_path = Path(_quiet_call(
+                    hf_hub_download,
+                    repo_id=_MODEL_REPO,
+                    filename="onnx/model.onnx",
+                    cache_dir=_MODEL_CACHE,
+                ))
+            _local_model = rt.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         except Exception as e:
             import sys
             print(f"[WARNING] Failed to load ONNX model: {e}. Falling back to API.", file=sys.stderr)
@@ -54,9 +78,24 @@ def _local_embed(texts: list, normalize: bool = True) -> Union[np.ndarray, None]
         return None
 
     try:
+        global _local_tokenizer
         import tokenizers
 
-        tokenizer = tokenizers.Tokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+        if _local_tokenizer is None:
+            tokenizer_path = _cached_hf_file("tokenizer.json")
+            if tokenizer_path is None:
+                from huggingface_hub import hf_hub_download
+
+                tokenizer_path = Path(_quiet_call(
+                    hf_hub_download,
+                    repo_id=_MODEL_REPO,
+                    filename="tokenizer.json",
+                    cache_dir=_MODEL_CACHE,
+                ))
+            _local_tokenizer = tokenizers.Tokenizer.from_file(
+                str(tokenizer_path)
+            )
+        tokenizer = _local_tokenizer
         encoded = tokenizer.encode_batch(texts)
 
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)

@@ -1,9 +1,13 @@
 # KING Tool Upgrade Session
 
-Last updated: 2026-05-19T08:38:18Z
+Last updated: 2026-05-21T00:00:00+05:30
 
 This file is the visible upgrade-control artifact for the current heartbeat. It
 records Phase 1 inventory and tier assignment before any runtime tool changes.
+
+Current exception: the 2026-05-21 browser automation request explicitly grants
+code-edit authority for the browser extraction tool. The implementation remains
+markdown-configured and avoids hardcoded routing or phrase matching.
 
 Important boundary: repository instructions for tool work currently say to edit
 markdown files and not touch tool code. This session therefore does not claim a
@@ -13,6 +17,25 @@ the user explicitly allows code edits.
 Current exception: the 2026-05-19T08:38Z heartbeat explicitly allowed code edits
 and full access, so the `registry_dispatch` runtime upgrade below is active and
 verified.
+
+Current exception: the 2026-05-19T23:15+05:30 fix explicitly addressed live
+tool-result leakage in the CLI. The agent now requests structured tool context
+from any callable that advertises `response_format`, serializes structured
+results as JSON for the model context, and finalizes tool results through the
+LLM before user-facing output. The project env disables the direct single-tool
+fast path and enables finalization so provider tools such as web, Reddit, and
+Hacker News fetch first, then answer from observed fields instead of dumping raw
+payloads or result lists.
+
+Verification evidence for this fix:
+
+- `python -m py_compile agent\core.py config.py`
+- `python -m unittest tests.test_grounding` -> 60 tests passed.
+- `'/exit' | python main.py` -> CLI reached `Ready` and exited cleanly.
+- Live web-search CLI probe answered in prose without raw structured payload.
+- Live Hacker News CLI probe summarized fetched results without dumping the raw
+  listing.
+- Live Reddit CLI probe reported the observed empty-result state in prose.
 
 ## Scope
 
@@ -742,9 +765,11 @@ user explicitly allows code edits.
 
 ## Next Heartbeat Work
 
-1. Continue Tier 1 runtime upgrades with `terminal`, then `file_write`.
+1. Continue tool runtime upgrades only when the previous surface has executable
+   verification evidence.
 2. Keep every new runtime capability optional and legacy-preserving by default.
-3. Do not mark any additional runtime tool as upgraded until V-01 passes against executable behavior.
+3. Use `tool_verification_pipeline` after each heartbeat so the final report can
+   name real command evidence instead of broad claims.
 
 ## Phase 3 Runtime Implementation - registry_dispatch
 
@@ -880,3 +905,831 @@ Runtime changes:
 [FIX] `tool_policy.md` now requires manifest and tool audits to stay inside the current repository unless the user provides an exact alternate root.
 
 [VERDICT] no runtime code changed; audit scope and unverified transport reporting are now guarded in the loaded markdown policy. Runtime TLS verification remains a follow-up code fix.
+
+## Phase 6 Runtime Implementation - tool_verification_pipeline
+
+Implemented `tool_verification_pipeline` version `1.0.0` in
+`tools/verification_pipeline.py`.
+
+Runtime changes:
+
+- Added a callable verification runner that reads `- command:` entries from the
+  configured markdown pipeline file.
+- Added config knobs for pipeline file path, maximum steps, command timeout, and
+  captured output size.
+- Kept pipeline commands visible in `tools/TOOL_VERIFICATION_PIPELINE.md`
+  instead of embedding the check list in Python code.
+- Added structured success and blocked-error envelopes with trace support.
+- Added dry-run mode so KING can preview a verification plan without executing
+  shell commands.
+- Blocked pipeline files that resolve outside the requested repository root.
+
+[NEW CAPABILITY] tool: tool_verification_pipeline
+  param: pipeline_path (optional, default: configured markdown pipeline)
+  type: string path inside repository root
+  what it unlocks: visible, markdown-owned verification plans
+  backward compatible: YES - no existing tool behavior changed
+
+[NEW CAPABILITY] tool: tool_verification_pipeline
+  param: dry_run (optional, default: false)
+  type: boolean
+  what it unlocks: command preview without command execution
+  backward compatible: YES - callers opt in
+
+[NEW CAPABILITY] tool: tool_verification_pipeline
+  param: response_format and trace_enabled (optional)
+  type: legacy or structured plus boolean
+  what it unlocks: parseable evidence and machine-readable traces
+  backward compatible: YES - legacy text remains the default
+
+## Phase 7 Runtime Verification - tool_verification_pipeline
+
+[V-01] PASS - evidence: the new tool is isolated; existing tool callers are not
+rewired and legacy defaults are text-only.
+
+[V-02] PASS - evidence: `tests/test_verification_pipeline.py` verifies a
+markdown command runs and returns structured evidence.
+
+[V-03] PASS - evidence: the same test file verifies dry-run does not execute a
+state-changing command.
+
+[V-04] PASS - evidence: the same test file verifies an absolute pipeline file
+outside the root returns `PIPELINE_OUT_OF_SCOPE`.
+
+[V-05] PASS - evidence: the same test file verifies a failing required command
+sets status `failed` and ship decision `hold`.
+
+[V-06] PASS - evidence: default `tool_verification_pipeline` run returned
+`Status: success` and `Ship decision: ship`; it ran 4 required checks from
+`tools/TOOL_VERIFICATION_PIPELINE.md`: `python -m unittest tests.test_grounding`
+ran 45 tests OK, `python -m pytest -q` passed 50 tests, `python -m compileall
+tools agent memory voice gesture main.py config.py` passed, and `npm run
+typecheck` passed.
+
+## Phase 8 Markdown Pipeline Hardening - manifest alignment
+
+Changed `tools/TOOL_VERIFICATION_PIPELINE.md` so manifest and callable-schema
+alignment is a required default check.
+
+Reason:
+
+- Tool changes should fail fast if a Python tool module is active but missing
+  from the markdown manifest.
+- The manifest should also catch stale entries when a documented executable
+  module no longer exists.
+- The default heartbeat proof should include registered callable schema
+  evidence, not only tests that happen to import tools.
+
+Runtime changes:
+
+- None. This phase is markdown-only.
+
+[V-01] PASS - evidence: updated default `tool_verification_pipeline` run
+returned `Status: success` and `Ship decision: ship`; it ran 5 required checks.
+The new manifest alignment check reported 11 observed tool modules, 11 manifest
+modules, 21 registered callable schemas, and no missing manifest or file
+entries. The remaining checks passed: `python -m unittest tests.test_grounding`
+ran 45 tests OK, `python -m pytest -q` passed 50 tests, `python -m compileall
+tools agent memory voice gesture main.py config.py` passed, and `npm run
+typecheck` passed.
+
+## Phase 9 Markdown Evidence Ledger
+
+Added `tools/TOOL_EVIDENCE_LEDGER.md` as the compact source for capability claim
+status.
+
+Reason:
+
+- Tool capability claims need a current state vocabulary instead of scattered
+  prose.
+- KING should distinguish `verified_runtime`, `active_legacy`,
+  `documented_only`, `blocked`, and `deferred`.
+- Future tool additions should update a claim ledger before the assistant says
+  a capability is active.
+
+Runtime changes:
+
+- None. This phase is markdown-only.
+
+[V-01] PASS - evidence: default `tool_verification_pipeline` returned
+`Status: success` and `Ship decision: ship`; it ran 5 required checks. Manifest
+alignment reported 11 observed tool modules, 11 manifest modules, 21 registered
+callable schemas, and no missing manifest or file entries. `python -m unittest
+tests.test_grounding` ran 49 tests OK, `python -m pytest -q` passed 54 tests,
+`python -m compileall tools agent memory voice gesture main.py config.py`
+passed, and `npm run typecheck` passed. Direct inspection also confirmed
+`tools/TOOL_EVIDENCE_LEDGER.md` exists and contains `verified_runtime` status
+entries.
+
+## Phase 10 Markdown Provider Failure Playbook
+
+Added `tools/TOOL_PROVIDER_FAILURE_PLAYBOOK.md` as the provider-backed tool
+truthfulness guide.
+
+Reason:
+
+- Provider-backed tools need consistent language for `empty`, `partial`,
+  `timeout`, `failed`, `blocked`, `unavailable`, and `unknown_after_attempt`.
+- KING should not convert one provider failure into a broad false negative.
+- Media and generated-artifact tools need explicit boundaries between opened,
+  saved, queued, played, deleted, and verified states.
+
+Runtime changes:
+
+- None. This phase is markdown-only.
+
+[V-01] PASS - evidence: default `tool_verification_pipeline` returned
+`Status: success` and `Ship decision: ship`; it ran 5 required checks. Manifest
+alignment reported 11 observed tool modules, 11 manifest modules, 21 registered
+callable schemas, and no missing manifest or file entries. `python -m unittest
+tests.test_grounding` ran 49 tests OK, `python -m pytest -q` passed 54 tests
+with one `.pytest_cache` permission warning, `python -m compileall tools agent
+memory voice gesture main.py config.py` passed, and `npm run typecheck` passed.
+Direct inspection confirmed `tools/TOOL_PROVIDER_FAILURE_PLAYBOOK.md` exists,
+contains `unknown_after_attempt`, and is linked from `tools/TOOL_MANIFEST.md`.
+
+## Phase 11 Markdown Tool Intake Checklist
+
+Added `tools/TOOL_INTAKE_CHECKLIST.md` as the intake gate for new tools and tool
+upgrades.
+
+Reason:
+
+- Future heartbeat work needs a repeatable documentation path before KING says a
+  tool exists or succeeded.
+- New tool claims should name the active callable schema, target scope, applied
+  contracts, exact success evidence, and separate failure states.
+- The checklist keeps markdown planning separate from runtime truth, so
+  documented designs do not become false active-capability claims.
+
+Runtime changes:
+
+- None. This phase is markdown-only.
+
+[V-01] PASS - evidence: default `tool_verification_pipeline` returned
+`Status: success` and `Ship decision: ship`; it ran 5 required checks. Manifest
+alignment reported 11 observed tool modules, 11 manifest modules, 21 registered
+callable schemas, and no missing manifest or file entries. `python -m unittest
+tests.test_grounding` ran 49 tests OK, `python -m pytest -q` passed 54 tests
+with one `.pytest_cache` permission warning, `python -m compileall tools agent
+memory voice gesture main.py config.py` passed, and `npm run typecheck` passed.
+Direct inspection confirmed `tools/TOOL_INTAKE_CHECKLIST.md` exists, contains
+`verified_runtime`, and is linked from `tools/TOOL_MANIFEST.md`.
+
+## Phase 3 Runtime Implementation - terminal
+
+Implemented or verified `terminal` version `2.0.0` in `tools/terminal.py`.
+
+Runtime changes:
+
+- Preserved legacy string output for callers that pass no new controls.
+- Added optional controls: `dry_run`, `max_output_chars`, `timeout_ms`,
+  `response_format`, and `trace_enabled`.
+- Added structured success responses with command, cwd, timeout, exit code,
+  stdout, stderr, opened path, dry-run state, truncation state, status, and
+  `meta`.
+- Added typed structured errors:
+  `EMPTY_COMMAND`, `DIRECTORY_NOT_FOUND`, `INVALID_TIMEOUT`,
+  `INVALID_OUTPUT_LIMIT`, `COMMAND_TIMEOUT`, `COMMAND_NOT_FOUND`,
+  `PERMISSION_DENIED`, `COMMAND_FAILED`, and `SYSTEM_COMMAND_ERROR`.
+- Added machine-parseable JSON trace emission when `trace_enabled` is true.
+- Kept automatic retries disabled because arbitrary shell/app-launch replay can
+  duplicate side effects.
+
+[NEW CAPABILITY] tool: terminal
+  param: dry_run (optional, default: false)
+  type: boolean
+  what it unlocks: execution preview without launching or running a command
+  example: terminal("echo ok", dry_run=True, response_format="structured")
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: terminal
+  param: max_output_chars (optional, default: 5000)
+  type: integer 200..20000
+  what it unlocks: caller-controlled bounded stdout and stderr
+  example: terminal("echo ok", max_output_chars=1000)
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: terminal
+  param: timeout_ms (optional, default: unset)
+  type: integer 1..60000
+  what it unlocks: millisecond-level timeout override for bounded command calls
+  example: terminal("echo ok", timeout_ms=1000, response_format="structured")
+  backward compatible: YES - callers not passing this param are unaffected
+
+## Phase 3 Runtime Implementation - file_write
+
+Implemented `file_write` version `2.0.0` in `tools/files.py`.
+
+Runtime changes:
+
+- Preserved legacy string output for callers that pass no new controls.
+- Added optional controls: `dry_run`, `create_parent_dirs`,
+  `response_format`, and `trace_enabled`.
+- Added structured success responses with path, mode, existed-before state,
+  parent-created state, requested and written byte counts, dry-run state,
+  changed state, final size, and `meta`.
+- Added typed structured errors:
+  `EMPTY_PATH`, `INVALID_WRITE_MODE`, `FILE_ALREADY_EXISTS`,
+  `PARENT_DIRECTORY_NOT_FOUND`, `PARENT_NOT_DIRECTORY`, `PERMISSION_DENIED`,
+  and `WRITE_FAILED`.
+- Added machine-parseable JSON trace emission when `trace_enabled` is true.
+- Kept atomic overwrite behavior and avoided automatic retries to prevent
+  duplicate writes.
+
+[NEW CAPABILITY] tool: file_write
+  param: dry_run (optional, default: false)
+  type: boolean
+  what it unlocks: write preview without creating parents or changing files
+  example: file_write("notes.txt", "draft", dry_run=True, response_format="structured")
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: file_write
+  param: create_parent_dirs (optional, default: true)
+  type: boolean
+  what it unlocks: callers can block implicit parent-directory creation
+  example: file_write("missing/path.txt", "draft", create_parent_dirs=False, response_format="structured")
+  backward compatible: YES - default true preserves existing behavior
+
+## Phase 4 Runtime Diff Review - terminal
+
+[UPGRADE DIFF] tool: terminal  unversioned -> 2.0.0
+
+  Schema changes:
+    Added inputs (optional): `dry_run`, `max_output_chars`, `timeout_ms`, `response_format`, `trace_enabled`.
+    Added outputs: structured `result`, structured `error`, `meta`, trace object.
+    Changed outputs (shape only, values same): none for legacy callers.
+    Removed: NONE.
+
+  Behavior changes:
+    Legacy command output -> unchanged legacy command output - reason: backward compatibility.
+    Legacy missing directory string -> unchanged missing directory string - reason: backward compatibility.
+    Optional dry-run -> new non-executing preview path - reason: safer command planning.
+    Optional structured mode -> parseable result/error envelope - reason: downstream tools can inspect exact status.
+
+  New error codes introduced: `EMPTY_COMMAND`, `DIRECTORY_NOT_FOUND`, `INVALID_TIMEOUT`, `INVALID_OUTPUT_LIMIT`, `COMMAND_TIMEOUT`, `COMMAND_NOT_FOUND`, `PERMISSION_DENIED`, `COMMAND_FAILED`, `SYSTEM_COMMAND_ERROR`.
+  New trace fields introduced: `event`, `tool`, `version`, `call_id`, `started_at`, `inputs_received`, `schema_valid`, `execution_path`, `external_calls`, `duration_ms`, `output_fields`, `status`, `error_code`.
+  New optional capabilities: `dry_run`, `max_output_chars`, `timeout_ms`, `response_format`, `trace_enabled`.
+
+  Backward compatible: YES
+
+  User changes preserved: regex-free ANSI stripping, configured timeout bounds, Windows PowerShell execution, and direct existing-path open behavior.
+
+## Phase 4 Runtime Diff Review - file_write
+
+[UPGRADE DIFF] tool: file_write  unversioned -> 2.0.0
+
+  Schema changes:
+    Added inputs (optional): `dry_run`, `create_parent_dirs`, `response_format`, `trace_enabled`.
+    Added outputs: structured write result, structured error, `meta`, trace object.
+    Changed outputs (shape only, values same): none for legacy callers.
+    Removed: NONE.
+
+  Behavior changes:
+    Legacy overwrite/append/create_new strings -> unchanged legacy strings - reason: backward compatibility.
+    Optional dry-run -> new no-side-effect planning path - reason: safer writes and retries.
+    Optional parent creation block -> new explicit refusal when parents are missing - reason: caller can prevent implicit directory creation.
+    Optional structured mode -> parseable write metadata - reason: downstream tools can verify mutation state.
+
+  New error codes introduced: `EMPTY_PATH`, `INVALID_WRITE_MODE`, `FILE_ALREADY_EXISTS`, `PARENT_DIRECTORY_NOT_FOUND`, `PARENT_NOT_DIRECTORY`, `PERMISSION_DENIED`, `WRITE_FAILED`.
+  New trace fields introduced: `event`, `tool`, `version`, `call_id`, `started_at`, `inputs_received`, `schema_valid`, `execution_path`, `external_calls`, `duration_ms`, `output_fields`, `status`, `error_code`.
+  New optional capabilities: `dry_run`, `create_parent_dirs`, `response_format`, `trace_enabled`.
+
+  Backward compatible: YES
+
+  User changes preserved: atomic overwrite, append and create_new modes, metadata output, and invalid-mode no-parent-side-effect behavior.
+
+## Phase 5 Runtime Verification - terminal and file_write
+
+[V-01] PASS - evidence: `terminal("echo upgrade_v01", timeout=5)` returned legacy string `upgrade_v01`; `file_write(temp/v01.txt, "hello", mode="create_new")` returned legacy `Written to:` output and created the file.
+
+[V-02] PASS - evidence: `execute_tool("terminal", dry_run=True, response_format="structured", trace_enabled=True)` returned `result.status` `DRY_RUN`; `file_write(..., create_parent_dirs=False, response_format="structured")` returned typed `PARENT_DIRECTORY_NOT_FOUND` without creating the parent.
+
+[V-03] PASS - evidence: `terminal("", response_format="structured")` returned `EMPTY_COMMAND`; `file_write("storage/v03.txt", "x", mode="bad", response_format="structured")` returned `INVALID_WRITE_MODE`; both included code, message, field, expected, retryable, and suggestion.
+
+[V-04] PASS - evidence: trace-enabled successful `file_write` emitted JSON trace with `status` `SUCCESS`; trace-enabled failing `terminal` emitted JSON trace with `status` `FAILED` and `error_code` `EMPTY_COMMAND`.
+
+[V-05] PASS - evidence: slow terminal command with `timeout_ms=50` returned `COMMAND_TIMEOUT` in 97 ms. `file_write` uses local atomic writes and does not add an unkillable thread timeout that could create unknown partial writes.
+
+[V-06] PASS - evidence: terminal and file_write intentionally do not auto-retry side-effect-capable calls; retry remains blocked by idempotency policy to avoid duplicate launches or writes.
+
+[V-07] PASS - evidence: `file_write(..., dry_run=True, response_format="structured")` returned `dry_run=true` and left the parent absent; `terminal("echo abcdef", max_output_chars=200, response_format="structured")` returned structured stdout `abcdef`.
+
+[V-08] PASS - evidence: downstream `ToolValidator.validate_and_execute("terminal", {"command": "echo downstream", "timeout": 5})` returned `(True, "downstream")`; broader checks passed.
+
+[TEST] `python -m unittest tests.test_grounding -v`
+
+[RESULT] 45 tests OK.
+
+[TEST] `python -m pytest -q`
+
+[RESULT] 45 passed.
+
+[TEST] `python -m compileall tools agent memory voice gesture main.py config.py`
+
+[RESULT] compileall passed.
+
+[TEST] `npm run typecheck`
+
+[RESULT] typecheck passed.
+
+[TEST] `npm run build`
+
+[RESULT] Next.js production build passed.
+
+[TEST] manifest audit consistency -> `python -c "import tools; from tools.manifest_audit import tool_manifest_audit; print(tool_manifest_audit('.', 300, True))"`
+
+[RESULT] `Status: success`; 11 observed tool modules matched 11 manifest modules; 21 callable schemas were listed; no files were changed by the audit.
+
+[MANIFEST UPDATED] tool: terminal - new version: 2.0.0 - score: 9.5/10
+
+[MANIFEST UPDATED] tool: file_write - new version: 2.0.0 - score: 9.5/10
+
+## Phase 3 Runtime Implementation - web_search
+
+Implemented `web_search` version `2.0.0` in `tools/web.py`.
+
+Runtime changes:
+
+- Preserved legacy text output for callers that pass no new controls.
+- Added optional controls: `provider`, `timeout_ms`, `response_format`, and
+  `trace_enabled`.
+- Added structured success responses with query, normalized max results,
+  requested provider, provider used, fallback flag, result list, result count,
+  degraded flag, degraded reason, provider status, and `meta`.
+- Added typed structured errors for `EMPTY_QUERY`, `INVALID_PROVIDER`,
+  `INVALID_RESULT_LIMIT`, and `INVALID_TIMEOUT`.
+- Preserved Tavily-first, DDGS-fallback behavior in auto mode and exposes the
+  fallback as degraded structured metadata.
+
+[NEW CAPABILITY] tool: web_search
+  param: provider (optional, default: auto)
+  type: string enum auto|tavily|ddgs
+  what it unlocks: caller can choose provider behavior without changing default fallback
+  example: web_search("ai news", provider="ddgs", response_format="structured")
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: web_search
+  param: timeout_ms (optional, default: 10000)
+  type: integer 1..60000
+  what it unlocks: bounded external provider calls
+  example: web_search("ai news", timeout_ms=5000)
+  backward compatible: YES - callers not passing this param are unaffected
+
+## Phase 3 Runtime Implementation - web_fetch
+
+Implemented `web_fetch` version `2.0.0` in `tools/web.py`.
+
+Runtime changes:
+
+- Preserved legacy text output for callers that pass no new controls.
+- Added optional controls: `timeout_ms`, `follow_redirects`,
+  `response_format`, and `trace_enabled`.
+- Added structured success responses with requested URL, final URL, status
+  code, title, readable text, truncation state, readable-text state,
+  redirect-following state, and `meta`.
+- Added typed structured errors for `EMPTY_URL`, `INVALID_URL`,
+  `INVALID_MAX_CHARS`, `INVALID_TIMEOUT`, and `FETCH_FAILED`.
+- Kept bounded retry behavior through the existing provider-attempt helper.
+
+[NEW CAPABILITY] tool: web_fetch
+  param: timeout_ms (optional, default: 10000)
+  type: integer 1..60000
+  what it unlocks: bounded external page fetches
+  example: web_fetch("https://example.com", timeout_ms=5000, response_format="structured")
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: web_fetch
+  param: follow_redirects (optional, default: true)
+  type: boolean
+  what it unlocks: caller can inspect non-redirect behavior
+  example: web_fetch("https://example.com", follow_redirects=False, response_format="structured")
+  backward compatible: YES - default true preserves existing behavior
+
+## Phase 4 Runtime Diff Review - web_search
+
+[UPGRADE DIFF] tool: web_search  unversioned -> 2.0.0
+
+  Schema changes:
+    Added inputs (optional): `provider`, `timeout_ms`, `response_format`, `trace_enabled`.
+    Added outputs: structured search result, structured error, `meta`, trace object.
+    Changed outputs (shape only, values same): none for legacy callers.
+    Removed: NONE.
+
+  Behavior changes:
+    Legacy search result list -> unchanged legacy text format - reason: backward compatibility.
+    Provider fallback status hidden in text only -> structured fallback/degraded metadata in structured mode - reason: prevent false negatives.
+    Fixed provider choice -> optional provider selector - reason: caller can force or avoid providers when debugging.
+
+  New error codes introduced: `EMPTY_QUERY`, `INVALID_PROVIDER`, `INVALID_RESULT_LIMIT`, `INVALID_TIMEOUT`.
+  New trace fields introduced: `event`, `tool`, `version`, `call_id`, `started_at`, `inputs_received`, `schema_valid`, `execution_path`, `external_calls`, `duration_ms`, `output_fields`, `status`, `error_code`.
+  New optional capabilities: `provider`, `timeout_ms`, `response_format`, `trace_enabled`.
+
+  Backward compatible: YES
+
+  User changes preserved: existing configured retry helper and Tavily-to-DDGS fallback behavior.
+
+## Phase 4 Runtime Diff Review - web_fetch
+
+[UPGRADE DIFF] tool: web_fetch  unversioned -> 2.0.0
+
+  Schema changes:
+    Added inputs (optional): `timeout_ms`, `follow_redirects`, `response_format`, `trace_enabled`.
+    Added outputs: structured page result, structured error, `meta`, trace object.
+    Changed outputs (shape only, values same): none for legacy callers.
+    Removed: NONE.
+
+  Behavior changes:
+    Legacy URL/status/title/text output -> unchanged legacy text format - reason: backward compatibility.
+    Fixed 15s timeout -> optional bounded `timeout_ms` with 10s default - reason: caller-controlled resilience.
+    Always-follow redirects -> optional `follow_redirects` with true default - reason: default remains stable while debugging gains precision.
+
+  New error codes introduced: `EMPTY_URL`, `INVALID_URL`, `INVALID_MAX_CHARS`, `INVALID_TIMEOUT`, `FETCH_FAILED`.
+  New trace fields introduced: `event`, `tool`, `version`, `call_id`, `started_at`, `inputs_received`, `schema_valid`, `execution_path`, `external_calls`, `duration_ms`, `output_fields`, `status`, `error_code`.
+  New optional capabilities: `timeout_ms`, `follow_redirects`, `response_format`, `trace_enabled`.
+
+  Backward compatible: YES
+
+  User changes preserved: existing HTML extraction and bounded provider-attempt retry behavior.
+
+## Phase 5 Runtime Verification - web_search and web_fetch
+
+[V-01] PASS - evidence: mocked legacy `web_search("query", max_results=1)` returned `1. Result` with `https://example.com`; mocked legacy `web_fetch("https://example.com/start", max_chars=1000)` returned URL, status 200, title, and readable text.
+
+[V-02] PASS - evidence: `execute_tool("web_search", query="query", max_results=1, response_format="structured", trace_enabled=True)` returned provider `ddgs`, fallback_used `true`, result_count `1`; `execute_tool("web_fetch", url="https://example.com/start", follow_redirects=False, timeout_ms=5000, response_format="structured")` returned final URL, status 200, title, and `follow_redirects=false`.
+
+[V-03] PASS - evidence: `web_search("", response_format="structured")` returned `EMPTY_QUERY`; `web_search("query", provider="bad", response_format="structured")` returned `INVALID_PROVIDER`; `web_fetch("example.com/nope", response_format="structured")` returned `INVALID_URL`.
+
+[V-04] PASS - evidence: trace-enabled structured `web_search` emitted JSON trace with `status` `SUCCESS`, `tool` `web_search`, and `external_calls.count` 2.
+
+[V-05] PASS - evidence: `timeout_ms` is validated to 1..60000 and forwarded to mocked `web_fetch` as 5.0 seconds; existing bounded provider failure tests still passed.
+
+[V-06] PASS - evidence: existing provider retry tests still passed: Hacker News timeout attempts remained bounded, `web_fetch` timeout failure returned provider-attempt status, and web search fallback from Tavily to DDGS still worked.
+
+[V-07] PASS - evidence: provider selector, timeout_ms, follow_redirects, response_format, and trace_enabled were exercised by targeted tests and direct V-checks.
+
+[V-08] PASS - evidence: `python -m unittest tests.test_grounding -v` ran 49 tests OK; `python -m pytest -q` passed 54 tests; markdown verification pipeline returned `status=success` and `ship_decision=ship`.
+
+[TEST] default markdown verification pipeline -> `tool_verification_pipeline('.', 'tools/TOOL_VERIFICATION_PIPELINE.md', timeout_ms=60000, response_format='structured')`
+
+[RESULT] `status=success`; `ship_decision=ship`; 5 required checks passed: manifest audit, `python -m unittest tests.test_grounding`, `python -m pytest -q`, `python -m compileall tools agent memory voice gesture main.py config.py`, and `npm run typecheck`.
+
+[TEST] `npm run build`
+
+[RESULT] Next.js production build passed.
+
+[TEST] manifest audit consistency -> `python -c "import tools; from tools.manifest_audit import tool_manifest_audit; print(tool_manifest_audit('.', 300, True))"`
+
+[RESULT] `Status: success`; 11 observed tool modules matched 11 manifest modules; 21 callable schemas were listed; no files were changed by the audit.
+
+[MANIFEST UPDATED] tool: web_search - new version: 2.0.0 - score: 9.5/10
+
+[MANIFEST UPDATED] tool: web_fetch - new version: 2.0.0 - score: 9.5/10
+
+## Test Fixture Maintenance - 2026-05-19T13:38Z
+
+[FIX] Existing memory tests in the dirty worktree were adjusted to match current memory-index behavior:
+
+- `tests/test_grounding.py` now seeds `_embeddings` on a `Brain.__new__` fixture and records temporary index existence before the temporary directory is removed.
+- `tests/test_memory.py` now skips non-list memory metadata files such as `memory_index.json` during script-style daily-memory checks.
+
+[VERDICT] These were test-fixture fixes only; memory runtime behavior was not changed in this pass.
+
+## Upgrade Session Summary - 2026-05-19T13:38Z
+
+[UPGRADE SESSION SUMMARY]
+  Tools upgraded and verified: `registry_dispatch` v2.0.0, `terminal` v2.0.0, `file_write` v2.0.0, `tool_verification_pipeline` v1.0.0, `web_search` v2.0.0, `web_fetch` v2.0.0
+  Tools upgraded but unverified: none
+  Tools deferred: Tier 2 and Tier 3 tools remain next: `reddit`, `hackernews`, `youtube_play`, `playlist`, `imagine`, `gallery`, `file_read`, `file_list`, and note tools
+  Anti-patterns detected and resolved: no feature creep, no breaking rename, no required additions; retries stayed disabled for side-effect tools
+  User changes preserved: existing terminal shell behavior, file atomic-write behavior, registry structured dispatch, web provider fallback behavior, and current memory runtime changes
+  Manifest updated: YES
+  Overall tool fleet score: upgraded runtime surfaces average 9.5/10; full fleet still partial because remaining Tier 2 and Tier 3 runtime upgrades remain
+  Recommended next session focus: upgrade `reddit` and `hackernews` structured provider status, timeout, and fallback reporting
+
+## Hardcoded Tool Response Cleanup - 2026-05-19T14:40Z
+
+[FIX] Markdown control surfaces now block hardcoded tool replies.
+
+Changed surfaces:
+
+- `persona.md` no longer gives fixed acknowledgement or provider-result
+  sentences for KING to reuse.
+- `tool_policy.md` now has a `Tool Response Composition` section requiring
+  user-facing answers to be composed from returned tool fields.
+- `tools/TOOL_MANIFEST.md` now includes the `tool_response_composition`
+  contract.
+- `tools/TOOL_EVIDENCE_LEDGER.md` now records that tool answers must come from
+  observed fields, with structured fields preferred when available.
+- `tools/TOOL_PROVIDER_FAILURE_PLAYBOOK.md` now uses field-based claim
+  boundaries instead of example sentences.
+- `tools/TOOL_INTAKE_CHECKLIST.md` now blocks canned tool replies during new
+  tool intake.
+
+[VERDICT] Markdown-only cleanup. Runtime code was not changed, preserving the
+current tool implementations and the repo instruction to edit markdown for tool
+behavior changes.
+
+## Phase 3 Tier 2 Runtime Upgrade - reddit and hackernews
+
+[UPGRADE DIFF] tool: reddit  unversioned -> 2.0.0
+
+  Schema changes:
+    Added inputs (optional): `timeout_ms`, `response_format`, `trace_enabled`, `include_source_status`
+    Added outputs: structured `result`, `error`, `meta`, and `trace` envelopes when requested
+    Changed outputs (shape only, values same): legacy output remains a string; structured mode is opt-in
+    Removed: NONE
+
+  Behavior changes:
+    Fixed transport failures reporting as missing content -> provider failures now retry and surface `PROVIDER_ERROR` in structured mode - reason: avoid false negatives when Reddit or fallback search is blocked.
+    Bare subreddit and `r/name` inputs normalize to the same subreddit path - reason: wider valid input acceptance without changing existing callers.
+
+  New error codes introduced: `INVALID_LIMIT`, `INVALID_TIMEOUT`, `MISSING_QUERY`, `MISSING_SUBREDDIT`, `MISSING_POST_ID`, `MISSING_USERNAME`, `INVALID_ACTION`, `NOT_FOUND`, `POST_NOT_FOUND`, `USER_NOT_FOUND`, `RATE_LIMITED`, `PROVIDER_ERROR`, `NO_RESULTS`
+  New trace fields introduced: call_id, started_at, inputs_received, schema_valid, execution_path, external_calls, duration_ms, output_fields, status, error_code
+  New optional capabilities: `timeout_ms`, `response_format`, `trace_enabled`, `include_source_status`
+
+  Backward compatible: YES
+
+  User changes preserved: existing Reddit actions, cache, JSON paths, DDGS fallback, `id` alias, and legacy text formatting are preserved.
+
+[UPGRADE DIFF] tool: hackernews  unversioned -> 2.0.0
+
+  Schema changes:
+    Added inputs (optional): `timeout_ms`, `response_format`, `trace_enabled`, `include_source_status`
+    Added outputs: structured `result`, `error`, `meta`, and `trace` envelopes when requested
+    Changed outputs (shape only, values same): legacy output remains a string; structured mode is opt-in
+    Removed: NONE
+
+  Behavior changes:
+    Existing retry settings now carry caller timeout through Firebase and Algolia calls - reason: bounded external I/O with observable provider status.
+    Search, listing, story, and user branches can return structured error envelopes - reason: callers can distinguish invalid input, no results, provider failure, and not found.
+
+  New error codes introduced: `INVALID_LIMIT`, `INVALID_TIMEOUT`, `MISSING_STORY_ID`, `MISSING_USERNAME`, `MISSING_QUERY`, `INVALID_ACTION`, `INVALID_STORY_ID`, `STORY_NOT_FOUND`, `USER_NOT_FOUND`, `PROVIDER_ERROR`, `NO_RESULTS`
+  New trace fields introduced: call_id, started_at, inputs_received, schema_valid, execution_path, external_calls, duration_ms, output_fields, status, error_code
+  New optional capabilities: `timeout_ms`, `response_format`, `trace_enabled`, `include_source_status`
+
+  Backward compatible: YES
+
+  User changes preserved: existing endpoint map, cache, retry config knobs, action names, `id` alias, and legacy text formatting are preserved.
+
+[NEW CAPABILITY] tool: reddit
+  param: timeout_ms (optional, default: 15000)
+  type: integer 1..60000
+  what it unlocks: bounded Reddit and fallback search calls
+  example: `reddit(action="hot", subreddit="python", timeout_ms=2500)`
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: reddit
+  param: response_format (optional, default: legacy)
+  type: string enum `legacy|structured`
+  what it unlocks: parseable result, error, meta, and trace envelopes
+  example: `reddit(action="search", query="ai", response_format="structured")`
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: reddit
+  param: trace_enabled (optional, default: false)
+  type: boolean
+  what it unlocks: emitted machine-readable trace entries
+  example: `reddit(action="front", trace_enabled=True)`
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: reddit
+  param: include_source_status (optional, default: false)
+  type: boolean
+  what it unlocks: provider/cache status fields in structured mode
+  example: `reddit(action="search", query="ai", response_format="structured", include_source_status=True)`
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: hackernews
+  param: timeout_ms (optional, default: 15000)
+  type: integer 1..60000
+  what it unlocks: bounded Firebase and Algolia calls
+  example: `hackernews(action="search", query="ai", timeout_ms=2500)`
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: hackernews
+  param: response_format (optional, default: legacy)
+  type: string enum `legacy|structured`
+  what it unlocks: parseable result, error, meta, and trace envelopes
+  example: `hackernews(action="top", response_format="structured")`
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: hackernews
+  param: trace_enabled (optional, default: false)
+  type: boolean
+  what it unlocks: emitted machine-readable trace entries
+  example: `hackernews(action="top", trace_enabled=True)`
+  backward compatible: YES - callers not passing this param are unaffected
+
+[NEW CAPABILITY] tool: hackernews
+  param: include_source_status (optional, default: false)
+  type: boolean
+  what it unlocks: provider/cache status fields in structured mode
+  example: `hackernews(action="search", query="ai", response_format="structured", include_source_status=True)`
+  backward compatible: YES - callers not passing this param are unaffected
+
+## Phase 5 Runtime Verification - reddit and hackernews
+
+[V-01] PASS - evidence: deterministic legacy Reddit hot listing contained `Legacy Reddit Story` and the expected Reddit URL; deterministic legacy Hacker News search contained `Legacy HN Story` and `https://example.com/hn`.
+
+[V-02] PASS - evidence: Reddit structured call accepted `subreddit="r/python"`, `limit="1"`, and `timeout_ms=2500`, normalized to `/r/python/hot`, returned count `1`, version `2.0.0`, and forwarded timeout `2.5`; Hacker News structured search accepted `limit="1"` and `timeout_ms=2500`, returned count `1`, version `2.0.0`, and forwarded timeout `2.5`.
+
+[V-03] PASS - evidence: Reddit structured search without query returned `MISSING_QUERY`; Hacker News comments with non-numeric id returned `INVALID_STORY_ID`; Hacker News search without query returned `MISSING_QUERY`.
+
+[V-04] PASS - evidence: trace-enabled Reddit error emitted JSON trace with `tool=reddit`, `status=FAILED`, `schema_valid=NO`, and `error_code=MISSING_QUERY`; trace-enabled Hacker News error emitted JSON trace with `tool=hackernews`, `status=FAILED`, `schema_valid=NO`, and `error_code=MISSING_QUERY`.
+
+[V-05] PASS - evidence: timeout values were bounded and forwarded as seconds to mocked providers: Reddit `timeout_ms=1200` produced per-attempt timeout `1.2`; Hacker News `timeout_ms=1200` produced per-attempt timeout `1.2`.
+
+[V-06] PASS - evidence: transient-failure simulations with `external_request_attempts=3` made three attempts for Reddit and Hacker News, then returned structured success with count `1` on attempt three.
+
+[V-07] PASS - evidence: `timeout_ms`, `response_format`, `trace_enabled`, and `include_source_status` were exercised by targeted unit tests and direct V-checks for both tools.
+
+[V-08] PASS - evidence: `python -m unittest tests.test_grounding` ran 56 tests OK; `python -m pytest -q` passed 72 tests and 21 subtests; manifest audit reported 11 observed modules, 11 manifest modules, and 21 registered callable schemas; `python -m compileall tools agent memory voice gesture main.py config.py`, `npm run typecheck`, `npm run build`, and the markdown verification pipeline all passed.
+
+[TEST] default markdown verification pipeline -> `tool_verification_pipeline('.', 'tools/TOOL_VERIFICATION_PIPELINE.md', timeout_ms=60000, response_format='structured')`
+
+[RESULT] `status=success`; `ship_decision=ship`; 5 required checks passed: manifest audit, `python -m unittest tests.test_grounding`, `python -m pytest -q`, `python -m compileall tools agent memory voice gesture main.py config.py`, and `npm run typecheck`.
+
+[MANIFEST UPDATED] tool: reddit - new version: 2.0.0 - score: 9.5/10
+
+[MANIFEST UPDATED] tool: hackernews - new version: 2.0.0 - score: 9.5/10
+
+## Upgrade Session Summary - 2026-05-19T14:59Z
+
+[UPGRADE SESSION SUMMARY]
+  Tools upgraded and verified: `registry_dispatch` v2.0.0, `terminal` v2.0.0, `file_write` v2.0.0, `tool_verification_pipeline` v1.0.0, `web_search` v2.0.0, `web_fetch` v2.0.0, `reddit` v2.0.0, `hackernews` v2.0.0
+  Tools upgraded but unverified: none
+  Tools deferred: Tier 2 and Tier 3 tools remain next: `youtube_play`, `playlist`, `imagine`, `gallery`, `file_read`, `file_list`, and note tools
+  Anti-patterns detected and resolved: no feature creep, no silent rewrite, no breaking rename, no required additions; Reddit transport false negatives now surface provider failure instead of missing-content claims
+  User changes preserved: existing Reddit and Hacker News action names, aliases, cache behavior, retry config, fallback search, and legacy text outputs
+  Manifest updated: YES
+  Overall tool fleet score: upgraded runtime surfaces average 9.5/10; full fleet still partial because remaining Tier 2 and Tier 3 runtime upgrades remain
+  Recommended next session focus: upgrade `youtube_play` and `playlist` with structured playback/download evidence and false-claim prevention
+
+## Browser Automation Runtime - 2026-05-21T00:00+05:30
+
+[NEW TOOL] `browser_extract` version `1.0.0`
+
+Implemented a first browser automation surface in `tools/browser.py`.
+
+Runtime behavior:
+
+- Loads a named target from `tools/BROWSER_TARGETS.md` or a direct `url`.
+- Prefers Playwright browser loading in `engine=auto`; uses HTTP fallback only
+  when Playwright is unavailable.
+- Supports explicit `engine=playwright` and `engine=httpx` for verification and
+  debugging.
+- Reuses saved Playwright storage state when `storage_state` is configured in
+  markdown or passed to the tool.
+- Extracts configured fields from selector values, meta text, visible text,
+  title, or URL without adding phrase routing or hardcoded social-profile logic.
+- Preserves legacy string output by default and exposes structured result,
+  error, meta, and trace envelopes when requested.
+- Uses env/config knobs for target file, timeout, text size, and user agent:
+  `KING_BROWSER_TARGETS_FILE`, `KING_BROWSER_DEFAULT_TIMEOUT_MS`,
+  `KING_BROWSER_MAX_TEXT_CHARS`, and `KING_BROWSER_USER_AGENT`.
+
+[NEW CONTROL FILE] `tools/BROWSER_TARGETS.md`
+
+- Target sections define URLs and field extraction rules.
+- Field labels and selectors live in markdown so social-page metrics such as
+  follower counts are configured data, not Python routing rules.
+- Example `instagram_profile` is a placeholder and must be edited to the real
+  user URL before use.
+
+[NEW CAPABILITY] tool: browser_extract
+  param: target
+  type: string optional
+  what it unlocks: repeatable page loading from markdown target entries
+  backward compatible: YES - no existing callers depended on this tool
+
+[NEW CAPABILITY] tool: browser_extract
+  param: engine
+  type: string enum auto|playwright|httpx
+  what it unlocks: real browser rendering by default with explicit fallback
+  control for verification
+  backward compatible: YES - new tool only
+
+[NEW CAPABILITY] tool: browser_extract
+  param: fields
+  type: comma-separated string optional
+  what it unlocks: caller can request a subset of configured fields without
+  changing the markdown target
+  backward compatible: YES - empty uses target fields
+
+Verification evidence:
+
+- `python -m unittest tests.test_grounding.BrowserAutomationToolTests -v` -> 3
+  tests passed before auth-state support; after auth-state support, 5 tests
+  passed.
+- `python -m unittest tests.test_grounding -v` -> 80 tests passed.
+- `python -m pytest -q` -> 98 tests and 23 subtests passed.
+- `python -m py_compile tools\browser.py config.py` -> passed.
+- `python -m compileall tools agent memory voice gesture main.py config.py` ->
+  passed.
+- `python -c "import tools; from tools.manifest_audit import tool_manifest_audit; print(tool_manifest_audit('.', 300, True))"` ->
+  12 observed modules, 12 manifest modules, 23 callable schemas, no manifest
+  drift.
+- `python -c "from tools.browser import browser_extract; result = browser_extract(url='https://example.com', engine='httpx', response_format='structured', timeout_ms=10000); ..."` ->
+  `browser_extract`, `httpx`, `https://example.com`, title `Example Domain`,
+  source status `ok`.
+- `python -c "from tools.browser import browser_extract; result = browser_extract(url='https://example.com', engine='playwright', response_format='structured', timeout_ms=15000); ..."` ->
+  Playwright loaded `https://example.com/`, status 200, title `Example Domain`,
+  engine `playwright`, degraded `false`.
+- `tool_verification_pipeline('.', 'tools/TOOL_VERIFICATION_PIPELINE.md', timeout_ms=60000, response_format='structured')` ->
+  `status=success`, `ship_decision=ship`, 5 required checks passed.
+- `npm run typecheck` -> passed.
+- `npm run build` -> passed.
+
+[MANIFEST UPDATED] tool: browser_extract - new version: 1.1.0 - score: 9.2/10
+
+[VERDICT] Shipped as verified runtime for configured public-page extraction.
+Account-private or login-gated social details remain dependent on the attempted
+URL, browser session state, and returned page fields; KING must report those
+states from the tool result instead of claiming broad access.
+
+## Browser Login Session Runtime - 2026-05-21T00:00+05:30
+
+[NEW TOOL] `browser_login_session` version `1.0.0`
+
+Implemented a visible manual-login helper in `tools/browser.py`.
+
+Runtime behavior:
+
+- Opens a non-headless Playwright Chromium window on a target `login_url`,
+  target `url`, or direct `url`.
+- Waits for the configured timeout while the user logs in manually.
+- Saves Playwright storage state to `storage/browser_auth/<session>.json` by
+  default, or to the target's configured `storage_state`.
+- Does not ask for, return, log, or inspect credentials.
+- Returns final URL, page title, saved-state path, saved-state existence, and a
+  credential policy field.
+
+[NEW CAPABILITY] tool: browser_login_session
+  param: target
+  type: string optional
+  what it unlocks: visible login for a configured markdown target
+  backward compatible: YES - new optional tool surface
+
+[NEW CAPABILITY] tool: browser_login_session
+  param: storage_state
+  type: string optional
+  what it unlocks: explicit saved-session file for later browser extraction
+  backward compatible: YES - default path comes from config or markdown
+
+Verification evidence:
+
+- `python -m unittest tests.test_grounding.BrowserAutomationToolTests -v` -> 5
+  tests passed, including storage-state reuse and registered login-session
+  schema.
+
+[MANIFEST UPDATED] tool: browser_login_session - new version: 1.0.0 - score: 9.0/10
+
+[VERDICT] Login-session support is shipped as verified runtime for schema,
+storage-state path handling, and extraction reuse. Live login remains
+user-driven and must be reported from the saved-state result of the actual
+browser session.
+
+## Browser Login Session Autosave - 2026-05-22T18:11+05:30
+
+[FIX] `browser_login_session` now saves Playwright storage state repeatedly
+during the visible login window and reports errors under its own tool name.
+
+Reason:
+
+- The first visible Instagram login attempt ended with `TargetClosedError`
+  because the previous helper saved only once, after the full wait completed.
+- The returned structured error incorrectly used `browser_extract` metadata
+  because shared browser error formatting was hardwired to the extraction tool.
+
+Runtime changes:
+
+- Added a login-specific structured error helper so login failures return
+  `meta.tool=browser_login_session`.
+- During manual login, the helper now saves storage state every bounded interval
+  until timeout or window close.
+- If the user closes the browser after at least one save, the saved state can
+  still be reused.
+- The result includes `storage_state_saves`, `closed_by_user`,
+  `storage_state_exists`, and the saved path.
+
+Verification evidence:
+
+- `python -m py_compile tools\browser.py config.py` -> passed.
+- `python -m unittest tests.test_grounding.BrowserAutomationToolTests -v` -> 6
+  tests passed.
+- Manifest audit -> 12 observed modules, 12 manifest modules, 23 callable
+  schemas, no manifest drift.
+- Live Instagram login session saved
+  `storage\browser_auth\instagram_profile.json`, `storage_state_exists=true`,
+  `storage_state_saves=37`, `credentials_captured=false`, final URL
+  `https://www.instagram.com/accounts/onetap/`.
+- Authenticated extraction against `https://www.instagram.com/` used the saved
+  state with `storage_state_used=true`; fields were empty because the configured
+  profile URL is still the placeholder and the root page did not expose
+  profile metrics.
+
+[VERDICT] Session save and reuse are verified. Profile metric extraction now
+depends on replacing the placeholder profile URL in `tools/BROWSER_TARGETS.md`
+with the real Instagram profile URL or adding more precise selectors for the
+logged-in profile page.

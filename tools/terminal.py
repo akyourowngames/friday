@@ -1,7 +1,10 @@
 import os
+import shutil
 import subprocess
 import sys
 import time
+from functools import lru_cache
+from pathlib import Path
 
 from config import settings
 from tools.registry import tool
@@ -20,6 +23,7 @@ from tools.runtime import (
 
 
 _TERMINAL_VERSION = "2.0.0"
+_LAUNCH_TARGETS_PATH = Path(__file__).resolve().parent / "TERMINAL_LAUNCH_TARGETS.md"
 
 
 def _strip_ansi(text: str) -> str:
@@ -62,11 +66,62 @@ def _detect_shell(command: str) -> list[str]:
     return ["bash", "-c", command]
 
 
+@lru_cache(maxsize=1)
+def _load_launch_targets() -> dict[str, list[str]]:
+    if not _LAUNCH_TARGETS_PATH.exists():
+        return {}
+    targets = {}
+    in_targets = False
+    for raw_line in _LAUNCH_TARGETS_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line == "Targets:":
+            in_targets = True
+            continue
+        if not in_targets or line.startswith("#") or "=" not in line:
+            continue
+        name, _, candidates_text = line.partition("=")
+        candidates = []
+        for candidate in candidates_text.split("|"):
+            value = candidate.strip()
+            if value:
+                candidates.append(value)
+        name = name.strip().lower()
+        if name and candidates:
+            targets[name] = candidates
+    return targets
+
+
+def _quote_ps_arg(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _normalize_launch_target(command: str) -> str:
+    if sys.platform != "win32":
+        return command
+    stripped = command.strip()
+    prefix = "start "
+    if not stripped.lower().startswith(prefix):
+        return command
+    target = stripped[len(prefix):].strip().strip('"').strip("'")
+    if not target:
+        return command
+    candidates = _load_launch_targets().get(target.lower())
+    if not candidates:
+        return command
+    for candidate in candidates:
+        if shutil.which(candidate):
+            return f"Start-Process {_quote_ps_arg(candidate)}"
+    return f"Start-Process {_quote_ps_arg(candidates[-1])}"
+
+
 def _run_command(command: str, timeout: float, max_output_chars: int) -> dict:
     try:
         opened = _start_existing_path(command)
         if opened is not None:
             return opened
+        command = _normalize_launch_target(command)
         command = _normalize_command(command)
         shell_cmd = _detect_shell(command)
         cp = subprocess.run(shell_cmd, capture_output=True, text=True, timeout=timeout)

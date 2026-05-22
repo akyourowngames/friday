@@ -70,6 +70,8 @@ class NIMClient:
             "ONLY extract if the fact is specific and personal to this user. "
             "Do NOT extract: descriptions of the assistant's behavior, general advice, "
             "common knowledge, pleasantries, or vague statements. "
+            "Do NOT extract temporary greeting corrections, the current time of day, "
+            "or the user's reaction to a greeting. "
             "Focus on: names, locations, health issues, preferences, relationships, work. "
             "IMPORTANT: When user corrects or updates a fact (e.g. new location, recovered health), "
             "extract the NEW fact, not the old one. "

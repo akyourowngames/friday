@@ -45,6 +45,13 @@ class ToolRouter:
         self._tool_texts = []
         self._small_talk_emb = None
         self._last_generated_file = None  # Track generated files for viewing
+        self._last_decision = {
+            "query": "",
+            "selected": [],
+            "scores": [],
+            "small_talk_score": 0.0,
+            "reason": "not_run",
+        }
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     def _get_small_talk_emb(self):
@@ -92,12 +99,26 @@ class ToolRouter:
         """Select tools purely based on semantic similarity. No regex, no rules."""
         # Short queries skip embedding cost - just return nothing
         if len(query.strip()) < settings.embedding_min_chars:
+            self._last_decision = {
+                "query": query,
+                "selected": [],
+                "scores": [],
+                "small_talk_score": 0.0,
+                "reason": "below_embedding_min_chars",
+            }
             return []
 
         if self._tool_embeddings is None or len(get_tools()) != len(self._tool_names):
             self._embed_tools()
 
         if not self._tool_names:
+            self._last_decision = {
+                "query": query,
+                "selected": [],
+                "scores": [],
+                "small_talk_score": 0.0,
+                "reason": "no_registered_tools",
+            }
             return []
 
         if q_emb is None:
@@ -105,17 +126,36 @@ class ToolRouter:
 
         similarities = np.dot(self._tool_embeddings, q_emb)
         max_tool_sim = float(np.max(similarities))
+        ranked_all = np.argsort(similarities)[::-1]
+        scores = [
+            {"tool": self._tool_names[int(idx)], "score": float(similarities[int(idx)])}
+            for idx in ranked_all[: min(5, len(ranked_all))]
+        ]
 
         # Check if this is just casual chat
         small_talk_sim = float(np.dot(self._get_small_talk_emb(), q_emb))
         if small_talk_sim > 0.65 and small_talk_sim > max_tool_sim + _SMALL_TALK_MARGIN:
+            self._last_decision = {
+                "query": query,
+                "selected": [],
+                "scores": scores,
+                "small_talk_score": small_talk_sim,
+                "reason": "small_talk_contrast_won",
+            }
             return []  # Just chat, no tools needed
 
         if max_tool_sim < self.threshold:
+            self._last_decision = {
+                "query": query,
+                "selected": [],
+                "scores": scores,
+                "small_talk_score": small_talk_sim,
+                "reason": "below_tool_threshold",
+            }
             return []  # No matching tools
 
         # Get top matches
-        top_indices = np.argsort(similarities)[::-1]
+        top_indices = ranked_all
         
         # Apply winner margin (pick clear winners)
         if len(top_indices) > 1:
@@ -136,4 +176,14 @@ class ToolRouter:
             name = self._tool_names[idx]
             selected.append(get_tool(name))
 
+        self._last_decision = {
+            "query": query,
+            "selected": [tool["name"] for tool in selected],
+            "scores": scores,
+            "small_talk_score": small_talk_sim,
+            "reason": "selected",
+        }
         return selected
+
+    def last_decision(self) -> dict:
+        return dict(self._last_decision)

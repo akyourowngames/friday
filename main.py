@@ -38,7 +38,7 @@ def print_welcome():
         padding=(1, 4),
     )
     console.print(title)
-    console.print("  [dim]/debug[/dim]  [dim]/tools[/dim]  [dim]/model <name>[/dim]  [dim]/voice[/dim]  [dim]/new[/dim]  [dim]/exit[/dim]")
+    console.print("  [dim]/debug[/dim]  [dim]/tools[/dim]  [dim]/model <name>[/dim]  [dim]/memory[/dim]  [dim]/remember <fact>[/dim]  [dim]/forget <fact>[/dim]  [dim]/voice[/dim]  [dim]/new[/dim]  [dim]/exit[/dim]")
     console.print()
 
 
@@ -66,6 +66,53 @@ def cmd_model(args):
         return
     settings.model_name = args
     console.print(f"[green]Model set to: {settings.model_name}[/green]")
+
+
+def cmd_memory(agent: Agent, args: str = ""):
+    try:
+        limit = int(args.strip()) if args.strip() else 25
+    except ValueError:
+        limit = 25
+    memories = agent.brain.list_memories(limit)
+    assessment = agent.brain.system_assessment()
+    console.print(
+        f"[cyan]Memory:[/cyan] {assessment['entry_count']} stored, "
+        f"{assessment['indexed_count']} indexed, index {assessment['index_state']}"
+    )
+    if not memories:
+        console.print("[yellow]No memories stored.[/yellow]")
+        return
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("#", justify="right")
+    table.add_column("Fact")
+    table.add_column("When")
+    for item in memories:
+        when = " ".join(part for part in (item.get("date", ""), item.get("time", "")) if part)
+        table.add_row(str(item["index"]), item["text"], when)
+    console.print(table)
+
+
+def cmd_remember(agent: Agent, fact: str):
+    result = agent.brain.remember(fact)
+    if result["stored"]:
+        console.print(f"[green]Remembered:[/green] {result['text']}")
+    else:
+        console.print(f"[yellow]Memory unchanged:[/yellow] {result['text'] or result['reason']}")
+
+
+def cmd_forget(agent: Agent, query: str):
+    result = agent.brain.forget(query)
+    status = result.get("status")
+    if status == "removed":
+        for fact in result.get("removed", []):
+            console.print(f"[green]Forgot:[/green] {fact}")
+        return
+    if status == "ambiguous":
+        console.print("[yellow]That matched more than one memory. Use a more exact phrase.[/yellow]")
+        for candidate in result.get("candidates", []):
+            console.print(f"  - {candidate}")
+        return
+    console.print(f"[yellow]No memory removed:[/yellow] {result.get('reason', 'not found')}")
 
 
 def voice_loop(agent: Agent):
@@ -126,6 +173,12 @@ def main():
                 cmd_tools()
             elif base == "model":
                 cmd_model(" ".join(cmd[1:]) if len(cmd) > 1 else None)
+            elif base == "memory":
+                cmd_memory(agent, " ".join(cmd[1:]) if len(cmd) > 1 else "")
+            elif base == "remember":
+                cmd_remember(agent, " ".join(cmd[1:]) if len(cmd) > 1 else "")
+            elif base == "forget":
+                cmd_forget(agent, " ".join(cmd[1:]) if len(cmd) > 1 else "")
             elif base == "new":
                 agent = Agent()
                 console.print("[green]New conversation started.[/green]")
@@ -189,7 +242,7 @@ def main():
                 else:
                     console.print(f"[red]Unknown gesture subcommand: {sub}. Try /gesture[/red]")
             elif base == "help":
-                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /voice  /gesture  /playlist  /new  /help  /exit")
+                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /memory [limit]  /remember <fact>  /forget <fact>  /voice  /gesture  /playlist  /new  /help  /exit")
             else:
                 console.print(f"[red]Unknown command: /{base}. Try /help[/red]")
             continue

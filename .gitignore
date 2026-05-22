@@ -7,6 +7,7 @@ __pycache__/
 *.pyo
 storage/onnx_models/
 storage/images/
+storage/browser_auth/
 storage/gesture_data/
 storage/gesture_model.pkl
 storage/gesture_scaler.pkl

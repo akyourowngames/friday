@@ -10,9 +10,24 @@ from pathlib import Path
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
+from config import settings
 from tools.registry import tool
+from tools.runtime import (
+    coerce_bool,
+    emit_trace,
+    error_payload,
+    make_trace,
+    normalize_int,
+    normalize_response_format,
+    normalize_timeout_ms,
+    structured_error,
+    structured_success,
+    utc_now_iso,
+)
 
 PLAYLIST_PATH = Path("storage/playlist.json")
+_YOUTUBE_VERSION = "2.0.0"
+_PLAYBACK_MODES = ("auto", "open", "skip")
 
 
 def _get_ffmpeg():
@@ -33,53 +48,90 @@ def _fmt_count(n: int) -> str:
     return str(n)
 
 
-def _search_youtube(query: str, max_results: int = 10) -> list[dict]:
-    try:
-        result = subprocess.run(
-            ["yt-dlp", f"ytsearch{max_results}:{query}", "--dump-json",
-             "--flat-playlist", "--no-download", "--quiet"],
-            capture_output=True, text=True, timeout=15,
-        )
-        entries = []
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            data = json.loads(line)
-            entries.append({
-                "id": data["id"],
-                "title": data["title"],
-                "url": data["webpage_url"],
+def _record_external(stats: dict | None, system: str) -> None:
+    if stats is None:
+        return
+    stats["external_count"] = stats.get("external_count", 0) + 1
+    systems = stats.setdefault("systems", [])
+    if system not in systems:
+        systems.append(system)
+
+
+def _set_stat(stats: dict | None, key: str, value) -> None:
+    if stats is not None:
+        stats[key] = value
+
+
+def _search_youtube(query: str, max_results: int = 10, timeout_seconds: float = 15.0, stats: dict | None = None) -> list[dict]:
+    attempts = max(1, settings.external_request_attempts)
+    delay = max(0.0, settings.external_retry_delay)
+    last_error = ""
+    for attempt in range(attempts):
+        _record_external(stats, "yt-dlp")
+        try:
+            result = subprocess.run(
+                ["yt-dlp", f"ytsearch{max_results}:{query}", "--dump-json",
+                 "--flat-playlist", "--no-download", "--quiet"],
+                capture_output=True, text=True, timeout=timeout_seconds,
+            )
+            entries = []
+            for line in result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                data = json.loads(line)
+                entries.append({
+                    "id": data["id"],
+                    "title": data["title"],
+                    "url": data["webpage_url"],
+                    "view_count": data.get("view_count", 0),
+                    "channel": data.get("channel", "Unknown"),
+                    "duration": data.get("duration", 0),
+                })
+            _set_stat(stats, "search_error", "")
+            return entries
+        except subprocess.TimeoutExpired:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = e.__class__.__name__
+        if attempt < attempts - 1 and delay:
+            time.sleep(delay)
+    _set_stat(stats, "search_error", f"{last_error} after {attempts} attempt(s)" if last_error else "no results")
+    return []
+
+
+def _get_full_info(url: str, timeout_seconds: float = 15.0, stats: dict | None = None) -> dict:
+    attempts = max(1, settings.external_request_attempts)
+    delay = max(0.0, settings.external_retry_delay)
+    last_error = ""
+    for attempt in range(attempts):
+        _record_external(stats, "yt-dlp")
+        try:
+            result = subprocess.run(
+                ["yt-dlp", "--dump-json", "--no-download", "--quiet", url],
+                capture_output=True, text=True, timeout=timeout_seconds,
+            )
+            data = json.loads(result.stdout.strip())
+            return {
+                "like_count": data.get("like_count", 0),
                 "view_count": data.get("view_count", 0),
-                "channel": data.get("channel", "Unknown"),
-                "duration": data.get("duration", 0),
-            })
-        return entries
-    except Exception:
-        return []
+            }
+        except subprocess.TimeoutExpired:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = e.__class__.__name__
+        if attempt < attempts - 1 and delay:
+            time.sleep(delay)
+    _set_stat(stats, "rank_error", f"{last_error} after {attempts} attempt(s)" if last_error else "metadata unavailable")
+    return {"like_count": 0, "view_count": 0}
 
 
-def _get_full_info(url: str) -> dict:
-    try:
-        result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-download", "--quiet", url],
-            capture_output=True, text=True, timeout=15,
-        )
-        data = json.loads(result.stdout.strip())
-        return {
-            "like_count": data.get("like_count", 0),
-            "view_count": data.get("view_count", 0),
-        }
-    except Exception:
-        return {"like_count": 0, "view_count": 0}
-
-
-def _rank_results(entries: list[dict]) -> dict | None:
+def _rank_results(entries: list[dict], timeout_seconds: float = 15.0, stats: dict | None = None) -> dict | None:
     if not entries:
         return None
     sorted_by_views = sorted(entries, key=lambda x: x["view_count"], reverse=True)
     candidates = sorted_by_views[:3]
     for c in candidates:
-        info = _get_full_info(c["url"])
+        info = _get_full_info(c["url"], timeout_seconds, stats)
         c["like_count"] = info.get("like_count", 0)
 
     def score(item):
@@ -88,7 +140,18 @@ def _rank_results(entries: list[dict]) -> dict | None:
     return max(candidates, key=score)
 
 
-def _start_playback_attempt(url: str, title: str) -> str:
+def _start_playback_attempt(url: str, title: str, playback_mode: str = "auto") -> str:
+    playback_mode = str(playback_mode or "auto").strip().lower()
+    if playback_mode == "skip":
+        return f"Playback skipped for '{title}': {url}"
+
+    if playback_mode == "open":
+        import webbrowser
+        opened = webbrowser.open(url)
+        if opened:
+            return f"Opened YouTube page for '{title}': {url}"
+        return f"Could not open YouTube page for '{title}': {url}"
+
     def _play():
         ffmpeg = _get_ffmpeg()
         if not ffmpeg:
@@ -155,7 +218,7 @@ def _start_playback_attempt(url: str, title: str) -> str:
 
 def _normalize_title(title: str) -> str:
     t = title.lower().strip()
-    for sep in [" — ", " – ", " - ", " ft. ", " feat. ", " ft ", " feat "]:
+    for sep in [" â€” ", " â€“ ", " - ", " ft. ", " feat. ", " ft ", " feat "]:
         t = t.split(sep)[0]
     return t.strip()
 
@@ -212,14 +275,65 @@ def _add_to_playlist(entry: dict) -> bool:
     return True
 
 
+def _playlist_item(entry: dict) -> dict:
+    return {
+        "title": entry.get("title", ""),
+        "url": entry.get("url", ""),
+        "channel": entry.get("channel", "Unknown"),
+        "view_count": entry.get("view_count", 0),
+        "like_count": entry.get("like_count", 0),
+        "duration": entry.get("duration", 0),
+        "favorite": entry.get("favorite", False),
+        "play_count": entry.get("play_count", 0),
+        "played_at": entry.get("played_at", ""),
+    }
+
+
+def _youtube_error(code: str, message: str, field: str, value, expected: str, retryable: bool, suggestion: str) -> dict:
+    return error_payload(code, message, field, value, expected, retryable, suggestion)
+
+
+def _youtube_trace(tool_name: str, started_at: str, started: float, inputs_received: int, schema_valid: bool, execution_path: str, status: str, output_fields: int, stats: dict, error_code: str | None = None) -> dict:
+    return make_trace(
+        tool_name,
+        _YOUTUBE_VERSION,
+        started_at,
+        started,
+        inputs_received,
+        schema_valid,
+        execution_path,
+        status,
+        output_fields,
+        {"count": stats.get("external_count", 0), "systems": stats.get("systems", [])},
+        error_code,
+    )
+
+
+def _tool_error(tool_name: str, error: dict, response_format: str, trace_enabled: bool, started: float, started_at: str, inputs_received: int, legacy: str, execution_path: str, stats: dict):
+    trace = _youtube_trace(tool_name, started_at, started, inputs_received, False, execution_path, "FAILED", 1, stats, error["code"])
+    emit_trace(trace, trace_enabled)
+    if response_format == "structured":
+        return structured_error(tool_name, _YOUTUBE_VERSION, error, started, trace)
+    return legacy
+
+
+def _tool_success(tool_name: str, result: dict, response_format: str, trace_enabled: bool, started: float, started_at: str, inputs_received: int, stats: dict):
+    status = "PARTIAL" if result.get("degraded") else "SUCCESS"
+    trace = _youtube_trace(tool_name, started_at, started, inputs_received, True, result.get("action", tool_name), status, len(result), stats)
+    emit_trace(trace, trace_enabled)
+    if response_format == "structured":
+        return structured_success(tool_name, _YOUTUBE_VERSION, result, started, trace)
+    return result.get("text", "")
+
+
 def _format_playlist(items: list[dict]) -> str:
     if not items:
         return "Playlist is empty"
     lines = []
     for i, item in enumerate(items, 1):
-        fav = "⭐ " if item.get("favorite") else "   "
+        fav = "â­ " if item.get("favorite") else "   "
         views = _fmt_count(item.get("view_count", 0))
-        lines.append(f"{fav}{i}. {item['title']} — {item['channel']} ({views} views)")
+        lines.append(f"{fav}{i}. {item['title']} â€” {item['channel']} ({views} views)")
     return "\n".join(lines)
 
 
@@ -238,38 +352,155 @@ def _format_playlist(items: list[dict]) -> str:
     ],
     param_descriptions={
         "query": "Song name, artist, or video to search and play on YouTube",
+        "max_results": "Number of YouTube search results to consider, from 1 to 25",
+        "timeout_ms": "yt-dlp subprocess timeout in milliseconds, from 1 to 60000",
+        "playback_mode": "auto, open, or skip. Default auto preserves existing playback behavior",
+        "response_format": "legacy or structured. Default legacy preserves existing output",
+        "trace_enabled": "When true, emit a machine-readable trace entry",
     },
 )
-def youtube_play(query: str) -> str:
-    if not query.strip():
-        return "Please provide a search query"
+def youtube_play(
+    query: str,
+    max_results: int = 10,
+    timeout_ms: int = 0,
+    playback_mode: str = "auto",
+    response_format: str = "legacy",
+    trace_enabled: bool = False,
+):
+    started = time.perf_counter()
+    started_at = utc_now_iso()
+    inputs_received = 6
+    stats = {"external_count": 0, "systems": []}
+    response_format = normalize_response_format(response_format)
+    trace_enabled = coerce_bool(trace_enabled)
+    query = str(query or "").strip()
+    playback_mode = str(playback_mode or "auto").strip().lower()
 
-    results = _search_youtube(query)
+    if not query:
+        error = _youtube_error(
+            "EMPTY_QUERY",
+            "YouTube playback needs a non-empty search query.",
+            "query",
+            query,
+            "song, artist, or video query",
+            False,
+            "Pass the song, artist, or video to search for.",
+        )
+        return _tool_error("youtube_play", error, response_format, trace_enabled, started, started_at, inputs_received, "Please provide a search query", "input_validation", stats)
+    max_results, limit_error = normalize_int(
+        max_results,
+        "max_results",
+        10,
+        1,
+        25,
+        "Use a max_results value between 1 and 25.",
+        "INVALID_RESULT_LIMIT",
+    )
+    if limit_error is not None:
+        return _tool_error("youtube_play", limit_error, response_format, trace_enabled, started, started_at, inputs_received, "No matching videos found", "input_validation", stats)
+    timeout_value, timeout_error = normalize_timeout_ms(timeout_ms, 15000)
+    if timeout_error is not None:
+        return _tool_error("youtube_play", timeout_error, response_format, trace_enabled, started, started_at, inputs_received, "No matching videos found", "input_validation", stats)
+    if playback_mode not in _PLAYBACK_MODES:
+        error = _youtube_error(
+            "INVALID_PLAYBACK_MODE",
+            "playback_mode must be auto, open, or skip.",
+            "playback_mode",
+            playback_mode,
+            "auto, open, or skip",
+            False,
+            "Use playback_mode='auto' to preserve existing behavior.",
+        )
+        return _tool_error("youtube_play", error, response_format, trace_enabled, started, started_at, inputs_received, "No matching videos found", "input_validation", stats)
+
+    timeout_seconds = timeout_value / 1000
+
+    results = _search_youtube(query, max_results, timeout_seconds, stats)
     if not results:
-        return "No matching videos found"
+        code = "PROVIDER_ERROR" if stats.get("search_error") else "NO_RESULTS"
+        error = _youtube_error(
+            code,
+            "YouTube search returned no usable videos.",
+            "query",
+            query,
+            "search results from yt-dlp",
+            code == "PROVIDER_ERROR",
+            "Retry later, increase timeout_ms, or try a more specific query.",
+        )
+        return _tool_error("youtube_play", error, response_format, trace_enabled, started, started_at, inputs_received, "No matching videos found", "search", stats)
 
-    best = _rank_results(results)
+    best = _rank_results(results, timeout_seconds, stats)
     if not best:
-        return "No matching videos found"
+        error = _youtube_error(
+            "RANKING_FAILED",
+            "YouTube results were found but no best result could be selected.",
+            "query",
+            query,
+            "rankable YouTube search results",
+            True,
+            "Retry with a more specific query.",
+        )
+        return _tool_error("youtube_play", error, response_format, trace_enabled, started, started_at, inputs_received, "No matching videos found", "ranking", stats)
 
-    _add_to_playlist({
+    entry = {
         "title": best["title"],
         "url": best["url"],
         "channel": best["channel"],
         "view_count": best.get("view_count", 0),
         "like_count": best.get("like_count", 0),
         "duration": best.get("duration", 0),
-    })
+    }
+    try:
+        playlist_added = _add_to_playlist(entry)
+    except Exception:
+        error = _youtube_error(
+            "PLAYLIST_WRITE_FAILED",
+            "The selected YouTube item could not be saved to the playlist.",
+            "playlist",
+            str(PLAYLIST_PATH),
+            "writable playlist storage",
+            True,
+            "Check playlist storage permissions and retry if the operation is still wanted.",
+        )
+        return _tool_error("youtube_play", error, response_format, trace_enabled, started, started_at, inputs_received, "No matching videos found", "playlist_write", stats)
 
-    playback_status = _start_playback_attempt(best["url"], best["title"])
+    try:
+        playback_status = _start_playback_attempt(best["url"], best["title"], playback_mode)
+    except Exception:
+        error = _youtube_error(
+            "PLAYBACK_FAILED",
+            "The selected YouTube item was saved but playback launch failed.",
+            "playback_mode",
+            playback_mode,
+            "successful playback attempt or page open",
+            True,
+            "Retry with playback_mode='open' or playback_mode='skip'.",
+        )
+        return _tool_error("youtube_play", error, response_format, trace_enabled, started, started_at, inputs_received, "No matching videos found", "playback", stats)
 
     likes = _fmt_count(best.get("like_count", 0))
     views = _fmt_count(best.get("view_count", 0))
-    return (
+    text = (
         f"{playback_status}\n"
-        f"Selected: '{best['title']}' — {best['channel']} "
+        f"Selected: '{best['title']}' Ã¢â‚¬â€ {best['channel']} "
         f"({views} views, {likes} likes)"
     )
+    result = {
+        "action": "youtube_play",
+        "query": query,
+        "text": text,
+        "selected": _playlist_item(entry),
+        "search_count": len(results),
+        "playlist_added": playlist_added,
+        "playlist_path": str(PLAYLIST_PATH),
+        "playback_mode": playback_mode,
+        "playback_status": playback_status,
+        "playback_attempted": playback_mode != "skip",
+        "degraded": playback_status.startswith("Could not"),
+        "degraded_reason": playback_status if playback_status.startswith("Could not") else "",
+    }
+    return _tool_success("youtube_play", result, response_format, trace_enabled, started, started_at, inputs_received, stats)
+
 
 
 @tool(
@@ -317,7 +548,7 @@ def playlist_manage(action: str, query: str = "") -> str:
         lines = []
         for i, item in enumerate(items, 1):
             lines.append(
-                f"{i}. {item['title']} — {item['channel']} "
+                f"{i}. {item['title']} â€” {item['channel']} "
                 f"(played {item.get('play_count', 1)}x)"
             )
         return "\n".join(lines)
@@ -331,7 +562,7 @@ def playlist_manage(action: str, query: str = "") -> str:
             return f"Song '{query}' not found in playlist"
         target["favorite"] = True
         _save_playlist(items)
-        return f"⭐ Marked '{target['title']}' as favorite"
+        return f"â­ Marked '{target['title']}' as favorite"
 
     if action == "unfavorite":
         if not query:
@@ -361,7 +592,7 @@ def playlist_manage(action: str, query: str = "") -> str:
         playback_status = _start_playback_attempt(target["url"], target["title"])
         return (
             f"{playback_status}\n"
-            f"Selected saved track: '{target['title']}' — {target['channel']}"
+            f"Selected saved track: '{target['title']}' â€” {target['channel']}"
         )
 
     if action == "remove":
@@ -407,7 +638,7 @@ def playlist_manage(action: str, query: str = "") -> str:
         playback_status = _start_playback_attempt(target["url"], target["title"])
         return (
             f"{playback_status}\n"
-            f"Shuffled selected track: '{target['title']}' — {target['channel']}"
+            f"Shuffled selected track: '{target['title']}' â€” {target['channel']}"
         )
 
     if action == "stop":

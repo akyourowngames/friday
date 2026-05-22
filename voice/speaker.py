@@ -2,11 +2,14 @@ import atexit
 import os
 import tempfile
 import threading
+import warnings
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import edge_tts
-import pygame
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", UserWarning)
+    import pygame
 
 _init_lock = threading.Lock()
 _initialized = False

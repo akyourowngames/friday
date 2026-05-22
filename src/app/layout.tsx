@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "FRIDAY",
-  description: "A dark Jarvis-inspired assistant interface."
+  title: "KING",
+  description: "KING assistant frontend.",
 };
 
-type RootLayoutProps = Readonly<{
-  children: React.ReactNode;
-}>;
+type RootLayoutProps = {
+  children: ReactNode;
+};
 
 export default function RootLayout({ children }: RootLayoutProps) {
   return (
