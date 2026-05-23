@@ -104,7 +104,7 @@ Last verified by the default markdown pipeline on 2026-05-23:
 - `tool_verification_pipeline` - `verified_runtime`.
 - `browser_extract` - `verified_runtime` for markdown-configured URL, saved-session reuse, and field extraction with mocked page-load evidence; live provider results remain scoped to the attempted URL and engine state.
 - `browser_login_session` - `verified_runtime` for visible manual-login schema, storage-state path handling, and credential-free session capture contract; live login success remains scoped to the saved storage-state result.
-- `navigator` - `verified_runtime` for open geocoding, open route distance, straight-line fallback, structured result fields, typed errors, and frontend route payload support; live provider results remain scoped to the attempted origin, destination, provider status, and route mode.
+- `navigator` - `verified_runtime` for open geocoding, open route distance, representative-point warnings for broad regions, reverse-geocoded route-through places, straight-line fallback, structured result fields, typed errors, and frontend route payload support; live provider results remain scoped to the attempted origin, destination, provider status, route mode, and sampled route places.
 - `datetime_info` - `active_legacy`.
 - `file_read` - `active_legacy`.
 - `file_list` - `active_legacy`.

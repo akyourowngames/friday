@@ -1771,3 +1771,39 @@ Verification evidence:
 distance fallback, structured evidence, and frontend payload support. Live
 answers remain scoped to the attempted origin, destination, mode, and provider
 status returned by the tool.
+
+## Navigator Route Map Upgrade - 2026-05-23T00:00+05:30
+
+[FIX] `navigator` now separates precise place routes from broad region routes
+and returns sampled route-through places for the frontend map.
+
+Runtime changes:
+
+- Geocoding results include provider precision metadata such as category, type,
+  place rank, bounding box, and representative-point status.
+- Routes involving states, regions, districts, or administrative boundaries
+  return a precision note instead of presenting one point-to-point route as a
+  global exact answer for the whole region.
+- OSRM polyline geometry is sampled and reverse-geocoded through Nominatim so
+  the frontend can show route-through places such as cities or districts.
+- The chat frontend now opens Navigator with origin, destination, mode, and
+  autorun query parameters; if a pop-up is blocked, it falls back to the same
+  tab.
+- The Navigator frontend now uses the main JARVIS color family and draws route
+  labels from returned route-place fields.
+
+Verification evidence:
+
+- `python -m unittest tests.test_grounding.NavigatorToolTests -v` -> 6 tests
+  passed, including representative-point reporting and route-place labels.
+- Live provider check for Haryana to New Delhi returned `152.0 km`, `2 hr 2
+  min`, precision note for representative coordinates, and route places
+  `Bhiwani`, `Rohtak`, `Bahadurgarh`, `Delhi`.
+- Browser-visible Navigator page at
+  `/frontend/navigator.html?origin=Haryana&destination=New%20Delhi&mode=driving&autorun=1`
+  showed the same distance, precision note, and route-place chips.
+
+[VERDICT] Navigator route visualization and false-precision handling are
+verified for the tested open-provider path. Region-to-region routes remain
+scoped to representative coordinates unless the user gives exact cities,
+addresses, or landmarks.

@@ -27,6 +27,7 @@ const directDistanceEl = document.getElementById('direct-distance');
 const originNameEl = document.getElementById('origin-name');
 const destinationNameEl = document.getElementById('destination-name');
 const providerLineEl = document.getElementById('provider-line');
+const cityStripEl = document.getElementById('city-strip');
 const submitBtn = form.querySelector('.submit-btn');
 const modeButtons = Array.from(document.querySelectorAll('.mode-pill'));
 
@@ -81,10 +82,38 @@ function renderPayload(payload) {
     originNameEl.textContent = longPlace(origin) || 'Origin resolved';
     destinationNameEl.textContent = longPlace(destination) || 'Destination resolved';
     const providers = Array.isArray(payload.provider_sequence) ? payload.provider_sequence.join(' + ') : '';
-    const degraded = payload.degraded ? `Fallback: ${payload.degraded_reason || 'route unavailable'}` : 'Route provider returned road distance.';
+    const degraded = payload.precision_note || (payload.degraded ? `Fallback: ${payload.degraded_reason || 'route unavailable'}` : 'Route provider returned road distance.');
     providerLineEl.textContent = `${providers || 'open providers'} - ${degraded}`;
-    setStatus(payload.degraded ? 'Fallback' : 'Routed', payload.degraded ? '' : 'ok');
+    const statusLabel = route.fallback_used ? 'Fallback' : (payload.precision_note ? 'Scoped' : 'Routed');
+    setStatus(statusLabel, '');
     routeModel = buildRouteModel(payload);
+    renderRoutePlaces(payload.route_places || []);
+}
+
+function renderRoutePlaces(places) {
+    if (!cityStripEl) return;
+    cityStripEl.innerHTML = '';
+    const usable = Array.isArray(places) ? places : [];
+    if (!usable.length) {
+        const empty = document.createElement('span');
+        empty.className = 'city-chip';
+        empty.innerHTML = '<span></span> Route cities unavailable';
+        cityStripEl.appendChild(empty);
+        return;
+    }
+    for (const place of usable) {
+        const chip = document.createElement('span');
+        chip.className = 'city-chip';
+        const name = String(place.name || place.display_name || 'Route point');
+        chip.innerHTML = `<span></span>${escapeHtml(name)}`;
+        cityStripEl.appendChild(chip);
+    }
+}
+
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = String(value || '');
+    return div.innerHTML;
 }
 
 function loadStoredPayload() {
@@ -246,6 +275,7 @@ function buildRouteModel(payload) {
     const angle = Math.atan2(end.y - start.y, end.x - start.x);
     return {
         points,
+        labels: Array.isArray(payload.route_places) ? payload.route_places.slice(0, 6) : [],
         routeDistance: route.distance_km || null,
         angle,
         angleDegrees: Math.round((angle * 180) / Math.PI),
@@ -362,7 +392,7 @@ function drawGrid(width, height, t) {
 
 function drawHologramField(width, height, t, rect) {
     ctx.save();
-    ctx.strokeStyle = 'rgba(67, 232, 198, 0.16)';
+    ctx.strokeStyle = 'rgba(78, 205, 196, 0.16)';
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.72;
     for (let i = 0; i < 9; i++) {
@@ -381,9 +411,9 @@ function drawHologramField(width, height, t, rect) {
     }
     const sweep = rect.x + ((t * 0.045) % (rect.w + 180)) - 90;
     const gradient = ctx.createLinearGradient(sweep - 80, 0, sweep + 80, 0);
-    gradient.addColorStop(0, 'rgba(67, 232, 198, 0)');
-    gradient.addColorStop(0.5, 'rgba(67, 232, 198, 0.22)');
-    gradient.addColorStop(1, 'rgba(67, 232, 198, 0)');
+    gradient.addColorStop(0, 'rgba(124, 106, 239, 0)');
+    gradient.addColorStop(0.5, 'rgba(124, 106, 239, 0.24)');
+    gradient.addColorStop(1, 'rgba(78, 205, 196, 0)');
     ctx.fillStyle = gradient;
     ctx.fillRect(sweep - 80, rect.y - 80, 160, rect.h + 160);
     ctx.restore();
@@ -410,14 +440,14 @@ function drawRoute(width, height, t) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.shadowBlur = 28;
-    ctx.shadowColor = 'rgba(67, 232, 198, 0.78)';
-    ctx.strokeStyle = 'rgba(67, 232, 198, 0.18)';
+    ctx.shadowColor = 'rgba(124, 106, 239, 0.78)';
+    ctx.strokeStyle = 'rgba(124, 106, 239, 0.22)';
     ctx.lineWidth = 22;
     drawPolyline(points);
     ctx.stroke();
 
     ctx.shadowBlur = 16;
-    ctx.strokeStyle = 'rgba(67, 232, 198, 0.68)';
+    ctx.strokeStyle = 'rgba(78, 205, 196, 0.72)';
     ctx.lineWidth = 8;
     drawPolyline(points);
     ctx.stroke();
@@ -432,9 +462,10 @@ function drawRoute(width, height, t) {
     ctx.setLineDash([]);
 
     const traveler = pointAtProgress(points, progress);
-    drawNode(origin.x, origin.y, '#43e8c6', t);
+    drawNode(origin.x, origin.y, '#4ecdc4', t);
     drawNode(destination.x, destination.y, '#f0b64b', t + 900);
     drawRouteTelemetry(points, projection.rect, t);
+    drawRouteLabels(points, routeModel ? routeModel.labels : [], t);
     ctx.fillStyle = '#eef6ef';
     ctx.shadowBlur = 18;
     ctx.shadowColor = '#eef6ef';
@@ -447,7 +478,7 @@ function drawRoute(width, height, t) {
 function drawRouteTelemetry(points, rect, t) {
     ctx.save();
     ctx.shadowBlur = 0;
-    ctx.fillStyle = 'rgba(67, 232, 198, 0.72)';
+    ctx.fillStyle = 'rgba(78, 205, 196, 0.72)';
     const count = Math.min(14, Math.max(4, Math.floor(points.length / 20)));
     for (let i = 1; i < count; i++) {
         const k = i / count;
@@ -468,6 +499,51 @@ function drawRouteTelemetry(points, rect, t) {
         ctx.stroke();
     }
     ctx.restore();
+}
+
+function drawRouteLabels(points, labels, t) {
+    if (!Array.isArray(labels) || !labels.length) return;
+    ctx.save();
+    ctx.font = '600 12px Poppins, system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    for (const label of labels) {
+        const fraction = Math.max(0.08, Math.min(0.92, Number(label.fraction) || 0.5));
+        const point = pointAtProgress(points, fraction);
+        const name = String(label.name || '').slice(0, 22);
+        if (!name) continue;
+        const pulse = 1 + Math.sin(t * 0.004 + fraction * 10) * 0.5;
+        const textWidth = ctx.measureText(name).width;
+        const x = Math.min(Math.max(point.x + 12, 12), canvas.getBoundingClientRect().width - textWidth - 22);
+        const y = point.y - 22 - pulse;
+        ctx.fillStyle = 'rgba(9, 8, 24, 0.82)';
+        ctx.strokeStyle = 'rgba(78, 205, 196, 0.28)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, x - 8, y - 12, textWidth + 16, 24, 8);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.fillText(name, x, y);
+        ctx.fillStyle = '#4ecdc4';
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+function roundRect(context, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    context.beginPath();
+    context.moveTo(x + r, y);
+    context.lineTo(x + width - r, y);
+    context.quadraticCurveTo(x + width, y, x + width, y + r);
+    context.lineTo(x + width, y + height - r);
+    context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    context.lineTo(x + r, y + height);
+    context.quadraticCurveTo(x, y + height, x, y + height - r);
+    context.lineTo(x, y + r);
+    context.quadraticCurveTo(x, y, x + r, y);
+    context.closePath();
 }
 
 function drawNode(x, y, color, t) {

@@ -662,9 +662,9 @@ It exists so KING can recover from transient failures without hanging, looping i
 ```json
 {
   "name": "navigator",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "upgrade_date": "2026-05-23T00:00:00+05:30",
-  "purpose": "Resolve two user-supplied places with open geocoding, calculate route distance through an open routing provider, and return grounded travel details with a transparent straight-line fallback.",
+  "purpose": "Resolve two user-supplied places with open geocoding, calculate route distance through an open routing provider, sample route-through places with reverse geocoding, and return grounded travel details with transparent representative-point and straight-line fallback reporting.",
   "inputs": {
     "origin": "string: non-empty starting place or address",
     "destination": "string: non-empty destination place or address",
@@ -676,11 +676,11 @@ It exists so KING can recover from transient failures without hanging, looping i
   },
   "outputs": {
     "legacy": "string: route summary composed from observed place, distance, duration, provider, and fallback fields",
-    "structured_success": "object: origin, destination, mode, provider sequence, route distance, straight-line distance, duration, degraded state, and narrative fields",
+    "structured_success": "object: origin, destination, place precision, mode, provider sequence, route distance, route-through places, straight-line distance, duration, degraded state, precision note, and narrative fields",
     "structured_error": "object: typed error plus meta and trace",
     "trace": "json object: emitted when trace_enabled is true"
   },
-  "providers": ["nominatim", "osrm", "haversine fallback"],
+  "providers": ["nominatim", "nominatim_reverse", "osrm", "haversine fallback"],
   "error_codes": ["EMPTY_ORIGIN", "EMPTY_DESTINATION", "INVALID_MODE", "INVALID_TIMEOUT", "PLACE_NOT_FOUND"],
   "has_trace": true,
   "timeout_ms": 12000,
@@ -689,7 +689,7 @@ It exists so KING can recover from transient failures without hanging, looping i
   "backward_compatible": true,
   "verified": true,
   "verification_date": "2026-05-23T00:00:00+05:30",
-  "score": 9.1
+  "score": 9.3
 }
 ```
 

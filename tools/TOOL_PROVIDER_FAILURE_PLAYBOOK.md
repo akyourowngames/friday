@@ -74,8 +74,11 @@ tool result into a broad claim about the world.
 - Distinguish geocoding failure, routing failure, routed distance, straight-line
   fallback, timeout, invalid mode, and missing input.
 - Report origin, destination, route distance, straight-line distance, duration,
-  provider sequence, degraded state, and fallback reason only when returned by
-  the tool.
+  provider sequence, route-through places, degraded state, precision note, and
+  fallback reason only when returned by the tool.
+- If a place resolves to a state, region, district, or administrative boundary,
+  report that the route uses a representative coordinate instead of presenting
+  the distance as exact coverage for the whole region.
 - If OSRM routing is unavailable but geocoding succeeded, report the fallback as
   a straight-line estimate, not as a road route.
 - Do not claim live traffic, tolls, road closures, turn-by-turn directions, or a

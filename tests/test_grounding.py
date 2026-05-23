@@ -1609,6 +1609,96 @@ class NavigatorToolTests(unittest.TestCase):
         self.assertEqual(panel["origin"]["name"], "A")
         self.assertEqual(panel["results"][0]["title"], "A to B")
 
+    def test_navigator_marks_region_routes_as_representative_points(self):
+        original_get = navigator_mod.httpx.get
+
+        class FakeResponse:
+            def __init__(self, data):
+                self._data = data
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._data
+
+        def fake_get(url, params=None, timeout=None, headers=None):
+            if url == navigator_mod.settings.navigator_geocode_url:
+                query = params.get("q")
+                if query == "Haryana":
+                    return FakeResponse([
+                        {
+                            "name": "Haryana",
+                            "display_name": "Haryana, India",
+                            "lat": "29.0",
+                            "lon": "76.0",
+                            "category": "boundary",
+                            "type": "administrative",
+                            "place_rank": 8,
+                        }
+                    ])
+                return FakeResponse([
+                    {
+                        "name": "New Delhi",
+                        "display_name": "New Delhi, Delhi, India",
+                        "lat": "28.61",
+                        "lon": "77.20",
+                        "category": "place",
+                        "type": "city",
+                        "place_rank": 16,
+                    }
+                ])
+            return FakeResponse(
+                {
+                    "code": "Ok",
+                    "routes": [
+                        {
+                            "distance": 152000,
+                            "duration": 7380,
+                            "geometry": "",
+                        }
+                    ],
+                }
+            )
+
+        try:
+            navigator_mod.httpx.get = fake_get
+            result = navigator_mod.navigator("Haryana", "New Delhi", response_format="structured")
+        finally:
+            navigator_mod.httpx.get = original_get
+
+        self.assertTrue(result["result"]["degraded"])
+        self.assertIn("representative coordinate", result["result"]["precision_note"])
+        self.assertTrue(result["result"]["origin"]["precision"]["representative_point"])
+
+    def test_navigator_route_places_are_returned_for_city_labels(self):
+        original_samples = navigator_mod._route_sample_points
+        original_reverse = navigator_mod._reverse_place
+        try:
+            navigator_mod._route_sample_points = lambda route: [
+                {"lat": 1.0, "lon": 2.0, "fraction": 0.25},
+                {"lat": 3.0, "lon": 4.0, "fraction": 0.75},
+            ]
+            navigator_mod._reverse_place = lambda point, timeout_seconds: (
+                {
+                    "name": "Route City" if point["fraction"] < 0.5 else "Second City",
+                    "display_name": "Route City",
+                    "lat": point["lat"],
+                    "lon": point["lon"],
+                    "fraction": point["fraction"],
+                    "source": "nominatim_reverse",
+                },
+                "",
+            )
+            places, status, external_count = navigator_mod._route_places({"geometry": "present"}, 1.0)
+        finally:
+            navigator_mod._route_sample_points = original_samples
+            navigator_mod._reverse_place = original_reverse
+
+        self.assertEqual([place["name"] for place in places], ["Route City", "Second City"])
+        self.assertEqual(status["returned_places"], 2)
+        self.assertEqual(external_count, 2)
+
 
 class ExternalRetryTests(unittest.TestCase):
     def test_hackernews_search_reports_bounded_provider_failure(self):

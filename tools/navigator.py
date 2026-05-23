@@ -20,6 +20,7 @@ from tools.runtime import (
 
 _NAVIGATOR_VERSION = "1.0.0"
 _ROUTE_MODES = ("driving", "walking", "cycling")
+_BROAD_PLACE_TYPES = ("administrative", "state", "province", "region")
 
 
 def _navigator_trace(
@@ -117,6 +118,41 @@ def _as_float(value, fallback: float = 0.0) -> float:
         return fallback
 
 
+def _as_int(value, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _bounding_box(item: dict) -> list[float]:
+    box = item.get("boundingbox")
+    if not isinstance(box, list) or len(box) != 4:
+        return []
+    values = []
+    for value in box:
+        values.append(_as_float(value))
+    return values
+
+
+def _place_precision(item: dict) -> dict:
+    category = str(item.get("category") or item.get("class") or "")
+    place_type = str(item.get("type") or "")
+    place_rank = _as_int(item.get("place_rank"), 0)
+    bounding_box = _bounding_box(item)
+    broad = category == "boundary" or place_type in _BROAD_PLACE_TYPES or (place_rank and place_rank < 12)
+    scope = "region" if broad else "place"
+    return {
+        "scope": scope,
+        "category": category,
+        "type": place_type,
+        "place_rank": place_rank,
+        "importance": _as_float(item.get("importance"), 0.0),
+        "bounding_box": bounding_box,
+        "representative_point": broad,
+    }
+
+
 def _geocode(query: str, timeout_seconds: float) -> tuple[dict | None, str]:
     def run():
         response = httpx.get(
@@ -148,6 +184,7 @@ def _geocode(query: str, timeout_seconds: float) -> tuple[dict | None, str]:
             "lat": lat,
             "lon": lon,
             "source": "nominatim",
+            "precision": _place_precision(item),
         }
 
     result, error = _provider_attempt(run)
@@ -156,6 +193,133 @@ def _geocode(query: str, timeout_seconds: float) -> tuple[dict | None, str]:
     if result is None:
         return None, "no place match"
     return result, ""
+
+
+def _decode_polyline(encoded: str) -> list[dict]:
+    points = []
+    if not encoded:
+        return points
+    index = 0
+    lat = 0
+    lon = 0
+    length = len(encoded)
+    while index < length:
+        result = 0
+        shift = 0
+        byte = 0
+        while index < length:
+            byte = ord(encoded[index]) - 63
+            index += 1
+            result |= (byte & 0x1F) << shift
+            shift += 5
+            if byte < 0x20:
+                break
+        lat += ~(result >> 1) if result & 1 else result >> 1
+
+        result = 0
+        shift = 0
+        while index < length:
+            byte = ord(encoded[index]) - 63
+            index += 1
+            result |= (byte & 0x1F) << shift
+            shift += 5
+            if byte < 0x20:
+                break
+        lon += ~(result >> 1) if result & 1 else result >> 1
+        points.append({"lat": lat / 100000, "lon": lon / 100000})
+    return points
+
+
+def _route_sample_points(route: dict) -> list[dict]:
+    points = _decode_polyline(str(route.get("geometry") or ""))
+    if len(points) < 5:
+        return []
+    sample_count = max(0, min(int(settings.navigator_route_place_samples), 6))
+    samples = []
+    for step in range(1, sample_count + 1):
+        fraction = step / (sample_count + 1)
+        index = min(len(points) - 1, max(0, round((len(points) - 1) * fraction)))
+        point = dict(points[index])
+        point["fraction"] = round(fraction, 3)
+        samples.append(point)
+    return samples
+
+
+def _address_place_name(address: dict, fallback: str) -> str:
+    if not isinstance(address, dict):
+        return fallback
+    for key in ("city", "town", "municipality", "village", "county", "state_district", "state"):
+        value = address.get(key)
+        if value:
+            return str(value)
+    return fallback
+
+
+def _reverse_place(point: dict, timeout_seconds: float) -> tuple[dict | None, str]:
+    def run():
+        response = httpx.get(
+            settings.navigator_reverse_url,
+            params={
+                "lat": point["lat"],
+                "lon": point["lon"],
+                "format": "jsonv2",
+                "addressdetails": 1,
+                "zoom": 10,
+            },
+            timeout=timeout_seconds,
+            headers=_headers(),
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            return None
+        address = data.get("address") if isinstance(data.get("address"), dict) else {}
+        display = str(data.get("display_name") or "")
+        name = _address_place_name(address, display)
+        if not name:
+            return None
+        return {
+            "name": name,
+            "display_name": display or name,
+            "lat": point["lat"],
+            "lon": point["lon"],
+            "fraction": point["fraction"],
+            "source": "nominatim_reverse",
+        }
+
+    result, error = _provider_attempt(run, attempts=1, delay=0)
+    if error:
+        return None, error
+    if result is None:
+        return None, "no reverse place match"
+    return result, ""
+
+
+def _route_places(route: dict, timeout_seconds: float) -> tuple[list[dict], dict, int]:
+    places = []
+    seen = set()
+    errors = []
+    external_count = 0
+    for point in _route_sample_points(route):
+        external_count += 1
+        place, error = _reverse_place(point, timeout_seconds)
+        if error:
+            errors.append(error)
+        if not place:
+            continue
+        key = str(place.get("name") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        places.append(place)
+    status = {
+        "provider": "nominatim_reverse",
+        "requested_samples": len(_route_sample_points(route)),
+        "returned_places": len(places),
+        "degraded": bool(errors),
+        "errors": errors[:3],
+    }
+    return places, status, external_count
 
 
 def _distance_km(origin: dict, destination: dict) -> float:
@@ -264,6 +428,9 @@ def _result_summary(result: dict) -> str:
         lines.append(f"Route status: straight-line fallback because {route.get('fallback_reason')}")
     else:
         lines.append("Route status: routed by OSRM")
+    precision_note = result.get("precision_note")
+    if precision_note:
+        lines.append(f"Precision note: {precision_note}")
     return "\n".join(lines)
 
 
@@ -395,6 +562,20 @@ def navigator(
             "fallback_used": True,
             "fallback_reason": route_error,
         }
+    route_places = []
+    route_place_status = {"provider": "nominatim_reverse", "requested_samples": 0, "returned_places": 0, "degraded": False, "errors": []}
+    if not route.get("fallback_used"):
+        route_places, route_place_status, reverse_count = _route_places(route, timeout_seconds)
+        external_count += reverse_count
+
+    precision_notes = []
+    if origin_place.get("precision", {}).get("representative_point"):
+        precision_notes.append(f"{origin_place['name']} is a region; the route starts from its representative coordinate")
+    if destination_place.get("precision", {}).get("representative_point"):
+        precision_notes.append(f"{destination_place['name']} is a region; the route ends at its representative coordinate")
+    precision_note = "; ".join(precision_notes)
+    degraded = fallback_used or bool(precision_note) or bool(route_place_status.get("degraded"))
+    degraded_reason = route_error if fallback_used else precision_note
 
     result = {
         "origin_query": origin,
@@ -405,9 +586,12 @@ def navigator(
         "alternatives_requested": alternatives,
         "provider_sequence": ["nominatim", route["provider"]],
         "route": route,
+        "route_places": route_places,
+        "route_place_status": route_place_status,
         "straight_line": _distance_payload(straight_km),
-        "degraded": fallback_used,
-        "degraded_reason": route_error if fallback_used else "",
+        "degraded": degraded,
+        "degraded_reason": degraded_reason,
+        "precision_note": precision_note,
         "narrative": {
             "headline": f"{origin_place['name']} to {destination_place['name']}",
             "summary": _result_summary(
@@ -418,11 +602,13 @@ def navigator(
                     "provider_sequence": ["nominatim", route["provider"]],
                     "route": route,
                     "straight_line": _distance_payload(straight_km),
+                    "precision_note": precision_note,
                 }
             ),
             "details": [
                 f"Route distance: {route['distance_km']} km",
                 f"Straight-line distance: {_distance_payload(straight_km)['distance_km']} km",
+                f"Route places: {', '.join([place['name'] for place in route_places]) if route_places else 'not available'}",
                 f"Provider status: {'fallback' if fallback_used else 'ok'}",
             ],
         },
@@ -433,10 +619,10 @@ def navigator(
         inputs_received,
         True,
         "route_fallback" if fallback_used else "route",
-        "PARTIAL" if fallback_used else "SUCCESS",
+        "PARTIAL" if degraded else "SUCCESS",
         len(result),
         external_count,
-        "ROUTE_FALLBACK" if fallback_used else None,
+        "ROUTE_FALLBACK" if fallback_used else ("REPRESENTATIVE_POINT" if precision_note else None),
     )
     emit_trace(trace, trace_enabled)
     if response_format == "structured":

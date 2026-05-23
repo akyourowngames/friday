@@ -330,6 +330,9 @@ def _panel_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | 
         answer = "Navigator panel opened from grounded route data."
         if route.get("fallback_used"):
             answer = "Navigator panel opened with straight-line fallback data."
+        precision_note = str(result.get("precision_note") or "")
+        if precision_note:
+            answer = "Navigator panel opened with representative-point route data."
         return {
             "source": "navigator",
             "query": query or headline or "Navigator route",
@@ -339,9 +342,12 @@ def _panel_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | 
             "mode": str(result.get("mode") or ""),
             "provider_sequence": result.get("provider_sequence") if isinstance(result.get("provider_sequence"), list) else [],
             "route": route,
+            "route_places": result.get("route_places") if isinstance(result.get("route_places"), list) else [],
+            "route_place_status": result.get("route_place_status") if isinstance(result.get("route_place_status"), dict) else {},
             "straight_line": result.get("straight_line") if isinstance(result.get("straight_line"), dict) else {},
             "degraded": bool(result.get("degraded")),
             "degraded_reason": str(result.get("degraded_reason") or ""),
+            "precision_note": precision_note,
             "narrative": narrative if isinstance(narrative, dict) else {},
             "results": [
                 {

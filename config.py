@@ -85,10 +85,12 @@ class Settings:
     browser_max_text_chars: int = _env_int("KING_BROWSER_MAX_TEXT_CHARS", 12000)
     browser_user_agent: str = _env("KING_BROWSER_USER_AGENT", "Mozilla/5.0 KING Browser Extractor")
     navigator_geocode_url: str = _env("KING_NAVIGATOR_GEOCODE_URL", "https://nominatim.openstreetmap.org/search")
+    navigator_reverse_url: str = _env("KING_NAVIGATOR_REVERSE_URL", "https://nominatim.openstreetmap.org/reverse")
     navigator_route_url: str = _env("KING_NAVIGATOR_ROUTE_URL", "https://router.project-osrm.org")
     navigator_user_agent: str = _env("KING_NAVIGATOR_USER_AGENT", "KING Navigator Tool")
     navigator_default_mode: str = _env("KING_NAVIGATOR_DEFAULT_MODE", "driving")
     navigator_default_timeout_ms: int = _env_int("KING_NAVIGATOR_DEFAULT_TIMEOUT_MS", 12000)
+    navigator_route_place_samples: int = _env_int("KING_NAVIGATOR_ROUTE_PLACE_SAMPLES", 4)
     embedding_model: str = _env("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embed-v1")
     embedding_min_chars: int = _env_int("KING_EMBEDDING_MIN_CHARS", 7)
 

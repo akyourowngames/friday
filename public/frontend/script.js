@@ -1256,11 +1256,19 @@ function renderNavigatorResult(payload) {
     try {
         sessionStorage.setItem('kingNavigatorPayload', JSON.stringify(payload));
     } catch (_) {}
+    const origin = encodeURIComponent(payload.origin_query || payload.origin?.name || '');
+    const destination = encodeURIComponent(payload.destination_query || payload.destination?.name || '');
+    const mode = encodeURIComponent(payload.mode || 'driving');
+    const navigatorUrl = `navigator.html?origin=${origin}&destination=${destination}&mode=${mode}&autorun=1`;
     try {
-        const opened = window.open('navigator.html', '_blank', 'noopener');
-        if (!opened) showToast('Navigator ready. Open Navigator from the top bar.');
+        const opened = window.open(navigatorUrl, '_blank', 'noopener');
+        if (!opened) {
+            showToast('Opening Navigator in this tab.');
+            setTimeout(() => { window.location.href = navigatorUrl; }, 250);
+        }
     } catch (_) {
-        showToast('Navigator ready. Open Navigator from the top bar.');
+        showToast('Opening Navigator in this tab.');
+        setTimeout(() => { window.location.href = navigatorUrl; }, 250);
     }
 }
 
