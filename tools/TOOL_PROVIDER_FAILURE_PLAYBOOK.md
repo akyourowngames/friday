@@ -69,6 +69,18 @@ tool result into a broad claim about the world.
 - Do not claim account-private social details unless the loaded page and
   configured fields returned those values for the attempted URL.
 
+### Navigator
+
+- Distinguish geocoding failure, routing failure, routed distance, straight-line
+  fallback, timeout, invalid mode, and missing input.
+- Report origin, destination, route distance, straight-line distance, duration,
+  provider sequence, degraded state, and fallback reason only when returned by
+  the tool.
+- If OSRM routing is unavailable but geocoding succeeded, report the fallback as
+  a straight-line estimate, not as a road route.
+- Do not claim live traffic, tolls, road closures, turn-by-turn directions, or a
+  complete map unless a future tool result explicitly returns those fields.
+
 ### Reddit And Hacker News
 
 - Distinguish missing input, rate limit, no results, provider error, not found,

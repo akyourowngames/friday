@@ -25,7 +25,9 @@ from agent.core import (
     _repair_contextual_tool_args,
     _repair_contextual_tool_call,
     _repair_search_query_specificity,
+    _should_keep_memory_context,
     _should_suppress_memory_context,
+    _should_use_profile_context,
     _should_use_memory_context,
     _tool_call_grounded,
     _tool_result_content,
@@ -47,6 +49,8 @@ import tools.reddit as reddit_mod
 import tools.web as web_mod
 import tools.notes as notes_mod
 import tools.browser as browser_mod
+import tools.navigator as navigator_mod
+import api_server as api_mod
 from agent.router import ToolRouter, _load_small_talk_text
 import agent.router as router_mod
 import agent.core as core_mod
@@ -64,6 +68,96 @@ class GroundingTests(unittest.TestCase):
 
         self.assertIn("Tool Grounding Contract", policy)
         self.assertIn("Do not claim live state", policy)
+
+    def test_router_keeps_small_talk_out_of_weak_tool_path(self):
+        original_get_tools = router_mod.get_tools
+        try:
+            router = ToolRouter()
+            router_mod.get_tools = lambda: [{"name": "note_read"}]
+            router.threshold = 0.16
+            router.winner_margin = 0.15
+            router._tool_names = ["note_read"]
+            router._tool_texts = ["note_read: read saved notes"]
+            router._tool_embeddings = np.array([[0.20]], dtype=np.float32)
+            router._small_talk_emb = np.array([0.20], dtype=np.float32)
+
+            selected = router.select_tools("how are you", q_emb=np.array([1.0], dtype=np.float32))
+        finally:
+            router_mod.get_tools = original_get_tools
+
+        self.assertEqual(selected, [])
+        self.assertEqual(router.last_decision()["reason"], "small_talk_contrast_won")
+
+    def test_router_still_selects_strong_action_tool(self):
+        original_get_tools = router_mod.get_tools
+        original_get_tool = router_mod.get_tool
+        try:
+            router_mod.get_tools = lambda: [{"name": "youtube_play"}]
+            router_mod.get_tool = lambda name: {"name": name}
+            router = ToolRouter()
+            router.threshold = 0.16
+            router.winner_margin = 0.15
+            router._tool_names = ["youtube_play"]
+            router._tool_texts = ["youtube_play: open or play YouTube"]
+            router._tool_embeddings = np.array([[0.50]], dtype=np.float32)
+            router._small_talk_emb = np.array([0.05], dtype=np.float32)
+
+            selected = router.select_tools("open youtube", q_emb=np.array([1.0], dtype=np.float32))
+        finally:
+            router_mod.get_tools = original_get_tools
+            router_mod.get_tool = original_get_tool
+
+        self.assertEqual([tool["name"] for tool in selected], ["youtube_play"])
+        self.assertEqual(router.last_decision()["reason"], "selected")
+
+    def test_graph_memory_survives_router_small_talk_reason(self):
+        context = "Graph memory: User crush ankita"
+        decision = {"reason": "small_talk_contrast_won"}
+
+        keep = _should_keep_memory_context(
+            context,
+            "who is my crush huh",
+            np.array([1.0], dtype=np.float32),
+            [],
+            decision,
+        )
+
+        self.assertTrue(keep)
+
+    def test_small_talk_does_not_keep_text_only_memory(self):
+        original = core_mod._should_use_memory_context
+        try:
+            core_mod._should_use_memory_context = lambda user_input, q_emb, selected_tools: False
+            keep = core_mod._should_keep_memory_context(
+                "Text memory: my cursh is ankita",
+                "how are you",
+                np.array([1.0], dtype=np.float32),
+                [],
+                {"reason": "small_talk_contrast_won"},
+            )
+        finally:
+            core_mod._should_use_memory_context = original
+
+        self.assertFalse(keep)
+
+    def test_broad_memory_followup_uses_profile_context(self):
+        original_embed = core_mod.embed
+        original_followup = core_mod._looks_like_context_followup
+
+        def fake_embed(texts, normalize=True):
+            if isinstance(texts, list):
+                return np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+            return np.array([1.0, 0.0], dtype=np.float32)
+
+        try:
+            core_mod.embed = fake_embed
+            core_mod._looks_like_context_followup = lambda text: True
+            self.assertTrue(_should_use_profile_context("what do you know about me", np.array([1.0, 0.0], dtype=np.float32)))
+            self.assertFalse(_should_use_profile_context("where do I live", np.array([0.0, 1.0], dtype=np.float32)))
+            self.assertTrue(_should_use_profile_context("anything else", np.array([0.0, 1.0], dtype=np.float32), last_profile_context=True))
+        finally:
+            core_mod.embed = original_embed
+            core_mod._looks_like_context_followup = original_followup
 
     def test_local_time_context_names_afternoon_explicitly(self):
         context = _local_time_context(datetime(2026, 5, 20, 16, 15))
@@ -858,6 +952,38 @@ class MemoryRecallTests(unittest.TestCase):
         self.assertGreaterEqual(report["avg_ms"], 0.0)
 
 
+class MemoryExtractionContextTests(unittest.TestCase):
+    def test_extract_and_store_passes_recent_context_for_followup_storage(self):
+        agent = core_mod.Agent.__new__(core_mod.Agent)
+        committed = []
+        observed = {}
+
+        class FakeBrain:
+            def commit(self, fact):
+                committed.append(fact)
+                return True
+
+        class FakeLLM:
+            def extract_facts(self, user_input, assistant_response, recent_user_context=""):
+                observed["user_input"] = user_input
+                observed["recent_user_context"] = recent_user_context
+                if "class 11th" in recent_user_context and "Ankita" in recent_user_context:
+                    return ["Ankita is in class 11th"]
+                return []
+
+        agent.brain = FakeBrain()
+        agent.llm = FakeLLM()
+
+        agent._extract_and_store(
+            "i am telling you to store this",
+            "Sir, I have stored that.",
+            "user: so she is in class 11th right now bud\nassistant: Sir, Ankita is your crush.",
+        )
+
+        self.assertEqual(observed["user_input"], "i am telling you to store this")
+        self.assertEqual(committed, ["Ankita is in class 11th"])
+
+
 class RouterSelectionTests(unittest.TestCase):
     def test_routing_contrast_loads_from_markdown_without_literal_chat_phrase(self):
         contrast = _load_small_talk_text()
@@ -1342,6 +1468,146 @@ class BrowserAutomationToolTests(unittest.TestCase):
 
         self.assertEqual(result["meta"]["tool"], "browser_login_session")
         self.assertEqual(result["error"]["code"], "INVALID_URL")
+
+
+class NavigatorToolTests(unittest.TestCase):
+    def _schema(self, name):
+        for schema in get_tool_schemas():
+            if schema["function"]["name"] == name:
+                return schema
+        raise AssertionError(f"schema not found: {name}")
+
+    def test_navigator_schema_is_registered(self):
+        schema = self._schema("navigator")
+        props = schema["function"]["parameters"]["properties"]
+
+        self.assertIn("origin", props)
+        self.assertIn("destination", props)
+        self.assertIn("mode", props)
+        self.assertIn("response_format", props)
+
+    def test_navigator_structured_route_uses_open_provider_fields(self):
+        original_get = navigator_mod.httpx.get
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, data):
+                self._data = data
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._data
+
+        def fake_get(url, params=None, timeout=None, headers=None):
+            calls.append({"url": url, "params": params, "timeout": timeout, "headers": headers})
+            if url == navigator_mod.settings.navigator_geocode_url:
+                query = params.get("q")
+                if query == "Origin City":
+                    return FakeResponse([
+                        {
+                            "name": "Origin City",
+                            "display_name": "Origin City, Test State",
+                            "lat": "28.6100",
+                            "lon": "77.2300",
+                        }
+                    ])
+                return FakeResponse([
+                    {
+                        "name": "Destination City",
+                        "display_name": "Destination City, Test State",
+                        "lat": "26.9200",
+                        "lon": "75.7900",
+                    }
+                ])
+            return FakeResponse(
+                {
+                    "code": "Ok",
+                    "routes": [
+                        {
+                            "distance": 280500,
+                            "duration": 13500,
+                            "geometry": "encoded-polyline",
+                        }
+                    ],
+                }
+            )
+
+        try:
+            navigator_mod.httpx.get = fake_get
+            result = navigator_mod.navigator(
+                "Origin City",
+                "Destination City",
+                timeout_ms=5000,
+                response_format="structured",
+            )
+        finally:
+            navigator_mod.httpx.get = original_get
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0]["timeout"], 5.0)
+        self.assertEqual(result["meta"]["tool"], "navigator")
+        self.assertEqual(result["result"]["route"]["distance_km"], 280.5)
+        self.assertEqual(result["result"]["route"]["provider"], "osrm")
+        self.assertFalse(result["result"]["route"]["fallback_used"])
+        self.assertEqual(result["result"]["origin"]["source"], "nominatim")
+
+    def test_navigator_falls_back_to_straight_line_when_route_provider_fails(self):
+        original_get = navigator_mod.httpx.get
+
+        class FakeResponse:
+            def __init__(self, data):
+                self._data = data
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._data
+
+        def fake_get(url, params=None, timeout=None, headers=None):
+            if url == navigator_mod.settings.navigator_geocode_url:
+                query = params.get("q")
+                lat = "10.0" if query == "A" else "11.0"
+                lon = "20.0" if query == "A" else "21.0"
+                return FakeResponse([{"name": query, "display_name": query, "lat": lat, "lon": lon}])
+            raise navigator_mod.httpx.TimeoutException("timeout")
+
+        try:
+            navigator_mod.httpx.get = fake_get
+            result = navigator_mod.navigator("A", "B", response_format="structured", timeout_ms=1000)
+        finally:
+            navigator_mod.httpx.get = original_get
+
+        self.assertTrue(result["result"]["degraded"])
+        self.assertTrue(result["result"]["route"]["fallback_used"])
+        self.assertEqual(result["result"]["route"]["provider"], "haversine")
+        self.assertGreater(result["result"]["straight_line"]["distance_km"], 0)
+
+    def test_navigator_api_panel_payload_preserves_route_fields(self):
+        result = {
+            "result": {
+                "origin_query": "A",
+                "destination_query": "B",
+                "origin": {"name": "A", "display_name": "A"},
+                "destination": {"name": "B", "display_name": "B"},
+                "mode": "driving",
+                "provider_sequence": ["nominatim", "osrm"],
+                "route": {"distance_km": 12.5, "duration_text": "20 min", "fallback_used": False},
+                "straight_line": {"distance_km": 10.0},
+                "degraded": False,
+                "narrative": {"headline": "A to B"},
+            },
+            "meta": {"tool": "navigator"},
+        }
+
+        panel = api_mod._panel_payload("navigator", result)
+
+        self.assertEqual(panel["source"], "navigator")
+        self.assertEqual(panel["route"]["distance_km"], 12.5)
+        self.assertEqual(panel["origin"]["name"], "A")
+        self.assertEqual(panel["results"][0]["title"], "A to B")
 
 
 class ExternalRetryTests(unittest.TestCase):

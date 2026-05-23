@@ -12,5 +12,6 @@ from . import terminal
 from . import manifest_audit
 from . import verification_pipeline
 from . import browser
+from . import navigator
 
 __all__ = ["tool", "get_tool", "get_tools", "get_tool_schemas", "execute_tool"]

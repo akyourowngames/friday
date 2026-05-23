@@ -14,6 +14,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agent.core import Agent
+from memory.brain import Brain
+from tools.registry import execute_tool
 
 
 APP_VERSION = "0.1.0"
@@ -25,6 +27,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
     ],
@@ -45,6 +49,27 @@ class ChatRequest(BaseModel):
     imgbase64: str | None = None
 
 
+class MemoryWriteRequest(BaseModel):
+    text: str
+    importance: float = 0.8
+
+
+class MemoryForgetRequest(BaseModel):
+    query: str
+
+
+class MemoryReflectRequest(BaseModel):
+    label: str = "frontend"
+
+
+class NavigatorRouteRequest(BaseModel):
+    origin: str
+    destination: str
+    mode: str = "driving"
+    alternatives: bool = False
+    timeout_ms: int = 0
+
+
 def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -58,6 +83,71 @@ def _get_session(session_id: str | None) -> tuple[str, Agent, threading.Lock]:
             _sessions[sid] = agent
         lock = _session_locks.setdefault(sid, threading.Lock())
     return sid, agent, lock
+
+
+def _fresh_brain() -> Brain:
+    return Brain()
+
+
+def _node_name(graph: dict[str, Any], node_id: str) -> str:
+    node = graph.get("nodes", {}).get(node_id, {})
+    return str(node.get("name") or node_id)
+
+
+def _memory_graph_payload(brain: Brain) -> dict[str, Any]:
+    graph = getattr(brain, "_graph", {})
+    nodes = []
+    for node in graph.get("nodes", {}).values():
+        if not isinstance(node, dict):
+            continue
+        nodes.append(
+            {
+                "id": str(node.get("id", "")),
+                "name": str(node.get("name", "")),
+                "type": str(node.get("type", "concept")),
+                "importance": node.get("importance", 0.5),
+                "created_at": node.get("created_at"),
+                "updated_at": node.get("updated_at"),
+                "aliases": node.get("aliases", []),
+            }
+        )
+
+    edges = []
+    for edge in graph.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        edges.append(
+            {
+                "id": str(edge.get("id", "")),
+                "source": str(edge.get("source", "")),
+                "source_name": _node_name(graph, str(edge.get("source", ""))),
+                "target": str(edge.get("target", "")),
+                "target_name": _node_name(graph, str(edge.get("target", ""))),
+                "relation": str(edge.get("relation", "")),
+                "strength": edge.get("strength", 0.5),
+                "confidence": edge.get("confidence", 0.5),
+                "memory_id": str(edge.get("memory_id", "")),
+                "tier": str(edge.get("tier", "semantic")),
+                "mode": str(edge.get("mode", "multi")),
+                "active": bool(edge.get("active", True)),
+                "evidence": str(edge.get("evidence", "")),
+                "created_at": edge.get("created_at"),
+                "updated_at": edge.get("updated_at"),
+                "valid_from": edge.get("valid_from"),
+                "valid_to": edge.get("valid_to"),
+                "inactive_reason": edge.get("inactive_reason"),
+                "supersedes": edge.get("supersedes", []),
+            }
+        )
+
+    return {
+        "assessment": brain.system_assessment(),
+        "summary": brain.graph_summary("", limit=20),
+        "nodes": nodes,
+        "edges": edges,
+        "reflections": graph.get("reflections", []),
+        "memories": brain.list_memories(200),
+    }
 
 
 def _run_agent(agent: Agent, lock: threading.Lock, message: str) -> dict[str, Any]:
@@ -121,12 +211,23 @@ def _tool_events(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "tool_name": name,
                     }
                 )
+            if name == "navigator":
+                events.append(
+                    {
+                        "event": "navigation_planning",
+                        "message": "Resolving route distance with open navigation providers.",
+                        "route": "navigation",
+                        "tool_name": name,
+                    }
+                )
     return events
 
 
 def _tool_route(tool_name: str) -> str:
     if tool_name in {"web_search", "web_fetch", "reddit", "hackernews"}:
         return "realtime"
+    if tool_name == "navigator":
+        return "navigation"
     if tool_name in {"file_read", "file_list", "terminal"}:
         return "task"
     return "assistant"
@@ -217,6 +318,40 @@ def _panel_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | 
             "results": items,
         }
 
+    if tool_name == "navigator":
+        route = result.get("route") if isinstance(result.get("route"), dict) else {}
+        origin = result.get("origin") if isinstance(result.get("origin"), dict) else {}
+        destination = result.get("destination") if isinstance(result.get("destination"), dict) else {}
+        headline = ""
+        narrative = result.get("narrative")
+        if isinstance(narrative, dict):
+            headline = str(narrative.get("headline") or "")
+        query = f"{result.get('origin_query', '')} to {result.get('destination_query', '')}".strip()
+        answer = "Navigator panel opened from grounded route data."
+        if route.get("fallback_used"):
+            answer = "Navigator panel opened with straight-line fallback data."
+        return {
+            "source": "navigator",
+            "query": query or headline or "Navigator route",
+            "answer": answer,
+            "origin": origin,
+            "destination": destination,
+            "mode": str(result.get("mode") or ""),
+            "provider_sequence": result.get("provider_sequence") if isinstance(result.get("provider_sequence"), list) else [],
+            "route": route,
+            "straight_line": result.get("straight_line") if isinstance(result.get("straight_line"), dict) else {},
+            "degraded": bool(result.get("degraded")),
+            "degraded_reason": str(result.get("degraded_reason") or ""),
+            "narrative": narrative if isinstance(narrative, dict) else {},
+            "results": [
+                {
+                    "title": headline or "Navigator route",
+                    "content": f"{route.get('distance_km', '?')} km, {route.get('duration_text', 'time unavailable')}",
+                    "url": "",
+                }
+            ],
+        }
+
     return None
 
 
@@ -288,6 +423,20 @@ async def _stream_chat(payload: ChatRequest):
     for event in _tool_events(messages):
         yield _sse({"session_id": session_id, "activity": event})
     for panel in _panel_payloads(messages):
+        if panel.get("source") == "navigator":
+            yield _sse(
+                {
+                    "session_id": session_id,
+                    "activity": {
+                        "event": "navigation_completed",
+                        "message": panel.get("answer", "Navigator panel ready."),
+                        "route": "navigation",
+                        "tool_name": "navigator",
+                    },
+                }
+            )
+            yield _sse({"session_id": session_id, "navigator_result": panel})
+            continue
         yield _sse(
             {
                 "session_id": session_id,
@@ -342,6 +491,49 @@ def health():
 @app.post("/chat/jarvis/stream")
 async def chat_jarvis_stream(payload: ChatRequest):
     return StreamingResponse(_stream_chat(payload), media_type="text/event-stream")
+
+
+@app.get("/memory/graph")
+def memory_graph():
+    brain = _fresh_brain()
+    return _memory_graph_payload(brain)
+
+
+@app.post("/memory/remember")
+def memory_remember(payload: MemoryWriteRequest):
+    brain = _fresh_brain()
+    result = brain.remember(payload.text, importance=payload.importance)
+    return {"result": result, "memory": _memory_graph_payload(brain)}
+
+
+@app.post("/memory/forget")
+def memory_forget(payload: MemoryForgetRequest):
+    brain = _fresh_brain()
+    result = brain.forget(payload.query)
+    return {"result": result, "memory": _memory_graph_payload(brain)}
+
+
+@app.post("/memory/reflect")
+def memory_reflect(payload: MemoryReflectRequest):
+    brain = _fresh_brain()
+    reflection = brain.reflect(payload.label)
+    return {"result": reflection, "memory": _memory_graph_payload(brain)}
+
+
+@app.post("/navigator/route")
+def navigator_route(payload: NavigatorRouteRequest):
+    result = execute_tool(
+        "navigator",
+        origin=payload.origin,
+        destination=payload.destination,
+        mode=payload.mode,
+        alternatives=payload.alternatives,
+        timeout_ms=payload.timeout_ms,
+        response_format="structured",
+    )
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return _panel_payload("navigator", result) or result
 
 
 @app.get("/app/audio/{filename}")

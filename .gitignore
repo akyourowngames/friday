@@ -5,6 +5,16 @@ node_modules/
 __pycache__/
 *.pyc
 *.pyo
+*.log
+*.err.log
+storage/*.png
+storage/*.jpg
+storage/*.jpeg
+storage/memories/
+storage/memory_backups/
+storage/*_embeddings.npy
+storage/*_texts.json
+storage/*_text.txt
 storage/onnx_models/
 storage/images/
 storage/browser_auth/

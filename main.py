@@ -75,9 +75,11 @@ def cmd_memory(agent: Agent, args: str = ""):
         limit = 25
     memories = agent.brain.list_memories(limit)
     assessment = agent.brain.system_assessment()
+    graph = assessment.get("graph", {})
     console.print(
         f"[cyan]Memory:[/cyan] {assessment['entry_count']} stored, "
-        f"{assessment['indexed_count']} indexed, index {assessment['index_state']}"
+        f"{assessment['indexed_count']} indexed, index {assessment['index_state']}, "
+        f"graph {graph.get('active_edge_count', 0)} active edges"
     )
     if not memories:
         console.print("[yellow]No memories stored.[/yellow]")

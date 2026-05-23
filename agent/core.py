@@ -337,6 +337,20 @@ def _memory_context_texts() -> tuple[str, str]:
     )
 
 
+@lru_cache(maxsize=1)
+def _memory_scope_texts() -> tuple[str, str]:
+    return (
+        _load_routing_policy_section(
+            "Broad Memory Recall Text",
+            "The user asks for a broad overview of remembered personal facts.",
+        ),
+        _load_routing_policy_section(
+            "Specific Memory Recall Text",
+            "The user asks for one particular remembered fact.",
+        ),
+    )
+
+
 def _looks_like_context_followup(text: str) -> bool:
     text = str(text or "").strip()
     if not text:
@@ -369,6 +383,23 @@ def _should_use_memory_context(user_input: str, q_emb, selected_tools: list) -> 
     except Exception:
         return False
     return memory_score > small_talk_score
+
+
+def _should_use_profile_context(user_input: str, q_emb, last_profile_context: bool = False) -> bool:
+    if q_emb is None:
+        return False
+    if last_profile_context and _looks_like_context_followup(user_input):
+        return True
+    broad_text, specific_text = _memory_scope_texts()
+    try:
+        compare_embs = embed([broad_text, specific_text])
+        if getattr(compare_embs, "ndim", 1) == 1:
+            compare_embs = compare_embs.reshape(1, -1)
+        broad_score = float(np.dot(compare_embs[0], q_emb))
+        specific_score = float(np.dot(compare_embs[1], q_emb))
+    except Exception:
+        return False
+    return broad_score >= specific_score
 
 
 def _latest_tool_name(messages) -> str:
@@ -561,6 +592,30 @@ def _should_suppress_memory_context(router_decision: dict) -> bool:
     return router_decision.get("reason") == "small_talk_contrast_won"
 
 
+def _memory_context_has_graph(context: str | None) -> bool:
+    for line in str(context or "").splitlines():
+        line = line.strip()
+        if line.startswith("Graph memory:") and line[len("Graph memory:"):].strip():
+            return True
+    return False
+
+
+def _should_keep_memory_context(
+    context: str | None,
+    user_input: str,
+    q_emb,
+    selected_tools: list,
+    router_decision: dict,
+) -> bool:
+    if not context:
+        return False
+    if _memory_context_has_graph(context):
+        return True
+    if _should_suppress_memory_context(router_decision):
+        return _should_use_memory_context(user_input, q_emb, selected_tools)
+    return _should_use_memory_context(user_input, q_emb, selected_tools)
+
+
 def _tool_result_content(result) -> str:
     if result is None:
         return "Done"
@@ -731,6 +786,8 @@ class Agent:
         self.verifier = Verifier()
         self.brain = Brain()
         self._executor = ThreadPoolExecutor(max_workers=3)
+        self._memory_extraction_messages = []
+        self._last_memory_profile_context = False
 
         if not self.llm.check_api_key():
             console.print("[red]NVIDIA_API_KEY not set![/red]")
@@ -757,6 +814,33 @@ class Agent:
         else:
             self.messages = keep + recent
 
+    def _memory_extraction_limit(self) -> int:
+        try:
+            return max(0, min(int(settings.memory_extraction_context_messages), 40))
+        except (TypeError, ValueError):
+            return 8
+
+    def _memory_extraction_context(self) -> str:
+        limit = self._memory_extraction_limit()
+        if limit <= 0:
+            return ""
+        lines = []
+        for item in self._memory_extraction_messages[-limit:]:
+            role = str(item.get("role", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if role and content:
+                lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    def _remember_plain_turn(self, user_input: str, assistant_response: str):
+        if user_input:
+            self._memory_extraction_messages.append({"role": "user", "content": str(user_input)})
+        if assistant_response:
+            self._memory_extraction_messages.append({"role": "assistant", "content": str(assistant_response)})
+        limit = self._memory_extraction_limit()
+        if limit > 0 and len(self._memory_extraction_messages) > limit:
+            self._memory_extraction_messages = self._memory_extraction_messages[-limit:]
+
     def process(self, user_input: str):
         recent_action_context = _recent_action_context(self.messages)
         need_context = len(user_input.strip()) >= settings.embedding_min_chars
@@ -764,18 +848,40 @@ class Agent:
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             router_future = pool.submit(self.router.select_tools, user_input, q_emb)
-            brain_future = pool.submit(self.brain.recall, user_input, 5, q_emb) if need_context else None
+            brain_future = pool.submit(self.brain.recall_context, user_input, 5, q_emb) if need_context else None
 
             selected_tools = router_future.result()
             context = brain_future.result() if brain_future else None
 
-        if _should_suppress_memory_context(self.router.last_decision()) or not _should_use_memory_context(user_input, q_emb, selected_tools):
+        memory_profile_context = False
+        if need_context and _should_use_memory_context(user_input, q_emb, selected_tools):
+            memory_profile_context = _should_use_profile_context(
+                user_input,
+                q_emb,
+                self._last_memory_profile_context,
+            )
+            if memory_profile_context:
+                profile_context = self.brain.profile_context(limit=8)
+                if profile_context:
+                    context = profile_context
+
+        if not _should_keep_memory_context(
+            context,
+            user_input,
+            q_emb,
+            selected_tools,
+            self.router.last_decision(),
+        ):
             context = None
 
         selected_tools = _maybe_reuse_latest_context_tool(user_input, selected_tools, self.messages)
 
         if context:
-            msg = f"[FACT (this is the truth — do not contradict or add to it): {context}]\n{user_input}"
+            msg = (
+                "[PERMANENT MEMORY FACTS: Use these as known truth for this turn. "
+                "Do not mention memory context, saved notes, conversation history, retrieval, confidence, scores, ranking, or internal metadata. "
+                f"Answer directly from the facts when they answer the user: {context}]\n{user_input}"
+            )
         else:
             msg = user_input
 
@@ -1056,17 +1162,25 @@ class Agent:
                 if self.messages and self.messages[-1]["role"] == "assistant":
                     self.messages[-1]["content"] = refusal
 
+        extraction_context = self._memory_extraction_context()
         if content and len(user_input.strip()) > 15:
-            self._executor.submit(self._extract_and_store, user_input, content)
+            self._executor.submit(self._extract_and_store, user_input, content, extraction_context)
+
+        if content:
+            self._remember_plain_turn(user_input, content)
+            self._last_memory_profile_context = bool(memory_profile_context and context)
 
         self._maybe_summarize()
 
         return content
 
-    def _extract_and_store(self, user_input, response):
+    def _extract_and_store(self, user_input, response, recent_user_context: str = ""):
         if not settings.memory_store_enabled:
             return
-        facts = self.llm.extract_facts(user_input, response)
+        try:
+            facts = self.llm.extract_facts(user_input, response, recent_user_context=recent_user_context)
+        except TypeError:
+            facts = self.llm.extract_facts(user_input, response)
         if facts:
             stored = 0
             for fact in facts:

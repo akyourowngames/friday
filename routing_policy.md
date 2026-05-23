@@ -16,6 +16,14 @@ The user is giving a fresh standalone search topic, a new named target, a differ
 
 The user asks who they are, what the assistant knows about them, what has been remembered, their saved preferences, personal facts, location, name, project context, or prior conversation facts.
 
+## Broad Memory Recall Text
+
+The user asks for a broad overview of remembered personal facts, asks what else is known, asks anything else after a memory answer, or asks for a profile-style summary of known identity, relationships, preferences, projects, and related people.
+
+## Specific Memory Recall Text
+
+The user asks for one particular remembered fact, such as a name, location, preference, relationship, class, project, or status, and the answer should focus on that fact instead of listing the whole profile.
+
 ## No Memory Small Talk Text
 
 The user greets the assistant, asks how the assistant is, vents casually, reacts emotionally, jokes, thanks the assistant, or continues ordinary conversation without asking for remembered personal facts.

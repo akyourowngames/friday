@@ -34,6 +34,7 @@ body {
 }
 
 button { font-family: var(--font); cursor: pointer; border: none; background: none; color: inherit; }
+a { color: inherit; text-decoration: none; }
 textarea { font-family: var(--font); color: var(--text); }
 
 .glass-panel {
@@ -1100,6 +1101,11 @@ textarea { font-family: var(--font); color: var(--text); }
     --tool-color-soft: rgba(255, 184, 107, 0.2);
 }
 
+.tool-burst--navigator {
+    --tool-color: #43e8c6;
+    --tool-color-soft: rgba(67, 232, 198, 0.22);
+}
+
 .tool-burst--terminal,
 .tool-burst--file_read {
     --tool-color: var(--accent-secondary);
@@ -1401,6 +1407,9 @@ textarea { font-family: var(--font); color: var(--text); }
 .activity-item.route-task .activity-event,
 .activity-item.route-task .activity-step { color: var(--accent-secondary); }
 .activity-item.route-task .activity-step { background: rgba(78, 205, 196, 0.15); }
+.activity-item.route-navigation .activity-event,
+.activity-item.route-navigation .activity-step { color: #43e8c6; }
+.activity-item.route-navigation .activity-step { background: rgba(67, 232, 198, 0.16); }
 .activity-item.route-chat .activity-event,
 .activity-item.route-chat .activity-step { color: var(--accent); }
 .activity-item.route-chat .activity-step { background: rgba(124, 106, 239, 0.2); }

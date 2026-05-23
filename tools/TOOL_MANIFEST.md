@@ -10,6 +10,7 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 - `hackernews.py` - Hacker News retrieval capability.
 - `image.py` - image generation or image-related capability.
 - `manifest_audit.py` - read-only audit capability for comparing this manifest with observed tool modules and registered callable schemas.
+- `navigator.py` - open-provider route distance, straight-line distance, travel estimate, and place detail capability.
 - `notes.py` - note storage and retrieval capability.
 - `reddit.py` - Reddit retrieval capability.
 - `terminal.py` - shell and application launch capability with configured timeout bounds.
@@ -655,6 +656,42 @@ It exists so KING can recover from transient failures without hanging, looping i
 - This contract does not override configured tool timeout bounds.
 - This contract does not permit infinite loops or background retries after the user-visible turn ends.
 - This contract must not become a keyword-based latency shortcut.
+
+## Runtime Tool Entry: navigator
+
+```json
+{
+  "name": "navigator",
+  "version": "1.0.0",
+  "upgrade_date": "2026-05-23T00:00:00+05:30",
+  "purpose": "Resolve two user-supplied places with open geocoding, calculate route distance through an open routing provider, and return grounded travel details with a transparent straight-line fallback.",
+  "inputs": {
+    "origin": "string: non-empty starting place or address",
+    "destination": "string: non-empty destination place or address",
+    "mode": "string enum driving|walking|cycling: optional, default KING_NAVIGATOR_DEFAULT_MODE",
+    "alternatives": "boolean: optional, default false",
+    "timeout_ms": "integer 1..60000: optional, default KING_NAVIGATOR_DEFAULT_TIMEOUT_MS",
+    "response_format": "string enum legacy|structured: optional, default legacy",
+    "trace_enabled": "boolean: optional, default false"
+  },
+  "outputs": {
+    "legacy": "string: route summary composed from observed place, distance, duration, provider, and fallback fields",
+    "structured_success": "object: origin, destination, mode, provider sequence, route distance, straight-line distance, duration, degraded state, and narrative fields",
+    "structured_error": "object: typed error plus meta and trace",
+    "trace": "json object: emitted when trace_enabled is true"
+  },
+  "providers": ["nominatim", "osrm", "haversine fallback"],
+  "error_codes": ["EMPTY_ORIGIN", "EMPTY_DESTINATION", "INVALID_MODE", "INVALID_TIMEOUT", "PLACE_NOT_FOUND"],
+  "has_trace": true,
+  "timeout_ms": 12000,
+  "retry": true,
+  "circuit_breaker": false,
+  "backward_compatible": true,
+  "verified": true,
+  "verification_date": "2026-05-23T00:00:00+05:30",
+  "score": 9.1
+}
+```
 
 ## Runtime Tool Entry: web_search
 

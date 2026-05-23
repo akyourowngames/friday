@@ -33,6 +33,16 @@ Before the upgrade, the memory subsystem had these bottlenecks and operational g
 - Added atomic file writes for JSON and NumPy index files to reduce corruption risk.
 - Added capacity controls with archival of evicted memories.
 - Added system assessment and benchmark methods for validation and documentation.
+- Added ranked recall results with confidence scoring while keeping `recall()`'s
+  string return contract intact for existing callers.
+- Added graph-scoped contradiction handling so temporal updates replace only the
+  same subject and relation instead of deleting unrelated facts.
+- Added lightweight graph inference for configured bridge relations, allowing a
+  stored relationship such as a crush to connect to that person's class,
+  location, or other active facts during recall.
+- Added recent plain conversation context to memory extraction so follow-up
+  storage requests can resolve the latest user-provided fact instead of copying
+  an assistant paraphrase.
 
 ### Storage Layout
 
@@ -53,6 +63,12 @@ New settings in `config.py`:
 - `KING_MEMORY_EMBEDDINGS_FILE`
 - `KING_MEMORY_ARCHIVE_FILE`
 - `KING_MEMORY_MAX_ENTRIES`
+- `KING_MEMORY_RANK_SEMANTIC_WEIGHT`
+- `KING_MEMORY_RANK_IMPORTANCE_WEIGHT`
+- `KING_MEMORY_RANK_OVERLAP_WEIGHT`
+- `KING_MEMORY_INFERENCE_BRIDGE_RELATIONS`
+- `KING_MEMORY_INFERENCE_CONFIDENCE_FACTOR`
+- `KING_MEMORY_EXTRACTION_CONTEXT_MESSAGES`
 
 ## Migration Plan
 

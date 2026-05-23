@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#050510">
+    <title>J.A.R.V.I.S Memory</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="memory.css">
+</head>
+<body>
+    <div class="memory-app">
+        <div class="memory-orb" aria-hidden="true"></div>
+
+        <header class="header glass-panel">
+            <div class="header-left">
+                <a class="btn-icon" href="index.html" title="Back to Jarvis" aria-label="Back to Jarvis">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+                </a>
+                <div class="brand-copy">
+                    <h1 class="logo">J.A.R.V.I.S</h1>
+                    <span class="tagline">Memory command center</span>
+                </div>
+            </div>
+
+            <div class="header-center">
+                <div class="mode-switch mode-switch-two">
+                    <div class="mode-slider" id="mode-slider"></div>
+                    <button class="mode-btn active" data-page="memory" title="Memory command center">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                        <span>Memory</span>
+                    </button>
+                    <button class="mode-btn" data-page="canvas" title="Full graph canvas">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="12" cy="19" r="2"/><path d="M7 11l4-5"/><path d="M13 6l4 5"/><path d="M17 13l-4 5"/><path d="M11 18l-4-5"/><path d="M7 12h10"/></svg>
+                        <span>Graph</span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="header-right">
+                <span class="connection" id="connection-state">
+                    <span class="connection-dot"></span>
+                    <span id="connection-label">Connecting</span>
+                </span>
+                <button class="btn-icon" id="refresh-btn" title="Refresh memory" aria-label="Refresh memory">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.3 6.4"/><path d="M3 12A9 9 0 0 1 18.3 5.6"/><path d="M18 2v4h-4"/><path d="M6 22v-4h4"/></svg>
+                </button>
+                <button class="btn-icon" id="export-btn" title="Export graph JSON" aria-label="Export graph JSON">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="workspace page-view active" id="memory-page">
+            <section class="metric-grid" id="metric-grid" aria-label="Memory system metrics"></section>
+
+            <section class="graph-shell glass-panel">
+                <div class="graph-toolbar">
+                    <div class="search-wrap">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+                        <input id="graph-search" type="search" placeholder="Search memory graph">
+                    </div>
+                    <div class="segmented" role="tablist" aria-label="Graph filters">
+                        <button class="segment active" data-filter="active">Active</button>
+                        <button class="segment" data-filter="all">All</button>
+                        <button class="segment" data-filter="inactive">Inactive</button>
+                    </div>
+                    <div class="segmented compact" role="tablist" aria-label="View mode">
+                        <button class="segment active" data-view="graph" title="Graph view" aria-label="Graph view">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="12" cy="19" r="2"/><path d="M7 11l4-5"/><path d="M13 6l4 5"/><path d="M17 13l-4 5"/><path d="M11 18l-4-5"/><path d="M7 12h10"/></svg>
+                        </button>
+                        <button class="segment" data-view="table" title="Edge table" aria-label="Edge table">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18"/><path d="M3 12h18"/><path d="M3 19h18"/><path d="M8 5v14"/><path d="M16 5v14"/></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="graph-summary" id="graph-summary"></div>
+
+                <div class="graph-view active" id="graph-view">
+                    <svg id="graph-svg" role="img" aria-label="Memory graph"></svg>
+                    <div class="empty-state" id="graph-empty">No graph edges match the current filter.</div>
+                </div>
+
+                <div class="table-view" id="table-view">
+                    <div class="edge-table" id="edge-table"></div>
+                </div>
+            </section>
+
+            <aside class="control-panel glass-panel">
+                <section class="inspector">
+                    <div class="section-head">
+                        <h2>Inspector</h2>
+                        <span class="panel-status" id="selection-kind">None</span>
+                    </div>
+                    <div class="inspector-body" id="inspector-body">
+                        <div class="placeholder">Select a node, edge, or memory.</div>
+                    </div>
+                </section>
+
+                <section class="write-panel">
+                    <div class="section-head">
+                        <h2>Manage Memory</h2>
+                        <span class="panel-status" id="write-status">Ready</span>
+                    </div>
+                    <textarea id="memory-input" rows="3" placeholder="User likes Python"></textarea>
+                    <div class="importance-row">
+                        <label for="importance-input">Importance</label>
+                        <input id="importance-input" type="range" min="0" max="1" step="0.05" value="0.8">
+                        <span id="importance-value">0.80</span>
+                    </div>
+                    <button class="primary-btn" id="remember-btn">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                        Store
+                    </button>
+
+                    <div class="tool-row">
+                        <input id="forget-input" type="text" placeholder="Forget by text">
+                        <button class="danger-btn" id="forget-btn" title="Remove matching memory" aria-label="Remove matching memory">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
+                        </button>
+                    </div>
+                    <span class="panel-status tool-status" id="forget-status">Ready</span>
+
+                    <div class="tool-row">
+                        <input id="reflect-label" type="text" value="frontend" placeholder="reflection label">
+                        <button class="secondary-btn icon-only" id="reflect-btn" title="Write reflection" aria-label="Write reflection">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M21 3v6h-6"/><path d="M21 3l-9 9"/></svg>
+                        </button>
+                    </div>
+                    <span class="panel-status tool-status" id="reflect-status">Ready</span>
+                </section>
+
+                <section class="relation-panel">
+                    <div class="section-head">
+                        <h2>Relations</h2>
+                        <span class="panel-status" id="relation-count">0</span>
+                    </div>
+                    <div class="relation-list" id="relation-list"></div>
+                </section>
+
+                <section class="timeline-panel">
+                    <div class="section-head">
+                        <h2>Activity</h2>
+                        <span class="panel-status" id="activity-count">0</span>
+                    </div>
+                    <div class="timeline" id="timeline"></div>
+                </section>
+            </aside>
+
+            <section class="memory-list-panel glass-panel">
+                <div class="section-head">
+                    <h2>Memories</h2>
+                    <div class="list-controls">
+                        <button class="text-btn active" data-memory-filter="all">All</button>
+                        <button class="text-btn" data-memory-filter="graph">Graph</button>
+                        <button class="text-btn" data-memory-filter="plain">Text</button>
+                    </div>
+                </div>
+                <div class="memory-list" id="memory-list"></div>
+            </section>
+        </main>
+
+        <main class="canvas-page page-view" id="canvas-page">
+            <section class="canvas-shell glass-panel">
+                <div class="canvas-toolbar">
+                    <div class="search-wrap">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+                        <input id="canvas-search" type="search" placeholder="Search full graph canvas">
+                    </div>
+                    <div class="segmented" role="tablist" aria-label="Canvas graph filters">
+                        <button class="segment active" data-canvas-filter="active">Active</button>
+                        <button class="segment" data-canvas-filter="all">All</button>
+                        <button class="segment" data-canvas-filter="inactive">Inactive</button>
+                    </div>
+                    <div class="canvas-actions">
+                        <button class="btn-icon" id="canvas-fit-btn" title="Fit graph" aria-label="Fit graph">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+                        </button>
+                        <button class="btn-icon" id="canvas-zoom-out-btn" title="Zoom out" aria-label="Zoom out">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M8 11h6"/><path d="M21 21l-4.3-4.3"/></svg>
+                        </button>
+                        <button class="btn-icon" id="canvas-zoom-in-btn" title="Zoom in" aria-label="Zoom in">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M8 11h6"/><path d="M11 8v6"/><path d="M21 21l-4.3-4.3"/></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="canvas-stage" id="canvas-stage">
+                    <svg id="canvas-svg" role="img" aria-label="Full memory graph canvas"></svg>
+                    <div class="canvas-empty" id="canvas-empty">No graph edges match this canvas filter.</div>
+                    <div class="canvas-hud">
+                        <span id="canvas-node-count">0 nodes</span>
+                        <span id="canvas-edge-count">0 edges</span>
+                        <span id="canvas-zoom-label">100%</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+    </div>
+
+    <script src="memory.js"></script>
+</body>
+</html>

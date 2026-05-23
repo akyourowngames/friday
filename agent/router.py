@@ -17,9 +17,28 @@ ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.m
 _SMALL_TALK_MARGIN = 0.10
 
 
+def _load_routing_section(heading: str) -> str:
+    if not ROUTING_POLICY_PATH.exists():
+        return ""
+    targets = {f"# {heading}".casefold(), f"## {heading}".casefold()}
+    lines = []
+    in_section = False
+    for raw_line in ROUTING_POLICY_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("# ") or line.startswith("## "):
+            in_section = line.casefold() in targets
+            continue
+        if in_section and line:
+            lines.append(line)
+    return " ".join(lines).strip()
+
+
 def _load_small_talk_text() -> str:
     if ROUTING_POLICY_PATH.exists():
-        return ROUTING_POLICY_PATH.read_text(encoding="utf-8").strip()
+        no_memory_small_talk = _load_routing_section("No Memory Small Talk Text")
+        text = f"Routing Contrast Text. No Memory Small Talk Text: {no_memory_small_talk}".strip()
+        if text:
+            return text
     return (
         "Conversational turn with no request for external data, local action, "
         "memory access, file access, search, playback, generation, or side effects."
@@ -134,7 +153,13 @@ class ToolRouter:
 
         # Check if this is just casual chat
         small_talk_sim = float(np.dot(self._get_small_talk_emb(), q_emb))
-        if small_talk_sim > 0.65 and small_talk_sim > max_tool_sim + _SMALL_TALK_MARGIN:
+        ambiguous_tool_ceiling = self.threshold + max(self.winner_margin, _SMALL_TALK_MARGIN)
+        small_talk_close = small_talk_sim + _SMALL_TALK_MARGIN >= max_tool_sim
+        if small_talk_sim > max_tool_sim + _SMALL_TALK_MARGIN or (
+            small_talk_close and max_tool_sim < ambiguous_tool_ceiling
+        ) or (
+            small_talk_sim >= 0.0 and max_tool_sim < ambiguous_tool_ceiling
+        ):
             self._last_decision = {
                 "query": query,
                 "selected": [],

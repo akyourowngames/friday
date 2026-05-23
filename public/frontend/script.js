@@ -4,7 +4,7 @@ const API = (() => {
     if (window.KING_API_BASE) return window.KING_API_BASE;
     const current = new URL(window.location.origin);
     if (current.hostname === 'localhost' || current.hostname === '127.0.0.1') {
-        if (current.port === '3000') return `${current.protocol}//${current.hostname}:8000`;
+        if (current.port !== '8000') return `${current.protocol}//${current.hostname}:8000`;
     }
     return window.location.origin || 'http://127.0.0.1:8000';
 })();
@@ -233,6 +233,7 @@ const TOOL_VISUAL_LABELS = {
     file_list: 'FILES',
     terminal: 'SYSTEM',
     browser: 'BROWSER',
+    navigator: 'NAV',
     assistant: 'CORE',
     evidence: 'EVIDENCE',
 };
@@ -262,6 +263,7 @@ function toolKindFromActivity(activity) {
     const eventName = String(activity.event || '').toLowerCase();
     const message = String(activity.message || '').toLowerCase();
     const combined = [tool, route, eventName, message].join(' ');
+    if (combined.includes('navigator') || combined.includes('navigation')) return 'navigator';
     if (combined.includes('reddit')) return 'reddit';
     if (combined.includes('hackernews') || combined.includes('hacker news')) return 'hackernews';
     if (combined.includes('web_search')) return 'web_search';
@@ -280,6 +282,8 @@ function shouldAnimateToolEvent(activity) {
     return eventName === 'tool_chain_planned'
         || eventName === 'searching_web'
         || eventName === 'search_completed'
+        || eventName === 'navigation_planning'
+        || eventName === 'navigation_completed'
         || eventName === 'tasks_executing'
         || eventName === 'actions_emitted'
         || eventName === 'vision_analyzing'
@@ -932,6 +936,9 @@ async function sendMessageWithImage(text, imgBase64) {
                         if (activityToggle) activityToggle.style.display = '';
                         if (activityPanel && shouldAutoOpenActivityPanel()) { activityPanel.classList.add('open'); updatePanelOverlay(); }
                     }
+                    if (data.navigator_result) {
+                        renderNavigatorResult(data.navigator_result);
+                    }
                     if (data.actions) handleActions(data.actions, contentEl);
                     if (data.background_tasks) handleBackgroundTasks(data.background_tasks, contentEl);
                     if ('chunk' in data) {
@@ -1238,6 +1245,25 @@ function renderSearchResults(payload) {
     }
 }
 
+function renderNavigatorResult(payload) {
+    if (!payload) return;
+    triggerToolAnimation({
+        event: 'navigation_completed',
+        route: 'navigation',
+        tool_name: 'navigator',
+        message: payload.answer || 'Navigator panel ready.',
+    });
+    try {
+        sessionStorage.setItem('kingNavigatorPayload', JSON.stringify(payload));
+    } catch (_) {}
+    try {
+        const opened = window.open('navigator.html', '_blank', 'noopener');
+        if (!opened) showToast('Navigator ready. Open Navigator from the top bar.');
+    } catch (_) {
+        showToast('Navigator ready. Open Navigator from the top bar.');
+    }
+}
+
 function safeUrlForHref(url) {
     if (!url || typeof url !== 'string') return '';
     const u = url.trim();
@@ -1268,6 +1294,8 @@ const ACTIVITY_STEPS = {
     extracting_query:    { step: 0, label: 'Extracting query' },
     searching_web:       { step: 0, label: 'Searching web' },
     search_completed:    { step: 0, label: 'Search completed' },
+    navigation_planning:  { step: 0, label: 'Navigator' },
+    navigation_completed: { step: 0, label: 'Route ready' },
     context_retrieved:   { step: 0, label: 'Context retrieved' },
     background_dispatched: { step: 0, label: 'Background tasks' },
     waiting_for_model:   { step: 0, label: 'Waiting for model' },
@@ -1300,6 +1328,7 @@ function appendActivity(activity) {
         else if (route === 'task') item.classList.add('route-task');
         else if (route === 'mixed') item.classList.add('route-task');
         else if (route === 'chat') item.classList.add('route-chat');
+        else if (route === 'navigation') item.classList.add('route-navigation');
     };
     if (activity.event === 'query_detected') {
         detail = activity.message || '';
@@ -1351,6 +1380,12 @@ function appendActivity(activity) {
     } else if (activity.event === 'search_completed') {
         detail = activity.message || 'Search completed';
         item.classList.add('activity-sub', 'route-realtime');
+    } else if (activity.event === 'navigation_planning') {
+        detail = activity.message || 'Resolving route...';
+        item.classList.add('activity-sub', 'route-navigation');
+    } else if (activity.event === 'navigation_completed') {
+        detail = activity.message || 'Route ready';
+        item.classList.add('activity-sub', 'route-navigation');
     } else if (activity.event === 'context_retrieved') {
         detail = activity.message || 'Knowledge base ready';
         item.classList.add('activity-sub', 'route-general');
@@ -1592,6 +1627,9 @@ async function sendMessage(textOverride) {
                         renderSearchResults(data.search_results);
                         if (searchResultsToggle) searchResultsToggle.style.display = '';
                         if (searchResultsWidget && settings.autoOpenSearchResults) { searchResultsWidget.classList.add('open'); updatePanelOverlay(); }
+                    }
+                    if (data.navigator_result) {
+                        renderNavigatorResult(data.navigator_result);
                     }
                     if (data.actions) {
                         handleActions(data.actions, contentEl);

@@ -15,7 +15,9 @@ from config import settings
 MEMORY_DIR = Path(settings.memory_dir)
 BACKUP_DIR = Path(settings.memory_backup_dir)
 MEMORY_FILTER_POLICY_PATH = Path(settings.memory_filter_policy_file)
+MEMORY_GRAPH_RELATIONS_PATH = Path(settings.memory_graph_relations_file)
 _INDEX_SCHEMA_VERSION = 2
+_GRAPH_SCHEMA_VERSION = 1
 
 _VAGUE_PATTERNS = [
     "medical records",
@@ -27,10 +29,14 @@ _VAGUE_PATTERNS = [
 ]
 
 
-def _load_policy_reject_phrases() -> list[str]:
-    path = MEMORY_FILTER_POLICY_PATH
+def _resolve_project_path(path: Path) -> Path:
     if not path.is_absolute():
         path = Path(__file__).resolve().parent.parent / path
+    return path
+
+
+def _load_policy_reject_phrases() -> list[str]:
+    path = _resolve_project_path(MEMORY_FILTER_POLICY_PATH)
     if not path.exists():
         return []
 
@@ -47,6 +53,37 @@ def _load_policy_reject_phrases() -> list[str]:
         if phrase:
             phrases.append(phrase)
     return phrases
+
+
+def _load_graph_relation_rules(path: Path | None = None) -> list[dict]:
+    rule_path = _resolve_project_path(path or MEMORY_GRAPH_RELATIONS_PATH)
+    if not rule_path.exists():
+        return []
+
+    rules = []
+    in_rules = False
+    for raw_line in rule_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            in_rules = line.lower() == "## rules"
+            continue
+        if not in_rules or not line.startswith("- ") or "=>" not in line:
+            continue
+        left, right = line[2:].split("=>", 1)
+        output = [part.strip() for part in right.strip().split("|")]
+        if len(output) < 5:
+            continue
+        rules.append(
+            {
+                "pattern": left.strip(),
+                "source": output[0],
+                "relation": output[1],
+                "target": output[2],
+                "tier": output[3],
+                "mode": output[4],
+            }
+        )
+    return rules
 
 _CONTRADICTION_CATEGORIES = {
     "name": ["name is", "name :", "full name", "called "],
@@ -74,10 +111,21 @@ def _is_vague(text: str) -> bool:
     lower = text.lower()
     if len(text) < 15:
         return True
+    if _looks_like_internal_score_artifact(text):
+        return True
     for pat in _VAGUE_PATTERNS + _load_policy_reject_phrases():
         if pat in lower:
             return True
     return False
+
+
+def _looks_like_internal_score_artifact(text: str) -> bool:
+    lower = str(text or "").casefold()
+    if "confidence" not in lower:
+        return False
+    has_digit = any(char.isdigit() for char in lower)
+    has_score_word = "level" in lower or "score" in lower or "statement" in lower
+    return has_digit or has_score_word
 
 
 def _contradiction_category(text: str) -> str | None:
@@ -106,6 +154,117 @@ def _normalize_fact(text: str) -> str:
         normalized.append(current)
         i += 1
     return " ".join(normalized).strip()
+
+
+def _clean_graph_value(value: str) -> str:
+    cleaned = str(value or "").strip()
+    while cleaned and cleaned[-1] in ".,;:!?":
+        cleaned = cleaned[:-1].strip()
+    return cleaned
+
+
+def _node_id(name: str) -> str:
+    cleaned = _clean_graph_value(name)
+    lowered = cleaned.casefold()
+    if lowered == "user":
+        return "user"
+
+    parts = []
+    last_was_sep = False
+    for char in lowered:
+        if char.isalnum():
+            parts.append(char)
+            last_was_sep = False
+        elif not last_was_sep:
+            parts.append("_")
+            last_was_sep = True
+    node = "".join(parts).strip("_")
+    return node or hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:12]
+
+
+def _render_template(template: str, values: dict) -> str:
+    output = template
+    for key, value in values.items():
+        output = output.replace("{" + key + "}", value)
+    return _clean_graph_value(output)
+
+
+def _match_graph_pattern(pattern: str, text: str) -> dict | None:
+    pattern = pattern.strip()
+    text = text.strip()
+    if not pattern or not text:
+        return None
+
+    tokens = []
+    cursor = 0
+    while cursor < len(pattern):
+        start = pattern.find("{", cursor)
+        if start < 0:
+            tokens.append(("literal", pattern[cursor:]))
+            break
+        end = pattern.find("}", start + 1)
+        if end < 0:
+            return None
+        if start > cursor:
+            tokens.append(("literal", pattern[cursor:start]))
+        tokens.append(("placeholder", pattern[start + 1:end].strip()))
+        cursor = end + 1
+
+    lowered_text = text.casefold()
+    values = {}
+    pos = 0
+    idx = 0
+    while idx < len(tokens):
+        kind, value = tokens[idx]
+        if kind == "literal":
+            literal = value
+            if not literal:
+                idx += 1
+                continue
+            found = lowered_text.find(literal.casefold(), pos)
+            if found < 0:
+                return None
+            if idx == 0 and found != 0:
+                return None
+            pos = found + len(literal)
+            idx += 1
+            continue
+
+        placeholder = value
+        next_literal = ""
+        for next_kind, next_value in tokens[idx + 1:]:
+            if next_kind == "literal" and next_value:
+                next_literal = next_value
+                break
+        if next_literal:
+            next_found = lowered_text.find(next_literal.casefold(), pos)
+            if next_found < 0:
+                return None
+            captured = text[pos:next_found]
+            pos = next_found
+        else:
+            captured = text[pos:]
+            pos = len(text)
+        captured = _clean_graph_value(captured)
+        if not captured:
+            return None
+        values[placeholder] = captured
+        idx += 1
+
+    if pos < len(text) and tokens and tokens[-1][0] == "literal":
+        remainder = text[pos:].strip()
+        if remainder:
+            return None
+    return values
+
+
+def _node_type(name: str, relation: str = "") -> str:
+    node = _node_id(name)
+    if node == "user":
+        return "person"
+    if relation in {"building", "working_on"}:
+        return "project"
+    return "concept"
 
 
 def _safe_float(value, default: float = 0.5) -> float:
@@ -194,15 +353,81 @@ def _ensure_2d(array: np.ndarray) -> np.ndarray:
     return array
 
 
+def _clamp01(value) -> float:
+    return min(max(_safe_float(value, 0.0), 0.0), 1.0)
+
+
+def _term_set(text: str, min_length: int = 2) -> set[str]:
+    terms = set()
+
+    def add_token(token: str):
+        if len(token) < min_length:
+            return
+        terms.add(token)
+        if len(token) > min_length + 1 and token.endswith("s"):
+            terms.add(token[:-1])
+
+    current = []
+    for char in str(text or "").casefold():
+        if char.isalnum():
+            current.append(char)
+            continue
+        if current:
+            token = "".join(current)
+            add_token(token)
+            current = []
+    if current:
+        token = "".join(current)
+        add_token(token)
+    return terms
+
+
+def _term_overlap(query_terms: set[str], text: str) -> tuple[int, float]:
+    if not query_terms:
+        return 0, 0.0
+    text_terms = _term_set(text)
+    if not text_terms:
+        return 0, 0.0
+    overlap_count = len(query_terms & text_terms)
+    return overlap_count, overlap_count / max(len(query_terms), 1)
+
+
+def _configured_relation_set(value: str) -> set[str]:
+    relations = set()
+    for item in str(value or "").split(","):
+        relation = item.strip().casefold()
+        if relation:
+            relations.add(relation)
+    return relations
+
+
+def _weighted_confidence(values: list[tuple[float, float]]) -> float:
+    weighted_total = 0.0
+    total_weight = 0.0
+    for value, weight in values:
+        safe_weight = max(0.0, _safe_float(weight, 0.0))
+        if safe_weight <= 0:
+            continue
+        weighted_total += _clamp01(value) * safe_weight
+        total_weight += safe_weight
+    if total_weight <= 0:
+        return 0.0
+    return round(weighted_total / total_weight, 3)
+
+
 class Brain:
     def __init__(self):
         self.memories = []
         self._embeddings = None
         self._index_state = "cold"
         self._last_backup = None
+        self._graph = self._empty_graph()
+        self._graph_rules = _load_graph_relation_rules()
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        self._load_graph()
         self._load_all()
+        self._backfill_graph_from_memories()
         self._load_or_build_index()
 
     def _index_meta_path(self) -> Path:
@@ -213,6 +438,45 @@ class Brain:
 
     def _archive_path(self) -> Path:
         return MEMORY_DIR / settings.memory_archive_file
+
+    def _graph_path(self) -> Path:
+        return MEMORY_DIR / settings.memory_graph_file
+
+    def _empty_graph(self) -> dict:
+        return {
+            "schema_version": _GRAPH_SCHEMA_VERSION,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "nodes": {},
+            "edges": [],
+            "reflections": [],
+            "procedures": [],
+        }
+
+    def _load_graph(self):
+        path = self._graph_path()
+        if not path.exists():
+            self._graph = self._empty_graph()
+            self._ensure_graph_node("User", "person", 0.8)
+            self._persist_graph()
+            return
+        try:
+            graph = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            graph = self._empty_graph()
+        if not isinstance(graph, dict):
+            graph = self._empty_graph()
+        graph.setdefault("schema_version", _GRAPH_SCHEMA_VERSION)
+        graph.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
+        graph.setdefault("nodes", {})
+        graph.setdefault("edges", [])
+        graph.setdefault("reflections", [])
+        graph.setdefault("procedures", [])
+        self._graph = graph
+        self._ensure_graph_node("User", "person", 0.8)
+
+    def _persist_graph(self):
+        self._graph["generated_at"] = datetime.now().isoformat(timespec="seconds")
+        self._atomic_write_json(self._graph_path(), self._graph)
 
     def _memory_files(self) -> list[Path]:
         files = []
@@ -228,12 +492,15 @@ class Brain:
         text = _normalize_fact(text)
         if _is_vague(text):
             return None
-        return {
+        normalized = {
             "text": text,
             "importance": _normalize_importance(item.get("importance")),
             "ts": str(item.get("ts") or "00:00:00"),
             "_date": date_str,
         }
+        normalized["id"] = str(item.get("id") or _memory_id(normalized))
+        normalized["tier"] = str(item.get("tier") or "semantic")
+        return normalized
 
     def _load_all(self):
         self.memories = []
@@ -260,6 +527,33 @@ class Brain:
                 seen.add(key)
                 self.memories.append(normalized)
         self.memories.sort(key=_timestamp_key)
+
+    def _backfill_graph_from_memories(self):
+        active_memory_ids = {item.get("id") or _memory_id(item) for item in self.memories}
+        expected_edge_ids = set()
+        for item in self.memories:
+            text = item.get("text", "")
+            for rule in self._graph_rules:
+                edge_info = self._rule_to_edge(rule, text)
+                if not edge_info:
+                    continue
+                source_id = _node_id(edge_info["source_name"])
+                target_id = _node_id(edge_info["target_name"])
+                expected_edge_ids.add(self._edge_id(source_id, edge_info["relation"], target_id))
+                break
+
+        existing_edges = self._graph.setdefault("edges", [])
+        kept_edges = [
+            edge
+            for edge in existing_edges
+            if edge.get("memory_id") not in active_memory_ids or edge.get("id") in expected_edge_ids
+        ]
+        if len(kept_edges) != len(existing_edges):
+            self._graph["edges"] = kept_edges
+            self._persist_graph()
+
+        for item in self.memories:
+            self._ingest_graph_memory(item)
 
     def _today_path(self):
         return MEMORY_DIR / f"memory_{date.today().isoformat()}.json"
@@ -310,7 +604,7 @@ class Brain:
             shutil.copy2(file_path, backup_path / file_path.name)
             copied += 1
 
-        for extra in (self._index_meta_path(), self._index_embeddings_path(), self._archive_path()):
+        for extra in (self._index_meta_path(), self._index_embeddings_path(), self._archive_path(), self._graph_path()):
             if extra.exists():
                 shutil.copy2(extra, backup_path / extra.name)
                 copied += 1
@@ -390,6 +684,8 @@ class Brain:
                     "text": item["text"],
                     "importance": item["importance"],
                     "ts": item["ts"],
+                    "id": item.get("id") or _memory_id(item),
+                    "tier": item.get("tier", "semantic"),
                 }
             )
 
@@ -420,6 +716,8 @@ class Brain:
                         "importance": item.get("importance", 0.5),
                         "ts": item.get("ts", "00:00:00"),
                         "_date": item.get("_date", date.today().isoformat()),
+                        "id": item.get("id") or _memory_id(item),
+                        "tier": item.get("tier", "semantic"),
                     },
                 }
                 handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -436,6 +734,7 @@ class Brain:
         dirty_dates = set()
         for idx in valid_indices:
             item = self.memories.pop(idx)
+            self._deactivate_memory_edges(item.get("id") or _memory_id(item), reason or "removed")
             removed.append(item)
             dirty_dates.add(item.get("_date", date.today().isoformat()))
 
@@ -473,7 +772,7 @@ class Brain:
         else:
             self._persist_index()
 
-    def _append_embedding(self, text: str):
+    def _append_embedding(self, text: str, insert_idx: int | None = None):
         try:
             new_embedding = np.asarray(embed(text), dtype=np.float32)
         except Exception:
@@ -483,10 +782,180 @@ class Brain:
         if self._embeddings is None or self._embeddings.size == 0:
             self._embeddings = new_embedding
             return
+        expected_existing = len(self.memories) - 1
+        if self._embeddings.shape[0] != expected_existing:
+            self._embeddings = None
+            return
         if self._embeddings.shape[1] != new_embedding.shape[1]:
             self._embeddings = None
             return
-        self._embeddings = np.vstack([self._embeddings, new_embedding])
+        if insert_idx is None or insert_idx >= self._embeddings.shape[0]:
+            self._embeddings = np.vstack([self._embeddings, new_embedding])
+            return
+        self._embeddings = np.insert(self._embeddings, insert_idx, new_embedding[0], axis=0)
+
+    def _ensure_graph_node(self, name: str, node_type: str = "concept", importance: float = 0.5) -> str:
+        name = _clean_graph_value(name)
+        node_id = _node_id(name)
+        now = datetime.now().isoformat(timespec="seconds")
+        nodes = self._graph.setdefault("nodes", {})
+        existing = nodes.get(node_id)
+        if existing:
+            existing["updated_at"] = now
+            existing["importance"] = max(_safe_float(existing.get("importance"), 0.5), _normalize_importance(importance))
+            if name and name not in existing.get("aliases", []) and existing.get("name", "") != name:
+                existing.setdefault("aliases", []).append(name)
+            return node_id
+
+        nodes[node_id] = {
+            "id": node_id,
+            "name": name or node_id,
+            "type": node_type,
+            "importance": _normalize_importance(importance),
+            "created_at": now,
+            "updated_at": now,
+            "aliases": [],
+        }
+        return node_id
+
+    def _edge_id(self, source_id: str, relation: str, target_id: str) -> str:
+        payload = f"{source_id}|{relation}|{target_id}"
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    def _rule_to_edge(self, rule: dict, text: str) -> dict | None:
+        values = _match_graph_pattern(rule["pattern"], text)
+        if values is None:
+            return None
+        source_name = _render_template(rule["source"], values)
+        target_name = _render_template(rule["target"], values)
+        relation = _clean_graph_value(rule["relation"]).casefold()
+        if not source_name or not target_name or not relation:
+            return None
+        return {
+            "source_name": source_name,
+            "target_name": target_name,
+            "relation": relation,
+            "tier": rule.get("tier", "semantic"),
+            "mode": rule.get("mode", "multi"),
+        }
+
+    def _deactivate_memory_edges(self, memory_id: str, reason: str):
+        changed = False
+        now = datetime.now().isoformat(timespec="seconds")
+        for edge in self._graph.setdefault("edges", []):
+            if edge.get("memory_id") != memory_id or not edge.get("active", True):
+                continue
+            edge["active"] = False
+            edge["valid_to"] = now
+            edge["inactive_reason"] = reason
+            changed = True
+        if changed:
+            self._persist_graph()
+
+    def _ingest_graph_memory(self, item: dict) -> bool:
+        text = item.get("text", "")
+        importance = item.get("importance", 0.5)
+        memory_id = item.get("id") or _memory_id(item)
+        now = datetime.now().isoformat(timespec="seconds")
+        changed = False
+
+        for rule in self._graph_rules:
+            edge_info = self._rule_to_edge(rule, text)
+            if not edge_info:
+                continue
+            source_id = self._ensure_graph_node(
+                edge_info["source_name"],
+                _node_type(edge_info["source_name"]),
+                importance,
+            )
+            target_id = self._ensure_graph_node(
+                edge_info["target_name"],
+                _node_type(edge_info["target_name"], edge_info["relation"]),
+                importance,
+            )
+            relation = edge_info["relation"]
+            mode = edge_info["mode"]
+
+            if mode == "temporal":
+                superseded = []
+                for edge in self._graph.setdefault("edges", []):
+                    if (
+                        edge.get("source") == source_id
+                        and edge.get("relation") == relation
+                        and edge.get("active", True)
+                        and edge.get("target") != target_id
+                    ):
+                        edge["active"] = False
+                        edge["valid_to"] = now
+                        edge["inactive_reason"] = "superseded"
+                        superseded.append(edge.get("id"))
+                        changed = True
+            else:
+                superseded = []
+
+            edge_id = self._edge_id(source_id, relation, target_id)
+            existing = None
+            for edge in self._graph.setdefault("edges", []):
+                if edge.get("id") == edge_id:
+                    existing = edge
+                    break
+
+            if existing:
+                existing_changed = False
+                target_strength = max(_safe_float(existing.get("strength"), 0.5), _normalize_importance(importance))
+                target_confidence = max(_safe_float(existing.get("confidence"), 0.5), 0.75)
+                if not existing.get("active", True):
+                    existing["active"] = True
+                    existing_changed = True
+                if existing.get("valid_to") is not None:
+                    existing["valid_to"] = None
+                    existing_changed = True
+                if existing.get("memory_id") != memory_id:
+                    existing["memory_id"] = memory_id
+                    existing_changed = True
+                if _safe_float(existing.get("strength"), 0.5) != target_strength:
+                    existing["strength"] = target_strength
+                    existing_changed = True
+                if _safe_float(existing.get("confidence"), 0.5) != target_confidence:
+                    existing["confidence"] = target_confidence
+                    existing_changed = True
+                if superseded:
+                    existing.setdefault("supersedes", [])
+                    for edge_id_value in superseded:
+                        if edge_id_value and edge_id_value not in existing["supersedes"]:
+                            existing["supersedes"].append(edge_id_value)
+                            existing_changed = True
+                if existing_changed:
+                    existing["updated_at"] = now
+                    changed = True
+                break
+
+            self._graph.setdefault("edges", []).append(
+                {
+                    "id": edge_id,
+                    "source": source_id,
+                    "target": target_id,
+                    "relation": relation,
+                    "strength": _normalize_importance(importance),
+                    "confidence": 0.75,
+                    "memory_id": memory_id,
+                    "created_at": now,
+                    "updated_at": now,
+                    "valid_from": now,
+                    "valid_to": None,
+                    "active": True,
+                    "tier": edge_info["tier"],
+                    "mode": mode,
+                    "evidence": text,
+                    "supersedes": [edge_id_value for edge_id_value in superseded if edge_id_value],
+                }
+            )
+            changed = True
+            break
+
+        if changed:
+            self._persist_graph()
+        return changed
 
     def _is_duplicate(self, text):
         lower = text.lower()
@@ -511,7 +980,44 @@ class Brain:
                 return True
         return False
 
+    def _temporal_edge_info(self, text: str) -> dict | None:
+        for rule in self._graph_rules:
+            if rule.get("mode") != "temporal":
+                continue
+            edge_info = self._rule_to_edge(rule, text)
+            if edge_info:
+                return edge_info
+        return None
+
+    def _graph_contradiction_indices(self, text: str) -> list[int] | None:
+        new_edge = self._temporal_edge_info(text)
+        if not new_edge:
+            return None
+
+        source_id = _node_id(new_edge["source_name"])
+        target_id = _node_id(new_edge["target_name"])
+        relation = new_edge["relation"]
+        to_remove = []
+
+        for idx, memory in enumerate(self.memories):
+            existing_edge = self._temporal_edge_info(memory["text"])
+            if not existing_edge:
+                continue
+            if _node_id(existing_edge["source_name"]) != source_id:
+                continue
+            if existing_edge["relation"] != relation:
+                continue
+            if _node_id(existing_edge["target_name"]) == target_id:
+                continue
+            to_remove.append(idx)
+
+        return to_remove
+
     def _remove_contradictions(self, text) -> set[str]:
+        graph_indices = self._graph_contradiction_indices(text)
+        if graph_indices is not None:
+            return self._remove_indices(graph_indices, reason="contradiction")
+
         category = _contradiction_category(text)
         if not category:
             return set()
@@ -541,11 +1047,19 @@ class Brain:
             "importance": _normalize_importance(importance),
             "ts": datetime.now().strftime("%H:%M:%S"),
             "_date": date.today().isoformat(),
+            "tier": "semantic",
         }
+        item["id"] = _memory_id(item)
         self.memories.append(item)
         self.memories.sort(key=_timestamp_key)
+        insert_idx = 0
+        for idx, memory in enumerate(self.memories):
+            if memory.get("id") == item["id"]:
+                insert_idx = idx
+                break
         dirty_dates.add(item["_date"])
-        self._append_embedding(item["text"])
+        self._ingest_graph_memory(item)
+        self._append_embedding(item["text"], insert_idx=insert_idx)
         dirty_dates.update(self._trim_capacity())
         self._persist_changes(dirty_dates)
         return True
@@ -570,9 +1084,11 @@ class Brain:
         items = self.memories[-safe_limit:]
         return [
             {
+                "id": item.get("id") or _memory_id(item),
                 "index": idx + 1,
                 "text": item["text"],
                 "importance": item.get("importance", 0.5),
+                "tier": item.get("tier", "semantic"),
                 "date": item.get("_date", ""),
                 "time": item.get("ts", ""),
             }
@@ -632,10 +1148,247 @@ class Brain:
         self._persist_changes(dirty_dates)
         return {"status": "removed", "reason": "semantic_match", "removed": removed}
 
+    def _edge_to_text(self, edge: dict) -> str:
+        nodes = self._graph.get("nodes", {})
+        source = nodes.get(edge.get("source"), {}).get("name", edge.get("source", ""))
+        target = nodes.get(edge.get("target"), {}).get("name", edge.get("target", ""))
+        relation = str(edge.get("relation", "")).replace("_", " ")
+        return f"{source} {relation} {target}".strip()
+
+    def _graph_edge_rank(self, edge: dict, query_terms: set[str]) -> dict | None:
+        text = self._edge_to_text(edge)
+        overlap_count, overlap_ratio = _term_overlap(query_terms, text)
+        if query_terms and overlap_count == 0:
+            return None
+        strength = _clamp01(edge.get("strength", 0.5))
+        confidence = _clamp01(edge.get("confidence", 0.5))
+        score = overlap_count + strength + confidence
+        return {
+            "text": text,
+            "score": round(score, 3),
+            "confidence": _weighted_confidence(
+                [
+                    (confidence, settings.memory_rank_semantic_weight),
+                    (strength, settings.memory_rank_importance_weight),
+                    (overlap_ratio, settings.memory_rank_overlap_weight),
+                ]
+            ),
+            "relation": edge.get("relation", ""),
+            "source": edge.get("source", ""),
+            "target": edge.get("target", ""),
+            "updated_at": edge.get("updated_at", ""),
+            "inferred": False,
+            "evidence": edge.get("evidence", ""),
+        }
+
+    def _graph_inference_ranks(self, active_edges: list[dict], query_terms: set[str]) -> list[dict]:
+        bridge_relations = _configured_relation_set(settings.memory_inference_bridge_relations)
+        if not bridge_relations:
+            return []
+
+        by_source = {}
+        for edge in active_edges:
+            by_source.setdefault(edge.get("source", ""), []).append(edge)
+
+        ranks = []
+        factor = _clamp01(settings.memory_inference_confidence_factor)
+        for bridge in active_edges:
+            if str(bridge.get("relation", "")).casefold() not in bridge_relations:
+                continue
+            bridge_text = self._edge_to_text(bridge)
+            for detail in by_source.get(bridge.get("target", ""), []):
+                if detail.get("id") == bridge.get("id"):
+                    continue
+                detail_text = self._edge_to_text(detail)
+                text = f"{bridge_text} -> {detail_text}"
+                overlap_count, overlap_ratio = _term_overlap(query_terms, text)
+                if query_terms and overlap_count == 0:
+                    continue
+                strength = min(_clamp01(bridge.get("strength", 0.5)), _clamp01(detail.get("strength", 0.5)))
+                confidence = min(_clamp01(bridge.get("confidence", 0.5)), _clamp01(detail.get("confidence", 0.5)))
+                confidence = _clamp01(confidence * factor)
+                ranks.append(
+                    {
+                        "text": text,
+                        "score": round(overlap_count + strength + confidence, 3),
+                        "confidence": _weighted_confidence(
+                            [
+                                (confidence, settings.memory_rank_semantic_weight),
+                                (strength, settings.memory_rank_importance_weight),
+                                (overlap_ratio, settings.memory_rank_overlap_weight),
+                            ]
+                        ),
+                        "relation": detail.get("relation", ""),
+                        "source": bridge.get("source", ""),
+                        "target": detail.get("target", ""),
+                        "updated_at": max(str(bridge.get("updated_at", "")), str(detail.get("updated_at", ""))),
+                        "inferred": True,
+                        "evidence": " | ".join(part for part in (bridge.get("evidence", ""), detail.get("evidence", "")) if part),
+                    }
+                )
+        return ranks
+
+    def graph_ranked(self, query: str = "", limit: int = 8) -> list[dict]:
+        try:
+            safe_limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            safe_limit = 8
+        query_terms = _term_set(query, min_length=2)
+        active_edges = [edge for edge in self._graph.get("edges", []) if edge.get("active", True)]
+        ranked = []
+        for edge in active_edges:
+            edge_rank = self._graph_edge_rank(edge, query_terms)
+            if edge_rank:
+                ranked.append(edge_rank)
+        ranked.extend(self._graph_inference_ranks(active_edges, query_terms))
+        if not ranked:
+            return []
+        ranked.sort(key=lambda item: (item["score"], item["confidence"], item.get("updated_at", "")), reverse=True)
+        seen = set()
+        results = []
+        for item in ranked:
+            key = item["text"].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(item)
+            if len(results) >= safe_limit:
+                break
+        return results
+
+    def graph_summary(self, query: str = "", limit: int = 8) -> str:
+        ranked = self.graph_ranked(query, limit=limit)
+        return " | ".join(item["text"] for item in ranked)
+
+    def profile_context(self, limit: int = 8) -> str:
+        try:
+            safe_limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            safe_limit = 8
+
+        inactive_evidence = {
+            str(edge.get("evidence", "")).strip().casefold()
+            for edge in self._graph.get("edges", [])
+            if not edge.get("active", True)
+        }
+
+        text_items = []
+        seen = set()
+        memories = list(self.memories)
+        memories.sort(
+            key=lambda memory: (
+                _normalize_importance(memory.get("importance", 0.5)),
+                memory.get("_date", ""),
+                memory.get("ts", ""),
+            ),
+            reverse=True,
+        )
+        for memory in memories:
+            text = memory["text"].strip()
+            key = text.casefold()
+            if key in inactive_evidence or key in seen:
+                continue
+            seen.add(key)
+            text_items.append(text)
+            if len(text_items) >= safe_limit:
+                break
+
+        graph_items = [item["text"] for item in self.graph_ranked("", limit=safe_limit)]
+        parts = []
+        if text_items:
+            parts.append(f"Text memory: {' | '.join(text_items)}")
+        if graph_items:
+            parts.append(f"Graph memory: {' | '.join(graph_items)}")
+        return "\n".join(parts)
+
+    def recall_context(self, query: str, k: int = 5, q_emb=None) -> str:
+        text_ranked = self.recall_ranked(query, k=k, q_emb=q_emb)
+        if len(text_ranked) > 1:
+            best = text_ranked[0]
+            second = text_ranked[1]
+            if best["similarity"] >= second["similarity"] + settings.memory_winner_margin:
+                text_ranked = [best]
+        if text_ranked:
+            inactive_evidence = {
+                str(edge.get("evidence", "")).strip().casefold()
+                for edge in self._graph.get("edges", [])
+                if not edge.get("active", True)
+            }
+            kept = []
+            for item in text_ranked:
+                if item["text"].strip().casefold() in inactive_evidence:
+                    continue
+                kept.append(item)
+            text_ranked = kept
+        text_context = " | ".join(
+            item["text"]
+            for item in text_ranked
+        )
+        graph_context = self.graph_summary(query, limit=max(3, k))
+        parts = []
+        if text_context:
+            parts.append(f"Text memory: {text_context}")
+        if graph_context:
+            parts.append(f"Graph memory: {graph_context}")
+        return "\n".join(parts)
+
+    def reflect(self, label: str = "session", limit: int = 20) -> dict:
+        active_edges = [edge for edge in self._graph.get("edges", []) if edge.get("active", True)]
+        active_edges.sort(
+            key=lambda edge: (
+                _safe_float(edge.get("strength"), 0.5),
+                edge.get("updated_at", ""),
+            ),
+            reverse=True,
+        )
+        top_edges = active_edges[: max(1, min(int(limit), 50))]
+        relation_counts = {}
+        entity_counts = {}
+        for edge in top_edges:
+            relation = edge.get("relation", "")
+            relation_counts[relation] = relation_counts.get(relation, 0) + 1
+            for key in ("source", "target"):
+                entity = edge.get(key, "")
+                entity_counts[entity] = entity_counts.get(entity, 0) + 1
+        top_relations = sorted(relation_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        top_entities = sorted(entity_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        nodes = self._graph.get("nodes", {})
+        insight_parts = []
+        if top_relations:
+            insight_parts.append("active relations: " + ", ".join(name for name, _count in top_relations if name))
+        if top_entities:
+            names = [nodes.get(entity_id, {}).get("name", entity_id) for entity_id, _count in top_entities]
+            insight_parts.append("central entities: " + ", ".join(name for name in names if name))
+        summary = "; ".join(part for part in insight_parts if part) or "No strong memory graph signals yet."
+        reflection = {
+            "label": str(label or "session"),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "edge_count": len(active_edges),
+            "summary": summary,
+        }
+        self._graph.setdefault("reflections", []).append(reflection)
+        self._persist_graph()
+        return reflection
+
+    def graph_assessment(self) -> dict:
+        edges = self._graph.get("edges", [])
+        active_edges = [edge for edge in edges if edge.get("active", True)]
+        return {
+            "schema_version": self._graph.get("schema_version", _GRAPH_SCHEMA_VERSION),
+            "node_count": len(self._graph.get("nodes", {})),
+            "edge_count": len(edges),
+            "active_edge_count": len(active_edges),
+            "reflection_count": len(self._graph.get("reflections", [])),
+            "relation_rule_count": len(self._graph_rules),
+            "inference_bridge_relations": sorted(_configured_relation_set(settings.memory_inference_bridge_relations)),
+            "graph_file": str(self._graph_path()),
+        }
+
     def system_assessment(self) -> dict:
         texts = [item["text"].strip().lower() for item in self.memories]
         duplicate_count = len(texts) - len(set(texts))
         indexed_count = int(getattr(self._embeddings, "shape", (0,))[0]) if self._embeddings is not None else 0
+        graph = self.graph_assessment()
         return {
             "schema_version": _INDEX_SCHEMA_VERSION,
             "entry_count": len(self.memories),
@@ -649,6 +1402,12 @@ class Brain:
             "capacity_limit": _memory_capacity_limit(),
             "capacity_remaining": max(0, _memory_capacity_limit() - len(self.memories)),
             "last_backup": self._last_backup,
+            "ranking": {
+                "semantic_weight": settings.memory_rank_semantic_weight,
+                "importance_weight": settings.memory_rank_importance_weight,
+                "overlap_weight": settings.memory_rank_overlap_weight,
+            },
+            "graph": graph,
         }
 
     def benchmark_recall(self, query: str, runs: int = 25, k: int = 5) -> dict:
@@ -667,9 +1426,18 @@ class Brain:
             "indexed_count": int(getattr(self._embeddings, "shape", (0,))[0]) if self._embeddings is not None else 0,
         }
 
-    def recall(self, query: str, k: int = 5, q_emb=None) -> str:
+    def _memory_confidence(self, similarity: float, importance: float, overlap: float) -> float:
+        return _weighted_confidence(
+            [
+                (similarity, settings.memory_rank_semantic_weight),
+                (importance, settings.memory_rank_importance_weight),
+                (overlap, settings.memory_rank_overlap_weight),
+            ]
+        )
+
+    def recall_ranked(self, query: str, k: int = 5, q_emb=None) -> list[dict]:
         if not self.memories:
-            return ""
+            return []
 
         if q_emb is None:
             q_emb = embed(query)
@@ -682,41 +1450,81 @@ class Brain:
 
         mem_embs = self._embeddings
         if mem_embs.size == 0:
-            return ""
+            return []
         if len(mem_embs.shape) != 2:
             self._rebuild_index()
             mem_embs = self._embeddings
         if mem_embs.size == 0 or len(mem_embs.shape) != 2:
-            return ""
+            return []
         if mem_embs.shape[1] != q_emb.shape[0]:
             self._rebuild_index()
             mem_embs = self._embeddings
             if mem_embs.size == 0 or len(mem_embs.shape) != 2 or mem_embs.shape[1] != q_emb.shape[0]:
-                return ""
+                return []
 
         sims = np.dot(mem_embs, q_emb)
-        weighted = sims * np.array([memory.get("importance", 0.5) for memory in self.memories], dtype=np.float32)
+        query_terms = _term_set(query, min_length=2)
+        ranked = []
+        for idx, memory in enumerate(self.memories):
+            similarity = float(sims[idx])
+            if similarity < settings.memory_similarity_threshold:
+                continue
+            importance = _normalize_importance(memory.get("importance", 0.5))
+            overlap_count, overlap_ratio = _term_overlap(query_terms, memory["text"])
+            confidence = self._memory_confidence(similarity, importance, overlap_ratio)
+            score = _weighted_confidence(
+                [
+                    (similarity, settings.memory_rank_semantic_weight),
+                    (importance, settings.memory_rank_importance_weight),
+                    (overlap_ratio, settings.memory_rank_overlap_weight),
+                ]
+            )
+            ranked.append(
+                {
+                    "id": memory.get("id") or _memory_id(memory),
+                    "text": memory["text"],
+                    "similarity": round(similarity, 4),
+                    "importance": importance,
+                    "overlap": overlap_count,
+                    "confidence": confidence,
+                    "score": score,
+                    "date": memory.get("_date", ""),
+                    "time": memory.get("ts", ""),
+                    "tier": memory.get("tier", "semantic"),
+                }
+            )
 
-        top_idx = np.argsort(weighted)[-k:][::-1]
-        top_idx = [idx for idx in top_idx if sims[idx] >= settings.memory_similarity_threshold]
+        ranked.sort(key=lambda item: (item["score"], item["similarity"], item["importance"], item["date"], item["time"]), reverse=True)
 
-        if not top_idx:
-            return ""
+        if not ranked:
+            return []
 
-        unique_idx = []
+        unique = []
         seen = set()
-        for idx in top_idx:
-            key = self.memories[idx]["text"].strip().lower()
+        try:
+            safe_k = max(1, int(k))
+        except (TypeError, ValueError):
+            safe_k = 5
+
+        for item in ranked:
+            key = item["text"].strip().casefold()
             if key in seen:
                 continue
             seen.add(key)
-            unique_idx.append(idx)
-        top_idx = unique_idx
+            unique.append(item)
+            if len(unique) >= safe_k:
+                break
+        return unique
 
-        if len(top_idx) > 1:
-            best = top_idx[0]
-            second = top_idx[1]
-            if sims[best] >= sims[second] + settings.memory_winner_margin:
-                top_idx = [best]
+    def recall(self, query: str, k: int = 5, q_emb=None) -> str:
+        ranked = self.recall_ranked(query, k=k, q_emb=q_emb)
+        if not ranked:
+            return ""
 
-        return " | ".join(self.memories[idx]["text"] for idx in top_idx)
+        if len(ranked) > 1:
+            best = ranked[0]
+            second = ranked[1]
+            if best["similarity"] >= second["similarity"] + settings.memory_winner_margin:
+                ranked = [best]
+
+        return " | ".join(item["text"] for item in ranked)

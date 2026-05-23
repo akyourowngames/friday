@@ -1733,3 +1733,41 @@ Verification evidence:
 depends on replacing the placeholder profile URL in `tools/BROWSER_TARGETS.md`
 with the real Instagram profile URL or adding more precise selectors for the
 logged-in profile page.
+
+## Navigator Tool - 2026-05-23T00:00+05:30
+
+[NEW TOOL] `navigator`
+
+Purpose:
+
+- Resolve origin and destination places through open geocoding.
+- Return road-route distance and estimated travel time from an open routing
+  provider.
+- Return straight-line distance as an explicit fallback when road routing is
+  unavailable.
+- Drive a separate frontend navigator page from structured tool output.
+
+Runtime behavior:
+
+- Uses configured endpoints from `KING_NAVIGATOR_GEOCODE_URL` and
+  `KING_NAVIGATOR_ROUTE_URL`.
+- Uses configured `KING_NAVIGATOR_USER_AGENT`,
+  `KING_NAVIGATOR_DEFAULT_MODE`, and `KING_NAVIGATOR_DEFAULT_TIMEOUT_MS`.
+- Preserves legacy text output by default and supports structured output,
+  typed errors, bounded timeout, retry attempts, and trace emission.
+- Reports `degraded=true` when routing falls back to straight-line distance.
+
+Verification evidence:
+
+- `python -m unittest tests.test_grounding.NavigatorToolTests -v` -> 4 tests
+  passed for schema registration, provider-backed route fields, fallback
+  reporting, and API panel payload shape.
+- `tool_manifest_audit` -> 13 observed modules, 13 manifest modules, 24
+  callable schemas, no manifest drift.
+
+[MANIFEST UPDATED] tool: navigator - new version: 1.0.0 - score: 9.1/10
+
+[VERDICT] Navigator is shipped as verified runtime for route distance, direct
+distance fallback, structured evidence, and frontend payload support. Live
+answers remain scoped to the attempted origin, destination, mode, and provider
+status returned by the tool.
