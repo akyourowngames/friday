@@ -1860,3 +1860,38 @@ Verification evidence:
 - `python -m unittest tests.test_memory tests.test_memory_gd tests.test_tools_fleet tests.test_notes_datetime -v`
 
 [VERDICT] Memory GD tier and fleet polish verified by targeted unit tests.
+
+## 2026-05-24 Navigator And Memory Recall Polish
+
+Scope: verify Claude's navigator and graph-memory work, then fix the remaining
+recall and opener edge cases found by the full suite.
+
+Runtime changes:
+
+- Chat Navigator opener now also exposes a DOM event bridge for frontend
+  verification and resilient tool-driven UI handoff.
+- Main frontend script cache is bumped so browsers load the corrected opener.
+- Graph-aware recall now keeps safe defaults for partial Brain instances used
+  by benchmarks and tests.
+- Clear semantic winner recall returns only the winning memory, preserving the
+  old anti-noise behavior while keeping graph ranking available for broader
+  profile/context recall.
+
+Verification evidence:
+
+- `python -m pytest -q` -> 182 tests passed, 24 subtests passed.
+- `python -m compileall config.py agent memory tools tests main.py api_server.py`
+- `npm run typecheck`
+- Live `/navigator/route` check for Haryana to New Delhi returned `152.0 km`,
+  `2 hr 2 min`, `fallback=False`, and route places `Bhiwani`, `Rohtak`,
+  `Bahadurgarh`, `Delhi`.
+- Browser-visible Navigator page rendered status `Scoped`, `152 km`, `2 hr 2
+  min`, and route-place labels/chips.
+- Browser-visible main chat query `whats the distance between delhi and
+  haryana` opened `/frontend/navigator.html?...autorun=1` and rendered `152
+  km`, `2 hr 3 min`, route places `Delhi`, `Bahadurgarh`, `Kalanaur`,
+  `Bhiwani`, with representative-coordinate precision text.
+
+[VERDICT] Navigator now opens from the main frontend and shows real provider
+route data with city labels. Memory recall keeps graph ranking without
+polluting precise recall with extra context when there is a clear winner.

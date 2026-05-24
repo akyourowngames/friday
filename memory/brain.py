@@ -723,6 +723,10 @@ class Brain:
         key = str(query or "").strip().casefold()
         if not key:
             return embed(query)
+        if not hasattr(self, "_query_cache"):
+            self._query_cache = {}
+        if not hasattr(self, "_query_cache_order"):
+            self._query_cache_order = []
         limit = max(0, int(settings.memory_query_cache_size))
         if limit and key in self._query_cache:
             return self._query_cache[key]
@@ -753,6 +757,10 @@ class Brain:
                 self._embeddings = np.vstack(chunks) if chunks else np.empty((0, 0), dtype=np.float32)
             if self._embeddings.shape[0] != len(self.memories):
                 self._embeddings = np.empty((0, 0), dtype=np.float32)
+        if not hasattr(self, "_query_cache"):
+            self._query_cache = {}
+        if not hasattr(self, "_query_cache_order"):
+            self._query_cache_order = []
         self._query_cache.clear()
         self._query_cache_order.clear()
         self._index_state = "warm"
@@ -1224,7 +1232,8 @@ class Brain:
     def _memory_id_for_graph_hit(self, graph_item: dict) -> str:
         target_text = str(graph_item.get("text", "")).strip().casefold()
         target_evidence = str(graph_item.get("evidence", "")).strip().casefold()
-        for edge in self._graph.get("edges", []):
+        graph = getattr(self, "_graph", {"edges": []})
+        for edge in graph.get("edges", []):
             if not edge.get("active", True):
                 continue
             edge_text = self._edge_to_text(edge).casefold()
@@ -1254,7 +1263,8 @@ class Brain:
             return []
         expanded = []
         seen_memory = set(seed_memory_ids)
-        for edge in self._graph.get("edges", []):
+        graph = getattr(self, "_graph", {"edges": []})
+        for edge in graph.get("edges", []):
             if not edge.get("active", True):
                 continue
             if edge.get("source") not in seed_nodes and edge.get("target") not in seed_nodes:
@@ -1380,9 +1390,10 @@ class Brain:
                 "graph_path": item.get("graph_path", ""),
             }
 
+        graph = getattr(self, "_graph", {"edges": []})
         inactive_evidence = {
             str(edge.get("evidence", "")).strip().casefold()
-            for edge in self._graph.get("edges", [])
+            for edge in graph.get("edges", [])
             if not edge.get("active", True)
         }
         ranked = [
@@ -1403,7 +1414,7 @@ class Brain:
             second = ranked[1]
             if float(best.get("similarity", 0.0)) >= float(second.get("similarity", 0.0)) + settings.memory_winner_margin:
                 if best.get("unified_score", 0.0) >= second.get("unified_score", 0.0):
-                    ranked = [best] + [item for item in ranked[1:] if item["id"] != best["id"]]
+                    ranked = [best]
         results = []
         seen_text = set()
         for item in ranked:
@@ -1699,7 +1710,8 @@ class Brain:
         except (TypeError, ValueError):
             safe_limit = 8
         query_terms = _term_set(query, min_length=2)
-        active_edges = [edge for edge in self._graph.get("edges", []) if edge.get("active", True)]
+        graph = getattr(self, "_graph", {"edges": []})
+        active_edges = [edge for edge in graph.get("edges", []) if edge.get("active", True)]
         ranked = []
         for edge in active_edges:
             edge_rank = self._graph_edge_rank(edge, query_terms)

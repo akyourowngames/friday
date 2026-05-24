@@ -1278,6 +1278,12 @@ if (typeof window !== 'undefined') {
     window.KING_NAVIGATOR_OPEN = renderNavigatorResult;
 }
 
+if (typeof document !== 'undefined') {
+    document.addEventListener('king:navigator-open', event => {
+        renderNavigatorResult((event && event.detail) || {});
+    });
+}
+
 function safeUrlForHref(url) {
     if (!url || typeof url !== 'string') return '';
     const u = url.trim();
