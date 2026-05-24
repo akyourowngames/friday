@@ -1261,15 +1261,21 @@ function renderNavigatorResult(payload) {
     const mode = encodeURIComponent(payload.mode || 'driving');
     const navigatorUrl = `navigator.html?origin=${origin}&destination=${destination}&mode=${mode}&autorun=1`;
     try {
-        const opened = window.open(navigatorUrl, '_blank', 'noopener');
+        const opened = window.open(navigatorUrl, 'king-navigator');
         if (!opened) {
             showToast('Opening Navigator in this tab.');
             setTimeout(() => { window.location.href = navigatorUrl; }, 250);
+        } else {
+            opened.focus();
         }
     } catch (_) {
         showToast('Opening Navigator in this tab.');
         setTimeout(() => { window.location.href = navigatorUrl; }, 250);
     }
+}
+
+if (typeof window !== 'undefined') {
+    window.KING_NAVIGATOR_OPEN = renderNavigatorResult;
 }
 
 function safeUrlForHref(url) {

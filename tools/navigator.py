@@ -18,8 +18,9 @@ from tools.runtime import (
 )
 
 
-_NAVIGATOR_VERSION = "1.0.0"
+_NAVIGATOR_VERSION = "2.1.0"
 _ROUTE_MODES = ("driving", "walking", "cycling")
+_NAVIGATOR_ACTIONS = ("route", "geocode", "straight_line")
 _BROAD_PLACE_TYPES = ("administrative", "state", "province", "region")
 
 
@@ -445,6 +446,7 @@ def _result_summary(result: dict) -> str:
     param_descriptions={
         "origin": "Starting place or address",
         "destination": "Destination place or address",
+        "action": "route (default), geocode, or straight_line",
         "mode": "Route mode: driving, walking, or cycling",
         "alternatives": "Whether the routing provider may return alternatives",
         "timeout_ms": "External request timeout in milliseconds, from 1 to 60000",
@@ -454,7 +456,8 @@ def _result_summary(result: dict) -> str:
 )
 def navigator(
     origin: str,
-    destination: str,
+    destination: str = "",
+    action: str = "route",
     mode: str = "driving",
     alternatives: bool = False,
     timeout_ms: int = 0,
@@ -463,13 +466,26 @@ def navigator(
 ):
     started = time.perf_counter()
     started_at = utc_now_iso()
-    inputs_received = 7
+    inputs_received = 8
     response_format = normalize_response_format(response_format)
     trace_enabled = coerce_bool(trace_enabled)
     alternatives = coerce_bool(alternatives)
     origin = str(origin or "").strip()
     destination = str(destination or "").strip()
     mode = str(mode or settings.navigator_default_mode).strip().lower()
+    action = str(action or "route").strip().lower()
+
+    if action not in _NAVIGATOR_ACTIONS:
+        error = error_payload(
+            "INVALID_ACTION",
+            "action must be route, geocode, or straight_line.",
+            "action",
+            action,
+            "route, geocode, or straight_line",
+            False,
+            "Use action='route' for full navigation or action='geocode' for place lookup only.",
+        )
+        return _navigator_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Navigator action is not supported.")
 
     if not origin:
         error = error_payload(
@@ -482,7 +498,7 @@ def navigator(
             "Pass a starting place in origin.",
         )
         return _navigator_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Navigator needs an origin.")
-    if not destination:
+    if action != "geocode" and not destination:
         error = error_payload(
             "EMPTY_DESTINATION",
             "destination must not be empty.",
@@ -493,7 +509,7 @@ def navigator(
             "Pass a destination place in destination.",
         )
         return _navigator_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Navigator needs a destination.")
-    if mode not in _ROUTE_MODES:
+    if action == "route" and mode not in _ROUTE_MODES:
         error = error_payload(
             "INVALID_MODE",
             "mode must be driving, walking, or cycling.",
@@ -519,8 +535,71 @@ def navigator(
     timeout_seconds = timeout_value / 1000
 
     origin_place, origin_error = _geocode(origin, timeout_seconds)
+    external_count = 1
+    if action == "geocode":
+        if origin_place is None:
+            error = error_payload(
+                "PLACE_NOT_FOUND",
+                "The place could not be resolved by the geocoding provider.",
+                "origin",
+                origin,
+                "resolved place",
+                True,
+                origin_error,
+            )
+            return _navigator_error(error, response_format, trace_enabled, started, started_at, inputs_received, f"Navigator could not resolve place: {origin_error}", "geocode", external_count)
+        result = {
+            "action": "geocode",
+            "query": origin,
+            "place": origin_place,
+            "provider_sequence": ["nominatim"],
+            "degraded": False,
+            "degraded_reason": "",
+        }
+        trace = _navigator_trace(started_at, started, inputs_received, True, "geocode", "SUCCESS", len(result), external_count)
+        emit_trace(trace, trace_enabled)
+        if response_format == "structured":
+            return structured_success("navigator", _NAVIGATOR_VERSION, result, started, trace)
+        return f"{origin_place['name']} ({origin_place['lat']}, {origin_place['lon']})"
+
     destination_place, destination_error = _geocode(destination, timeout_seconds)
     external_count = 2
+    if action == "straight_line":
+        if origin_place is None or destination_place is None:
+            missing_field = "origin" if origin_place is None else "destination"
+            detail = origin_error if origin_place is None else destination_error
+            error = error_payload(
+                "PLACE_NOT_FOUND",
+                "One of the places could not be resolved.",
+                missing_field,
+                origin if origin_place is None else destination,
+                "resolved place",
+                True,
+                detail,
+            )
+            return _navigator_error(error, response_format, trace_enabled, started, started_at, inputs_received, f"Navigator could not resolve {missing_field}", "geocode", external_count)
+        straight_km = _distance_km(origin_place, destination_place)
+        result = {
+            "action": "straight_line",
+            "origin_query": origin,
+            "destination_query": destination,
+            "origin": origin_place,
+            "destination": destination_place,
+            "straight_line": _distance_payload(straight_km),
+            "provider_sequence": ["nominatim"],
+            "degraded": False,
+            "degraded_reason": "",
+        }
+        trace = _navigator_trace(started_at, started, inputs_received, True, "straight_line", "SUCCESS", len(result), external_count)
+        emit_trace(trace, trace_enabled)
+        if response_format == "structured":
+            return structured_success("navigator", _NAVIGATOR_VERSION, result, started, trace)
+        payload = _distance_payload(straight_km)
+        return f"Straight-line distance: {payload['distance_km']} km ({payload['distance_miles']} mi)"
+
+    if action != "route":
+        error = error_payload("INVALID_ACTION", "Unsupported navigator action.", "action", action, "route, geocode, straight_line", False, "Use a supported action.")
+        return _navigator_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Navigator action is not supported.")
     if origin_place is None or destination_place is None:
         missing_field = "origin" if origin_place is None else "destination"
         missing_value = origin if origin_place is None else destination
@@ -578,6 +657,7 @@ def navigator(
     degraded_reason = route_error if fallback_used else precision_note
 
     result = {
+        "action": "route",
         "origin_query": origin,
         "destination_query": destination,
         "origin": origin_place,

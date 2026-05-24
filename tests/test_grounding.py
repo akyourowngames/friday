@@ -1340,7 +1340,7 @@ class BrowserAutomationToolTests(unittest.TestCase):
     def test_browser_extract_uses_markdown_configured_fields(self):
         original_load_page = browser_mod._load_page
 
-        def fake_load_page(url, engine, timeout_ms, wait_until, max_text_chars, fields, storage_state=""):
+        def fake_load_page(url, engine, timeout_ms, wait_until, max_text_chars, fields, storage_state="", read_mode="fields", dom_policy=None):
             return {
                 "requested_url": url,
                 "final_url": "https://example.com/profile",
@@ -1393,7 +1393,7 @@ class BrowserAutomationToolTests(unittest.TestCase):
         original_load_page = browser_mod._load_page
         observed = {}
 
-        def fake_load_page(url, engine, timeout_ms, wait_until, max_text_chars, fields, storage_state=""):
+        def fake_load_page(url, engine, timeout_ms, wait_until, max_text_chars, fields, storage_state="", read_mode="fields", dom_policy=None):
             observed["storage_state"] = storage_state
             return {
                 "requested_url": url,

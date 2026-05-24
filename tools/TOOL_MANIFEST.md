@@ -4,14 +4,17 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 
 ## Active Executable Tools
 
-- `browser.py` - browser or HTTP page loading with markdown-configured field extraction.
-- `datetime_tool.py` - time and date capability exposed by the Python tool registry.
+- `browser.py` - browser page read, DOM iteration, field extraction, and login sessions (v2.0.0).
+- `keyboard.py` - key press and markdown-defined keyboard shortcuts.
+- `system_control.py` - volume, brightness, and media controls from SYSTEM_CONTROLS.md.
+- `datetime_tool.py` - timezone-aware date and time with human or ISO output, structured errors, and optional traces (v2.0.0).
 - `files.py` - file read, write, and list capability with path and mode validation.
 - `hackernews.py` - Hacker News retrieval capability.
-- `image.py` - image generation or image-related capability.
-- `manifest_audit.py` - read-only audit capability for comparing this manifest with observed tool modules and registered callable schemas.
+- `image.py` - image generation and gallery management with structured output and provider status (v2.0.0).
+- `manifest_audit.py` - read-only manifest audit with structured output and traces (v2.0.0).
+- `memory_ops.py` - memory assess, recall, remember, and forget with structured output and GD tier reporting.
 - `navigator.py` - open-provider route distance, straight-line distance, travel estimate, and place detail capability.
-- `notes.py` - note storage and retrieval capability.
+- `notes.py` - note save, read, update, delete, list, and search with structured output, typed errors, and optional traces (v2.0.0).
 - `reddit.py` - Reddit retrieval capability.
 - `terminal.py` - shell and application launch capability with configured timeout bounds.
 - `verification_pipeline.py` - markdown-driven verification pipeline for bounded local checks and ship or hold evidence.
@@ -932,6 +935,11 @@ It exists so KING can recover from transient failures without hanging, looping i
 
 ## Evolution Log
 
+- 2026-05-23T18:10+00:00 - Upgraded `notes` tools to version 2.0.0 with config-driven storage path (`KING_NOTES_FILE`), structured legacy-preserving output, search limit, preview bounds, typed errors, and traces.
+- 2026-05-23T18:10+00:00 - Upgraded `datetime_info` to version 2.0.0 with ISO output style, structured fields (offset, unix, weekday), Windows-safe timezone resolution, ambiguous-match reporting, and traces.
+- 2026-05-23T20:00+00:00 - Memory GD tier: index schema v3, query cache, chunked rebuild, integrity/tier/maintain APIs, and `memory_ops` tools.
+- 2026-05-23T20:00+00:00 - Upgraded `imagine`/`gallery`, `tool_manifest_audit`, and `navigator` to structured v2 surfaces.
+- 2026-05-23T22:00+00:00 - Browser v2: `browser_read_page`, DOM iteration policy, read_mode on `browser_extract`; navigator v2.1 actions; new `system_control` and `keyboard` tools.
 - 2026-05-21T00:00+05:30 - Added `browser_login_session`, upgraded `browser_extract` to reuse saved storage state, and expanded `BROWSER_TARGETS.md` with `login_url` and `storage_state`.
 - 2026-05-21T00:00+05:30 - Added `browser_extract` runtime, `BROWSER_TARGETS.md`, and config knobs for browser or HTTP page loading with markdown-configured extraction fields.
 - 2026-05-19T23:15+05:30 - Fixed CLI tool-result leakage by forcing structured-capable tools into structured context and routing completed tool results through an LLM final-answer step before user-facing output.

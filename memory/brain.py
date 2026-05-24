@@ -16,8 +16,9 @@ MEMORY_DIR = Path(settings.memory_dir)
 BACKUP_DIR = Path(settings.memory_backup_dir)
 MEMORY_FILTER_POLICY_PATH = Path(settings.memory_filter_policy_file)
 MEMORY_GRAPH_RELATIONS_PATH = Path(settings.memory_graph_relations_file)
-_INDEX_SCHEMA_VERSION = 2
-_GRAPH_SCHEMA_VERSION = 1
+_INDEX_SCHEMA_VERSION = 3
+_INDEX_SCHEMA_COMPAT = (2, 3)
+_GRAPH_SCHEMA_VERSION = 2
 
 _VAGUE_PATTERNS = [
     "medical records",
@@ -53,6 +54,42 @@ def _load_policy_reject_phrases() -> list[str]:
         if phrase:
             phrases.append(phrase)
     return phrases
+
+
+def _load_auto_relation_settings(path: Path | None = None) -> dict:
+    rule_path = _resolve_project_path(path or Path(settings.memory_auto_relations_file))
+    values = {
+        "relation": "associated_with",
+        "mode": "multi",
+        "tier": "semantic",
+        "min_entity_name_length": 2,
+    }
+    if not rule_path.exists():
+        return values
+    section = ""
+    for raw_line in rule_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            section = line[3:].strip().lower()
+            continue
+        if section != "settings" or not line.startswith("- "):
+            continue
+        cleaned = line[2:].strip()
+        if ":" not in cleaned:
+            continue
+        key, _, raw_value = cleaned.partition(":")
+        key = key.strip().lower()
+        raw_value = raw_value.strip()
+        if not key or not raw_value:
+            continue
+        if key == "min_entity_name_length":
+            try:
+                values[key] = int(raw_value)
+            except ValueError:
+                pass
+            continue
+        values[key] = raw_value
+    return values
 
 
 def _load_graph_relation_rules(path: Path | None = None) -> list[dict]:
@@ -423,6 +460,9 @@ class Brain:
         self._last_backup = None
         self._graph = self._empty_graph()
         self._graph_rules = _load_graph_relation_rules()
+        self._auto_relation = _load_auto_relation_settings()
+        self._query_cache = {}
+        self._query_cache_order = []
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         self._load_graph()
@@ -448,6 +488,7 @@ class Brain:
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "nodes": {},
             "edges": [],
+            "memory_links": {},
             "reflections": [],
             "procedures": [],
         }
@@ -469,6 +510,7 @@ class Brain:
         graph.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
         graph.setdefault("nodes", {})
         graph.setdefault("edges", [])
+        graph.setdefault("memory_links", {})
         graph.setdefault("reflections", [])
         graph.setdefault("procedures", [])
         self._graph = graph
@@ -500,6 +542,17 @@ class Brain:
         }
         normalized["id"] = str(item.get("id") or _memory_id(normalized))
         normalized["tier"] = str(item.get("tier") or "semantic")
+        normalized["storage"] = str(item.get("storage") or "unified")
+        graph_edges = item.get("graph_edges")
+        if isinstance(graph_edges, list):
+            normalized["graph_edges"] = [str(edge_id) for edge_id in graph_edges if str(edge_id).strip()]
+        else:
+            normalized["graph_edges"] = []
+        graph_nodes = item.get("graph_nodes")
+        if isinstance(graph_nodes, list):
+            normalized["graph_nodes"] = [str(node_id) for node_id in graph_nodes if str(node_id).strip()]
+        else:
+            normalized["graph_nodes"] = []
         return normalized
 
     def _load_all(self):
@@ -552,8 +605,19 @@ class Brain:
             self._graph["edges"] = kept_edges
             self._persist_graph()
 
+        migrate_dates = set()
         for item in self.memories:
+            if item.get("graph_edges"):
+                self._sync_memory_graph_refs(item)
+                continue
             self._ingest_graph_memory(item)
+            self._auto_relate_entities(item)
+            self._sync_memory_graph_refs(item)
+            migrate_dates.add(item.get("_date", date.today().isoformat()))
+        if migrate_dates:
+            self._persist_changes(migrate_dates)
+        elif self._graph.get("memory_links"):
+            self._persist_graph()
 
     def _today_path(self):
         return MEMORY_DIR / f"memory_{date.today().isoformat()}.json"
@@ -636,7 +700,7 @@ class Brain:
                 embeddings = np.load(emb_path)
                 embeddings = _ensure_2d(embeddings)
                 if (
-                    meta.get("schema_version") == _INDEX_SCHEMA_VERSION
+                    meta.get("schema_version") in _INDEX_SCHEMA_COMPAT
                     and meta.get("signature") == signature
                     and int(meta.get("entry_count", -1)) == len(self.memories)
                     and embeddings.shape[0] == len(self.memories)
@@ -655,14 +719,43 @@ class Brain:
         self._rebuild_index()
         self._index_state = "rebuilt"
 
+    def _embed_query(self, query: str):
+        key = str(query or "").strip().casefold()
+        if not key:
+            return embed(query)
+        limit = max(0, int(settings.memory_query_cache_size))
+        if limit and key in self._query_cache:
+            return self._query_cache[key]
+        vector = embed(query)
+        if limit:
+            self._query_cache[key] = vector
+            self._query_cache_order.append(key)
+            while len(self._query_cache_order) > limit:
+                oldest = self._query_cache_order.pop(0)
+                self._query_cache.pop(oldest, None)
+        return vector
+
     def _rebuild_index(self):
         if not self.memories:
             self._embeddings = np.empty((0, 0), dtype=np.float32)
         else:
-            embeddings = embed([item["text"] for item in self.memories])
-            self._embeddings = _ensure_2d(np.asarray(embeddings, dtype=np.float32))
+            texts = [item["text"] for item in self.memories]
+            batch_size = max(1, int(settings.memory_rebuild_batch_size))
+            if len(texts) <= batch_size:
+                embeddings = embed(texts)
+                self._embeddings = _ensure_2d(np.asarray(embeddings, dtype=np.float32))
+            else:
+                chunks = []
+                for start in range(0, len(texts), batch_size):
+                    batch = texts[start : start + batch_size]
+                    batch_emb = embed(batch)
+                    chunks.append(_ensure_2d(np.asarray(batch_emb, dtype=np.float32)))
+                self._embeddings = np.vstack(chunks) if chunks else np.empty((0, 0), dtype=np.float32)
             if self._embeddings.shape[0] != len(self.memories):
                 self._embeddings = np.empty((0, 0), dtype=np.float32)
+        self._query_cache.clear()
+        self._query_cache_order.clear()
+        self._index_state = "warm"
         self._persist_index()
 
     def _persist_index(self):
@@ -686,6 +779,9 @@ class Brain:
                     "ts": item["ts"],
                     "id": item.get("id") or _memory_id(item),
                     "tier": item.get("tier", "semantic"),
+                    "storage": item.get("storage", "unified"),
+                    "graph_edges": list(item.get("graph_edges") or []),
+                    "graph_nodes": list(item.get("graph_nodes") or []),
                 }
             )
 
@@ -957,6 +1053,369 @@ class Brain:
             self._persist_graph()
         return changed
 
+    def _ingest_graph_fallback_memory(self, item: dict) -> bool:
+        text = _clean_graph_value(item.get("text", ""))
+        if not text:
+            return False
+        importance = item.get("importance", 0.5)
+        memory_id = item.get("id") or _memory_id(item)
+        now = datetime.now().isoformat(timespec="seconds")
+        source_name = _clean_graph_value(settings.memory_graph_fallback_source)
+        relation = _clean_graph_value(settings.memory_graph_fallback_relation).casefold()
+        tier = _clean_graph_value(settings.memory_graph_fallback_tier) or "semantic"
+        if not source_name or not relation:
+            return False
+
+        source_id = self._ensure_graph_node(source_name, _node_type(source_name), importance)
+        target_id = self._ensure_graph_node(text, "memory", importance)
+        edge_id = self._edge_id(source_id, relation, target_id)
+        for edge in self._graph.setdefault("edges", []):
+            if edge.get("id") != edge_id:
+                continue
+            changed = False
+            if not edge.get("active", True):
+                edge["active"] = True
+                edge["valid_to"] = None
+                changed = True
+            if edge.get("memory_id") != memory_id:
+                edge["memory_id"] = memory_id
+                changed = True
+            target_strength = max(_safe_float(edge.get("strength"), 0.5), _normalize_importance(importance))
+            if _safe_float(edge.get("strength"), 0.5) != target_strength:
+                edge["strength"] = target_strength
+                changed = True
+            if changed:
+                edge["updated_at"] = now
+                self._persist_graph()
+            return changed
+
+        self._graph.setdefault("edges", []).append(
+            {
+                "id": edge_id,
+                "source": source_id,
+                "target": target_id,
+                "relation": relation,
+                "strength": _normalize_importance(importance),
+                "confidence": 0.6,
+                "memory_id": memory_id,
+                "created_at": now,
+                "updated_at": now,
+                "valid_from": now,
+                "valid_to": None,
+                "active": True,
+                "tier": tier,
+                "mode": "multi",
+                "evidence": text,
+                "supersedes": [],
+            }
+        )
+        self._persist_graph()
+        return True
+
+    def _entities_in_text(self, text: str) -> list[str]:
+        text_tokens = _term_set(text, min_length=int(self._auto_relation.get("min_entity_name_length", 2)))
+        if not text_tokens:
+            return []
+        text_lower = str(text or "").casefold()
+        matches = []
+        seen = set()
+        for node in self._graph.get("nodes", {}).values():
+            name = _clean_graph_value(node.get("name", ""))
+            if not name or name.casefold() == "user":
+                continue
+            name_tokens = _term_set(name, min_length=int(self._auto_relation.get("min_entity_name_length", 2)))
+            if name_tokens and name_tokens <= text_tokens:
+                key = name.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    matches.append(name)
+                continue
+            name_lower = name.casefold()
+            if len(name_lower) >= int(self._auto_relation.get("min_entity_name_length", 2)) and name_lower in text_lower:
+                key = name.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    matches.append(name)
+        matches.sort(key=len, reverse=True)
+        return matches
+
+    def _auto_relate_entities(self, item: dict) -> bool:
+        if not settings.memory_auto_relations_enabled:
+            return False
+        text = item.get("text", "")
+        memory_id = item.get("id") or _memory_id(item)
+        entities = self._entities_in_text(text)
+        if len(entities) < 2:
+            return False
+        relation = _clean_graph_value(self._auto_relation.get("relation", "associated_with")).casefold()
+        mode = _clean_graph_value(self._auto_relation.get("mode", "multi"))
+        tier = _clean_graph_value(self._auto_relation.get("tier", "semantic")) or "semantic"
+        importance = item.get("importance", 0.5)
+        now = datetime.now().isoformat(timespec="seconds")
+        changed = False
+        for left in range(len(entities)):
+            for right in range(left + 1, len(entities)):
+                source_name = entities[left]
+                target_name = entities[right]
+                source_id = self._ensure_graph_node(source_name, _node_type(source_name), importance)
+                target_id = self._ensure_graph_node(target_name, _node_type(target_name), importance)
+                edge_id = self._edge_id(source_id, relation, target_id)
+                existing = None
+                for edge in self._graph.setdefault("edges", []):
+                    if edge.get("id") == edge_id:
+                        existing = edge
+                        break
+                if existing:
+                    if not existing.get("active", True):
+                        existing["active"] = True
+                        existing["valid_to"] = None
+                        changed = True
+                    if existing.get("memory_id") != memory_id:
+                        existing["memory_id"] = memory_id
+                        changed = True
+                    continue
+                self._graph.setdefault("edges", []).append(
+                    {
+                        "id": edge_id,
+                        "source": source_id,
+                        "target": target_id,
+                        "relation": relation,
+                        "strength": _normalize_importance(importance),
+                        "confidence": 0.65,
+                        "memory_id": memory_id,
+                        "created_at": now,
+                        "updated_at": now,
+                        "valid_from": now,
+                        "valid_to": None,
+                        "active": True,
+                        "tier": tier,
+                        "mode": mode,
+                        "evidence": text,
+                        "supersedes": [],
+                        "auto": True,
+                    }
+                )
+                changed = True
+        if changed:
+            self._persist_graph()
+        return changed
+
+    def _sync_memory_graph_refs(self, item: dict, persist_graph: bool = False):
+        memory_id = item.get("id") or _memory_id(item)
+        edge_ids = []
+        node_ids = set()
+        for edge in self._graph.get("edges", []):
+            if edge.get("memory_id") != memory_id or not edge.get("active", True):
+                continue
+            edge_id = edge.get("id")
+            if edge_id:
+                edge_ids.append(edge_id)
+            node_ids.add(edge.get("source", ""))
+            node_ids.add(edge.get("target", ""))
+        node_ids.discard("")
+        item["graph_edges"] = edge_ids
+        item["graph_nodes"] = sorted(node_ids)
+        item["storage"] = "unified"
+        item["tier"] = item.get("tier") or ("graph" if edge_ids else "semantic")
+        self._graph.setdefault("memory_links", {})[memory_id] = edge_ids
+        if persist_graph:
+            self._persist_graph()
+
+    def _memory_id_for_graph_hit(self, graph_item: dict) -> str:
+        target_text = str(graph_item.get("text", "")).strip().casefold()
+        target_evidence = str(graph_item.get("evidence", "")).strip().casefold()
+        for edge in self._graph.get("edges", []):
+            if not edge.get("active", True):
+                continue
+            edge_text = self._edge_to_text(edge).casefold()
+            edge_evidence = str(edge.get("evidence", "")).strip().casefold()
+            if target_text and (edge_text == target_text or edge_evidence == target_text):
+                return str(edge.get("memory_id", ""))
+            if target_evidence and edge_evidence == target_evidence:
+                return str(edge.get("memory_id", ""))
+        return ""
+
+    def _memory_by_id(self, memory_id: str) -> dict | None:
+        for memory in self.memories:
+            if (memory.get("id") or _memory_id(memory)) == memory_id:
+                return memory
+        return None
+
+    def _expand_graph_neighbors(self, seed_memory_ids: set[str], limit: int) -> list[dict]:
+        hops = max(0, int(settings.memory_unified_expansion_hops))
+        if hops <= 0 or not seed_memory_ids:
+            return []
+        seed_nodes = set()
+        for memory_id in seed_memory_ids:
+            memory = self._memory_by_id(memory_id)
+            if memory:
+                seed_nodes.update(memory.get("graph_nodes") or [])
+        if not seed_nodes:
+            return []
+        expanded = []
+        seen_memory = set(seed_memory_ids)
+        for edge in self._graph.get("edges", []):
+            if not edge.get("active", True):
+                continue
+            if edge.get("source") not in seed_nodes and edge.get("target") not in seed_nodes:
+                continue
+            memory_id = str(edge.get("memory_id", ""))
+            if not memory_id or memory_id in seen_memory:
+                continue
+            memory = self._memory_by_id(memory_id)
+            if not memory:
+                continue
+            seen_memory.add(memory_id)
+            expanded.append(
+                {
+                    "id": memory_id,
+                    "text": memory["text"],
+                    "score": round(_clamp01(_safe_float(edge.get("strength"), 0.5)) * settings.memory_unified_graph_weight, 4),
+                    "confidence": _clamp01(_safe_float(edge.get("confidence"), 0.5)),
+                    "sources": ["graph_expand"],
+                    "graph_path": self._edge_to_text(edge),
+                    "tier": memory.get("tier", "semantic"),
+                }
+            )
+            if len(expanded) >= limit:
+                break
+        return expanded
+
+    def recall_unified(self, query: str, k: int = 5, q_emb=None) -> list[dict]:
+        try:
+            safe_k = max(1, min(int(k), 50))
+        except (TypeError, ValueError):
+            safe_k = 5
+        graph_weight = _clamp01(settings.memory_unified_graph_weight)
+        merged: dict[str, dict] = {}
+
+        if not str(query or "").strip() and self.memories:
+            profile_sorted = sorted(
+                self.memories,
+                key=lambda memory: (
+                    _normalize_importance(memory.get("importance", 0.5)),
+                    memory.get("_date", ""),
+                    memory.get("ts", ""),
+                ),
+                reverse=True,
+            )
+            for memory in profile_sorted[:safe_k]:
+                memory_id = memory.get("id") or _memory_id(memory)
+                merged[memory_id] = {
+                    "id": memory_id,
+                    "text": memory["text"],
+                    "similarity": 1.0,
+                    "importance": _normalize_importance(memory.get("importance", 0.5)),
+                    "overlap": 0,
+                    "confidence": 0.75,
+                    "score": _normalize_importance(memory.get("importance", 0.5)),
+                    "unified_score": _normalize_importance(memory.get("importance", 0.5)),
+                    "date": memory.get("_date", ""),
+                    "time": memory.get("ts", ""),
+                    "tier": memory.get("tier", "semantic"),
+                    "sources": ["profile"],
+                    "graph_path": "",
+                }
+
+        for item in self._recall_ranked_semantic(query, k=safe_k * 2, q_emb=q_emb):
+            memory_id = item["id"]
+            merged[memory_id] = {
+                **item,
+                "sources": ["text"],
+                "graph_path": "",
+                "unified_score": item.get("score", 0.0),
+            }
+
+        for graph_item in self.graph_ranked(query, limit=safe_k * 2):
+            memory_id = self._memory_id_for_graph_hit(graph_item)
+            boost = round(float(graph_item.get("score", 0.0)) * graph_weight, 4)
+            if memory_id and memory_id in merged:
+                merged[memory_id]["unified_score"] = round(merged[memory_id]["unified_score"] + boost, 4)
+                merged[memory_id]["sources"] = sorted(set(merged[memory_id]["sources"]) | {"graph"})
+                merged[memory_id]["graph_path"] = graph_item.get("text", "")
+                continue
+            if not memory_id:
+                continue
+            memory = self._memory_by_id(memory_id)
+            if not memory:
+                continue
+            merged[memory_id] = {
+                "id": memory_id,
+                "text": memory["text"],
+                "similarity": 0.0,
+                "importance": _normalize_importance(memory.get("importance", 0.5)),
+                "overlap": 0,
+                "confidence": graph_item.get("confidence", 0.5),
+                "score": boost,
+                "unified_score": boost,
+                "date": memory.get("_date", ""),
+                "time": memory.get("ts", ""),
+                "tier": memory.get("tier", "semantic"),
+                "sources": ["graph"],
+                "graph_path": graph_item.get("text", ""),
+            }
+
+        seed_ids = set(merged)
+        for item in self._expand_graph_neighbors(seed_ids, limit=safe_k):
+            memory_id = item["id"]
+            if memory_id in merged:
+                merged[memory_id]["unified_score"] = round(merged[memory_id]["unified_score"] + item["score"], 4)
+                merged[memory_id]["sources"] = sorted(set(merged[memory_id]["sources"]) | set(item["sources"]))
+                if item.get("graph_path"):
+                    merged[memory_id]["graph_path"] = item["graph_path"]
+                continue
+            merged[memory_id] = {
+                "id": memory_id,
+                "text": item["text"],
+                "similarity": 0.0,
+                "importance": _normalize_importance(0.5),
+                "overlap": 0,
+                "confidence": item.get("confidence", 0.5),
+                "score": item["score"],
+                "unified_score": item["score"],
+                "date": "",
+                "time": "",
+                "tier": item.get("tier", "semantic"),
+                "sources": list(item.get("sources") or ["graph_expand"]),
+                "graph_path": item.get("graph_path", ""),
+            }
+
+        inactive_evidence = {
+            str(edge.get("evidence", "")).strip().casefold()
+            for edge in self._graph.get("edges", [])
+            if not edge.get("active", True)
+        }
+        ranked = [
+            item
+            for item in merged.values()
+            if item["text"].strip().casefold() not in inactive_evidence
+        ]
+        ranked.sort(
+            key=lambda item: (
+                item.get("unified_score", item.get("score", 0.0)),
+                item.get("similarity", 0.0),
+                item.get("importance", 0.0),
+            ),
+            reverse=True,
+        )
+        if len(ranked) > 1:
+            best = ranked[0]
+            second = ranked[1]
+            if float(best.get("similarity", 0.0)) >= float(second.get("similarity", 0.0)) + settings.memory_winner_margin:
+                if best.get("unified_score", 0.0) >= second.get("unified_score", 0.0):
+                    ranked = [best] + [item for item in ranked[1:] if item["id"] != best["id"]]
+        results = []
+        seen_text = set()
+        for item in ranked:
+            key = item["text"].strip().casefold()
+            if key in seen_text:
+                continue
+            seen_text.add(key)
+            results.append(item)
+            if len(results) >= safe_k:
+                break
+        return results
+
     def _is_duplicate(self, text):
         lower = text.lower()
         words = set(lower.split())
@@ -1058,7 +1517,13 @@ class Brain:
                 insert_idx = idx
                 break
         dirty_dates.add(item["_date"])
-        self._ingest_graph_memory(item)
+        graph_changed = self._ingest_graph_memory(item)
+        if not graph_changed:
+            graph_changed = self._ingest_graph_fallback_memory(item)
+        self._auto_relate_entities(item)
+        self._sync_memory_graph_refs(item, persist_graph=True)
+        if graph_changed:
+            item["tier"] = "graph"
         self._append_embedding(item["text"], insert_idx=insert_idx)
         dirty_dates.update(self._trim_capacity())
         self._persist_changes(dirty_dates)
@@ -1265,72 +1730,26 @@ class Brain:
             safe_limit = max(1, min(int(limit), 50))
         except (TypeError, ValueError):
             safe_limit = 8
+        ranked = self.recall_unified("", k=safe_limit)
+        return self._unified_context_string(ranked)
 
-        inactive_evidence = {
-            str(edge.get("evidence", "")).strip().casefold()
-            for edge in self._graph.get("edges", [])
-            if not edge.get("active", True)
-        }
-
-        text_items = []
-        seen = set()
-        memories = list(self.memories)
-        memories.sort(
-            key=lambda memory: (
-                _normalize_importance(memory.get("importance", 0.5)),
-                memory.get("_date", ""),
-                memory.get("ts", ""),
-            ),
-            reverse=True,
-        )
-        for memory in memories:
-            text = memory["text"].strip()
-            key = text.casefold()
-            if key in inactive_evidence or key in seen:
-                continue
-            seen.add(key)
-            text_items.append(text)
-            if len(text_items) >= safe_limit:
-                break
-
-        graph_items = [item["text"] for item in self.graph_ranked("", limit=safe_limit)]
+    def _unified_context_string(self, ranked: list[dict]) -> str:
+        if not ranked:
+            return ""
         parts = []
-        if text_items:
-            parts.append(f"Text memory: {' | '.join(text_items)}")
-        if graph_items:
-            parts.append(f"Graph memory: {' | '.join(graph_items)}")
-        return "\n".join(parts)
+        for item in ranked:
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            path = str(item.get("graph_path", "")).strip()
+            if path and path.casefold() != text.casefold():
+                parts.append(f"{text} (via {path})")
+            else:
+                parts.append(text)
+        return " | ".join(parts)
 
     def recall_context(self, query: str, k: int = 5, q_emb=None) -> str:
-        text_ranked = self.recall_ranked(query, k=k, q_emb=q_emb)
-        if len(text_ranked) > 1:
-            best = text_ranked[0]
-            second = text_ranked[1]
-            if best["similarity"] >= second["similarity"] + settings.memory_winner_margin:
-                text_ranked = [best]
-        if text_ranked:
-            inactive_evidence = {
-                str(edge.get("evidence", "")).strip().casefold()
-                for edge in self._graph.get("edges", [])
-                if not edge.get("active", True)
-            }
-            kept = []
-            for item in text_ranked:
-                if item["text"].strip().casefold() in inactive_evidence:
-                    continue
-                kept.append(item)
-            text_ranked = kept
-        text_context = " | ".join(
-            item["text"]
-            for item in text_ranked
-        )
-        graph_context = self.graph_summary(query, limit=max(3, k))
-        parts = []
-        if text_context:
-            parts.append(f"Text memory: {text_context}")
-        if graph_context:
-            parts.append(f"Graph memory: {graph_context}")
-        return "\n".join(parts)
+        return self._unified_context_string(self.recall_unified(query, k=k, q_emb=q_emb))
 
     def reflect(self, label: str = "session", limit: int = 20) -> dict:
         active_edges = [edge for edge in self._graph.get("edges", []) if edge.get("active", True)]
@@ -1384,12 +1803,105 @@ class Brain:
             "graph_file": str(self._graph_path()),
         }
 
-    def system_assessment(self) -> dict:
+    def verify_integrity(self) -> dict:
+        checks = []
+        entry_count = len(self.memories)
+        indexed_count = int(getattr(self._embeddings, "shape", (0,))[0]) if self._embeddings is not None else 0
+        coverage = (indexed_count / entry_count) if entry_count else 1.0
+        checks.append(
+            {
+                "name": "index_coverage",
+                "ok": coverage >= settings.memory_tier_min_coverage,
+                "detail": f"coverage={coverage:.3f}",
+            }
+        )
+        signature = _memory_signature(self.memories)
+        meta_ok = False
+        if self._index_meta_path().exists():
+            try:
+                meta = json.loads(self._index_meta_path().read_text(encoding="utf-8"))
+                meta_ok = meta.get("signature") == signature and int(meta.get("entry_count", -1)) == entry_count
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                meta_ok = False
+        checks.append({"name": "index_signature", "ok": meta_ok or entry_count == 0, "detail": "metadata matches corpus"})
+        dim_ok = True
+        if entry_count and self._embeddings is not None and len(getattr(self._embeddings, "shape", ())) == 2:
+            dim_ok = self._embeddings.shape[0] == entry_count and self._embeddings.shape[1] > 0
+        checks.append({"name": "embedding_shape", "ok": dim_ok, "detail": "matrix rows match memories"})
+        node_ids = set(self._graph.get("nodes", {}))
+        orphan_edges = 0
+        for edge in self._graph.get("edges", []):
+            if edge.get("source") not in node_ids or edge.get("target") not in node_ids:
+                orphan_edges += 1
+        checks.append(
+            {
+                "name": "graph_nodes",
+                "ok": orphan_edges == 0,
+                "detail": f"orphan_edges={orphan_edges}",
+            }
+        )
+        texts = [item["text"].strip().casefold() for item in self.memories]
+        duplicate_count = len(texts) - len(set(texts))
+        checks.append(
+            {
+                "name": "duplicate_text",
+                "ok": duplicate_count == 0,
+                "detail": f"duplicates={duplicate_count}",
+                "severity": "warning" if duplicate_count else "ok",
+            }
+        )
+        failed = [item for item in checks if not item.get("ok") and item.get("severity") != "warning"]
+        return {
+            "ok": len(failed) == 0,
+            "checks": checks,
+            "failed_count": len(failed),
+        }
+
+    def tier_report(self) -> dict:
+        integrity = self.verify_integrity()
+        assessment = self.system_assessment(include_integrity=False)
+        coverage = assessment.get("index_coverage_ratio", 0.0)
+        min_coverage = _safe_float(settings.memory_tier_min_coverage, 1.0)
+        tier = "developing"
+        if integrity.get("ok") and coverage >= min_coverage and assessment.get("index_state") in ("warm", "empty"):
+            tier = "gd"
+        elif integrity.get("failed_count", 0) > 0 or coverage < min_coverage:
+            tier = "degraded"
+        return {
+            "tier": tier,
+            "integrity_ok": integrity.get("ok"),
+            "index_coverage_ratio": coverage,
+            "index_state": assessment.get("index_state"),
+            "entry_count": assessment.get("entry_count"),
+            "failed_checks": integrity.get("failed_count", 0),
+        }
+
+    def maintain(self, rebuild: bool = False, backup: bool = True) -> dict:
+        before = self.tier_report()
+        backup_path = ""
+        if backup and self._memory_files():
+            backup_path = self.create_backup("maintain")
+        integrity = self.verify_integrity()
+        if rebuild or not integrity.get("ok"):
+            if self._memory_files() and not backup_path and backup:
+                backup_path = self.create_backup("maintain-rebuild")
+            self._rebuild_index()
+        after = self.tier_report()
+        return {
+            "status": "ok" if after.get("tier") == "gd" else "partial",
+            "backup_path": backup_path,
+            "rebuilt": rebuild or not integrity.get("ok"),
+            "before": before,
+            "after": after,
+            "integrity": integrity,
+        }
+
+    def system_assessment(self, include_integrity: bool = True) -> dict:
         texts = [item["text"].strip().lower() for item in self.memories]
         duplicate_count = len(texts) - len(set(texts))
         indexed_count = int(getattr(self._embeddings, "shape", (0,))[0]) if self._embeddings is not None else 0
         graph = self.graph_assessment()
-        return {
+        payload = {
             "schema_version": _INDEX_SCHEMA_VERSION,
             "entry_count": len(self.memories),
             "daily_file_count": len(self._memory_files()),
@@ -1402,6 +1914,9 @@ class Brain:
             "capacity_limit": _memory_capacity_limit(),
             "capacity_remaining": max(0, _memory_capacity_limit() - len(self.memories)),
             "last_backup": self._last_backup,
+            "query_cache_size": len(self._query_cache),
+            "query_cache_limit": max(0, int(settings.memory_query_cache_size)),
+            "rebuild_batch_size": max(1, int(settings.memory_rebuild_batch_size)),
             "ranking": {
                 "semantic_weight": settings.memory_rank_semantic_weight,
                 "importance_weight": settings.memory_rank_importance_weight,
@@ -1409,10 +1924,14 @@ class Brain:
             },
             "graph": graph,
         }
+        if include_integrity:
+            payload["integrity"] = self.verify_integrity()
+            payload["tier"] = self.tier_report().get("tier")
+        return payload
 
     def benchmark_recall(self, query: str, runs: int = 25, k: int = 5) -> dict:
         runs = max(1, int(runs))
-        q_emb = embed(query)
+        q_emb = self._embed_query(query)
         started = perf_counter()
         last_result = ""
         for _ in range(runs):
@@ -1436,11 +1955,30 @@ class Brain:
         )
 
     def recall_ranked(self, query: str, k: int = 5, q_emb=None) -> list[dict]:
+        return [
+            {
+                "id": item["id"],
+                "text": item["text"],
+                "similarity": item.get("similarity", 0.0),
+                "importance": item.get("importance", 0.5),
+                "overlap": item.get("overlap", 0),
+                "confidence": item.get("confidence", 0.0),
+                "score": item.get("unified_score", item.get("score", 0.0)),
+                "date": item.get("date", ""),
+                "time": item.get("time", ""),
+                "tier": item.get("tier", "semantic"),
+                "sources": item.get("sources", ["unified"]),
+                "graph_path": item.get("graph_path", ""),
+            }
+            for item in self.recall_unified(query, k=k, q_emb=q_emb)
+        ]
+
+    def _recall_ranked_semantic(self, query: str, k: int = 5, q_emb=None) -> list[dict]:
         if not self.memories:
             return []
 
         if q_emb is None:
-            q_emb = embed(query)
+            q_emb = self._embed_query(query)
         q_emb = np.asarray(q_emb, dtype=np.float32)
         if q_emb.ndim != 1:
             q_emb = q_emb.reshape(-1)
@@ -1517,14 +2055,4 @@ class Brain:
         return unique
 
     def recall(self, query: str, k: int = 5, q_emb=None) -> str:
-        ranked = self.recall_ranked(query, k=k, q_emb=q_emb)
-        if not ranked:
-            return ""
-
-        if len(ranked) > 1:
-            best = ranked[0]
-            second = ranked[1]
-            if best["similarity"] >= second["similarity"] + settings.memory_winner_margin:
-                ranked = [best]
-
-        return " | ".join(item["text"] for item in ranked)
+        return self.recall_context(query, k=k, q_emb=q_emb)

@@ -27,3 +27,23 @@ The user asks for one particular remembered fact, such as a name, location, pref
 ## No Memory Small Talk Text
 
 The user greets the assistant, asks how the assistant is, vents casually, reacts emotionally, jokes, thanks the assistant, or continues ordinary conversation without asking for remembered personal facts.
+
+## Local System Control Text
+
+The user wants to change this computer's speaker volume, screen brightness, mute state, or media playback using local device controls. This includes requests to turn volume up or down, make the screen brighter or dimmer, mute or unmute audio, or play, pause, or skip media on the machine KING is running on.
+
+## Action Correction Text
+
+The user is saying the previous answer was wrong, the action did not happen, nothing changed, or they want the same device action tried again. Short replies like no, nope, not working, still wrong, or try again after a brightness or volume answer belong here.
+
+## Conversational Banter Text
+
+The user is reacting, joking, teasing, venting, complimenting, expressing surprise, saying the assistant is smarter or dumber, saying wtf or lol, or continuing casual chat without asking for a new concrete action, search, file change, terminal command, browser step, purchase, call, or device control.
+
+## Actionable Request Text
+
+The user wants something done: open an app, run a command, search the web, fetch a page, change volume or brightness, read a file, save a note, place an order flow, or otherwise cause an observable tool-backed outcome.
+
+## Incomplete Utterance Text
+
+The user started a question but trailed off, used ellipsis, left the object unstated, or continued a prior topic without repeating it. Examples include who is my followed by dots, and what about her, and finish that thought.

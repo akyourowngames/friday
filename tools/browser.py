@@ -21,10 +21,11 @@ from tools.runtime import (
 )
 
 
-_BROWSER_VERSION = "1.1.0"
-_BROWSER_LOGIN_VERSION = "1.0.0"
+_BROWSER_VERSION = "2.0.0"
+_BROWSER_LOGIN_VERSION = "2.0.0"
 _ENGINES = ("auto", "playwright", "httpx")
 _SOURCES = ("auto", "selector", "meta", "text", "title", "url")
+_READ_MODES = ("fields", "text", "dom", "full")
 
 
 class _PageParser(HTMLParser):
@@ -182,6 +183,119 @@ def _load_targets(config_path: str) -> tuple[dict[str, dict], dict | None]:
     return targets, None
 
 
+def _load_dom_policy(config_path: str) -> dict:
+    path = _resolve_path(config_path or settings.browser_dom_policy_file)
+    policy = {
+        "max_blocks": 80,
+        "max_block_chars": 600,
+        "max_links": 40,
+        "max_headings": 30,
+        "main_selectors": "main || article || [role=main] || #content || .content || body",
+        "skip_tags": "script, style, noscript, svg, path, iframe",
+        "heading_tags": "h1, h2, h3, h4, h5, h6",
+        "block_tags": "p, li, td, th, blockquote, pre, figcaption, dd, dt",
+    }
+    if not path.exists():
+        return policy
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return policy
+    for raw in lines:
+        line = raw.strip()
+        if not line.startswith("- "):
+            continue
+        key, value = _line_key_value(line)
+        if not key or not value:
+            continue
+        if key in ("max_blocks", "max_block_chars", "max_links", "max_headings"):
+            try:
+                policy[key] = int(value)
+            except ValueError:
+                continue
+        else:
+            policy[key] = value
+    return policy
+
+
+def _collect_dom_playwright(page, policy: dict) -> dict:
+    payload = {
+        "max_blocks": int(policy.get("max_blocks", 80)),
+        "max_block_chars": int(policy.get("max_block_chars", 600)),
+        "max_links": int(policy.get("max_links", 40)),
+        "max_headings": int(policy.get("max_headings", 30)),
+        "main_selectors": str(policy.get("main_selectors", "body")),
+        "skip_tags": [item.strip() for item in str(policy.get("skip_tags", "")).split(",") if item.strip()],
+        "heading_tags": [item.strip() for item in str(policy.get("heading_tags", "")).split(",") if item.strip()],
+        "block_tags": [item.strip() for item in str(policy.get("block_tags", "")).split(",") if item.strip()],
+    }
+    try:
+        snapshot = page.evaluate(
+            """(policy) => {
+                const skip = new Set((policy.skip_tags || []).map((t) => t.toUpperCase()));
+                const blockTags = new Set((policy.block_tags || []).map((t) => t.toUpperCase()));
+                const headingTags = new Set((policy.heading_tags || []).map((t) => t.toUpperCase()));
+                const maxBlocks = policy.max_blocks || 80;
+                const maxChars = policy.max_block_chars || 600;
+                const maxLinks = policy.max_links || 40;
+                const maxHeadings = policy.max_headings || 30;
+                const selectors = String(policy.main_selectors || 'body').split('||').map((s) => s.trim()).filter(Boolean);
+                let root = null;
+                for (const sel of selectors) {
+                    try {
+                        root = document.querySelector(sel);
+                        if (root) break;
+                    } catch (e) {}
+                }
+                if (!root) root = document.body;
+                const compact = (value) => String(value || '').split(/\\s+/).join(' ').trim();
+                const blocks = [];
+                const links = [];
+                const headings = [];
+                const walk = (el, depth) => {
+                    if (!el || blocks.length >= maxBlocks) return;
+                    const tag = String(el.tagName || '').toUpperCase();
+                    if (skip.has(tag)) return;
+                    if (headingTags.has(tag)) {
+                        const text = compact(el.innerText || el.textContent);
+                        if (text && headings.length < maxHeadings) {
+                            headings.push({ tag: tag.toLowerCase(), text: text.slice(0, maxChars), depth });
+                        }
+                    }
+                    if (tag === 'A') {
+                        const href = el.getAttribute('href') || '';
+                        const text = compact(el.innerText || el.textContent);
+                        if (href && links.length < maxLinks) {
+                            links.push({ text: text.slice(0, 120), href: href.slice(0, 500) });
+                        }
+                    }
+                    if (blockTags.has(tag)) {
+                        const text = compact(el.innerText || el.textContent);
+                        if (text.length >= 20) {
+                            blocks.push({ tag: tag.toLowerCase(), text: text.slice(0, maxChars), depth });
+                        }
+                    }
+                    const children = el.children ? Array.from(el.children) : [];
+                    for (const child of children) walk(child, depth + 1);
+                };
+                walk(root, 0);
+                return {
+                    blocks,
+                    links,
+                    headings,
+                    root_selector: selectors[0] || 'body',
+                    block_count: blocks.length,
+                    link_count: links.length,
+                    heading_count: headings.length,
+                };
+            }""",
+            payload,
+        )
+        return snapshot if isinstance(snapshot, dict) else {}
+    except Exception:
+        return {"blocks": [], "links": [], "headings": [], "block_count": 0, "link_count": 0, "heading_count": 0}
+
+
 def _split_values(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -326,7 +440,16 @@ def _playwright_missing_error() -> dict:
     )
 
 
-def _load_playwright_page(url: str, timeout_ms: int, wait_until: str, max_text_chars: int, fields: list[dict], storage_state: str = "") -> tuple[dict | None, dict | None]:
+def _load_playwright_page(
+    url: str,
+    timeout_ms: int,
+    wait_until: str,
+    max_text_chars: int,
+    fields: list[dict],
+    storage_state: str = "",
+    read_mode: str = "fields",
+    dom_policy: dict | None = None,
+) -> tuple[dict | None, dict | None]:
     try:
         from playwright.sync_api import sync_playwright
     except Exception:
@@ -377,6 +500,9 @@ def _load_playwright_page(url: str, timeout_ms: int, wait_until: str, max_text_c
                         selector_values[field.get("name", "")] = values
                 final_url = page.url
                 status_code = response.status if response is not None else None
+                dom_snapshot = {}
+                if read_mode in ("dom", "full"):
+                    dom_snapshot = _collect_dom_playwright(page, dom_policy or _load_dom_policy(""))
             finally:
                 if context is not None:
                     try:
@@ -385,7 +511,7 @@ def _load_playwright_page(url: str, timeout_ms: int, wait_until: str, max_text_c
                         pass
                 browser.close()
         text = _compact_text(body_text)
-        return {
+        page_payload = {
             "requested_url": url,
             "final_url": final_url,
             "status_code": status_code,
@@ -398,7 +524,11 @@ def _load_playwright_page(url: str, timeout_ms: int, wait_until: str, max_text_c
             "degraded": False,
             "degraded_reason": "",
             "storage_state_used": bool(storage_state),
-        }, None
+        }
+        if read_mode in ("dom", "full"):
+            page_payload["dom"] = dom_snapshot
+            page_payload["dom_block_count"] = dom_snapshot.get("block_count", 0)
+        return page_payload, None
     except Exception as exc:
         return None, error_payload(
             "PAGE_LOAD_FAILED",
@@ -411,12 +541,27 @@ def _load_playwright_page(url: str, timeout_ms: int, wait_until: str, max_text_c
         )
 
 
-def _load_page(url: str, engine: str, timeout_ms: int, wait_until: str, max_text_chars: int, fields: list[dict], storage_state: str = "") -> tuple[dict | None, dict | None]:
+def _load_page(
+    url: str,
+    engine: str,
+    timeout_ms: int,
+    wait_until: str,
+    max_text_chars: int,
+    fields: list[dict],
+    storage_state: str = "",
+    read_mode: str = "fields",
+    dom_policy: dict | None = None,
+) -> tuple[dict | None, dict | None]:
     if engine == "playwright":
-        return _load_playwright_page(url, timeout_ms, wait_until, max_text_chars, fields, storage_state)
+        return _load_playwright_page(url, timeout_ms, wait_until, max_text_chars, fields, storage_state, read_mode, dom_policy)
     if engine == "httpx":
-        return _load_httpx_page(url, timeout_ms / 1000, max_text_chars)
-    page, error = _load_playwright_page(url, timeout_ms, wait_until, max_text_chars, fields, storage_state)
+        page, error = _load_httpx_page(url, timeout_ms / 1000, max_text_chars)
+        if page is not None and read_mode in ("dom", "full"):
+            page["dom"] = {"blocks": [], "links": [], "headings": [], "block_count": 0, "note": "dom requires playwright engine"}
+            page["degraded"] = True
+            page["degraded_reason"] = "DOM iteration requires Playwright; HTTP engine returned text only."
+        return page, error
+    page, error = _load_playwright_page(url, timeout_ms, wait_until, max_text_chars, fields, storage_state, read_mode, dom_policy)
     if page is not None:
         return page, None
     if error and error.get("code") == "BROWSER_DEPENDENCY_MISSING":
@@ -568,6 +713,124 @@ def _legacy_result(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _legacy_read_result(result: dict) -> str:
+    lines = [
+        f"URL: {result.get('final_url') or result.get('requested_url')}",
+        f"Title: {result.get('title', '')}",
+        f"Engine: {result.get('engine_used', '')}",
+    ]
+    if result.get("degraded"):
+        lines.append(f"Degraded: {result.get('degraded_reason', '')}")
+    text = result.get("text", "")
+    if text:
+        lines.append("")
+        lines.append(text[:4000])
+    dom = result.get("dom", {})
+    blocks = dom.get("blocks", []) if isinstance(dom, dict) else []
+    if blocks:
+        lines.append("")
+        lines.append(f"DOM blocks ({len(blocks)}):")
+        for block in blocks[:12]:
+            if isinstance(block, dict):
+                lines.append(f"- [{block.get('tag', 'block')}] {block.get('text', '')[:200]}")
+    return "\n".join(lines)
+
+
+def _browser_read_impl(
+    target: str,
+    url: str,
+    config_path: str,
+    engine: str,
+    timeout_ms: int,
+    max_text_chars: int,
+    storage_state: str,
+    read_mode: str,
+    dom_policy_path: str,
+    response_format: str,
+    trace_enabled: bool,
+    started: float,
+    started_at: str,
+):
+    response_format = normalize_response_format(response_format)
+    trace_enabled = coerce_bool(trace_enabled)
+    config_path = config_path or settings.browser_targets_file
+    engine = str(engine or "auto").strip().lower()
+    read_mode = str(read_mode or "full").strip().lower()
+    if read_mode not in _READ_MODES:
+        read_mode = "full"
+    return browser_extract(
+        target=target,
+        url=url,
+        fields="",
+        config_path=config_path,
+        engine=engine,
+        timeout_ms=timeout_ms,
+        max_text_chars=max_text_chars,
+        storage_state=storage_state,
+        read_mode=read_mode,
+        dom_policy_path=dom_policy_path,
+        response_format=response_format,
+        trace_enabled=trace_enabled,
+    )
+
+
+@tool(
+    name="browser_read_page",
+    description="Load a URL and return readable page text plus DOM-iterated blocks for scraping and reading page content",
+    examples=[
+        "read the page at https://example.com",
+        "scrape dom content from my configured target",
+        "open URL and return full page text",
+    ],
+    param_descriptions={
+        "url": "http or https URL to read",
+        "target": "Optional named target from BROWSER_TARGETS.md",
+        "read_mode": "text, dom, or full (default full)",
+        "config_path": "Browser targets markdown file",
+        "dom_policy_path": "DOM iteration policy markdown file",
+        "engine": "auto, playwright, or httpx",
+        "timeout_ms": "Page load timeout in milliseconds",
+        "max_text_chars": "Maximum visible text characters",
+        "storage_state": "Optional Playwright storage state path",
+        "response_format": "legacy or structured",
+        "trace_enabled": "Emit machine-readable trace when true",
+    },
+)
+def browser_read_page(
+    url: str = "",
+    target: str = "",
+    read_mode: str = "full",
+    config_path: str = "",
+    dom_policy_path: str = "",
+    engine: str = "auto",
+    timeout_ms: int = 0,
+    max_text_chars: int = 0,
+    storage_state: str = "",
+    response_format: str = "legacy",
+    trace_enabled: bool = False,
+):
+    started = time.perf_counter()
+    started_at = utc_now_iso()
+    result = _browser_read_impl(
+        target,
+        url,
+        config_path,
+        engine,
+        timeout_ms,
+        max_text_chars,
+        storage_state,
+        read_mode,
+        dom_policy_path,
+        response_format,
+        trace_enabled,
+        started,
+        started_at,
+    )
+    if response_format == "structured" and isinstance(result, dict) and "meta" in result:
+        result["meta"]["tool"] = "browser_read_page"
+    return result
+
+
 @tool(
     name="browser_extract",
     description=(
@@ -589,6 +852,8 @@ def _legacy_result(result: dict) -> str:
         "max_text_chars": "Maximum visible text characters retained for extraction, from 500 to 50000.",
         "storage_state": "Optional Playwright storage-state file to reuse a saved login session.",
         "response_format": "legacy or structured. Default legacy preserves existing behavior.",
+        "read_mode": "fields (default), text, dom, or full page read including DOM blocks",
+        "dom_policy_path": "Optional DOM policy markdown path. Defaults to KING_BROWSER_DOM_POLICY_FILE.",
         "trace_enabled": "When true, emit a machine-readable trace entry.",
     },
 )
@@ -601,19 +866,34 @@ def browser_extract(
     timeout_ms: int = 0,
     max_text_chars: int = 0,
     storage_state: str = "",
+    read_mode: str = "fields",
+    dom_policy_path: str = "",
     response_format: str = "legacy",
     trace_enabled: bool = False,
 ):
     started = time.perf_counter()
     started_at = utc_now_iso()
-    inputs_received = 10
+    inputs_received = 12
     response_format = normalize_response_format(response_format)
     trace_enabled = coerce_bool(trace_enabled)
     config_path = config_path or settings.browser_targets_file
     engine = str(engine or "auto").strip().lower()
     target = str(target or "").strip()
     url = str(url or "").strip()
+    read_mode = str(read_mode or "fields").strip().lower()
+    dom_policy = _load_dom_policy(dom_policy_path)
 
+    if read_mode not in _READ_MODES:
+        error = error_payload(
+            "INVALID_READ_MODE",
+            "read_mode must be fields, text, dom, or full.",
+            "read_mode",
+            read_mode,
+            "fields, text, dom, or full",
+            False,
+            "Use read_mode='dom' for structured DOM blocks or read_mode='full' for text and DOM.",
+        )
+        return _browser_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Browser extraction failed: invalid read_mode")
     if engine not in _ENGINES:
         error = error_payload(
             "INVALID_ENGINE",
@@ -694,11 +974,23 @@ def browser_extract(
     session_name = target or urlparse(requested_url).netloc or "browser_session"
     resolved_storage_state = _storage_state_for_load(session_name, target_config, storage_state)
 
-    page, page_error = _load_page(requested_url, engine, timeout_value, wait_until, max_text_chars, configured_fields, resolved_storage_state)
+    page, page_error = _load_page(
+        requested_url,
+        engine,
+        timeout_value,
+        wait_until,
+        max_text_chars,
+        configured_fields,
+        resolved_storage_state,
+        read_mode,
+        dom_policy,
+    )
     if page_error is not None:
         return _browser_error(page_error, response_format, trace_enabled, started, started_at, inputs_received, "Browser extraction failed: page load failed", "page_load", engine, True)
 
-    extracted_fields = [_extract_field(field, page) for field in configured_fields]
+    extracted_fields = []
+    if read_mode in ("fields", "full"):
+        extracted_fields = [_extract_field(field, page) for field in configured_fields]
     matched_count = sum(1 for field in extracted_fields if field.get("matched"))
     result = {
         "target": target,
@@ -718,8 +1010,16 @@ def browser_extract(
         "matched_count": matched_count,
         "text_truncated": page.get("text_truncated", False),
         "text_sample": page.get("text", "")[:500],
-        "source_status": "ok" if matched_count or not configured_fields else "loaded_no_field_values",
+        "read_mode": read_mode,
+        "dom": page.get("dom", {}),
+        "dom_block_count": page.get("dom_block_count", 0),
+        "full_text": page.get("text", "") if read_mode in ("text", "full") else "",
+        "source_status": "ok" if matched_count or read_mode in ("text", "dom", "full") or not configured_fields else "loaded_no_field_values",
     }
+    if read_mode == "text" and not page.get("text"):
+        result["source_status"] = "loaded_no_text"
+    if read_mode == "dom" and not page.get("dom_block_count"):
+        result["source_status"] = "loaded_no_dom_blocks"
     status = "SUCCESS" if result["source_status"] == "ok" else "PARTIAL"
     trace = _browser_trace(started_at, started, inputs_received, True, "page_extract", status, len(result), result["engine_used"], None if status == "SUCCESS" else "NO_FIELD_VALUES")
     emit_trace(trace, trace_enabled)

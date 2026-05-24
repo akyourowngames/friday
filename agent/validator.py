@@ -31,7 +31,12 @@ class ToolValidator:
                 try:
                     args[param] = int(value)
                 except ValueError:
-                    return False, f"Parameter '{param}' should be integer, got string"
+                    if param in required:
+                        return False, f"Parameter '{param}' should be integer, got string"
+                    args.pop(param, None)
+                    continue
+            if expected == "integer" and isinstance(value, float) and value.is_integer():
+                args[param] = int(value)
             elif expected == "number" and isinstance(value, str):
                 try:
                     args[param] = float(value)

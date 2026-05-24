@@ -13,5 +13,8 @@ from . import manifest_audit
 from . import verification_pipeline
 from . import browser
 from . import navigator
+from . import memory_ops
+from . import system_control
+from . import keyboard
 
 __all__ = ["tool", "get_tool", "get_tools", "get_tool_schemas", "execute_tool"]

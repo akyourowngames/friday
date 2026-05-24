@@ -289,8 +289,8 @@ class MemoryBrainTests(unittest.TestCase):
             report = brain.benchmark_recall("where does the user live", runs=3, k=1)
 
             self.assertEqual(report["runs"], 3)
-        self.assertEqual(report["result_count"], 1)
-        self.assertGreaterEqual(report["avg_ms"], 0.0)
+            self.assertEqual(report["result_count"], 1)
+            self.assertGreaterEqual(report["avg_ms"], 0.0)
 
     def test_remember_and_forget_exact_memory(self):
         with isolated_memory():
@@ -317,6 +317,18 @@ class MemoryBrainTests(unittest.TestCase):
             self.assertEqual(graph["nodes"]["user"]["type"], "person")
             self.assertTrue(any(edge["relation"] == "likes" and edge["active"] for edge in graph["edges"]))
 
+    def test_plain_text_memory_gets_graph_fallback_relation(self):
+        with isolated_memory():
+            brain = Brain()
+
+            self.assertTrue(brain.commit("User keeps navigator verification evidence", importance=0.7))
+            edges = [edge for edge in brain._graph["edges"] if edge["active"]]
+            memories = brain.list_memories(5)
+
+            self.assertTrue(any(edge["relation"] == "remembers" for edge in edges))
+            self.assertEqual(memories[-1]["tier"], "graph")
+            self.assertIn("User remembers User keeps navigator verification evidence", brain.graph_summary("navigator evidence"))
+
     def test_recall_context_includes_graph_memory_without_changing_recall_contract(self):
         vectors = {
             "User likes Python": np.array([1.0, 0.0], dtype=np.float32),
@@ -334,7 +346,8 @@ class MemoryBrainTests(unittest.TestCase):
             self.assertTrue(brain.commit("User likes Python", importance=0.9))
 
             self.assertEqual(brain.recall("what should I use for coding"), "")
-            self.assertIn("Graph memory: User likes Python", brain.recall_context("what Python preference is stored"))
+            self.assertIn("User likes Python", brain.recall_context("what Python preference is stored"))
+            self.assertNotIn("Graph memory:", brain.recall_context("what Python preference is stored"))
 
     def test_temporal_graph_edges_supersede_old_provider(self):
         with isolated_memory():
@@ -406,7 +419,8 @@ class MemoryBrainTests(unittest.TestCase):
             context = brain.recall_context("what class is my crush in")
 
             self.assertIn("User crush Ankita -> Ankita in class 11th", summary)
-            self.assertIn("Graph memory:", context)
+            self.assertIn("Ankita", context)
+            self.assertNotIn("Graph memory:", context)
             self.assertIn("Ankita in class 11th", context)
             self.assertNotIn("confidence", summary.casefold())
             self.assertNotIn("confidence", context.casefold())

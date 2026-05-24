@@ -1807,3 +1807,56 @@ Verification evidence:
 verified for the tested open-provider path. Region-to-region routes remain
 scoped to representative coordinates unless the user gives exact cities,
 addresses, or landmarks.
+
+## 2026-05-23 Notes And Datetime Upgrade
+
+Scope: polish `tools/notes.py` and `tools/datetime_tool.py` to match the
+structured runtime pattern used by `files.py` and `web.py`.
+
+Runtime changes:
+
+- Notes tools (`note_save`, `note_read`, `note_update`, `note_delete`,
+  `note_list`, `note_search`) are version 2.0.0 with optional
+  `response_format` and `trace_enabled`, typed errors, and structured result
+  objects while preserving legacy string output by default.
+- Notes storage path is config-driven via `KING_NOTES_FILE` (default
+  `storage/notes.json`).
+- `note_search` adds bounded `limit` and `preview_chars`; `note_list` adds
+  bounded `preview_chars` for tag-filter previews.
+- `datetime_info` is version 2.0.0 with `output_style` (`human` or `iso`),
+  structured offset and timestamp fields, ambiguous timezone match reporting,
+  and Windows-safe fallback when `ZoneInfo` raises `OSError` for directory-like
+  names such as `America`.
+
+Verification evidence:
+
+- `python -m py_compile tools\notes.py tools\datetime_tool.py config.py`
+- `python -m unittest tests.test_notes_datetime tests.test_grounding.NoteToolTests tests.test_grounding.DateTimeToolTests -v` -> 18 tests passed.
+
+[VERDICT] Notes and datetime upgrades are backward compatible on legacy output
+and verified by isolated and grounding tests.
+
+## 2026-05-23 Memory GD Tier And Fleet Polish
+
+Scope: GD-tier memory subsystem plus structured polish for remaining tools.
+
+Memory runtime:
+
+- Index schema v3 with compatibility for v2 artifacts.
+- Bounded query embedding cache (`KING_MEMORY_QUERY_CACHE_SIZE`).
+- Chunked rebuild batches (`KING_MEMORY_REBUILD_BATCH_SIZE`).
+- `verify_integrity()`, `tier_report()`, `maintain()`, and enriched `system_assessment()`.
+- Callable tools: `memory_assess`, `memory_recall`, `memory_remember`, `memory_forget`.
+
+Tool polish:
+
+- `imagine` and `gallery` v2.0.0 structured surfaces with provider status.
+- `tool_manifest_audit` v2.0.0 structured surfaces.
+- `navigator` version bumped to 2.0.0.
+
+Verification evidence:
+
+- `python -m py_compile memory\brain.py tools\memory_ops.py tools\image.py tools\manifest_audit.py`
+- `python -m unittest tests.test_memory tests.test_memory_gd tests.test_tools_fleet tests.test_notes_datetime -v`
+
+[VERDICT] Memory GD tier and fleet polish verified by targeted unit tests.

@@ -55,6 +55,33 @@ def _load_tool_policy() -> str:
     )
 
 
+def _chat_polish_policy_path() -> Path:
+    path = Path(settings.chat_polish_policy_file)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+    return path
+
+
+@lru_cache(maxsize=8)
+def _load_chat_polish_section(heading: str, fallback: str) -> str:
+    path = _chat_polish_policy_path()
+    if not path.exists():
+        return fallback
+    target = f"## {heading}".lower()
+    lines = []
+    in_section = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            if in_section:
+                break
+            in_section = line.lower() == target
+            continue
+        if in_section and line:
+            lines.append(line)
+    return " ".join(lines) or fallback
+
+
 def _load_routing_policy_section(heading: str, fallback: str) -> str:
     if not ROUTING_POLICY_PATH.exists():
         return fallback
@@ -230,8 +257,24 @@ def _has_backtick_tool_call(text: str, schemas: list) -> bool:
     return False
 
 
-def _build_system_prompt(selected_tools, recent_action_context: str = ""):
+def _build_system_prompt(
+    selected_tools,
+    recent_action_context: str = "",
+    memory_facts: str = "",
+    conversational_turn: bool = False,
+):
     lines = [_system_header(), "", _load_tool_policy()]
+    if memory_facts:
+        lines.append("")
+        lines.append(_load_chat_polish_section("Memory Presentation Rules", "State known facts naturally."))
+        lines.append("Known facts for this turn:")
+        lines.append(memory_facts)
+    if conversational_turn:
+        lines.append("")
+        lines.append(_load_chat_polish_section(
+            "Conversational Response Rules",
+            "Answer naturally without mentioning tools or memory systems.",
+        ))
     if recent_action_context:
         lines.append("")
         lines.append("Recent actionable context:")
@@ -255,12 +298,22 @@ def _build_system_prompt(selected_tools, recent_action_context: str = ""):
             "Example: {\"name\": \"terminal\", \"parameters\": {\"command\": \"start notepad\"}}. "
             "The system will execute it. Do not describe what the tool does in text."
         )
+        if any(t.get("name") == "system_control" for t in selected_tools):
+            lines.append(
+                "For volume or brightness on this PC, call system_control with action volume_up, "
+                "volume_down, brightness_up, or brightness_down. Omit config_path."
+            )
     else:
         lines.append("")
         lines.append(
-            "No tools are selected for this turn. Answer normally for conversation; "
-            "if the user requested an action, say no selected tool is available instead of pretending."
+            "No tools are selected for this turn. Answer in natural conversation. "
+            "If the user clearly wanted a device or system action you cannot run here, say so briefly without sounding like a policy bot."
         )
+        if conversational_turn:
+            lines.append(_load_chat_polish_section(
+                "Fragment Follow-Up Rules",
+                "Short reactions refer to your previous answer; clarify instead of refusing.",
+            ))
     return "\n".join(lines)
 
 
@@ -369,8 +422,6 @@ def _looks_like_context_followup(text: str) -> bool:
 
 
 def _should_use_memory_context(user_input: str, q_emb, selected_tools: list) -> bool:
-    if selected_tools:
-        return True
     if q_emb is None:
         return False
     memory_text, small_talk_text = _memory_context_texts()
@@ -382,7 +433,14 @@ def _should_use_memory_context(user_input: str, q_emb, selected_tools: list) -> 
         small_talk_score = float(np.dot(compare_embs[1], q_emb))
     except Exception:
         return False
-    return memory_score > small_talk_score
+    if memory_score <= small_talk_score:
+        return False
+    if selected_tools:
+        memory_tools = {"memory_recall", "memory_assess", "memory_remember", "memory_forget"}
+        selected_names = {tool.get("name", "") for tool in selected_tools}
+        if selected_names and not selected_names <= memory_tools:
+            return False
+    return True
 
 
 def _should_use_profile_context(user_input: str, q_emb, last_profile_context: bool = False) -> bool:
@@ -565,6 +623,7 @@ def _repair_contextual_tool_call(tool_name: str, args: dict, user_input: str, me
             return "hackernews", repaired
     repaired_args = _repair_contextual_tool_args(tool_name, args, user_input, messages)
     repaired_args = _repair_search_query_specificity(tool_name, repaired_args, user_input)
+    repaired_args = _repair_system_control_args(tool_name, repaired_args, user_input)
     return tool_name, repaired_args
 
 
@@ -683,6 +742,314 @@ def _tool_supports_parameter(tool_name: str, parameter_name: str) -> bool:
     return parameter_name in properties
 
 
+@lru_cache(maxsize=1)
+def _load_grounding_policy() -> tuple[set[str], set[str]]:
+    path = Path(__file__).resolve().parent.parent / settings.tool_grounding_policy_file
+    skip_params = {
+        "response_format",
+        "trace_enabled",
+        "config_path",
+        "output_style",
+        "read_mode",
+    }
+    loose_tools = {"memory_recall", "memory_assess", "system_control"}
+    if not path.exists():
+        return skip_params, loose_tools
+    section = ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            section = line[3:].strip().lower()
+            continue
+        if not line.startswith("- "):
+            continue
+        item = line[2:].strip()
+        if not item:
+            continue
+        if section == "skip parameters":
+            skip_params.add(item)
+        elif section == "loose grounding tools":
+            loose_tools.add(item)
+    return skip_params, loose_tools
+
+
+@lru_cache(maxsize=1)
+def _conversational_banter_text() -> str:
+    return _load_routing_policy_section(
+        "Conversational Banter Text",
+        "The user is reacting, joking, or chatting casually without requesting a concrete action.",
+    )
+
+
+@lru_cache(maxsize=1)
+def _actionable_request_text() -> str:
+    return _load_routing_policy_section(
+        "Actionable Request Text",
+        "The user wants a concrete tool-backed action or observable outcome.",
+    )
+
+
+def _looks_like_conversational_banter(user_input: str, q_emb) -> bool:
+    text = str(user_input or "").strip()
+    if not text or q_emb is None:
+        return False
+    if _looks_like_local_system_control(text, q_emb) or _looks_like_action_correction(text, []):
+        return False
+    small_talk_text = _memory_context_texts()[1]
+    try:
+        compare_embs = embed([_conversational_banter_text(), _actionable_request_text(), small_talk_text])
+        if getattr(compare_embs, "ndim", 1) == 1:
+            compare_embs = compare_embs.reshape(1, -1)
+        banter_score = float(np.dot(compare_embs[0], q_emb))
+        action_score = float(np.dot(compare_embs[1], q_emb))
+        chat_score = float(np.dot(compare_embs[2], q_emb))
+    except Exception:
+        return False
+    conversational_score = max(banter_score, chat_score)
+    return conversational_score >= action_score and conversational_score >= settings.tool_similarity_threshold
+
+
+@lru_cache(maxsize=1)
+def _incomplete_utterance_text() -> str:
+    return _load_routing_policy_section(
+        "Incomplete Utterance Text",
+        "The user trailed off or left the object of the question unstated.",
+    )
+
+
+def _looks_like_incomplete_utterance(user_input: str, q_emb) -> bool:
+    text = str(user_input or "").strip()
+    if not text:
+        return False
+    trimmed = text.rstrip()
+    if trimmed.endswith("...") or trimmed.endswith("…"):
+        return True
+    if q_emb is None:
+        return False
+    try:
+        incomplete_emb = embed(_incomplete_utterance_text())
+        return float(np.dot(incomplete_emb, q_emb)) >= settings.tool_similarity_threshold
+    except Exception:
+        return False
+
+
+def _recent_conversation_topic(messages: list) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = _strip_memory_prefix(str(msg.get("content", ""))).strip()
+        if content and len(content) >= 8:
+            return content
+    return ""
+
+
+def _expand_conversational_input(user_input: str, messages: list) -> str:
+    text = str(user_input or "").strip()
+    if not text:
+        return text
+    topic = _recent_conversation_topic(messages)
+    if not topic or topic == text:
+        return text
+    utterance_emb = embed(text)
+    if _looks_like_context_followup(text) or _looks_like_incomplete_utterance(text, utterance_emb):
+        return f"Earlier: {topic}\nNow: {text}"
+    return text
+
+
+def _embedding_query(user_input: str, messages: list) -> tuple[object | None, str]:
+    expanded = _expand_conversational_input(user_input, messages)
+    if len(expanded.strip()) >= settings.embedding_min_chars:
+        return embed(expanded), expanded
+    topic = _recent_conversation_topic(messages)
+    if topic:
+        combined = f"{topic}\n{expanded}".strip()
+        if len(combined) >= settings.embedding_min_chars:
+            return embed(combined), expanded
+    return None, expanded
+
+
+def _is_conversational_turn(selected_tools: list, user_input: str, q_emb) -> bool:
+    if not selected_tools:
+        return True
+    return _looks_like_conversational_banter(user_input, q_emb)
+
+
+def _should_extract_memory(user_input: str, q_emb) -> bool:
+    if not settings.memory_store_enabled:
+        return False
+    text = str(user_input or "").strip()
+    if len(text) < 12:
+        return False
+    if _looks_like_conversational_banter(text, q_emb if q_emb is not None else embed(text)):
+        return False
+    return True
+
+
+def _filter_tools_for_conversation(user_input: str, q_emb, selected_tools: list) -> list:
+    if not selected_tools:
+        return selected_tools
+    if _looks_like_conversational_banter(user_input, q_emb):
+        return []
+    return selected_tools
+
+
+@lru_cache(maxsize=1)
+def _local_system_control_text() -> str:
+    return _load_routing_policy_section(
+        "Local System Control Text",
+        "The user wants to change this computer's volume, brightness, mute state, or media playback.",
+    )
+
+
+def _looks_like_local_system_control(user_input: str, q_emb) -> bool:
+    text = str(user_input or "").strip()
+    if not text or q_emb is None:
+        return False
+    system_text = _local_system_control_text()
+    small_talk_text = _memory_context_texts()[1]
+    try:
+        compare_embs = embed([system_text, small_talk_text])
+        if getattr(compare_embs, "ndim", 1) == 1:
+            compare_embs = compare_embs.reshape(1, -1)
+        system_score = float(np.dot(compare_embs[0], q_emb))
+        chat_score = float(np.dot(compare_embs[1], q_emb))
+    except Exception:
+        return False
+    return system_score >= chat_score and system_score >= settings.tool_similarity_threshold
+
+
+def _ensure_local_system_control_tool(selected_tools: list, user_input: str, q_emb, messages: list | None = None) -> list:
+    needs_tool = _looks_like_local_system_control(user_input, q_emb)
+    if not needs_tool and messages is not None:
+        needs_tool = _looks_like_action_correction(user_input, messages)
+    if not needs_tool:
+        return selected_tools
+    tool = get_tool("system_control")
+    if not tool:
+        return selected_tools
+    if any(item.get("name") == "system_control" for item in selected_tools):
+        return selected_tools
+    boosted = [tool] + list(selected_tools)
+    return boosted[: max(1, settings.tool_top_k)]
+
+
+@lru_cache(maxsize=1)
+def _action_correction_text() -> str:
+    return _load_routing_policy_section(
+        "Action Correction Text",
+        "The user says the previous answer was wrong or the action did not work.",
+    )
+
+
+def _looks_like_action_correction(user_input: str, messages: list) -> bool:
+    text = str(user_input or "").strip()
+    if not text:
+        return False
+    context = text
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant":
+            prior = str(msg.get("content") or "").strip()
+            if prior:
+                context = f"{text}\n{prior[:300]}"
+                break
+    try:
+        correction_emb = embed(_action_correction_text())
+        sample_emb = embed(context)
+        return float(np.dot(correction_emb, sample_emb)) >= settings.tool_similarity_threshold
+    except Exception:
+        return False
+
+
+def _strip_memory_prefix(content: str) -> str:
+    text = str(content or "").strip()
+    if text.startswith("[") and "]" in text:
+        return text.split("]", 1)[-1].strip()
+    return text
+
+
+def _last_user_system_request(messages: list) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = _strip_memory_prefix(str(msg.get("content", "")))
+        if _looks_like_local_system_control(content, embed(content)):
+            return content
+    return ""
+
+
+def _forced_local_system_control_call(
+    user_input: str,
+    tool_schemas: list,
+    messages: list,
+    q_emb,
+) -> dict | None:
+    if not tool_schemas:
+        return None
+    available = {schema["function"]["name"] for schema in tool_schemas}
+    if "system_control" not in available:
+        return None
+
+    args: dict = {}
+    if _looks_like_action_correction(user_input, messages):
+        latest_args = _latest_tool_arguments(messages, "system_control")
+        if latest_args.get("action"):
+            args = dict(latest_args)
+        else:
+            prior_request = _last_user_system_request(messages)
+            if prior_request:
+                args = _repair_system_control_args("system_control", {}, prior_request)
+    elif _looks_like_local_system_control(user_input, q_emb):
+        args = _repair_system_control_args("system_control", {}, user_input)
+    else:
+        return None
+
+    args = _repair_system_control_args("system_control", args, user_input)
+    action = str(args.get("action", "")).strip()
+    if not action:
+        return None
+    if _tool_supports_parameter("system_control", "response_format"):
+        args["response_format"] = "structured"
+    return {
+        "id": "call_system_control_0",
+        "name": "system_control",
+        "arguments": json.dumps(args, ensure_ascii=False),
+    }
+
+
+def _repair_system_control_args(tool_name: str, args: dict, user_input: str) -> dict:
+    if tool_name != "system_control":
+        return args
+    from tools import system_control as system_control_mod
+
+    repaired = dict(args)
+    config_path = str(repaired.get("config_path", "")).strip()
+    if config_path and config_path.lower() not in str(user_input or "").lower():
+        repaired.pop("config_path", None)
+
+    action = str(repaired.get("action", "")).strip()
+    if action:
+        repaired["action"] = system_control_mod._normalize_action_name(action)
+        return repaired
+
+    aliases = system_control_mod._load_action_aliases()
+    if not aliases:
+        return repaired
+    alias_keys = list(aliases.keys())
+    alias_texts = [key.replace("_", " ") for key in alias_keys]
+    try:
+        user_emb = embed(str(user_input or ""))
+        alias_embs = embed(alias_texts)
+        if getattr(alias_embs, "ndim", 1) == 1:
+            alias_embs = alias_embs.reshape(1, -1)
+        scores = np.dot(alias_embs, user_emb)
+        best_index = int(np.argmax(scores))
+        if float(scores[best_index]) >= settings.tool_argument_grounding_threshold:
+            repaired["action"] = aliases[alias_keys[best_index]]
+    except Exception:
+        pass
+    return repaired
+
+
 def _prepare_tool_args_for_answer(tool_name: str, args: dict) -> dict:
     prepared = dict(args)
     if _tool_supports_parameter(tool_name, "response_format") and "response_format" not in prepared:
@@ -691,22 +1058,34 @@ def _prepare_tool_args_for_answer(tool_name: str, args: dict) -> dict:
 
 
 def _tool_call_grounded(user_input: str, args: dict, messages: list, tool_name: str = "") -> bool:
-    values = [tool_name] if tool_name else []
-    for value in args.values():
+    skip_params, loose_tools = _load_grounding_policy()
+    if tool_name in loose_tools:
+        return True
+
+    values = []
+    for param, value in args.items():
+        if param in skip_params:
+            continue
         if value is None:
             continue
         if isinstance(value, str) and not value.strip():
             continue
+        if isinstance(value, (dict, list)):
+            continue
         values.append(str(value))
-    if not values:
+    if not values and not tool_name:
         return True
-    grounding_text = user_input
+
+    grounding_text = _strip_memory_prefix(user_input)
     recent_tool_context = _recent_tool_context(messages)
     if recent_tool_context:
         grounding_text = f"{grounding_text}\n{recent_tool_context}"
     try:
         grounding_emb = embed(grounding_text)
-        value_embs = embed(values)
+        embed_values = list(values)
+        if tool_name:
+            embed_values.append(tool_name)
+        value_embs = embed(embed_values)
         if getattr(value_embs, "ndim", 1) == 1:
             value_embs = value_embs.reshape(1, -1)
         similarity = float(np.max(np.dot(value_embs, grounding_emb)))
@@ -843,12 +1222,12 @@ class Agent:
 
     def process(self, user_input: str):
         recent_action_context = _recent_action_context(self.messages)
-        need_context = len(user_input.strip()) >= settings.embedding_min_chars
-        q_emb = embed(user_input) if need_context else None
+        q_emb, routing_input = _embedding_query(user_input, self.messages)
+        need_context = q_emb is not None
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            router_future = pool.submit(self.router.select_tools, user_input, q_emb)
-            brain_future = pool.submit(self.brain.recall_context, user_input, 5, q_emb) if need_context else None
+            router_future = pool.submit(self.router.select_tools, routing_input, q_emb)
+            brain_future = pool.submit(self.brain.recall_context, routing_input, 5, q_emb) if need_context else None
 
             selected_tools = router_future.result()
             context = brain_future.result() if brain_future else None
@@ -874,20 +1253,24 @@ class Agent:
         ):
             context = None
 
+        selected_tools = _filter_tools_for_conversation(user_input, q_emb, selected_tools)
         selected_tools = _maybe_reuse_latest_context_tool(user_input, selected_tools, self.messages)
+        selected_tools = _ensure_local_system_control_tool(selected_tools, user_input, q_emb, self.messages)
 
-        if context:
-            msg = (
-                "[PERMANENT MEMORY FACTS: Use these as known truth for this turn. "
-                "Do not mention memory context, saved notes, conversation history, retrieval, confidence, scores, ranking, or internal metadata. "
-                f"Answer directly from the facts when they answer the user: {context}]\n{user_input}"
-            )
-        else:
-            msg = user_input
+        conversational_turn = _is_conversational_turn(selected_tools, user_input, q_emb)
+        memory_facts = context if context else ""
 
-        self.messages.append({"role": "user", "content": msg})
+        self.messages.append({"role": "user", "content": user_input})
 
-        self.messages[0] = {"role": "system", "content": _build_system_prompt(selected_tools, recent_action_context)}
+        self.messages[0] = {
+            "role": "system",
+            "content": _build_system_prompt(
+                selected_tools,
+                recent_action_context,
+                memory_facts=memory_facts,
+                conversational_turn=conversational_turn,
+            ),
+        }
 
         tool_schemas = [
             t for t in get_tool_schemas()
@@ -907,8 +1290,16 @@ class Agent:
         current_turn_called = []
         current_turn_tool_msgs = []
         grounding_rejected = False
+        grounding_retry_pending = False
         content = ""
         forced_contextual_call = _forced_contextual_tool_call(user_input, tool_schemas, self.messages)
+        if not forced_contextual_call:
+            forced_contextual_call = _forced_local_system_control_call(
+                user_input,
+                tool_schemas,
+                self.messages,
+                q_emb,
+            )
 
         while True:
             tool_rounds += 1
@@ -1071,7 +1462,8 @@ class Agent:
             })
 
             results = {}
-            
+            executed_tool_count = 0
+
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {}
                 for fc in formatted_calls:
@@ -1096,6 +1488,7 @@ class Agent:
                         continue
                     future = pool.submit(execute_tool, name, **args)
                     futures[future] = fc
+                    executed_tool_count += 1
 
                 for future in as_completed(futures):
                     fc = futures[future]
@@ -1105,8 +1498,34 @@ class Agent:
                         result = f"Error: {e}"
                     results[fc["id"]] = _tool_result_content(result)
 
+            if grounding_rejected and executed_tool_count == 0:
+                if self.messages and self.messages[-1].get("role") == "assistant":
+                    self.messages.pop()
+                if settings.grounding_retry_without_tools and not grounding_retry_pending:
+                    grounding_retry_pending = True
+                    tool_schemas = []
+                    self.messages[0] = {
+                        "role": "system",
+                        "content": _build_system_prompt(
+                            [],
+                            recent_action_context,
+                            memory_facts=memory_facts,
+                            conversational_turn=True,
+                        ),
+                    }
+                    self.messages.append({
+                        "role": "system",
+                        "content": (
+                            "The previous tool attempt was not grounded in the user's message. "
+                            "Answer conversationally in plain language. Do not call a tool on this turn "
+                            "unless the user made a concrete actionable request."
+                        ),
+                    })
+                    continue
+                break
+
             for fc in formatted_calls:
-                result = results[fc["id"]]
+                result = results.get(fc["id"], "Error: No tool result")
                 if len(result) > MAX_TOOL_RESULT_CHARS:
                     result = result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
                 if settings.debug:
@@ -1120,18 +1539,11 @@ class Agent:
                 })
                 current_turn_called.append(fc["function"]["name"])
                 current_turn_tool_msgs.append(result)
-                
-                # Track file-generating tools for terminal viewing
+
                 if fc["function"]["name"] in _FILE_GENERATING_TOOLS:
                     self.router._last_generated_file = result
 
             tools_called_this_input = True
-
-            if grounding_rejected:
-                content = "I need the exact target before I can use that tool, sir."
-                print(content)
-                self.messages.append({"role": "assistant", "content": content})
-                break
 
             if tools_called_this_input and settings.finalize_tool_results_with_llm:
                 self.messages.append({
@@ -1153,17 +1565,38 @@ class Agent:
                     self.messages.append({"role": "assistant", "content": direct_result})
                     break
 
-        if tool_schemas and content and not tools_called_this_input:
+        if (
+            tool_schemas
+            and content
+            and not tools_called_this_input
+            and not conversational_turn
+        ):
             verdict = self.verifier.verify(content, current_turn_called, current_turn_tool_msgs, tool_schemas)
             if verdict != "PASS":
-                refusal = "I'm sorry, I don't have the ability to do that."
-                print(f"\n[{refusal}]")
-                content = refusal
-                if self.messages and self.messages[-1]["role"] == "assistant":
-                    self.messages[-1]["content"] = refusal
+                self.messages.append({
+                    "role": "system",
+                    "content": (
+                        "Your last reply sounded like a completed action without tool evidence. "
+                        "Answer again in plain conversational language for this turn."
+                    ),
+                })
+                retry_content = ""
+                try:
+                    stream = self.llm.stream(self.messages, tools=None)
+                    for chunk in stream:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            retry_content += chunk.choices[0].delta.content
+                except RuntimeError:
+                    retry_content = content
+                if retry_content.strip():
+                    if self.messages and self.messages[-1].get("role") == "assistant":
+                        self.messages.pop()
+                    content = retry_content.strip()
+                    _print_assistant_content(content)
+                    self.messages.append({"role": "assistant", "content": content})
 
         extraction_context = self._memory_extraction_context()
-        if content and len(user_input.strip()) > 15:
+        if content and _should_extract_memory(user_input, q_emb):
             self._executor.submit(self._extract_and_store, user_input, content, extraction_context)
 
         if content:
@@ -1186,5 +1619,5 @@ class Agent:
             for fact in facts:
                 if self.brain.commit(fact):
                     stored += 1
-            if stored:
+            if stored and (settings.memory_store_notify or settings.debug):
                 console.print(f"[dim]Stored {stored} memory[/dim]")

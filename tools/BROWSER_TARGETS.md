@@ -40,6 +40,12 @@ window later is fine once a save has happened.
   selectors.
 - `attribute`: optional attribute to read from matched selector nodes.
 
+## Page Reading
+
+- `browser_read_page` loads a URL and returns visible text plus DOM blocks.
+- `read_mode` on `browser_extract`: `fields` (default), `text`, `dom`, or `full`.
+- DOM limits and selectors live in `tools/BROWSER_DOM_POLICY.md`.
+
 ## Example Target
 
 Replace this URL with your real profile URL before using it.

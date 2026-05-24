@@ -5,7 +5,7 @@ import numpy as np
 
 class Verifier:
     SIMILARITY_THRESHOLD = 0.25
-    ACTION_DESCRIPTION_THRESHOLD = 0.30
+    ACTION_DESCRIPTION_THRESHOLD = 0.22
 
     def __init__(self):
         self._tool_emb_cache = {}
