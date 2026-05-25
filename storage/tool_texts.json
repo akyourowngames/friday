@@ -30,11 +30,5 @@
   "memory_forget: Remove memories matching a query string | forget my old address | remove memory about temporary password",
   "system_control: Change this PC's speaker volume, screen brightness, or media playback keys. Use keyboard_press or keyboard_shortcut for keyboard shortcuts and arbitrary key combinations. Use action names volume_up, volume_down, volume_set, brightness_down, brightness_up, brightness_set. Omit config_path; the bundled tools/SYSTEM_CONTROLS.md catalog is used automatically. | increase volume | decrease brightness | mute volume | media play pause | turn brightness up",
   "keyboard_press: Press an arbitrary keyboard shortcut or key combination using explicit key tokens joined by + | press ctrl+s | send alt+tab | press enter",
-  "keyboard_shortcut: Press a named shortcut from KEYBOARD_SHORTCUTS.md | use the copy shortcut | run keyboard shortcut save | press shortcut new_tab",
-  "registry_test_echo: Registry test echo",
-  "registry_test_secret_error: Registry test secret error",
-  "registry_test_trace: Registry test trace",
-  "registry_test_timeout: Registry test timeout",
-  "registry_test_unknown: Registry test unknown",
-  "registry_test_validator: Registry test validator"
+  "keyboard_shortcut: Press a named shortcut from KEYBOARD_SHORTCUTS.md | use the copy shortcut | run keyboard shortcut save | press shortcut new_tab"
 ]
