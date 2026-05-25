@@ -2,6 +2,7 @@
   "name": "king-friday-frontend",
   "version": "0.1.0",
   "description": "Local-first AI assistant runtime with graph memory, semantic tool routing, markdown-governed tools, and verified tool calling.",
+  "license": "MIT",
   "keywords": [
     "local-ai-assistant",
     "ai-agent",
@@ -17,7 +18,8 @@
     "automation",
     "personal-ai",
     "agent-framework",
-    "developer-tools"
+    "developer-tools",
+    "open-source"
   ],
   "repository": {
     "type": "git",

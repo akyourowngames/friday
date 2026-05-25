@@ -9,19 +9,19 @@ KING: Local AI Assistant Runtime with Graph Memory and Verified Tool Calling
 
 ## Short Description
 
-Local-first AI assistant runtime with graph memory, semantic tool routing,
-markdown-governed tools, FastAPI/Next.js frontend surfaces, and a verification
-pipeline for grounded tool behavior.
+Open-source local-first AI assistant runtime with graph memory, semantic tool
+routing, markdown-governed tools, FastAPI/Next.js frontend surfaces, and a
+verification pipeline for grounded tool behavior.
 
 ## Long Description
 
-KING is a Python and Next.js assistant runtime for building local Jarvis-style
-AI systems. It combines semantic tool routing, graph-backed memory, structured
-tool result envelopes, markdown-owned tool governance, browser and system
-automation, route/navigation tooling, and visible frontend pages for memory,
-navigator, chat, and generated assets. The repo is designed for developers who
-want agent behavior that is inspectable, testable, and grounded in real tool
-results instead of canned success claims.
+KING is an open-source Python and Next.js assistant runtime for building local
+Jarvis-style AI systems. It combines semantic tool routing, graph-backed memory,
+structured tool result envelopes, markdown-owned tool governance, browser and
+system automation, route/navigation tooling, and visible frontend pages for
+memory, navigator, chat, and generated assets. The repo is designed for
+developers who want agent behavior that is inspectable, testable, and grounded
+in real tool results instead of canned success claims.
 
 ## Suggested GitHub Topics
 
@@ -41,6 +41,7 @@ personal-ai
 agent-framework
 developer-tools
 local-first
+open-source
 
 ## Search Phrases
 

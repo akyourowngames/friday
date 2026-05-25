@@ -1,9 +1,9 @@
 # KING: Local AI Assistant Runtime with Graph Memory and Tool Calling
 
-KING is a local-first AI assistant runtime for developers who want more than a
-chat box: semantic tool routing, graph-backed memory, structured tool results,
-frontend control surfaces, and a verification pipeline that proves behavior
-before the assistant claims it works.
+KING is an open-source, local-first AI assistant runtime for developers who
+want more than a chat box: semantic tool routing, graph-backed memory,
+structured tool results, frontend control surfaces, and a verification pipeline
+that proves behavior before the assistant claims it works.
 
 It is built around a simple idea: an assistant should remember useful context,
 use real tools when it has them, expose what it can do through inspectable
@@ -16,7 +16,7 @@ local AI assistant, open source Jarvis assistant, AI tool calling framework,
 graph memory AI, semantic tool routing, local agent runtime, markdown driven
 AI tools, personal AI assistant, NVIDIA NIM assistant, FastAPI AI assistant,
 Next.js AI dashboard, Python AI agent, retrieval augmented memory, verified AI
-tools, local automation assistant
+tools, local automation assistant, open source AI agent
 
 ## Why Developers Star It
 
@@ -35,6 +35,23 @@ tools, local automation assistant
   are available from the local web UI.
 - **Verification is a feature**: a markdown-owned pipeline runs tests,
   compile checks, frontend type checks, and manifest audits.
+
+## Open Source and Contributing
+
+Friday/KING is open source and built for contributors. Pull requests, issues,
+new tools, provider adapters, memory improvements, frontend surfaces, tests,
+docs, and verification upgrades are welcome.
+
+Good contribution paths:
+
+- add a new tool with schema, typed errors, manifest evidence, and tests
+- improve graph memory ranking, relation rules, or recall presentation
+- add provider fallback logic without fake success claims
+- polish the frontend pages for chat, memory, navigator, or folder watcher
+- expand the verification pipeline with checks that produce useful evidence
+
+Please keep changes grounded: no keyword routing shortcuts, no canned success
+responses, no hidden verification claims, and no secrets in commits.
 
 ## Architecture
 
@@ -127,18 +144,14 @@ python -c "import tools; from tools.manifest_audit import tool_manifest_audit; p
 For the full markdown-defined toolchain check, use the verification tool or run
 the commands listed in `tools/TOOL_VERIFICATION_PIPELINE.md`.
 
-## Developer Gists
+## Reusable Code Gists
 
-This repo contains several reusable patterns worth lifting into other agent
-projects:
+These public GitHub Gists extract the most useful code patterns from this repo:
 
-- graph memory with relation repair and vector projection
-- markdown as a governance layer for tools and verification
-- structured tool envelopes with trace metadata
-- provider fallback reporting without fake success claims
-- frontend pages that visualize tools instead of hiding them behind chat
-
-See `docs/DEV_GISTS.md` for copyable architecture notes.
+- [JSON tool-call leak guard](https://gist.github.com/akyourowngames/a4ae05d4a11a0b36cf2be9f227f3d96b)
+- [Semantic tool router](https://gist.github.com/akyourowngames/f6492d54f7f1f7302d5f1ed387f89a5a)
+- [Structured tool result envelopes](https://gist.github.com/akyourowngames/5e1f59861ad965e0fe1a585ac9cbb022)
+- [Graph memory unified ranker](https://gist.github.com/akyourowngames/64563ec381c7a435b13a79facd742a4e)
 
 ## Repository Map
 
@@ -153,8 +166,12 @@ tests/                 grounding, memory, tool, frontend-adjacent checks
 deploy/folder_watcher/ service, Docker, launchd, nginx templates
 ```
 
+## License
+
+MIT. Use it, fork it, remix it, and send improvements back.
+
 ## Project Status
 
-KING is an active local assistant research/runtime repo. It is strongest as a
-developer playground for agent memory, tool grounding, local automation, and
-frontend-visible tool workflows.
+KING is an active open-source local assistant research/runtime repo. It is
+strongest as a developer playground for agent memory, tool grounding, local
+automation, and frontend-visible tool workflows.
