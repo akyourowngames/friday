@@ -113,6 +113,12 @@ def dashboard_html(config: WatcherConfig) -> str:
       gap: 8px;
       margin-bottom: 14px;
     }}
+    .chat-controls {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      margin-top: 10px;
+    }}
     input, button {{
       height: 38px;
       border-radius: 7px;
@@ -130,6 +136,20 @@ def dashboard_html(config: WatcherConfig) -> str:
       background: var(--dark);
       color: #fff;
       cursor: pointer;
+    }}
+    button.secondary {{
+      background: #edf6f5;
+      color: #115e59;
+      border-color: #b9dfda;
+    }}
+    button.inline-action {{
+      width: 100%;
+      min-width: 74px;
+      background: #edf6f5;
+      color: #115e59;
+      border-color: #b9dfda;
+      font-size: 12px;
+      padding: 0 8px;
     }}
     table {{
       width: 100%;
@@ -170,7 +190,36 @@ def dashboard_html(config: WatcherConfig) -> str:
     }}
     .event b {{ color: var(--accent-2); }}
     .muted {{ color: var(--muted); }}
-    #llmResult {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
+    #llmResult, #deepDiveResult {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .chat-log {{
+      display: grid;
+      gap: 8px;
+      max-height: 290px;
+      overflow: auto;
+      padding-right: 4px;
+    }}
+    .message {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 13px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+      background: #f7f9fb;
+    }}
+    .message.user {{
+      background: #e8f4ff;
+      border-color: #b9d9f2;
+    }}
+    .message.assistant {{
+      background: #f7fbf8;
+      border-color: #c9e4d1;
+    }}
+    .selected-file {{
+      margin-bottom: 10px;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }}
     .split {{
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
@@ -224,6 +273,15 @@ def dashboard_html(config: WatcherConfig) -> str:
     <section>
       <div class="split">
         <div>
+          <div class="panel" style="margin-top: 0; margin-bottom: 14px">
+            <h2>AI Chat</h2>
+            <div id="selectedFile" class="selected-file muted">No file selected</div>
+            <div id="chatLog" class="chat-log"></div>
+            <div class="chat-controls">
+              <input id="chatInput" aria-label="Chat message" placeholder="Ask about this folder">
+              <button id="chatSendButton">Send</button>
+            </div>
+          </div>
           <div class="search">
             <input id="searchInput" value="folder watcher" aria-label="Search indexed content">
             <button id="searchButton">Search</button>
@@ -234,9 +292,13 @@ def dashboard_html(config: WatcherConfig) -> str:
             <h2>LLM Result</h2>
             <div id="llmResult" class="muted"></div>
           </div>
+          <div class="panel" id="deepDivePanel" style="display: none; margin-bottom: 14px">
+            <h2>Deep Dive</h2>
+            <div id="deepDiveResult" class="muted"></div>
+          </div>
           <table>
             <thead>
-              <tr><th style="width: 28%">File</th><th>Path</th><th style="width: 22%">Tags</th></tr>
+              <tr><th style="width: 26%">File</th><th>Path</th><th style="width: 20%">Tags</th><th style="width: 96px">Action</th></tr>
             </thead>
             <tbody id="filesBody"></tbody>
           </table>
@@ -259,14 +321,31 @@ def dashboard_html(config: WatcherConfig) -> str:
     const socketState = document.getElementById('socketState');
     const llmPanel = document.getElementById('llmPanel');
     const llmResult = document.getElementById('llmResult');
+    const chatInput = document.getElementById('chatInput');
+    const chatSendButton = document.getElementById('chatSendButton');
+    const chatLog = document.getElementById('chatLog');
+    const selectedFile = document.getElementById('selectedFile');
+    const deepDivePanel = document.getElementById('deepDivePanel');
+    const deepDiveResult = document.getElementById('deepDiveResult');
+    let selectedFileId = null;
+    let chatHistory = [];
 
     function text(value) {{
       return value === undefined || value === null ? '' : String(value);
     }}
 
+    function html(value) {{
+      return text(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }}
+
     function tags(values) {{
       if (!Array.isArray(values) || !values.length) return '<span class="muted">none</span>';
-      return values.map((item) => `<span class="tag">${{text(item)}}</span>`).join('');
+      return values.map((item) => `<span class="tag">${{html(item)}}</span>`).join('');
     }}
 
     async function loadStats() {{
@@ -292,9 +371,10 @@ def dashboard_html(config: WatcherConfig) -> str:
     function renderFiles(files) {{
       filesBody.innerHTML = files.map((file) => `
         <tr>
-          <td><strong>${{text(file.filename)}}</strong><br><span class="muted">${{text(file.mime_type)}}</span></td>
-          <td>${{text(file.path)}}${{file.snippet ? `<br><span class="muted">${{text(file.snippet)}}</span>` : ''}}</td>
+          <td><strong>${{html(file.filename)}}</strong><br><span class="muted">${{html(file.mime_type)}}</span></td>
+          <td>${{html(file.path)}}${{file.snippet ? `<br><span class="muted">${{html(file.snippet)}}</span>` : ''}}</td>
           <td>${{tags(file.tags)}}</td>
+          <td><button class="inline-action" data-file-id="${{html(file.id)}}">Deep Dive</button></td>
         </tr>
       `).join('');
     }}
@@ -352,12 +432,58 @@ def dashboard_html(config: WatcherConfig) -> str:
       await loadLatest();
     }}
 
+    function addChat(role, content) {{
+      const row = document.createElement('div');
+      row.className = 'message ' + role;
+      row.textContent = content;
+      chatLog.appendChild(row);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      chatHistory.push({{role, content}});
+      if (chatHistory.length > 12) chatHistory = chatHistory.slice(-12);
+    }}
+
+    async function sendChat() {{
+      const message = chatInput.value.trim();
+      if (!message) return;
+      chatInput.value = '';
+      addChat('user', message);
+      const response = await fetch('/chat', {{
+        method: 'POST',
+        headers: {{'content-type': 'application/json'}},
+        body: JSON.stringify({{message, history: chatHistory.slice(0, -1), file_id: selectedFileId, limit: 8}})
+      }});
+      const result = await response.json();
+      if (!response.ok) {{
+        addChat('assistant', JSON.stringify(result.detail || result));
+        return;
+      }}
+      addChat('assistant', result.answer || '');
+      if (Array.isArray(result.files) && result.files.length) renderFiles(result.files);
+    }}
+
+    async function deepDive(fileId) {{
+      selectedFileId = fileId;
+      selectedFile.textContent = 'Selected: ' + fileId;
+      deepDivePanel.style.display = 'block';
+      deepDiveResult.textContent = 'reading...';
+      const response = await fetch('/files/' + encodeURIComponent(fileId) + '/deep-dive');
+      const result = await response.json();
+      if (!response.ok) {{
+        deepDiveResult.textContent = JSON.stringify(result.detail || result, null, 2);
+        return;
+      }}
+      const name = ((result.file || {{}}).filename || fileId);
+      selectedFile.textContent = 'Selected: ' + name;
+      deepDiveResult.textContent = result.answer || JSON.stringify(result, null, 2);
+      addChat('assistant', result.answer || ('Selected ' + name));
+    }}
+
     function addEvent(event) {{
       const payload = event.payload || {{}};
       const file = payload.file || {{}};
       const row = document.createElement('div');
       row.className = 'event';
-      row.innerHTML = `<b>${{text(event.event_type)}}</b><br>${{text(file.filename || event.new_path || event.old_path)}}<br><span class="muted">${{new Date((event.timestamp || Date.now() / 1000) * 1000).toLocaleTimeString()}}</span>`;
+      row.innerHTML = `<b>${{html(event.event_type)}}</b><br>${{html(file.filename || event.new_path || event.old_path)}}<br><span class="muted">${{new Date((event.timestamp || Date.now() / 1000) * 1000).toLocaleTimeString()}}</span>`;
       eventsList.prepend(row);
       while (eventsList.children.length > 20) eventsList.removeChild(eventsList.lastChild);
     }}
@@ -381,8 +507,16 @@ def dashboard_html(config: WatcherConfig) -> str:
     searchButton.addEventListener('click', runSearch);
     askButton.addEventListener('click', askLlm);
     summarizeButton.addEventListener('click', summarizePending);
+    chatSendButton.addEventListener('click', sendChat);
+    filesBody.addEventListener('click', (event) => {{
+      const button = event.target.closest('button[data-file-id]');
+      if (button) deepDive(button.dataset.fileId);
+    }});
     searchInput.addEventListener('keydown', (event) => {{
       if (event.key === 'Enter') runSearch();
+    }});
+    chatInput.addEventListener('keydown', (event) => {{
+      if (event.key === 'Enter') sendChat();
     }});
 
     Promise.all([loadStats(), loadStatus(), loadLatest()]).then(connectSocket);

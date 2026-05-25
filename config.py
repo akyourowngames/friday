@@ -152,7 +152,7 @@ class Settings:
     navigator_route_place_samples: int = _env_int("KING_NAVIGATOR_ROUTE_PLACE_SAMPLES", 4)
     verification_pipeline_file: str = _env("KING_VERIFICATION_PIPELINE_FILE", "tools/TOOL_VERIFICATION_PIPELINE.md")
     verification_pipeline_max_steps: int = _env_int("KING_VERIFICATION_PIPELINE_MAX_STEPS", 8)
-    verification_pipeline_timeout_ms: int = _env_int("KING_VERIFICATION_PIPELINE_TIMEOUT_MS", 60000)
+    verification_pipeline_timeout_ms: int = _env_int("KING_VERIFICATION_PIPELINE_TIMEOUT_MS", 180000)
     verification_pipeline_timeout_max_ms: int = _env_int("KING_VERIFICATION_PIPELINE_TIMEOUT_MAX_MS", 300000)
     verification_pipeline_output_chars: int = _env_int("KING_VERIFICATION_PIPELINE_OUTPUT_CHARS", 4000)
     folder_watcher_config_file: str = _env("KING_FOLDER_WATCHER_CONFIG_FILE", "tools/FOLDER_WATCHER_CONFIG.md")

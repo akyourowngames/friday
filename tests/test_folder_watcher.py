@@ -14,6 +14,7 @@ from folder_watcher.bus import EventBus
 from folder_watcher.configuration import load_config
 from folder_watcher.index import FolderIndex
 from folder_watcher.ingest import IngestPipeline
+from folder_watcher.llm import load_llm_policy
 from folder_watcher.watcher import DebouncedWatcher
 
 
@@ -32,6 +33,8 @@ class FakeLLM:
             "model": "fake-model",
             "summaries_enabled": True,
             "queries_enabled": True,
+            "chat_enabled": True,
+            "deep_dive_enabled": True,
             "policy": {"allowed_tables": self.policy.allowed_tables},
         }
 
@@ -39,6 +42,12 @@ class FakeLLM:
         return True
 
     def summaries_available(self):
+        return True
+
+    def chat_available(self):
+        return True
+
+    def deep_dive_available(self):
         return True
 
     def generate_sql(self, query: str, limit: int | None = None):
@@ -53,6 +62,25 @@ class FakeLLM:
             "summary": "This file is summarized by the fake LLM for deterministic tests.",
             "tags": ["llm-summary", "test-evidence"],
             "provider": "fake",
+        }
+
+    def chat(self, message: str, history: list[dict] | None = None, file_id: str | None = None, limit: int | None = None):
+        return {
+            "answer": "Fake natural chat grounded in folder watcher evidence: " + message,
+            "provider": "fake",
+            "selected_file": {"id": file_id} if file_id else None,
+            "files": [],
+            "stats": {"active_files": 1},
+        }
+
+    def deep_dive_file(self, file_id: str):
+        return {
+            "answer": "Fake deep dive for selected file " + file_id,
+            "provider": "fake",
+            "file": {"id": file_id, "filename": "fake.md"},
+            "dependencies": [],
+            "dependents": [],
+            "events": [],
         }
 
 
@@ -135,6 +163,34 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(self.config.hot_file_event_threshold, 2)
         self.assertEqual(self.config.playlist_path, (self.root / "new-arrivals.m3u").resolve())
         self.assertEqual(self.config.directory_intents[0].directory, "prompts")
+
+        self.config.llm_policy_path.write_text(
+            "\n".join(
+                [
+                    "# Test LLM Policy",
+                    "## Runtime",
+                    "- chat_enabled: true",
+                    "- deep_dive_enabled: true",
+                    "- max_chat_chars: 900",
+                    "- chat_context_files: 4",
+                    "## Allowed SQL Tables",
+                    "- files",
+                    "## Allowed SQL Functions",
+                    "- count",
+                    "## Chat System Prompt",
+                    "Chat from evidence.",
+                    "## Deep Dive System Prompt",
+                    "Deep dive from evidence.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        policy = load_llm_policy(self.root, self.config.llm_policy_path)
+        self.assertTrue(policy.chat_enabled)
+        self.assertTrue(policy.deep_dive_enabled)
+        self.assertEqual(policy.max_chat_chars, 900)
+        self.assertEqual(policy.chat_context_files, 4)
+        self.assertIn("Chat from evidence", policy.chat_prompt)
 
     def test_ingest_indexes_text_metadata_tags_search_and_stats(self):
         code = self.watch / "agent_loop.py"
@@ -249,6 +305,8 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("KING Folder Watcher", dashboard.text)
         self.assertIn("/watch", dashboard.text)
+        self.assertIn("/chat", dashboard.text)
+        self.assertIn("Deep Dive", dashboard.text)
 
     def test_llm_query_summary_and_sql_guard_are_structural(self):
         note = self.watch / "llm-note.md"
@@ -275,6 +333,32 @@ class FolderWatcherTests(unittest.TestCase):
             5,
         )
         self.assertEqual(blocked["status"], "blocked")
+
+    def test_chat_and_deep_dive_are_provider_backed_and_grounded(self):
+        note = self.watch / "chat-target.md"
+        note.write_text("natural chat deep dive evidence", encoding="utf-8")
+        file_item = self.pipeline.ingest_path(note)["file"]
+        app = create_app(self.config, self.index, llm_service=FakeLLM())
+        client = TestClient(app)
+
+        chat = client.post(
+            "/chat",
+            json={
+                "message": "what is here and what matters",
+                "history": [{"role": "user", "content": "hello"}],
+                "file_id": file_item["id"],
+                "limit": 4,
+            },
+        )
+        self.assertEqual(chat.status_code, 200)
+        self.assertEqual(chat.json()["mode"], "llm_chat")
+        self.assertIn("Fake natural chat", chat.json()["answer"])
+        self.assertEqual(chat.json()["selected_file"]["id"], file_item["id"])
+
+        deep_dive = client.get(f"/files/{file_item['id']}/deep-dive")
+        self.assertEqual(deep_dive.status_code, 200)
+        self.assertEqual(deep_dive.json()["mode"], "llm_deep_dive")
+        self.assertIn(file_item["id"], deep_dive.json()["answer"])
 
     def test_document_and_media_extractors_store_real_metadata(self):
         try:

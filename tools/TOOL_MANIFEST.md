@@ -144,8 +144,8 @@ It exists because a change is not shipped until the project can prove what chang
 `folder_watcher_service` is the local filesystem intelligence service for indexing
 configured folders into SQLite, exposing dashboard, status, LLM-driven query and
 summary generation, latest-file, diff, search, duplicate, stats, content, tag,
-export, snapshot, hot-file, anomaly, playlist, dependency graph, WebSocket, and
-webhook surfaces.
+export, snapshot, hot-file, anomaly, playlist, dependency graph, chat, file
+deep-dive, WebSocket, and webhook surfaces.
 
 ### Runtime
 
@@ -175,6 +175,10 @@ webhook surfaces.
   directory events.
 - Read-only LLM-generated SQL results guarded by SQLite authorizer callbacks.
 - LLM file summaries and semantic tags when summaries are enabled.
+- Natural chat responses grounded in indexed folder context and selected-file
+  evidence.
+- File deep-dive responses grounded in content, metadata, graph edges, events,
+  duplicate state, and markdown-owned LLM policy.
 - Snapshot, hot-file, anomaly, duplicate symlink suggestion, dependency,
   dependent, and MUSE-compatible playlist responses.
 - FastAPI JSON responses and WebSocket event messages.

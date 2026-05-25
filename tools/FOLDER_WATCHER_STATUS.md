@@ -26,6 +26,7 @@ without pretending planned surfaces are already complete.
 - Browser dashboard at `/dashboard`
 - Markdown-owned LLM policy in `tools/FOLDER_WATCHER_LLM_POLICY.md`
 - Provider-backed natural-language SQL generation when the configured LLM key is present
+- Provider-backed natural chat endpoint and dashboard chat panel
 - SQLite authorizer guard for read-only LLM-generated SQL
 - Provider-backed on-demand summaries and summarize-pending endpoint when summaries are enabled
 - PDF text extraction and document metadata
@@ -34,6 +35,7 @@ without pretending planned surfaces are already complete.
 - Image metadata and EXIF extraction with OCR hook support
 - Video metadata extraction through OpenCV and optional ffprobe detail
 - File relationship graph and dependency/dependent endpoints
+- File deep-dive endpoint using selected file content, metadata, graph, events, and LLM policy
 - Change velocity tracking and hot-file tagging in API responses
 - Directory intent anomaly detection
 - Snapshot reconstruction endpoint
@@ -49,6 +51,7 @@ without pretending planned surfaces are already complete.
 ## Partial
 
 - Natural-language file query falls back to local index search when the configured LLM provider is unavailable
+- Natural chat falls back to local indexed context when the configured LLM provider is unavailable
 - Summary endpoint reports pending status when summaries are disabled or the configured LLM provider is unavailable
 - OCR depends on local Tesseract runtime availability.
 - Audio transcription depends on sidecar transcripts or local faster-whisper availability.

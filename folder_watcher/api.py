@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .bus import EventBus
 from .configuration import WatcherConfig
@@ -37,6 +37,13 @@ class ConfigPatchRequest(BaseModel):
 
 class SummarizePendingRequest(BaseModel):
     limit: int = 10
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[dict[str, Any]] = Field(default_factory=list)
+    file_id: str | None = None
+    limit: int = 8
 
 
 class WebhookRequest(BaseModel):
@@ -175,6 +182,31 @@ def create_app(
     def llm_status(_: Any = Depends(require_auth)):
         return llm.status()
 
+    @app.post("/chat")
+    def chat(request: ChatRequest, _: Any = Depends(require_auth)):
+        if not request.message.strip():
+            raise HTTPException(status_code=400, detail="message must not be empty")
+        if request.file_id and index.get_file(request.file_id) is None:
+            raise HTTPException(status_code=404, detail="file not found")
+        if llm.chat_available():
+            try:
+                result = llm.chat(request.message, request.history, request.file_id, request.limit)
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"LLM chat failed: {exc}") from exc
+            return {"mode": "llm_chat", "message": request.message, **result}
+        files = index.search(request.message, request.limit)
+        if not files:
+            files = index.latest(request.limit)
+        selected_file = index.get_file(request.file_id) if request.file_id else None
+        return {
+            "mode": "local_context",
+            "message": request.message,
+            "answer": _local_chat_answer(files, selected_file, llm.status()),
+            "selected_file": selected_file,
+            "files": files,
+            "llm": llm.status(),
+        }
+
     @app.get("/files/duplicates")
     def files_duplicates(_: Any = Depends(require_auth)):
         return {"groups": index.duplicates()}
@@ -258,6 +290,29 @@ def create_app(
         if index.get_file(file_id) is None:
             raise HTTPException(status_code=404, detail="file not found")
         return {"file_id": file_id, "dependents": index.dependents(file_id)}
+
+    @app.get("/files/{file_id}/deep-dive")
+    def file_deep_dive(file_id: str, _: Any = Depends(require_auth)):
+        item = index.get_file(file_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="file not found")
+        if llm.deep_dive_available():
+            try:
+                result = llm.deep_dive_file(file_id)
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"LLM deep dive failed: {exc}") from exc
+            return {"mode": "llm_deep_dive", "file_id": file_id, **result}
+        return {
+            "mode": "local_context",
+            "file_id": file_id,
+            "answer": _local_deep_dive_answer(item),
+            "file": item,
+            "content_excerpt": (index.get_content(file_id) or "")[:5000],
+            "dependencies": index.dependencies(file_id),
+            "dependents": index.dependents(file_id),
+            "events": [event for event in index.diff(since=0, limit=1000) if event.get("file_id") == file_id][-20:],
+            "llm": llm.status(),
+        }
 
     @app.get("/files/{file_id}/summary")
     def get_file_summary(file_id: str, _: Any = Depends(require_auth)):
@@ -376,3 +431,32 @@ def _rows_as_files(rows: list[dict]) -> list[dict]:
         if "id" in row and "path" in row and "filename" in row:
             files.append(row)
     return files
+
+
+def _local_chat_answer(files: list[dict], selected_file: dict | None, llm_status: dict) -> str:
+    if not llm_status.get("provider_ready"):
+        state = "unavailable"
+    elif not llm_status.get("chat_enabled", True):
+        state = "disabled by policy"
+    else:
+        state = "not active for this request"
+    if selected_file:
+        return (
+            "LLM chat is " + state + ". Selected file: "
+            + str(selected_file.get("filename", "unknown"))
+            + ". Matching indexed files: "
+            + str(len(files))
+            + "."
+        )
+    return "LLM chat is " + state + ". Matching indexed files: " + str(len(files)) + "."
+
+
+def _local_deep_dive_answer(file_record: dict) -> str:
+    return (
+        str(file_record.get("filename", "unknown"))
+        + " is indexed as "
+        + str(file_record.get("mime_type", "unknown"))
+        + " with "
+        + str(len(file_record.get("tags", [])))
+        + " tags."
+    )

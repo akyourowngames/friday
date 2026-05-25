@@ -107,6 +107,8 @@ adding routing shortcuts in code.
 - `GET /files/search` runs content search using SQLite FTS5 when available.
 - `POST /files/query` uses the LLM policy to generate read-only SQLite when the
   provider is available, then falls back to local index search when it is not.
+- `POST /chat` replies naturally from markdown-owned LLM chat policy and
+  indexed folder evidence, with optional selected-file context.
 - `GET /llm/status` reports provider readiness, model, prompt policy, and LLM
   feature switches.
 - `GET /files/duplicates` groups active files by identical SHA256 hash.
@@ -117,6 +119,8 @@ adding routing shortcuts in code.
 - `GET /files/{id}/content` returns extracted text content.
 - `GET /files/{id}/dependencies` returns indexed relationship edges from a file.
 - `GET /files/{id}/dependents` returns indexed reverse relationship edges.
+- `GET /files/{id}/deep-dive` returns provider-backed or local deep-dive context
+  for one indexed file.
 - `GET /files/{id}/summary` returns a stored summary or generates one through
   the LLM policy when summaries are enabled and the provider is available.
 - `POST /files/summarize-pending` summarizes pending text files through the LLM
