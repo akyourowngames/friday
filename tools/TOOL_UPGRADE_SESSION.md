@@ -1921,3 +1921,36 @@ Verification evidence:
 
 [VERDICT] The memory was not cleared. The regression was ranking/gating, and
 the CLI now recalls the stored identity fact again.
+
+## 2026-05-25 Graph-Only Memory Repair
+
+Scope: make graph memory authoritative and repair older text-projection rows
+that did not have relation edges.
+
+Runtime changes:
+
+- Memory rows now use `storage: graph`; the `text` field is retained only as a
+  projection for embeddings, display, and rollback.
+- Startup backfill repairs older text-only rows into graph edges, sets
+  `tier: graph`, and writes repaired graph references back to the daily memory
+  projection.
+- Relation rules now support non-user preference facts such as `Ankita likes
+  short hair`.
+- Recall keeps the strongest graph path for a memory so direct preference edges
+  win over weaker automatic association paths.
+
+Verification evidence:
+
+- Real memory probe: `what does Ankita like`, `what she likes`, and `and what
+  she likes` all returned `Ankita likes short hair` first.
+- Real graph state includes active edge `ankita likes short_hair` with evidence
+  `Ankita likes short hair`.
+- Real CLI sequence `ahh what do you know about ankita` then `and what she
+  likes` answered that Ankita likes short hair.
+- `python -m pytest -q` -> 191 tests passed, 24 subtests passed.
+- `python -m compileall config.py agent memory tools tests main.py api_server.py`
+- `npm run typecheck`
+
+[VERDICT] Durable facts are now graph-backed by default, legacy rows are
+repaired into graph storage on load, and Ankita preference recall works through
+the graph.

@@ -24,7 +24,8 @@ indexed corpus, integrity checks passing, and bounded maintenance paths.
 
 ## Unified Model
 
-Every stored fact is text + graph together (`storage: unified`). See `memory/MEMORY_UNIFIED_MODEL.md`.
+Every stored fact is graph-backed (`storage: graph`) with a text projection for
+embedding recall and display. See `memory/MEMORY_UNIFIED_MODEL.md`.
 Recall merges semantic text rank, graph edge rank, and one-hop graph expansion in `Brain.recall_unified()`.
 
 ## Callable Tools

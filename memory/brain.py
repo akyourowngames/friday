@@ -553,7 +553,7 @@ class Brain:
         }
         normalized["id"] = str(item.get("id") or _memory_id(normalized))
         normalized["tier"] = str(item.get("tier") or "semantic")
-        normalized["storage"] = str(item.get("storage") or "unified")
+        normalized["storage"] = str(item.get("storage") or "graph")
         graph_edges = item.get("graph_edges")
         if isinstance(graph_edges, list):
             normalized["graph_edges"] = [str(edge_id) for edge_id in graph_edges if str(edge_id).strip()]
@@ -593,38 +593,29 @@ class Brain:
         self.memories.sort(key=_timestamp_key)
 
     def _backfill_graph_from_memories(self):
-        active_memory_ids = {item.get("id") or _memory_id(item) for item in self.memories}
-        expected_edge_ids = set()
-        for item in self.memories:
-            text = item.get("text", "")
-            for rule in self._graph_rules:
-                edge_info = self._rule_to_edge(rule, text)
-                if not edge_info:
-                    continue
-                source_id = _node_id(edge_info["source_name"])
-                target_id = _node_id(edge_info["target_name"])
-                expected_edge_ids.add(self._edge_id(source_id, edge_info["relation"], target_id))
-                break
-
-        existing_edges = self._graph.setdefault("edges", [])
-        kept_edges = [
-            edge
-            for edge in existing_edges
-            if edge.get("memory_id") not in active_memory_ids or edge.get("id") in expected_edge_ids
-        ]
-        if len(kept_edges) != len(existing_edges):
-            self._graph["edges"] = kept_edges
-            self._persist_graph()
-
         migrate_dates = set()
         for item in self.memories:
-            if item.get("graph_edges"):
-                self._sync_memory_graph_refs(item)
-                continue
-            self._ingest_graph_memory(item)
-            self._auto_relate_entities(item)
+            before_edges = list(item.get("graph_edges") or [])
+            before_nodes = list(item.get("graph_nodes") or [])
+            before_tier = item.get("tier")
+            before_storage = item.get("storage")
+            graph_changed = self._ingest_graph_memory(item)
+            if not self._has_active_memory_edges(item):
+                graph_changed = self._ingest_graph_fallback_memory(item) or graph_changed
+            auto_changed = self._auto_relate_entities(item)
             self._sync_memory_graph_refs(item)
-            migrate_dates.add(item.get("_date", date.today().isoformat()))
+            if item.get("graph_edges"):
+                item["tier"] = "graph"
+                item["storage"] = "graph"
+            if (
+                graph_changed
+                or auto_changed
+                or before_edges != list(item.get("graph_edges") or [])
+                or before_nodes != list(item.get("graph_nodes") or [])
+                or before_tier != item.get("tier")
+                or before_storage != item.get("storage")
+            ):
+                migrate_dates.add(item.get("_date", date.today().isoformat()))
         if migrate_dates:
             self._persist_changes(migrate_dates)
         elif self._graph.get("memory_links"):
@@ -798,7 +789,7 @@ class Brain:
                     "ts": item["ts"],
                     "id": item.get("id") or _memory_id(item),
                     "tier": item.get("tier", "semantic"),
-                    "storage": item.get("storage", "unified"),
+                    "storage": item.get("storage", "graph"),
                     "graph_edges": list(item.get("graph_edges") or []),
                     "graph_nodes": list(item.get("graph_nodes") or []),
                 }
@@ -1234,11 +1225,18 @@ class Brain:
         node_ids.discard("")
         item["graph_edges"] = edge_ids
         item["graph_nodes"] = sorted(node_ids)
-        item["storage"] = "unified"
-        item["tier"] = item.get("tier") or ("graph" if edge_ids else "semantic")
+        item["storage"] = "graph" if edge_ids else item.get("storage", "graph")
+        item["tier"] = "graph" if edge_ids else item.get("tier", "semantic")
         self._graph.setdefault("memory_links", {})[memory_id] = edge_ids
         if persist_graph:
             self._persist_graph()
+
+    def _has_active_memory_edges(self, item: dict) -> bool:
+        memory_id = item.get("id") or _memory_id(item)
+        for edge in self._graph.get("edges", []):
+            if edge.get("memory_id") == memory_id and edge.get("active", True):
+                return True
+        return False
 
     def _memory_id_for_graph_hit(self, graph_item: dict) -> str:
         target_text = str(graph_item.get("text", "")).strip().casefold()
@@ -1336,6 +1334,7 @@ class Brain:
                     "tier": memory.get("tier", "semantic"),
                     "sources": ["profile"],
                     "graph_path": "",
+                    "graph_score": 0.0,
                 }
 
         for item in self._recall_ranked_semantic(query, k=safe_k * 2, q_emb=q_emb):
@@ -1344,6 +1343,7 @@ class Brain:
                 **item,
                 "sources": ["text"],
                 "graph_path": "",
+                "graph_score": 0.0,
                 "unified_score": item.get("score", 0.0),
             }
 
@@ -1353,7 +1353,9 @@ class Brain:
             if memory_id and memory_id in merged:
                 merged[memory_id]["unified_score"] = round(merged[memory_id]["unified_score"] + boost, 4)
                 merged[memory_id]["sources"] = sorted(set(merged[memory_id]["sources"]) | {"graph"})
-                merged[memory_id]["graph_path"] = graph_item.get("text", "")
+                if boost >= float(merged[memory_id].get("graph_score", 0.0)):
+                    merged[memory_id]["graph_path"] = graph_item.get("text", "")
+                    merged[memory_id]["graph_score"] = boost
                 continue
             if not memory_id:
                 continue
@@ -1374,6 +1376,7 @@ class Brain:
                 "tier": memory.get("tier", "semantic"),
                 "sources": ["graph"],
                 "graph_path": graph_item.get("text", ""),
+                "graph_score": boost,
             }
 
         seed_ids = set(merged)
@@ -1382,8 +1385,9 @@ class Brain:
             if memory_id in merged:
                 merged[memory_id]["unified_score"] = round(merged[memory_id]["unified_score"] + item["score"], 4)
                 merged[memory_id]["sources"] = sorted(set(merged[memory_id]["sources"]) | set(item["sources"]))
-                if item.get("graph_path"):
+                if item.get("graph_path") and item["score"] >= float(merged[memory_id].get("graph_score", 0.0)):
                     merged[memory_id]["graph_path"] = item["graph_path"]
+                    merged[memory_id]["graph_score"] = item["score"]
                 continue
             merged[memory_id] = {
                 "id": memory_id,
@@ -1399,6 +1403,7 @@ class Brain:
                 "tier": item.get("tier", "semantic"),
                 "sources": list(item.get("sources") or ["graph_expand"]),
                 "graph_path": item.get("graph_path", ""),
+                "graph_score": item["score"],
             }
 
         graph = getattr(self, "_graph", {"edges": []})
@@ -1529,6 +1534,7 @@ class Brain:
             "ts": datetime.now().strftime("%H:%M:%S"),
             "_date": date.today().isoformat(),
             "tier": "semantic",
+            "storage": "graph",
         }
         item["id"] = _memory_id(item)
         self.memories.append(item)
@@ -1540,12 +1546,13 @@ class Brain:
                 break
         dirty_dates.add(item["_date"])
         graph_changed = self._ingest_graph_memory(item)
-        if not graph_changed:
+        if not self._has_active_memory_edges(item):
             graph_changed = self._ingest_graph_fallback_memory(item)
         self._auto_relate_entities(item)
         self._sync_memory_graph_refs(item, persist_graph=True)
-        if graph_changed:
+        if item.get("graph_edges"):
             item["tier"] = "graph"
+            item["storage"] = "graph"
         self._append_embedding(item["text"], insert_idx=insert_idx)
         dirty_dates.update(self._trim_capacity())
         self._persist_changes(dirty_dates)

@@ -17,7 +17,7 @@ class UnifiedMemoryTests(unittest.TestCase):
             brain = brain_mod.Brain()
             self.assertTrue(brain.commit("User name is Krish Verma"))
             memory = brain.memories[-1]
-            self.assertEqual(memory.get("storage"), "unified")
+            self.assertEqual(memory.get("storage"), "graph")
             self.assertTrue(memory.get("graph_edges"))
             self.assertTrue(memory.get("graph_nodes"))
             graph = json.loads((memory_dir / brain_mod.settings.memory_graph_file).read_text(encoding="utf-8"))

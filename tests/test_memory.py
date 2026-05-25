@@ -317,6 +317,54 @@ class MemoryBrainTests(unittest.TestCase):
             self.assertEqual(graph["nodes"]["user"]["type"], "person")
             self.assertTrue(any(edge["relation"] == "likes" and edge["active"] for edge in graph["edges"]))
 
+    def test_subject_preference_creates_graph_relation(self):
+        with isolated_memory():
+            brain = Brain()
+
+            self.assertTrue(brain.commit("Ankita likes short hair", importance=0.8))
+
+            summary = brain.graph_summary("what does Ankita like")
+            self.assertIn("Ankita likes short hair", summary)
+            self.assertIn("Ankita likes short hair", brain.recall_context("what does Ankita like"))
+            self.assertTrue(
+                any(
+                    edge["relation"] == "likes"
+                    and edge["active"]
+                    and edge["source"] == "ankita"
+                    for edge in brain._graph["edges"]
+                )
+            )
+
+    def test_legacy_text_memory_is_repaired_into_graph_storage(self):
+        with isolated_memory() as (memory_dir, _backup_dir):
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            memory_file = memory_dir / f"memory_{date.today().isoformat()}.json"
+            memory_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "text": "Ankita likes short hair",
+                            "importance": 0.8,
+                            "ts": "10:00:00",
+                            "tier": "semantic",
+                            "storage": "unified",
+                            "graph_edges": [],
+                            "graph_nodes": [],
+                        }
+                    ],
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            brain = Brain()
+
+            repaired = brain.memories[-1]
+            self.assertEqual(repaired["storage"], "graph")
+            self.assertEqual(repaired["tier"], "graph")
+            self.assertTrue(repaired["graph_edges"])
+            self.assertIn("Ankita likes short hair", brain.graph_summary("Ankita likes"))
+
     def test_plain_text_memory_gets_graph_fallback_relation(self):
         with isolated_memory():
             brain = Brain()

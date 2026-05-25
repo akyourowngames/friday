@@ -21,6 +21,10 @@ Modes:
 - User likes {object} => User|likes|{object}|preference|multi
 - User prefers {object} => User|prefers|{object}|preference|multi
 - User dislikes {object} => User|dislikes|{object}|preference|multi
+- {subject} likes {object} => {subject}|likes|{object}|preference|multi
+- {subject} like {object} => {subject}|likes|{object}|preference|multi
+- {subject} prefers {object} => {subject}|prefers|{object}|preference|multi
+- {subject} dislikes {object} => {subject}|dislikes|{object}|preference|multi
 - My crush is {object} => User|crush|{object}|preference|temporal
 - My cursh is {object} => User|crush|{object}|preference|temporal
 - User crush is {object} => User|crush|{object}|preference|temporal
