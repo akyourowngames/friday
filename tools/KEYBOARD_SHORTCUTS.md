@@ -36,6 +36,10 @@ Saved shortcuts for `keyboard_shortcut`. Keys use `+` between modifiers and the 
 
 - keys: f5
 
+### show_desktop
+
+- keys: win+d
+
 ### screenshot
 
 - keys: win+shift+s

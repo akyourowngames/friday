@@ -1954,3 +1954,27 @@ Verification evidence:
 [VERDICT] Durable facts are now graph-backed by default, legacy rows are
 repaired into graph storage on load, and Ankita preference recall works through
 the graph.
+
+## 2026-05-25 Tool Exposure Contract Repair
+
+Scope: repair the global tool behavior contract without changing core routing
+code.
+
+Markdown-control changes:
+
+- `AGENTS.md` now blocks core routing/execution edits for tool exposure unless
+  the user explicitly grants that current scope.
+- `tool_policy.md` now requires registry-backed tools to be used when exposed,
+  and treats missing selected schemas as an exposure problem instead of a broad
+  assistant incapability.
+- `tool_policy.md` and `TOOL_PROVIDER_FAILURE_PLAYBOOK.md` now require local
+  keyboard and system-control answers to separate sent-key evidence from
+  verified state changes.
+- `tools/KEYBOARD_SHORTCUTS.md` now includes `show_desktop` using `win+d`.
+
+Claim boundary:
+
+- This is a markdown contract repair, not a runtime router rewrite. It prevents
+  future work from hiding tool exposure problems behind fake limitations or fake
+  success text, while keeping executable changes deferred until explicitly
+  authorized.

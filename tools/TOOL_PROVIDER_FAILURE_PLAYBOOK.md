@@ -119,6 +119,21 @@ tool result into a broad claim about the world.
 - If a state-changing command may have partially completed, inspect the target
   before retry.
 
+### Keyboard And System Control
+
+- Distinguish key-send evidence, media-key evidence, hardware-key fallback,
+  verified state change, blocked permission, unavailable dependency, and failed
+  local action.
+- If a keyboard tool sends `win+d`, `ctrl+c`, `alt+tab`, or another shortcut,
+  report the sent shortcut only unless a verification field proves the target
+  window or desktop state changed.
+- If a system-control tool sends volume, mute, media, or brightness keys,
+  report the returned action and method. Do not claim the volume, brightness,
+  or playback state changed unless the tool result includes that measured state.
+- If a capable keyboard or system-control tool is registered but not selected
+  by the assistant, treat that as a tool exposure failure, not as a user-facing
+  incapability claim.
+
 ## Verification Requirements
 
 - Provider tools need tests for input validation, empty results, provider

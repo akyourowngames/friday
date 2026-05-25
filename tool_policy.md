@@ -24,6 +24,33 @@ When a tool call is needed, output one JSON tool call on its own line using an a
 
 Do not show shell commands, JSON calls, or function-call syntax as prose. The runtime executes tool calls; user-facing text should only describe verified results or ask for missing information.
 
+## Registry Exposure Discipline
+
+The registry schema and markdown control surfaces are the source of truth for
+tool capability exposure. Do not add phrase-match shortcuts or canned fallback
+answers to make a tool appear available.
+
+If the selected registry exposes a capable tool, call it. Do not answer with
+"not capable", "cannot perform", or a broad limitation unless the registry,
+schema, permission gate, or tool result proves that the requested action cannot
+be attempted.
+
+If the needed tool is present in the markdown manifest but absent from selected
+runtime schemas, report that as an exposure problem. Name the missing tool or
+schema evidence instead of pretending the assistant itself lacks the ability.
+
+For local PC actions, separate attempt evidence from verified state:
+
+- `keyboard_press` or `keyboard_shortcut` results prove only the requested keys
+  were sent unless verification fields prove a visible state changed.
+- `system_control` media-key results prove only the media key was sent unless
+  returned fields include the new volume, brightness, mute, or playback state.
+- Hardware-key fallbacks are attempt evidence. Tell the user what was sent and
+  what still needs visual confirmation.
+- Failed, unavailable, blocked, or partial local-action results must be reported
+  as observed. Do not rewrite them into success, incapability, or broad Windows
+  limitations.
+
 ## Tool Response Composition
 
 Do not use hardcoded tool response text, canned success messages, canned failure messages, or prewritten provider summaries.
