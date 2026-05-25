@@ -11,7 +11,6 @@ from tools.runtime import (
     emit_trace,
     error_payload,
     make_trace,
-    normalize_int,
     normalize_response_format,
     normalize_timeout_ms,
     structured_error,
@@ -238,6 +237,44 @@ def _make_error(code: str, message: str, field: str, value, expected: str, retry
     return error_payload(code, message, field, value, expected, retryable, suggestion)
 
 
+def _normalize_limit(value, default: int = 10, maximum: int = 25):
+    if value in (None, ""):
+        return default, None
+    if isinstance(value, bool):
+        return None, _make_error(
+            "INVALID_LIMIT",
+            "limit must be an integer.",
+            "limit",
+            value,
+            f"integer 1..{maximum}",
+            False,
+            f"Use a Reddit limit from 1 to {maximum}.",
+        )
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None, _make_error(
+            "INVALID_LIMIT",
+            "limit must be an integer.",
+            "limit",
+            value,
+            f"integer 1..{maximum}",
+            False,
+            f"Use a Reddit limit from 1 to {maximum}.",
+        )
+    if normalized < 1:
+        return None, _make_error(
+            "INVALID_LIMIT",
+            "limit is outside the supported range.",
+            "limit",
+            value,
+            f"integer 1..{maximum}",
+            False,
+            f"Use a Reddit limit from 1 to {maximum}.",
+        )
+    return min(normalized, maximum), None
+
+
 def _fetch_listing_result(path: str, limit: int, extra_params: dict = None, action: str = "listing", timeout_seconds: float = 15.0, stats: dict | None = None) -> dict:
     cache_key = f"listing_{path}_{limit}_{extra_params}"
     cached = _cache_get(cache_key)
@@ -457,7 +494,7 @@ def _search_reddit(query: str, subreddit: str, limit: int, sort: str) -> str:
     if not posts:
         return f"No results for '{query}'"
     lines = [f"{i+1}. {_format_post(p)}" for i, p in enumerate(posts)]
-    result = "\n\n".join(lines)
+    result = f"Reddit search results for '{query}':\n\n" + "\n\n".join(lines)
     _cache_set(cache_key, result)
     return result
 
@@ -540,7 +577,8 @@ def _search_reddit_result(query: str, subreddit: str, limit: int, sort: str, tim
         )
         return _operation_result("search", f"No results for '{query}'", status="no_results", error=error, source_status="no results", extra=extra)
     lines = [f"{i+1}. {_format_post(p)}" for i, p in enumerate(posts)]
-    result = _operation_result("search", "\n\n".join(lines), [_post_item(p) for p in posts], source_status="ok", extra=extra)
+    text = f"Reddit search results for '{query}':\n\n" + "\n\n".join(lines)
+    result = _operation_result("search", text, [_post_item(p) for p in posts], source_status="ok", extra=extra)
     _cache_set(cache_key, result)
     return result
 
@@ -754,15 +792,7 @@ def reddit(
     response_format = normalize_response_format(response_format)
     trace_enabled = coerce_bool(trace_enabled)
     include_source_status = coerce_bool(include_source_status)
-    limit, limit_error = normalize_int(
-        limit,
-        "limit",
-        10,
-        1,
-        25,
-        "Use a Reddit limit from 1 to 25.",
-        "INVALID_LIMIT",
-    )
+    limit, limit_error = _normalize_limit(limit, 10, 25)
     if limit_error is not None:
         return _reddit_error(limit_error, response_format, trace_enabled, started, started_at, inputs_received, "Provide a limit between 1 and 25", "input_validation", stats)
     timeout_value, timeout_error = normalize_timeout_ms(timeout_ms, 15000)
@@ -776,6 +806,10 @@ def reddit(
     time_filter = str(time or "week").strip().lower()
     if id and not query:
         query = str(id).strip()
+    if action == "front" and query:
+        action = "search"
+    elif action == "front" and subreddit:
+        action = "hot"
 
     if action == "search":
         if not query:

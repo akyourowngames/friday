@@ -129,6 +129,28 @@ Last verified by the default markdown pipeline on 2026-05-23:
 - `gallery` - `active_legacy`.
 - Note tools - `active_legacy`.
 
+## 2026-05-25 Tool Fleet Repair Snapshot
+
+- `registry_dispatch` remains `verified_runtime`; it now also covers tool
+  schemas with a callable argument named `name`.
+- `reddit` is `verified_runtime` for live front-page retrieval, live query
+  search, oversized limit clamping, and `front` plus query normalization to
+  search.
+- `hackernews` is `verified_runtime` for live top-story retrieval and
+  markdown-owned action alias normalization from `fetch` to `top`.
+- `imagine` is `verified_runtime` for live Pollinations image generation with a
+  four-character prompt and viewer-disabled save proof.
+- `file_list` is `verified_runtime` for markdown-owned natural path alias
+  resolution through `FILE_PATH_ALIASES.md`.
+- `keyboard_press` is `verified_runtime` for sending explicit key combinations;
+  visible desktop or window state remains unverified unless a future result
+  field proves it.
+- Registry-wide smoke covered all 32 registered tools with 32 pass, 0 fail.
+- Latest ship checks: `python -m pytest -q` passed 210 tests and 24 subtests;
+  `python tests\live_gauntlet.py --full-live` passed 7 checks; the markdown
+  verification pipeline returned `ship` with 6 passed checks, 0 failed, and 0
+  timed out.
+
 ## Escalation Rules
 
 - If manifest audit fails, stop tool claims at `blocked` until alignment is

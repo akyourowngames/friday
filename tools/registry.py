@@ -246,7 +246,7 @@ def _call_with_optional_timeout(func, kwargs, timeout_ms):
         executor.shutdown(wait=False, cancel_futures=True)
 
 
-def execute_tool(name, response_format="legacy", trace_enabled=False, timeout_ms=None, **kwargs):
+def execute_tool(tool_name, response_format="legacy", trace_enabled=False, timeout_ms=None, **kwargs):
     started = time.perf_counter()
     started_at = _now_iso()
     requested_response_format = response_format
@@ -254,23 +254,23 @@ def execute_tool(name, response_format="legacy", trace_enabled=False, timeout_ms
     if response_format not in _RESPONSE_FORMATS:
         response_format = "legacy"
 
-    if name not in _tools:
+    if tool_name not in _tools:
         error = _error_payload(
             "TOOL_NOT_FOUND",
-            f"Tool '{name}' was not found.",
+            f"Tool '{tool_name}' was not found.",
             "name",
-            name,
+            tool_name,
             "registered tool name",
             False,
             "Use one of the tool names returned by get_tools().",
         )
-        trace = _make_trace(name, started_at, started, len(kwargs), False, "lookup", "FAILED", 1, error["code"])
+        trace = _make_trace(tool_name, started_at, started, len(kwargs), False, "lookup", "FAILED", 1, error["code"])
         _emit_trace(trace, trace_enabled)
         if response_format == "structured":
-            return _structured_error(name, error, started, trace if trace_enabled else None)
-        return f"Error: Tool '{name}' not found"
+            return _structured_error(tool_name, error, started, trace if trace_enabled else None)
+        return f"Error: Tool '{tool_name}' not found"
 
-    func = _tools[name]["function"]
+    func = _tools[tool_name]["function"]
     sig = inspect.signature(func)
     valid = set(sig.parameters.keys())
     tool_kwargs = dict(kwargs)
@@ -295,82 +295,82 @@ def execute_tool(name, response_format="legacy", trace_enabled=False, timeout_ms
         received = ", ".join(sorted(unknown))
         error = _error_payload(
             "UNKNOWN_PARAMETER",
-            f"Tool '{name}' received unknown parameter(s).",
+            f"Tool '{tool_name}' received unknown parameter(s).",
             "parameters",
             received,
             accepted,
             False,
             "Remove unsupported parameters or inspect the tool schema before dispatch.",
         )
-        trace = _make_trace(name, started_at, started, len(tool_kwargs), False, "schema_validation", "FAILED", 1, error["code"])
+        trace = _make_trace(tool_name, started_at, started, len(tool_kwargs), False, "schema_validation", "FAILED", 1, error["code"])
         _emit_trace(trace, trace_enabled_for_dispatcher)
         if response_format == "structured":
-            return _structured_error(name, error, started, trace if trace_enabled_for_dispatcher else None)
+            return _structured_error(tool_name, error, started, trace if trace_enabled_for_dispatcher else None)
         return (
-            f"Error: '{name}' received unknown parameter(s): {received}. "
+            f"Error: '{tool_name}' received unknown parameter(s): {received}. "
             f"Accepted: {accepted}"
         )
 
     timeout_value, timeout_error = _normalize_timeout(timeout_value_for_dispatcher)
     if timeout_error is not None:
-        trace = _make_trace(name, started_at, started, len(tool_kwargs), False, "input_validation", "FAILED", 1, timeout_error["code"])
+        trace = _make_trace(tool_name, started_at, started, len(tool_kwargs), False, "input_validation", "FAILED", 1, timeout_error["code"])
         _emit_trace(trace, trace_enabled_for_dispatcher)
         if response_format == "structured":
-            return _structured_error(name, timeout_error, started, trace if trace_enabled_for_dispatcher else None)
-        return f"Error executing '{name}': invalid timeout_ms"
+            return _structured_error(tool_name, timeout_error, started, trace if trace_enabled_for_dispatcher else None)
+        return f"Error executing '{tool_name}': invalid timeout_ms"
 
     try:
         result, call_error = _call_with_optional_timeout(func, tool_kwargs, timeout_value)
         if call_error == "timeout":
             error = _error_payload(
                 "TOOL_TIMEOUT",
-                f"Tool '{name}' exceeded timeout_ms.",
+                f"Tool '{tool_name}' exceeded timeout_ms.",
                 "timeout_ms",
                 timeout_value,
                 "tool completion before timeout",
                 True,
                 "Retry with a larger timeout or narrow the requested operation.",
             )
-            trace = _make_trace(name, started_at, started, len(tool_kwargs), True, "execute_timeout", "FAILED", 1, error["code"])
+            trace = _make_trace(tool_name, started_at, started, len(tool_kwargs), True, "execute_timeout", "FAILED", 1, error["code"])
             _emit_trace(trace, trace_enabled_for_dispatcher)
             if response_format == "structured":
-                return _structured_error(name, error, started, trace if trace_enabled_for_dispatcher else None)
-            return f"Error executing '{name}': timed out after {timeout_value}ms"
+                return _structured_error(tool_name, error, started, trace if trace_enabled_for_dispatcher else None)
+            return f"Error executing '{tool_name}': timed out after {timeout_value}ms"
         if forwarded_tool_controls and requested_response_format == "structured":
             return result
         output = str(result) if result is not None else "Done"
-        trace = _make_trace(name, started_at, started, len(tool_kwargs), True, "execute", "SUCCESS", 2)
+        trace = _make_trace(tool_name, started_at, started, len(tool_kwargs), True, "execute", "SUCCESS", 2)
         _emit_trace(trace, trace_enabled_for_dispatcher)
         if response_format == "structured":
-            return _structured_success(name, output, dict(tool_kwargs), started, trace if trace_enabled_for_dispatcher else None)
+            return _structured_success(tool_name, output, dict(tool_kwargs), started, trace if trace_enabled_for_dispatcher else None)
         return output
     except TypeError as e:
         error = _error_payload(
             "TOOL_TYPE_ERROR",
-            f"Tool '{name}' received arguments that do not match its callable signature.",
+            f"Tool '{tool_name}' received arguments that do not match its callable signature.",
             "parameters",
             sorted(tool_kwargs),
             _signature_text(sig),
             False,
             "Inspect the tool schema and pass values matching the callable signature.",
         )
-        trace = _make_trace(name, started_at, started, len(tool_kwargs), True, "execute_type_error", "FAILED", 1, error["code"])
+        trace = _make_trace(tool_name, started_at, started, len(tool_kwargs), True, "execute_type_error", "FAILED", 1, error["code"])
         _emit_trace(trace, trace_enabled_for_dispatcher)
         if response_format == "structured":
-            return _structured_error(name, error, started, trace if trace_enabled_for_dispatcher else None)
-        return _legacy_type_error(name, sig, e)
+            return _structured_error(tool_name, error, started, trace if trace_enabled_for_dispatcher else None)
+        return _legacy_type_error(tool_name, sig, e)
     except Exception as e:
         error = _error_payload(
             "TOOL_EXECUTION_ERROR",
-            f"Tool '{name}' failed while executing.",
+            f"Tool '{tool_name}' failed while executing.",
             "tool",
-            name,
+            tool_name,
             "successful tool execution",
             True,
             "Retry if the operation is safe, or inspect internal logs for raw exception details.",
         )
-        trace = _make_trace(name, started_at, started, len(tool_kwargs), True, "execute_exception", "FAILED", 1, error["code"])
+        trace = _make_trace(tool_name, started_at, started, len(tool_kwargs), True, "execute_exception", "FAILED", 1, error["code"])
         _emit_trace(trace, trace_enabled_for_dispatcher)
         if response_format == "structured":
-            return _structured_error(name, error, started, trace if trace_enabled_for_dispatcher else None)
-        return f"Error executing '{name}': {e.__class__.__name__}"
+            return _structured_error(tool_name, error, started, trace if trace_enabled_for_dispatcher else None)
+        return f"Error executing '{tool_name}': {e.__class__.__name__}"

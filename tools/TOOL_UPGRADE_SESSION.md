@@ -2080,3 +2080,66 @@ Verification evidence:
 [VERDICT] Volume is now a verified CoreAudio state change, brightness no longer
 claims success when Windows reports no change, and concrete brightness actions
 do not get hijacked by previous volume context.
+
+## 2026-05-25 Tool Fleet Repair And Live Smoke
+
+Scope: repair the user-facing failures where image generation, Reddit, Hacker
+News, keyboard shortcuts, file listing, and set-volume calls either selected the
+wrong tool, used invalid model-shaped arguments, or reported unverified state.
+
+Runtime changes:
+
+- `imagine` now accepts four-character prompts, so `girl` is a valid prompt and
+  still rejects shorter non-descriptive input.
+- Router grounding now lets explicit schema terms win over small-talk
+  suppression, which keeps `img` routed to `imagine`.
+- `volume_set` is defined in `SYSTEM_CONTROLS.md`, exposed through the
+  system-control schema, and verified through CoreAudio before claiming success.
+- Reddit clamps oversized model-generated limits, turns `front` plus a query
+  into a search, and labels legacy search output with the observed query.
+- Hacker News resolves `fetch`, `browse`, and `stories` through the markdown
+  action-alias file to the supported `top` action.
+- `execute_tool` now uses an internal `tool_name` parameter so tools with a
+  schema field named `name`, such as `keyboard_shortcut`, can execute through
+  the registry.
+- File tools now consume `FILE_PATH_ALIASES.md`, so natural path arguments such
+  as `current folder` resolve to the configured path alias after file tooling is
+  selected.
+- Tool-answer instructions now forbid unverified keyboard state claims and tell
+  the model to trust returned result fields over original model-shaped tool-call
+  arguments.
+
+Verification evidence:
+
+- Live KING debug: `gen me img of super car` called `imagine` and saved an
+  image file.
+- Live KING debug after an image turn: `project hail mary reddit threads`
+  selected `reddit`, not `gallery`, and returned Project Hail Mary Reddit
+  threads.
+- Live KING debug: `fetch me reddit threads on ai` returned Reddit search
+  results for `ai` instead of a generic front page or a no-results claim.
+- Live KING debug: `fetch me somthing from hackernews` called `hackernews` with
+  model-shaped `action=fetch`, normalized through markdown aliases, and returned
+  top Hacker News stories.
+- Live KING debug: `press win + d` called `keyboard_press({"keys":"win+d"})`
+  and answered only that the keys were sent.
+- Live direct volume probe verified `volume_set` through CoreAudio and restored
+  the original level.
+- Registry-wide smoke pass covered all 32 registered tools: 32 passed, 0
+  failed. Interactive or state-sensitive tools used safe validation or
+  read-only paths where appropriate.
+- `python -m unittest tests.test_tools_fleet.ToolsFleetPolishTests -v` passed
+  15 tests.
+- `python -m unittest tests.test_system_keyboard_browser.SystemControlToolTests -v`
+  passed 21 tests.
+- `python -m pytest -q` passed 210 tests and 24 subtests.
+- `python -m compileall config.py agent memory tools tests main.py api_server.py`
+  passed.
+- `npm run typecheck` passed.
+- `python tests\live_gauntlet.py --full-live` passed 7 checks.
+- `tool_verification_pipeline('.', 'tools/TOOL_VERIFICATION_PIPELINE.md',
+  timeout_ms=180000, response_format='structured')` returned `ship` with 6
+  passed checks, 0 failed, and 0 timed out.
+
+[VERDICT] The tool fleet is registry-exposed and live-verified again without
+adding phrase-match response shortcuts in `agent/core.py`.

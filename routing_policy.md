@@ -6,11 +6,11 @@ If a turn asks for facts from memory, live/current information, local files, app
 
 ## Context Follow-Up Text
 
-The user is asking to continue the latest actionable result, return additional details, show more from the same topic, expand the previous answer, inspect the previously listed item more deeply, retry the latest failed action, or proceed with the same target.
+The user is asking to continue the latest actionable result, return additional details, show more from the same topic, expand the previous answer, inspect the previously listed item more deeply, retry the latest failed action, or proceed with the same target. This is not a complete new request that names a fresh source, destination, app, file, command, service, or topic.
 
 ## New Topic Text
 
-The user is giving a fresh standalone search topic, a new named target, a different application, a different file path, a new URL, or a new command that should replace the previous topic.
+The user is giving a fresh standalone search topic, a new named target, a different application, a different file path, a new URL, a different information source, or a new command that should replace the previous topic. Complete requests with their own action and target are new topics even if they begin with a casual reaction.
 
 ## Memory Recall Text
 
@@ -46,4 +46,4 @@ The user wants something done: open an app, run a command, search the web, fetch
 
 ## Incomplete Utterance Text
 
-The user started a question but trailed off, used ellipsis, left the object unstated, or continued a prior topic without repeating it. Examples include who is my followed by dots, and what about her, and finish that thought.
+The user started a question but trailed off, used ellipsis, left the object unstated, or continued a prior topic without repeating it. This applies to short fragments that cannot stand alone. It does not apply when the current message already has an action and a named source, target, or topic.

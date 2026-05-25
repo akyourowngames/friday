@@ -195,7 +195,7 @@ def _keyboard_trace(started_at, started, inputs_received, path, status, fields, 
 
 @tool(
     name="keyboard_press",
-    description="Press a key combination such as ctrl+c using explicit key tokens joined by +",
+    description="Press an arbitrary keyboard shortcut or key combination using explicit key tokens joined by +",
     examples=[
         "press ctrl+s",
         "send alt+tab",

@@ -16,5 +16,7 @@ volume_increase = volume_up
 volume_decrease = volume_down
 turn_up_volume = volume_up
 turn_down_volume = volume_down
+set_volume = volume_set
+volume_level = volume_set
 mute = volume_mute
 play_pause = media_play_pause

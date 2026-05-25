@@ -2,6 +2,8 @@
 
 Markdown contract for `system_control`. Each action is a named capability.
 The runtime only runs actions defined here.
+Keyboard shortcuts and arbitrary key combinations are handled by `keyboard_press`
+or `keyboard_shortcut`, not this catalog.
 
 ## Platform
 
@@ -25,6 +27,11 @@ The runtime only runs actions defined here.
 
 - method: volume_mute_toggle
 - step: 1
+
+### volume_set
+
+- method: volume_set
+- requires: level
 
 ### brightness_up
 

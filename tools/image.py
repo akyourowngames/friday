@@ -265,7 +265,7 @@ def _find_image(name: str) -> str | None:
         "create a logo for my startup a blue geometric fox",
     ],
     param_descriptions={
-        "prompt": "Text description of the image to generate (5+ characters)",
+        "prompt": "Text description of the image to generate (4+ characters)",
         "size": "Image size: 1024x1024 (square, default), 1216x832 (landscape), or 832x1216 (portrait)",
         "model": "Model: pollinations (default, free), sdxl, playground-v2.5, or sdxl-turbo",
         "open_viewer": "When true, open the saved image with the system viewer",
@@ -288,9 +288,9 @@ def imagine(
     trace_enabled = coerce_bool(trace_enabled)
     open_viewer = coerce_bool(open_viewer)
     prompt = str(prompt or "").strip()
-    if len(prompt) < 5:
-        error = error_payload("SHORT_PROMPT", "prompt must be at least 5 characters.", "prompt", prompt, "descriptive prompt", False, "Add more visual detail to the prompt.")
-        return _image_error("imagine", error, response_format, trace_enabled, started, started_at, inputs_received, "Provide a descriptive prompt (at least 5 characters)")
+    if len(prompt) < 4:
+        error = error_payload("SHORT_PROMPT", "prompt must be at least 4 characters.", "prompt", prompt, "descriptive prompt", False, "Add more visual detail to the prompt.")
+        return _image_error("imagine", error, response_format, trace_enabled, started, started_at, inputs_received, "Provide a descriptive prompt (at least 4 characters)")
     size = str(size or "1024x1024").strip()
     if size not in _VALID_SIZES:
         error = error_payload("INVALID_SIZE", "size must be a supported image dimension.", "size", size, ", ".join(sorted(_VALID_SIZES)), False, "Use 1024x1024, 1216x832, or 832x1216.")

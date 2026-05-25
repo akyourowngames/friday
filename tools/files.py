@@ -1,6 +1,7 @@
 import mimetypes
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
 
 from tools.registry import tool
@@ -20,6 +21,7 @@ from tools.runtime import (
 _FILE_READ_VERSION = "2.0.0"
 _FILE_WRITE_VERSION = "2.0.0"
 _FILE_LIST_VERSION = "2.0.0"
+_FILE_PATH_ALIASES = Path(__file__).with_name("FILE_PATH_ALIASES.md")
 
 
 def _is_binary(path: Path) -> bool:
@@ -30,8 +32,27 @@ def _is_binary(path: Path) -> bool:
     return path.suffix.lower() in EXT_BINARY
 
 
+@lru_cache(maxsize=1)
+def _load_path_aliases() -> dict[str, str]:
+    aliases = {}
+    if not _FILE_PATH_ALIASES.exists():
+        return aliases
+    for raw_line in _FILE_PATH_ALIASES.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        alias, target = line.split("=", 1)
+        alias = alias.strip().casefold()
+        target = target.strip()
+        if alias and target:
+            aliases[alias] = target
+    return aliases
+
+
 def _resolve(path: str) -> Path:
-    return Path(path).expanduser().resolve()
+    value = str(path or "").strip()
+    value = _load_path_aliases().get(value.casefold(), value)
+    return Path(value).expanduser().resolve()
 
 
 def _metadata(path: Path) -> str:
@@ -116,6 +137,9 @@ def _file_write_error(error: dict, response_format: str, trace_enabled: bool, st
         "read config.py",
         "show me the contents of main.py",
         "open requirements.txt",
+        "read README.md",
+        "show CHANGELOG.md",
+        "open docs/setup.md",
     ],
     param_descriptions={
         "path": "Text file path to read",

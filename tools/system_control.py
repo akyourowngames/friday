@@ -231,6 +231,63 @@ def _coerce_int(value, default: int = 0) -> int:
         return default
 
 
+def _term_set(text: str) -> set[str]:
+    terms = set()
+    current = []
+    for char in str(text or "").casefold():
+        if char.isalnum():
+            current.append(char)
+            continue
+        if current:
+            token = "".join(current)
+            if len(token) >= 2:
+                terms.add(token)
+            current = []
+    if current:
+        token = "".join(current)
+        if len(token) >= 2:
+            terms.add(token)
+    return terms
+
+
+def _extract_level_from_text(text: str) -> int | None:
+    current = []
+    for char in str(text or ""):
+        if char.isdigit():
+            current.append(char)
+            continue
+        if current:
+            value = int("".join(current))
+            return max(0, min(100, value))
+    if current:
+        value = int("".join(current))
+        return max(0, min(100, value))
+    return None
+
+
+def _best_set_action_for_text(text: str) -> str:
+    user_terms = _term_set(text)
+    if not user_terms:
+        return ""
+    catalog, error, _path = _load_controls("")
+    if error is not None:
+        return ""
+    best_action = ""
+    best_score = 0
+    for name, action in catalog.get("actions", {}).items():
+        method = str(action.get("method", ""))
+        requires = str(action.get("requires", ""))
+        if not (method.endswith("_set") or requires == "level"):
+            continue
+        parts = [name, method, requires]
+        parts.extend(str(value) for value in action.values())
+        score = len(user_terms & _term_set(" ".join(parts)))
+        if score > best_score:
+            best_action = name
+            best_score = score
+    return best_action
+
+
 def _press_media_key(vk: int, repeats: int = 1, pause_seconds: float = 0.04) -> tuple[bool, str]:
     if sys.platform != "win32":
         return False, "media_key requires win32"
@@ -510,6 +567,46 @@ def _volume_delta_with_verification(action: dict) -> tuple[dict, dict | None]:
     }, None
 
 
+def _volume_set_with_verification(level: int) -> tuple[dict, dict | None]:
+    current, read_error = _volume_get()
+    if current is None:
+        return {}, error_payload(
+            "ACTION_FAILED",
+            "Volume could not be read before setting the level.",
+            "action",
+            "volume_set",
+            "readable Windows CoreAudio master volume",
+            True,
+            read_error,
+        )
+    target = max(0, min(100, int(level)))
+    ok, set_error = _volume_set(target)
+    if not ok:
+        return {}, error_payload(
+            "ACTION_FAILED",
+            "Volume set failed.",
+            "action",
+            "volume_set",
+            "writable Windows CoreAudio master volume",
+            True,
+            set_error,
+        )
+    time.sleep(0.15)
+    after, verify_error = _volume_get()
+    verified = after is not None and int(after) == target
+    return {
+        "method": "volume_set",
+        "path": "core_audio",
+        "previous": current,
+        "level": target,
+        "verified_level": after,
+        "verified": verified,
+        "status": "verified_changed" if verified and target != current else "verified_noop" if verified else "attempted_unverified",
+        "claim": "changed" if verified and target != current else "already_at_level" if verified else "set_unverified",
+        "verify_error": "" if verified else verify_error,
+    }, None
+
+
 def _volume_mute_toggle_with_verification(action: dict) -> tuple[dict, dict | None]:
     current, read_error = _mute_get()
     step = max(1, _coerce_int(action.get("step", 1), 1))
@@ -575,6 +672,9 @@ def _execute_action(action: dict, level: int = 0) -> tuple[dict, dict | None]:
     if method == "volume_delta":
         return _volume_delta_with_verification(action)
 
+    if method == "volume_set":
+        return _volume_set_with_verification(level)
+
     if method == "volume_mute_toggle":
         return _volume_mute_toggle_with_verification(action)
 
@@ -616,14 +716,26 @@ def _execute_action(action: dict, level: int = 0) -> tuple[dict, dict | None]:
         ok, err = _brightness_set(level)
         if not ok:
             return {}, error_payload("ACTION_FAILED", "Brightness set failed.", "action", action.get("name", ""), "brightness set", True, err)
-        return {"method": method, "previous": current, "level": level}, None
+        time.sleep(0.35)
+        after, verify_error = _brightness_get()
+        verified = after is not None and int(after) == int(level)
+        return {
+            "method": method,
+            "previous": current,
+            "level": level,
+            "verified_level": after,
+            "verified": verified,
+            "status": "verified_changed" if verified and current != level else "verified_noop" if verified else "attempted_unverified",
+            "claim": "changed" if verified and current != level else "already_at_level" if verified else "set_unverified",
+            "verify_error": "" if verified else verify_error,
+        }, None
 
     return {}, error_payload(
         "UNKNOWN_METHOD",
         "The action method is not supported.",
         "method",
         method,
-        "media_key, volume_delta, volume_mute_toggle, brightness_delta, or brightness_set",
+        "media_key, volume_delta, volume_set, volume_mute_toggle, brightness_delta, or brightness_set",
         False,
         "Define the action in SYSTEM_CONTROLS.md.",
     )
@@ -648,8 +760,9 @@ def _control_trace(started_at, started, inputs_received, path, status, fields, e
 @tool(
     name="system_control",
     description=(
-        "Change this PC's volume, screen brightness, or media keys. "
-        "Use action names volume_up, volume_down, brightness_down, brightness_up, brightness_set. "
+        "Change this PC's speaker volume, screen brightness, or media playback keys. "
+        "Use keyboard_press or keyboard_shortcut for keyboard shortcuts and arbitrary key combinations. "
+        "Use action names volume_up, volume_down, volume_set, brightness_down, brightness_up, brightness_set. "
         "Omit config_path; the bundled tools/SYSTEM_CONTROLS.md catalog is used automatically."
     ),
     examples=[
@@ -660,8 +773,8 @@ def _control_trace(started_at, started, inputs_received, path, status, fields, e
         "turn brightness up",
     ],
     param_descriptions={
-        "action": "Catalog action: volume_up, volume_down, volume_mute, brightness_up, brightness_down, brightness_set",
-        "level": "Target brightness 1-100 for brightness_set only",
+        "action": "Catalog action: volume_up, volume_down, volume_set, volume_mute, brightness_up, brightness_down, brightness_set",
+        "level": "Target volume 0-100 for volume_set or brightness 1-100 for brightness_set",
         "config_path": "Optional override; omit unless the user named a specific markdown path",
         "response_format": "legacy or structured",
         "trace_enabled": "Emit machine-readable trace when true",
@@ -669,7 +782,7 @@ def _control_trace(started_at, started, inputs_received, path, status, fields, e
 )
 def system_control(
     action: str,
-    level: int = 0,
+    level: int = -1,
     config_path: str = "",
     response_format: str = "legacy",
     trace_enabled: bool = False,
@@ -681,7 +794,7 @@ def system_control(
     trace_enabled = coerce_bool(trace_enabled)
     action = _normalize_action_name(action)
     config_path = config_path or settings.system_controls_file
-    parsed_level = 0
+    parsed_level = -1
 
     if not action:
         error = error_payload("EMPTY_ACTION", "action must not be empty.", "action", action, "named system action", False, "Pass an action from SYSTEM_CONTROLS.md.")
@@ -699,6 +812,14 @@ def system_control(
             if response_format == "structured":
                 return structured_error("system_control", _SYSTEM_VERSION, level_error, started, trace)
             return "Error: brightness_set requires level between 1 and 100"
+    elif action == "volume_set":
+        parsed_level, level_error = normalize_int(level, "level", -1, 0, 100, "Use level between 0 and 100.", "INVALID_LEVEL")
+        if level_error is not None:
+            trace = _control_trace(started_at, started, inputs_received, "validate", "FAILED", 1, level_error["code"])
+            emit_trace(trace, trace_enabled)
+            if response_format == "structured":
+                return structured_error("system_control", _SYSTEM_VERSION, level_error, started, trace)
+            return "Error: volume_set requires level between 0 and 100"
 
     catalog, config_error, resolved_config_path = _load_controls(config_path)
     if config_error is not None:
@@ -743,9 +864,13 @@ def system_control(
         "config_path": str(resolved_config_path or _BUNDLED_CONTROLS_PATH),
     }
     legacy = f"System action '{action}' completed on {sys.platform}"
-    if outcome.get("method") == "volume_delta" and outcome.get("verified"):
+    if outcome.get("method") in {"volume_delta", "volume_set"} and outcome.get("verified"):
         if outcome.get("claim") == "already_at_limit":
             legacy = f"Volume is already at {outcome.get('level')}%."
+        elif outcome.get("claim") == "already_at_level":
+            legacy = f"Volume is already set to {outcome.get('level')}%."
+        elif outcome.get("method") == "volume_set":
+            legacy = f"Volume set from {outcome.get('previous')}% to {outcome.get('level')}%."
         else:
             legacy = f"Volume changed from {outcome.get('previous')}% to {outcome.get('level')}%."
     elif outcome.get("method") == "volume_mute_toggle" and outcome.get("verified"):

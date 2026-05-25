@@ -11,3 +11,6 @@ details = comments
 detail = comments
 deep_dive = comments
 deepdive = comments
+fetch = top
+browse = top
+stories = top

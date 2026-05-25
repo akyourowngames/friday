@@ -12,7 +12,6 @@ from tools.runtime import (
     emit_trace,
     error_payload,
     make_trace,
-    normalize_int,
     normalize_response_format,
     normalize_timeout_ms,
     structured_error,
@@ -207,6 +206,44 @@ def _operation_result(
 
 def _make_error(code: str, message: str, field: str, value, expected: str, retryable: bool, suggestion: str) -> dict:
     return error_payload(code, message, field, value, expected, retryable, suggestion)
+
+
+def _normalize_limit(value, default: int = 10, maximum: int = 30):
+    if value in (None, ""):
+        return default, None
+    if isinstance(value, bool):
+        return None, _make_error(
+            "INVALID_LIMIT",
+            "limit must be an integer.",
+            "limit",
+            value,
+            f"integer 1..{maximum}",
+            False,
+            f"Use a Hacker News limit from 1 to {maximum}.",
+        )
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None, _make_error(
+            "INVALID_LIMIT",
+            "limit must be an integer.",
+            "limit",
+            value,
+            f"integer 1..{maximum}",
+            False,
+            f"Use a Hacker News limit from 1 to {maximum}.",
+        )
+    if normalized < 1:
+        return None, _make_error(
+            "INVALID_LIMIT",
+            "limit is outside the supported range.",
+            "limit",
+            value,
+            f"integer 1..{maximum}",
+            False,
+            f"Use a Hacker News limit from 1 to {maximum}.",
+        )
+    return min(normalized, maximum), None
 
 
 def _fetch_stories_result(endpoint: str, limit: int, timeout_seconds: float = 15.0, stats: dict | None = None) -> dict:
@@ -586,15 +623,7 @@ def hackernews(
     response_format = normalize_response_format(response_format)
     trace_enabled = coerce_bool(trace_enabled)
     include_source_status = coerce_bool(include_source_status)
-    limit, limit_error = normalize_int(
-        limit,
-        "limit",
-        10,
-        1,
-        30,
-        "Use a Hacker News limit from 1 to 30.",
-        "INVALID_LIMIT",
-    )
+    limit, limit_error = _normalize_limit(limit, 10, 30)
     if limit_error is not None:
         return _hn_error(limit_error, response_format, trace_enabled, started, started_at, inputs_received, "Provide a limit between 1 and 30", "input_validation", stats)
     timeout_value, timeout_error = normalize_timeout_ms(timeout_ms, 15000)

@@ -17,6 +17,25 @@ ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.m
 _SMALL_TALK_MARGIN = 0.10
 
 
+def _term_set(text: str) -> set[str]:
+    terms = set()
+    current = []
+    for char in str(text or "").casefold():
+        if char.isalnum():
+            current.append(char)
+            continue
+        if current:
+            token = "".join(current)
+            if len(token) >= 3:
+                terms.add(token)
+            current = []
+    if current:
+        token = "".join(current)
+        if len(token) >= 3:
+            terms.add(token)
+    return terms
+
+
 def _load_routing_section(heading: str) -> str:
     if not ROUTING_POLICY_PATH.exists():
         return ""
@@ -146,6 +165,7 @@ class ToolRouter:
         similarities = np.dot(self._tool_embeddings, q_emb)
         max_tool_sim = float(np.max(similarities))
         ranked_all = np.argsort(similarities)[::-1]
+        top_index = int(ranked_all[0])
         scores = [
             {"tool": self._tool_names[int(idx)], "score": float(similarities[int(idx)])}
             for idx in ranked_all[: min(5, len(ranked_all))]
@@ -155,11 +175,14 @@ class ToolRouter:
         small_talk_sim = float(np.dot(self._get_small_talk_emb(), q_emb))
         ambiguous_tool_ceiling = self.threshold + max(self.winner_margin, _SMALL_TALK_MARGIN)
         small_talk_close = small_talk_sim + _SMALL_TALK_MARGIN >= max_tool_sim
-        if small_talk_sim > max_tool_sim + _SMALL_TALK_MARGIN or (
+        top_tool_text = self._tool_texts[top_index] if top_index < len(self._tool_texts) else self._tool_names[top_index]
+        top_tool_grounded = bool(_term_set(query) & _term_set(top_tool_text))
+        tool_grounding_wins = top_tool_grounded and max_tool_sim >= self.threshold
+        if not tool_grounding_wins and (small_talk_sim > max_tool_sim + _SMALL_TALK_MARGIN or (
             small_talk_close and max_tool_sim < ambiguous_tool_ceiling
         ) or (
             small_talk_sim >= 0.0 and max_tool_sim < ambiguous_tool_ceiling
-        ):
+        )):
             self._last_decision = {
                 "query": query,
                 "selected": [],

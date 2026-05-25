@@ -60,6 +60,7 @@ class Settings:
     tool_similarity_threshold: float = _env_float("KING_TOOL_SIMILARITY_THRESHOLD", 0.23)
     tool_winner_margin: float = _env_float("KING_TOOL_WINNER_MARGIN", 0.15)
     tool_relative_floor: float = _env_float("KING_TOOL_RELATIVE_FLOOR", 0.72)
+    incomplete_utterance_max_terms: int = _env_int("KING_INCOMPLETE_UTTERANCE_MAX_TERMS", 5)
     max_tool_rounds: int = _env_int("KING_MAX_TOOL_ROUNDS", 6)
     llm_stream_attempts: int = _env_int("KING_LLM_STREAM_ATTEMPTS", 2)
     tool_call_retries: int = _env_int("KING_TOOL_CALL_RETRIES", 1)

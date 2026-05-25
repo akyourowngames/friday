@@ -732,6 +732,12 @@ def _build_tool_answer_instruction(user_input: str, tool_names: list[str]) -> st
         "tool result contains an error or missing target, do not claim success; ask for the missing "
         "target or state the observed failure. For search results, do not merely say how many results "
         "were found; include the useful observed titles, links, snippets, and provider/fallback status. "
+        "Do not add themes, summaries, totals, descriptions, or categories that are not explicitly "
+        "present in the tool result. "
+        "If the original tool-call arguments conflict with returned result fields, trust the returned "
+        "result fields. "
+        "For keyboard_press and keyboard_shortcut, say the keys were sent; do not claim the visible "
+        "desktop, app, or window state changed unless the result includes explicit verification. "
         "For system_control, claim the state changed only when the result has verified=true. "
         "If status is attempted_unverified or claim is sent_key_only, say what was sent and that the "
         "state was not verified. "
@@ -831,11 +837,26 @@ def _looks_like_incomplete_utterance(user_input: str, q_emb) -> bool:
     trimmed = text.rstrip()
     if trimmed.endswith("...") or trimmed.endswith("…"):
         return True
+    if len(_query_terms(text)) > max(0, settings.incomplete_utterance_max_terms):
+        return False
     if q_emb is None:
         return False
     try:
-        incomplete_emb = embed(_incomplete_utterance_text())
-        return float(np.dot(incomplete_emb, q_emb)) >= settings.tool_similarity_threshold
+        compare_embs = embed([
+            _incomplete_utterance_text(),
+            _context_followup_texts()[1],
+            _actionable_request_text(),
+        ])
+        if getattr(compare_embs, "ndim", 1) == 1:
+            compare_embs = compare_embs.reshape(1, -1)
+        incomplete_score = float(np.dot(compare_embs[0], q_emb))
+        new_topic_score = float(np.dot(compare_embs[1], q_emb))
+        action_score = float(np.dot(compare_embs[2], q_emb))
+        return (
+            incomplete_score >= settings.tool_similarity_threshold
+            and incomplete_score >= new_topic_score
+            and incomplete_score >= action_score
+        )
     except Exception:
         return False
 
@@ -990,6 +1011,25 @@ def _looks_like_action_correction(user_input: str, messages: list) -> bool:
     text = str(user_input or "").strip()
     if not text:
         return False
+    correction_text = _action_correction_text()
+    new_topic_text = _context_followup_texts()[1]
+    try:
+        text_emb = embed(text)
+        compare_embs = embed([correction_text, new_topic_text])
+        if getattr(compare_embs, "ndim", 1) == 1:
+            compare_embs = compare_embs.reshape(1, -1)
+        correction_score = float(np.dot(compare_embs[0], text_emb))
+        new_topic_score = float(np.dot(compare_embs[1], text_emb))
+    except Exception:
+        return False
+    text_terms = _query_terms(text)
+    if new_topic_score > correction_score and len(text_terms) >= 2:
+        return False
+    if correction_score >= settings.tool_similarity_threshold:
+        return True
+    if len(text_terms) > 2:
+        return False
+
     context = text
     for msg in reversed(messages):
         if msg.get("role") == "assistant":
@@ -998,7 +1038,7 @@ def _looks_like_action_correction(user_input: str, messages: list) -> bool:
                 context = f"{text}\n{prior[:300]}"
                 break
     try:
-        correction_emb = embed(_action_correction_text())
+        correction_emb = embed(correction_text)
         sample_emb = embed(context)
         return float(np.dot(correction_emb, sample_emb)) >= settings.tool_similarity_threshold
     except Exception:
@@ -1074,24 +1114,42 @@ def _repair_system_control_args(tool_name: str, args: dict, user_input: str) -> 
     action = str(repaired.get("action", "")).strip()
     if action:
         repaired["action"] = system_control_mod._normalize_action_name(action)
+        if "level" not in repaired:
+            level = system_control_mod._extract_level_from_text(user_input)
+            if level is not None:
+                repaired["level"] = level
         return repaired
 
     aliases = system_control_mod._load_action_aliases()
-    if not aliases:
+    level = system_control_mod._extract_level_from_text(user_input)
+    set_action = system_control_mod._best_set_action_for_text(user_input) if level is not None else ""
+    if set_action:
+        repaired["action"] = set_action
+        repaired["level"] = level
         return repaired
-    alias_keys = list(aliases.keys())
-    alias_texts = [key.replace("_", " ") for key in alias_keys]
-    try:
-        user_emb = embed(str(user_input or ""))
-        alias_embs = embed(alias_texts)
-        if getattr(alias_embs, "ndim", 1) == 1:
-            alias_embs = alias_embs.reshape(1, -1)
-        scores = np.dot(alias_embs, user_emb)
-        best_index = int(np.argmax(scores))
-        if float(scores[best_index]) >= settings.tool_argument_grounding_threshold:
-            repaired["action"] = aliases[alias_keys[best_index]]
-    except Exception:
-        pass
+    if aliases:
+        alias_keys = list(aliases.keys())
+        alias_texts = [key.replace("_", " ") for key in alias_keys]
+        try:
+            user_emb = embed(str(user_input or ""))
+            alias_embs = embed(alias_texts)
+            if getattr(alias_embs, "ndim", 1) == 1:
+                alias_embs = alias_embs.reshape(1, -1)
+            scores = np.dot(alias_embs, user_emb)
+            best_index = int(np.argmax(scores))
+            candidate_key = alias_keys[best_index]
+            candidate_action = aliases[candidate_key]
+            user_terms = system_control_mod._term_set(user_input)
+            candidate_terms = system_control_mod._term_set(f"{candidate_key} {candidate_action}")
+            if (
+                float(scores[best_index]) >= settings.tool_argument_grounding_threshold
+                and bool(user_terms & candidate_terms)
+            ):
+                repaired["action"] = candidate_action
+        except Exception:
+            pass
+    if level is not None:
+        repaired["level"] = level
     return repaired
 
 

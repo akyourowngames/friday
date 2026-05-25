@@ -32,6 +32,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `TOOL_INTAKE_CHECKLIST.md` - required intake questions, documentation path, and verification gate before new tool claims.
 - `TOOL_UPGRADE_SESSION.md` - heartbeat implementation and verification notes.
 - `BROWSER_TARGETS.md` - editable browser target URLs, wait policy, and extraction fields consumed by `browser_extract`.
+- `FILE_PATH_ALIASES.md` - editable natural path aliases consumed by file tools after they are selected.
 
 ## Markdown Tool Contract: tool_readiness_audit
 

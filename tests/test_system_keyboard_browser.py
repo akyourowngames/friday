@@ -128,6 +128,29 @@ class SystemControlToolTests(unittest.TestCase):
         self.assertIn("brightness_down", forced["arguments"])
         self.assertNotIn("volume_up", forced["arguments"])
 
+    def test_set_volume_repair_uses_level_and_set_action(self):
+        from agent.core import _repair_system_control_args
+
+        repaired = _repair_system_control_args("system_control", {}, "set volume to 100")
+
+        self.assertEqual(repaired["action"], "volume_set")
+        self.assertEqual(repaired["level"], 100)
+
+    def test_set_brightness_repair_uses_level_and_set_action(self):
+        from agent.core import _repair_system_control_args
+
+        repaired = _repair_system_control_args("system_control", {}, "set brightness to 50")
+
+        self.assertEqual(repaired["action"], "brightness_set")
+        self.assertEqual(repaired["level"], 50)
+
+    def test_system_control_repair_does_not_turn_keyboard_into_media(self):
+        from agent.core import _repair_system_control_args
+
+        repaired = _repair_system_control_args("system_control", {}, "press win + d")
+
+        self.assertNotIn("action", repaired)
+
     def test_repair_strips_hallucinated_config_path(self):
         from agent.core import _repair_system_control_args
 
@@ -201,6 +224,17 @@ class SystemControlToolTests(unittest.TestCase):
         self.assertEqual(result["result"]["status"], "verified_changed")
         self.assertEqual(result["result"]["outcome"]["method"], "volume_delta")
         mock_set.assert_called_once_with(42)
+
+    def test_volume_set_verifies_core_audio_level(self):
+        with patch.object(system_mod, "_volume_get", side_effect=[(40, ""), (100, "")]):
+            with patch.object(system_mod, "_volume_set", return_value=(True, "")) as mock_set:
+                result = system_mod.system_control("volume_set", level=100, response_format="structured")
+
+        self.assertEqual(result["result"]["action"], "volume_set")
+        self.assertTrue(result["result"]["verified"])
+        self.assertEqual(result["result"]["status"], "verified_changed")
+        self.assertEqual(result["result"]["outcome"]["method"], "volume_set")
+        mock_set.assert_called_once_with(100)
 
     def test_brightness_hardware_fallback_is_unverified_partial(self):
         system_mod._WMI_BRIGHTNESS_PROBE["checked"] = False
