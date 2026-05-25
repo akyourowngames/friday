@@ -6,6 +6,23 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _looks_like_json_tool_call(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+
+    function = parsed.get("function")
+    if isinstance(function, dict) and function.get("name"):
+        return True
+    return "name" in parsed and ("parameters" in parsed or "arguments" in parsed)
+
+
 class SummaryStore:
     """Persists conversation summaries so context survives restarts and /new.
 
@@ -23,7 +40,7 @@ class SummaryStore:
     def append(self, summary_text: str, turn_count: int = 0) -> int:
         """Add a new summary entry. Trims to max_summaries. Returns count."""
         text = str(summary_text or "").strip()
-        if not text:
+        if not text or _looks_like_json_tool_call(text):
             return len(self.summaries)
         entry = {
             "text": text,
@@ -55,9 +72,9 @@ class SummaryStore:
         parts = ["Previous session summaries:"]
         for s in recent:
             text = str(s.get("text", "")).strip()
-            if text:
+            if text and not _looks_like_json_tool_call(text):
                 parts.append(f"- {text}")
-        return "\n".join(parts)
+        return "\n".join(parts) if len(parts) > 1 else ""
 
     def size(self) -> int:
         return len(self.summaries)

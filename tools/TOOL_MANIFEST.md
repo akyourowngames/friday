@@ -906,10 +906,10 @@ It exists so KING can recover from transient failures without hanging, looping i
   "version": "2.0.0",
   "upgraded_from": "unversioned",
   "upgrade_date": "2026-05-19T14:59:08Z",
-  "purpose": "Browse Reddit listings, search, comments, and users with legacy text output by default and optional bounded timeout, structured provider status, fallback reporting, typed errors, and traces.",
+  "purpose": "Browse Reddit front, global hot/new/top, subreddit listings, search, comments, and users with legacy text output by default and optional bounded timeout, structured provider status, fallback reporting, typed errors, and traces.",
   "inputs": {
-    "action": "string enum front|hot|new|top|comments|search|user: optional, default front",
-    "subreddit": "string: optional subreddit name, accepts bare name or r/name",
+    "action": "string enum front|hot|new|top|comments|search|user: optional, default front; hot/new/top work globally when subreddit is omitted",
+    "subreddit": "string: optional subreddit name, accepts bare name or r/name; required only for comments and subreddit-scoped listings",
     "query": "string: search term, post id, or username depending on action",
     "limit": "integer 1..25: optional, default 10",
     "time": "string enum hour|day|week|month|year|all: optional, default week",

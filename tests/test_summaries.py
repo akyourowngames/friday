@@ -37,6 +37,12 @@ class TestSummaryStore(unittest.TestCase):
         self.assertIn("timestamp", recent[0])
         self.assertIn("start_date", recent[0])
 
+    def test_append_skips_json_tool_call_text(self):
+        count = self.store.append('{"name":"fetch_latest_reddit_threads","parameters":{}}')
+
+        self.assertEqual(count, 0)
+        self.assertEqual(self.store.size(), 0)
+
     def test_append_empty_text(self):
         count = self.store.append("", turn_count=0)
         self.assertEqual(count, 0)
@@ -80,6 +86,16 @@ class TestSummaryStore(unittest.TestCase):
         self.assertIn("User is learning Python", text)
 
     def test_context_string_empty(self):
+        self.assertEqual(self.store.context_string(), "")
+
+    def test_context_string_skips_legacy_json_tool_call_text(self):
+        self.store.summaries.append({
+            "text": '{"function":{"name":"reddit","arguments":"{}"}}',
+            "turn_count": 1,
+            "timestamp": "now",
+            "start_date": "today",
+        })
+
         self.assertEqual(self.store.context_string(), "")
 
     def test_context_string_limits_n(self):

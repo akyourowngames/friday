@@ -726,14 +726,17 @@ def _run_reddit(action: str, subreddit: str, query: str, limit: int, time_filter
     if action == "front":
         return _fetch_listing_result("/", limit, None, "front", timeout_seconds, stats)
     if action == "hot":
-        return _fetch_listing_result(f"/r/{subreddit}/hot", limit, None, "hot", timeout_seconds, stats)
+        path = f"/r/{subreddit}/hot" if subreddit else "/hot"
+        return _fetch_listing_result(path, limit, None, "hot", timeout_seconds, stats)
     if action == "new":
-        return _fetch_listing_result(f"/r/{subreddit}/new", limit, None, "new", timeout_seconds, stats)
+        path = f"/r/{subreddit}/new" if subreddit else "/new"
+        return _fetch_listing_result(path, limit, None, "new", timeout_seconds, stats)
     if action == "top":
         if time_filter not in ("hour", "day", "week", "month", "year", "all"):
             time_filter = "week"
-        return _fetch_listing_result(f"/r/{subreddit}/top", limit, {"t": time_filter}, "top", timeout_seconds, stats)
-    valid = "front, hot <subreddit>, new <subreddit>, top <subreddit> [time], comments <subreddit> <post_id>, search [subreddit] <query>, user <username>"
+        path = f"/r/{subreddit}/top" if subreddit else "/top"
+        return _fetch_listing_result(path, limit, {"t": time_filter}, "top", timeout_seconds, stats)
+    valid = "front, hot [subreddit], new [subreddit], top [subreddit] [time], comments <subreddit> <post_id>, search [subreddit] <query>, user <username>"
     error = _make_error(
         "INVALID_ACTION",
         "The Reddit action is not supported.",
@@ -748,7 +751,7 @@ def _run_reddit(action: str, subreddit: str, query: str, limit: int, time_filter
 
 @tool(
     name="reddit",
-    description="Browse Reddit: front page, subreddit hot/new/top posts, search, get comments, view user profiles. Actions: front, hot, new, top, comments, search, user",
+    description="Browse Reddit: front page, global or subreddit hot/new/top posts, search, get comments, view user profiles. Actions: front, hot, new, top, comments, search, user",
     examples=[
         "show reddit front page",
         "hot posts from r/python",
@@ -759,8 +762,8 @@ def _run_reddit(action: str, subreddit: str, query: str, limit: int, time_filter
         "show reddit user spez",
     ],
     param_descriptions={
-        "action": "front (default), hot, new, top, comments, search, user",
-        "subreddit": "Subreddit name (without r/) for hot/new/top/comments",
+        "action": "front (default), hot, new, top, comments, search, user. Hot/new/top can run globally without subreddit.",
+        "subreddit": "Subreddit name (without r/) for subreddit-scoped hot/new/top/comments",
         "query": "Search term for search, post ID for comments, username for user",
         "id": "Alias for query — post ID to get comments for",
         "limit": "Number of results (1-25, default 10)",
@@ -840,23 +843,14 @@ def reddit(
         return _finalize_reddit(result, response_format, trace_enabled, started, started_at, inputs_received, stats, include_source_status)
 
     if action == "hot":
-        if not subreddit:
-            error = _make_error("MISSING_SUBREDDIT", "Reddit hot listing needs a subreddit.", "subreddit", subreddit, "subreddit name", False, "Pass a subreddit name.")
-            return _reddit_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Provide a subreddit name", "input_validation", stats)
         result = _run_reddit(action, subreddit, query, limit, time_filter, sort, timeout_seconds, stats)
         return _finalize_reddit(result, response_format, trace_enabled, started, started_at, inputs_received, stats, include_source_status)
 
     if action == "new":
-        if not subreddit:
-            error = _make_error("MISSING_SUBREDDIT", "Reddit new listing needs a subreddit.", "subreddit", subreddit, "subreddit name", False, "Pass a subreddit name.")
-            return _reddit_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Provide a subreddit name", "input_validation", stats)
         result = _run_reddit(action, subreddit, query, limit, time_filter, sort, timeout_seconds, stats)
         return _finalize_reddit(result, response_format, trace_enabled, started, started_at, inputs_received, stats, include_source_status)
 
     if action == "top":
-        if not subreddit:
-            error = _make_error("MISSING_SUBREDDIT", "Reddit top listing needs a subreddit.", "subreddit", subreddit, "subreddit name", False, "Pass a subreddit name.")
-            return _reddit_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Provide a subreddit name", "input_validation", stats)
         result = _run_reddit(action, subreddit, query, limit, time_filter, sort, timeout_seconds, stats)
         return _finalize_reddit(result, response_format, trace_enabled, started, started_at, inputs_received, stats, include_source_status)
 

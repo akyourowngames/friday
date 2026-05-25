@@ -150,40 +150,34 @@ def _find_json(text: str) -> str | None:
     return None
 
 
-def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
-    """Detect JSON-formatted tool call leaked as text content.
-    Returns (tool_call_dict, None) on success,
-    (None, error_message) if parsed but tool unknown,
-    (None, None) if not a JSON tool call."""
-    stripped = text.strip()
+def _extract_json_tool_shape(text: str) -> tuple[str | None, dict | None, bool]:
+    stripped = (text or "").strip()
     json_str = stripped if stripped.startswith("{") else _find_json(stripped)
     if not json_str:
-        return None, None
+        return None, None, False
     try:
         parsed = json.loads(json_str)
     except (json.JSONDecodeError, TypeError):
-        return None, None
+        return None, None, False
     if not isinstance(parsed, dict):
-        return None, None
+        return None, None, False
 
     func_name = None
     func_args = None
 
-    if "name" in parsed and "parameters" in parsed:
+    function = parsed.get("function")
+    if isinstance(function, dict) and function.get("name"):
+        func_name = function.get("name")
+        func_args = function.get("arguments", "{}")
+    elif "name" in parsed and "parameters" in parsed:
         func_name = parsed["name"]
         func_args = parsed["parameters"]
     elif "name" in parsed and "arguments" in parsed:
         func_name = parsed["name"]
         func_args = parsed["arguments"]
-    elif parsed.get("function", {}).get("name"):
-        func_name = parsed["function"]["name"]
-        try:
-            func_args = json.loads(parsed["function"].get("arguments", "{}"))
-        except (json.JSONDecodeError, TypeError):
-            func_args = {}
 
-    if not func_name:
-        return None, None
+    if not isinstance(func_name, str) or not func_name.strip():
+        return None, None, False
 
     if isinstance(func_args, str):
         try:
@@ -191,7 +185,19 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
         except (json.JSONDecodeError, TypeError):
             func_args = {}
 
-    if not isinstance(func_args, dict):
+    if func_args is None:
+        func_args = {}
+
+    return func_name.strip(), func_args if isinstance(func_args, dict) else {}, True
+
+
+def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
+    """Detect JSON-formatted tool call leaked as text content.
+    Returns (tool_call_dict, None) on success,
+    (None, error_message) if parsed but tool unknown,
+    (None, None) if not a JSON tool call."""
+    func_name, func_args, is_tool_shape = _extract_json_tool_shape(text)
+    if not is_tool_shape or not func_name:
         return None, None
 
     known = {t["function"]["name"].lower(): t["function"]["name"] for t in schemas}
@@ -207,6 +213,25 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
         "name": actual,
         "arguments": json.dumps(func_args),
     }, None
+
+
+def _json_tool_leak_message(text: str, schemas: list) -> str | None:
+    func_name, _, is_tool_shape = _extract_json_tool_shape(text)
+    if not is_tool_shape or not func_name:
+        return None
+
+    known = {t["function"]["name"].lower(): t["function"]["name"] for t in schemas}
+    if known and known.get(func_name.lower()):
+        return (
+            f"I produced a text-formatted call for `{known[func_name.lower()]}` "
+            "instead of executing it, sir. Please retry that request."
+        )
+    if get_tool(func_name):
+        return (
+            f"I could not execute `{func_name}` because that tool was not selected "
+            "for this turn, sir."
+        )
+    return f"I could not execute `{func_name}` because it is not registered as a KING tool, sir."
 
 
 def _has_backtick_tool_call(text: str, schemas: list) -> bool:
@@ -1430,7 +1455,7 @@ class Agent:
             content = ""
             tool_calls = {}
             started = False
-            buffer_tool_text = bool(tool_schemas)
+            buffer_tool_text = True
 
             if forced_contextual_call:
                 tool_calls[0] = forced_contextual_call
@@ -1538,6 +1563,9 @@ class Agent:
 
             if not tool_calls:
                 if content:
+                    leak_message = _json_tool_leak_message(content, tool_schemas)
+                    if leak_message:
+                        content = leak_message
                     is_action = False
                     if tool_schemas and not tools_called_this_input:
                         is_action = self.verifier.verify(content, [], [], tool_schemas) != "PASS"

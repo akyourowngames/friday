@@ -115,6 +115,27 @@ class ToolsFleetPolishTests(unittest.TestCase):
         self.assertEqual(seen["query"], "ai")
         self.assertEqual(result["result"]["action"], "search")
 
+    def test_reddit_new_without_subreddit_uses_global_listing(self):
+        import tools.reddit as reddit_mod
+
+        original = reddit_mod._run_reddit
+        seen = {}
+
+        def fake_run(action, subreddit, query, limit, time_filter, sort, timeout_seconds, stats):
+            seen["action"] = action
+            seen["subreddit"] = subreddit
+            return reddit_mod._operation_result(action, "ok", [{"title": "ok"}])
+
+        try:
+            reddit_mod._run_reddit = fake_run
+            result = reddit_mod.reddit(action="new", response_format="structured")
+        finally:
+            reddit_mod._run_reddit = original
+
+        self.assertEqual(seen["action"], "new")
+        self.assertEqual(seen["subreddit"], "")
+        self.assertEqual(result["result"]["action"], "new")
+
     def test_hackernews_clamps_hallucinated_large_limit(self):
         import tools.hackernews as hn_mod
 

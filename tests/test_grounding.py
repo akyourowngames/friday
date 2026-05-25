@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.core import (
     _has_backtick_tool_call,
+    _json_tool_leak_message,
     _load_tool_policy,
     _tool_call_grounded,
     _try_parse_json_tool_call,
@@ -125,6 +126,26 @@ class GroundingTests(unittest.TestCase):
 
         self.assertIsNone(call)
         self.assertIn("not an available tool", error)
+
+    def test_maverick_text_tool_shape_parses_to_selected_tool(self):
+        schemas = [self._schema("reddit")]
+        call, error = _try_parse_json_tool_call(
+            '{"type":"function","name":"reddit","parameters":{"action":"front","limit":5}}',
+            schemas,
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(call["name"], "reddit")
+        self.assertEqual(json.loads(call["arguments"])["action"], "front")
+
+    def test_unregistered_json_tool_shape_is_not_printed_raw(self):
+        message = _json_tool_leak_message(
+            '{"name":"fetch_latest_reddit_threads","parameters":{}}',
+            [],
+        )
+
+        self.assertIn("fetch_latest_reddit_threads", message)
+        self.assertNotIn('{"name"', message)
 
     def test_validator_rejects_unknown_parameters_before_dispatch(self):
         validator = ToolValidator()
