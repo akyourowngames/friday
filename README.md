@@ -42,6 +42,9 @@ Friday/KING is open source and built for contributors. Pull requests, issues,
 new tools, provider adapters, memory improvements, frontend surfaces, tests,
 docs, and verification upgrades are welcome.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and pull request
+guidelines.
+
 Good contribution paths:
 
 - add a new tool with schema, typed errors, manifest evidence, and tests
