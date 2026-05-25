@@ -1978,3 +1978,49 @@ Claim boundary:
   future work from hiding tool exposure problems behind fake limitations or fake
   success text, while keeping executable changes deferred until explicitly
   authorized.
+
+## 2026-05-25 Global Tool Exposure Runtime Repair
+
+Scope: fix live false negatives where registry tools were selected, then erased
+or hijacked before execution.
+
+Runtime changes:
+
+- The conversational-banter filter now preserves selected tools when the user's
+  words overlap the selected tool's registry name, description, examples, or
+  parameter descriptions. This keeps a direct request such as popular Reddit
+  threads from losing `reddit` after semantic selection.
+- Local system-control correction now requires prior local system-control
+  context before boosting `system_control`, preventing unrelated follow-ups such
+  as playlist inspection from being routed to media keys.
+- Tool schemas are now passed to the model in the same order returned by the
+  router, so the strongest semantic tool remains first in the callable list.
+- Debug result previews now escape non-ASCII characters before Rich prints them
+  on Windows consoles, preventing live debug crashes from provider text.
+
+Verification evidence:
+
+- Router probe: `fetch me popular reddit threads` selected `reddit`,
+  `hackernews` after conversation filtering.
+- Router probe: `whats in playlist` selected `playlist`, `youtube_play` and did
+  not boost `system_control`.
+- Live agent debug probe: `fetch me popular reddit threads` called
+  `reddit({"limit":"25","action":"front"})` and answered from returned Reddit
+  threads.
+- Live agent debug probe: `whats in playlist` called
+  `playlist({"action":"list"})` and answered from the saved playlist.
+- `python -m unittest tests.test_system_keyboard_browser.SystemControlToolTests -v`
+  passed 14 tests.
+- `python -m py_compile agent\core.py tests\test_system_keyboard_browser.py`
+  passed.
+- `python -m pytest -q` passed 193 tests and 24 subtests.
+- `python -m compileall config.py agent memory tools tests main.py api_server.py`
+  passed.
+- `npm run typecheck` passed.
+- `tool_verification_pipeline('.', 'tools/TOOL_VERIFICATION_PIPELINE.md',
+  timeout_ms=180000, response_format='structured')` returned `ship` with 6
+  passed checks, 0 failed, and 0 timed out.
+
+[VERDICT] The failing examples now use tools seamlessly through registry
+selection and schema-grounded execution. The fix does not add keyword routing or
+canned tool responses.

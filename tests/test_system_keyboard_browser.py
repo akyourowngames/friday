@@ -43,6 +43,19 @@ class SystemControlToolTests(unittest.TestCase):
         filtered = _filter_tools_for_conversation("you are being smarter huh", embed("you are being smarter huh"), tools)
         self.assertEqual(filtered, [])
 
+    def test_named_tool_request_survives_banter_filter(self):
+        from agent.core import _filter_tools_for_conversation
+        from agent.embedder import embed
+
+        selected_tools = [get_tool("reddit")]
+        filtered = _filter_tools_for_conversation(
+            "fetch me popular reddit threads",
+            embed("fetch me popular reddit threads"),
+            selected_tools,
+        )
+
+        self.assertEqual([tool["name"] for tool in filtered], ["reddit"])
+
     def test_identity_question_does_not_force_system_control(self):
         from agent.core import _ensure_local_system_control_tool
         from agent.embedder import embed
@@ -50,6 +63,24 @@ class SystemControlToolTests(unittest.TestCase):
         selected = _ensure_local_system_control_tool([], "who i am king", embed("who i am king"), [])
 
         self.assertEqual(selected, [])
+
+    def test_unrelated_followup_does_not_force_system_control(self):
+        from agent.core import _ensure_local_system_control_tool
+        from agent.embedder import embed
+
+        messages = [
+            {"role": "user", "content": "fetch me popular reddit threads"},
+            {"role": "assistant", "content": "I cannot verify Reddit without a tool result."},
+        ]
+        selected = [get_tool("playlist")]
+        result = _ensure_local_system_control_tool(
+            selected,
+            "whats in playlist",
+            embed("Earlier: fetch me popular reddit threads\nNow: whats in playlist"),
+            messages,
+        )
+
+        self.assertEqual([tool["name"] for tool in result], ["playlist"])
 
     def test_forced_call_on_correction_nope(self):
         from agent.core import _forced_local_system_control_call

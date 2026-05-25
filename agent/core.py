@@ -25,6 +25,10 @@ TOOL_POLICY_PATH = Path(__file__).resolve().parent.parent / "tool_policy.md"
 ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.md"
 
 
+def _debug_safe(text) -> str:
+    return str(text).encode("ascii", errors="backslashreplace").decode("ascii")
+
+
 def _print_assistant_content(content: str) -> None:
     if not content:
         return
@@ -889,8 +893,33 @@ def _filter_tools_for_conversation(user_input: str, q_emb, selected_tools: list)
     if not selected_tools:
         return selected_tools
     if _looks_like_conversational_banter(user_input, q_emb):
+        if _selected_tool_has_user_terms(user_input, selected_tools):
+            return selected_tools
         return []
     return selected_tools
+
+
+def _selected_tool_has_user_terms(user_input: str, selected_tools: list) -> bool:
+    user_terms = _grounding_terms(user_input)
+    if not user_terms:
+        return False
+    for tool in selected_tools:
+        parts = [
+            str(tool.get("name", "")),
+            str(tool.get("description", "")),
+        ]
+        examples = tool.get("examples") or []
+        if isinstance(examples, list):
+            parts.extend(str(item) for item in examples)
+        properties = tool.get("parameters", {}).get("properties", {})
+        if isinstance(properties, dict):
+            for param_name, details in properties.items():
+                parts.append(str(param_name))
+                if isinstance(details, dict):
+                    parts.append(str(details.get("description", "")))
+        if user_terms & _grounding_terms(" ".join(parts)):
+            return True
+    return False
 
 
 @lru_cache(maxsize=1)
@@ -933,7 +962,7 @@ def _looks_like_local_system_control(user_input: str, q_emb) -> bool:
 
 def _ensure_local_system_control_tool(selected_tools: list, user_input: str, q_emb, messages: list | None = None) -> list:
     needs_tool = _looks_like_local_system_control(user_input, q_emb)
-    if not needs_tool and messages is not None:
+    if not needs_tool and messages is not None and _last_user_system_request(messages):
         needs_tool = _looks_like_action_correction(user_input, messages)
     if not needs_tool:
         return selected_tools
@@ -1289,9 +1318,11 @@ class Agent:
             ),
         }
 
+        schema_by_name = {t["function"]["name"]: t for t in get_tool_schemas()}
         tool_schemas = [
-            t for t in get_tool_schemas()
-            if t["function"]["name"] in {x["name"] for x in selected_tools}
+            schema_by_name[name]
+            for name in [x["name"] for x in selected_tools]
+            if name in schema_by_name
         ]
 
         if settings.debug:
@@ -1470,7 +1501,10 @@ class Agent:
 
             if settings.debug:
                 for fc in formatted_calls:
-                    console.print(f"[dim] Tool: {fc['function']['name']}({fc['function']['arguments']})[/dim]")
+                    console.print(
+                        f"[dim] Tool: {_debug_safe(fc['function']['name'])}"
+                        f"({_debug_safe(fc['function']['arguments'])})[/dim]"
+                    )
 
             self.messages.append({
                 "role": "assistant",
@@ -1547,7 +1581,7 @@ class Agent:
                     result = result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
                 if settings.debug:
                     preview = result[:200].replace("\n", " ")
-                    console.print(f"[dim] Result: {preview}[/dim]")
+                    console.print(f"[dim] Result: {_debug_safe(preview)}[/dim]")
 
                 self.messages.append({
                     "role": "tool",

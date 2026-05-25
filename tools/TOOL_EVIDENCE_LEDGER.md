@@ -97,6 +97,11 @@ Last verified by the default markdown pipeline on 2026-05-23:
 
 ## Current Runtime Status
 
+- `tool_selection_execution_guard` - `verified_runtime` for preserving
+  registry-selected tools when the user's words overlap the selected schema,
+  keeping selected schema order aligned with router rank, and preventing
+  unrelated follow-ups from being hijacked by local system-control correction
+  handling.
 - `registry_dispatch` - `verified_runtime`.
 - `terminal` - `verified_runtime`.
 - `file_write` - `verified_runtime`.
