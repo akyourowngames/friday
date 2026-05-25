@@ -1,6 +1,29 @@
 {
   "name": "king-friday-frontend",
   "version": "0.1.0",
+  "description": "Local-first AI assistant runtime with graph memory, semantic tool routing, markdown-governed tools, and verified tool calling.",
+  "keywords": [
+    "local-ai-assistant",
+    "ai-agent",
+    "tool-calling",
+    "graph-memory",
+    "semantic-routing",
+    "jarvis",
+    "python",
+    "fastapi",
+    "nextjs",
+    "nvidia-nim",
+    "rag",
+    "automation",
+    "personal-ai",
+    "agent-framework",
+    "developer-tools"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akyourowngames/friday.git"
+  },
+  "homepage": "https://github.com/akyourowngames/friday",
   "private": true,
   "scripts": {
     "dev": "next dev",
