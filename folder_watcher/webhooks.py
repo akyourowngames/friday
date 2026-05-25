@@ -14,11 +14,13 @@ class Webhook:
     url: str
     events: list[str] = field(default_factory=list)
     filter: dict[str, Any] = field(default_factory=dict)
+    last_sent: float = 0.0
 
 
 class WebhookRegistry:
-    def __init__(self, timeout: float = 5.0):
+    def __init__(self, timeout: float = 5.0, rate_limit_per_sec: float = 5.0):
         self.timeout = timeout
+        self.rate_limit_per_sec = rate_limit_per_sec
         self._hooks: dict[str, Webhook] = {}
         self._lock = threading.Lock()
 
@@ -46,8 +48,21 @@ class WebhookRegistry:
         for hook in hooks:
             if not _matches(hook, event):
                 continue
+            if not self._allow_send(hook):
+                continue
             thread = threading.Thread(target=self._post, args=(hook, event), daemon=True)
             thread.start()
+
+    def _allow_send(self, hook: Webhook) -> bool:
+        import time
+
+        minimum_gap = 1.0 / max(0.1, float(self.rate_limit_per_sec or 5.0))
+        now = time.time()
+        with self._lock:
+            if now - hook.last_sent < minimum_gap:
+                return False
+            hook.last_sent = now
+            return True
 
     def _post(self, hook: Webhook, event: dict):
         try:

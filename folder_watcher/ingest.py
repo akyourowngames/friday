@@ -8,6 +8,7 @@ import tomllib
 from pathlib import Path
 
 from .configuration import WatcherConfig
+from .extractors import extract_document_or_media
 from .index import FolderIndex
 
 
@@ -29,8 +30,14 @@ class IngestPipeline:
         digest = _sha256(resolved, self.config.hash_chunk_bytes)
         mime_type = _sniff_mime(resolved)
         metadata = _metadata(resolved, mime_type)
-        content = _extract_content(resolved, mime_type, self.config)
+        extracted_metadata, extracted_content = extract_document_or_media(resolved, mime_type, self.config)
+        metadata.update(extracted_metadata)
+        content = extracted_content or _extract_content(resolved, mime_type, self.config)
         tags = _tags_for(resolved, mime_type, stat.st_size, self.config)
+        anomaly = _directory_anomaly(resolved, self.config)
+        if anomaly:
+            metadata["anomaly"] = anomaly
+            tags.append({"tag": "anomaly", "source": "auto:directory-intent"})
         record = {
             "path": str(resolved),
             "filename": resolved.name,
@@ -43,7 +50,15 @@ class IngestPipeline:
             "metadata": metadata,
             "summary": "",
         }
-        return self.index.upsert_file(record, content, tags, event_type)
+        result = self.index.upsert_file(record, content, tags, event_type)
+        file_item = result.get("file") if result else None
+        if file_item and metadata.get("imports"):
+            self.index.update_relationships(file_item["id"], _dependency_edges(resolved, metadata, self.config))
+        if file_item and anomaly and self.config.anomaly_events_enabled:
+            result["anomaly_event"] = self.index.log_anomaly(file_item["id"], str(resolved), anomaly)
+        if file_item and mime_type.startswith("audio/"):
+            self.index.write_playlist(self.config.playlist_path)
+        return result
 
     def delete_path(self, path: str | Path) -> dict:
         return self.index.mark_deleted(path)
@@ -134,9 +149,55 @@ def _metadata(path: Path, mime_type: str) -> dict:
     return metadata
 
 
+def _dependency_edges(path: Path, metadata: dict, config: WatcherConfig) -> list[dict]:
+    edges = []
+    for imported in metadata.get("imports", []):
+        target_path = _resolve_import(imported, config)
+        edges.append(
+            {
+                "target_name": str(imported),
+                "target_path": str(target_path) if target_path else "",
+                "relation": "python_import",
+                "source_path": str(path),
+            }
+        )
+    return edges
+
+
+def _resolve_import(imported: str, config: WatcherConfig) -> Path | None:
+    parts = [part for part in str(imported or "").split(".") if part]
+    if not parts:
+        return None
+    module_path = config.watch_path.joinpath(*parts)
+    candidates = [module_path.with_suffix(".py"), module_path / "__init__.py"]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def _directory_anomaly(path: Path, config: WatcherConfig) -> dict | None:
+    try:
+        relative = path.relative_to(config.watch_path)
+    except ValueError:
+        return None
+    parts = [part.lower() for part in relative.parts[:-1]]
+    extension = path.suffix.lower()
+    for intent in config.directory_intents:
+        directory = intent.directory.lower().strip("/")
+        if directory in parts and extension not in intent.extensions:
+            return {
+                "directory": intent.directory,
+                "extension": extension,
+                "expected_extensions": list(intent.extensions),
+                "reason": "extension_outside_directory_intent",
+            }
+    return None
+
+
 def _python_metadata(path: Path) -> dict:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return {"language": "python", "parse_status": "unreadable"}
     result: dict[str, object] = {
@@ -197,7 +258,7 @@ def _extract_content(path: Path, mime_type: str, config: WatcherConfig) -> str:
     if suffix not in config.text_extensions and not mime_type.startswith("text/") and mime_type not in ("application/json", "application/xml"):
         return ""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return ""
     return text[: max(1, int(config.max_content_chars))]

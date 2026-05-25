@@ -4,7 +4,7 @@ import threading
 from pathlib import Path
 
 from .bus import EventBus
-from .configuration import WatcherConfig
+from .configuration import WatcherConfig, load_config
 from .ingest import IngestPipeline
 
 
@@ -35,8 +35,12 @@ class DebouncedWatcher:
                 watcher._handle(event.src_path, "DIR_CREATED" if event.is_directory else "FILE_CREATED")
 
             def on_modified(self, event):
-                if not event.is_directory:
-                    watcher._handle(event.src_path, "FILE_MODIFIED")
+                if event.is_directory:
+                    return
+                if watcher._is_config_path(event.src_path):
+                    watcher._reload_config()
+                    return
+                watcher._handle(event.src_path, "FILE_MODIFIED")
 
             def on_deleted(self, event):
                 payload = watcher.pipeline.delete_path(event.src_path)
@@ -48,6 +52,8 @@ class DebouncedWatcher:
 
         observer = Observer()
         observer.schedule(Handler(), str(self.config.watch_path), recursive=True)
+        if self.config.config_path.parent != self.config.watch_path:
+            observer.schedule(Handler(), str(self.config.config_path.parent), recursive=False)
         observer.start()
         self._observer = observer
         return observer
@@ -84,3 +90,27 @@ class DebouncedWatcher:
     def _publish(self, event: dict | None):
         if event is not None and self.event_bus is not None:
             self.event_bus.publish(event)
+
+    def _is_config_path(self, path: str) -> bool:
+        try:
+            return Path(path).expanduser().resolve() == self.config.config_path
+        except OSError:
+            return False
+
+    def _reload_config(self):
+        try:
+            fresh = load_config(self.config.repo_root, self.config.config_path)
+        except Exception:
+            return
+        self.config.refresh_from(fresh)
+        self._publish(
+            {
+                "event_type": "CONFIG_RELOADED",
+                "timestamp": __import__("time").time(),
+                "file_id": None,
+                "old_path": None,
+                "new_path": str(self.config.config_path),
+                "processed": False,
+                "payload": {"config": self.config.public_dict()},
+            }
+        )

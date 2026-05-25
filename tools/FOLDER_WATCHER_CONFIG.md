@@ -18,6 +18,16 @@ adding routing shortcuts in code.
 - hash_chunk_bytes: 65536
 - large_file_size: 100MB
 - ai_summaries_enabled: false
+- llm_queries_enabled: true
+- llm_policy_file: tools/FOLDER_WATCHER_LLM_POLICY.md
+- hot_file_event_threshold: 5
+- hot_file_window_seconds: 86400
+- anomaly_events_enabled: true
+- ocr_enabled: true
+- transcription_enabled: true
+- subscriber_rate_limit_per_sec: 20
+- webhook_rate_limit_per_sec: 5
+- playlist_path: storage/folder_watcher_new_arrivals.m3u
 
 ## Ignore Globs
 
@@ -77,24 +87,46 @@ adding routing shortcuts in code.
 - directory:audio -> audio
 - size-over:100MB -> large-file
 
+## Directory Intent Rules
+
+- models: .bin,.safetensors,.onnx,.pt,.pth
+- prompts: .txt,.md,.json,.yaml,.yml
+- audio: .mp3,.flac,.wav,.m4a,.ogg
+- documents: .pdf,.docx,.txt,.md
+
 ## API Contract
 
 - `GET /health` returns service status.
+- `GET /dashboard` renders the live browser dashboard.
+- `GET /status` returns the markdown-backed feature status matrix.
 - `GET /files/latest` returns recently indexed active files.
 - `GET /files/diff` returns event-log changes since a timestamp.
+- `GET /files/snapshot` reconstructs indexed file state from the event log.
+- `GET /files/hot` returns frequently changed files in the configured window.
+- `GET /files/anomalies` returns directory-intent anomaly events.
 - `GET /files/search` runs content search using SQLite FTS5 when available.
-- `POST /files/query` resolves a local natural-language file query through the
-  current index without claiming provider-backed SQL generation.
+- `POST /files/query` uses the LLM policy to generate read-only SQLite when the
+  provider is available, then falls back to local index search when it is not.
+- `GET /llm/status` reports provider readiness, model, prompt policy, and LLM
+  feature switches.
 - `GET /files/duplicates` groups active files by identical SHA256 hash.
+- `GET /files/duplicates/symlink-suggestions` returns duplicate link plans
+  without modifying the filesystem.
 - `GET /files/stats` returns index coverage and file breakdowns.
 - `GET /files/{id}` returns one indexed file record.
 - `GET /files/{id}/content` returns extracted text content.
-- `GET /files/{id}/summary` returns a stored summary or a clear pending status.
+- `GET /files/{id}/dependencies` returns indexed relationship edges from a file.
+- `GET /files/{id}/dependents` returns indexed reverse relationship edges.
+- `GET /files/{id}/summary` returns a stored summary or generates one through
+  the LLM policy when summaries are enabled and the provider is available.
+- `POST /files/summarize-pending` summarizes pending text files through the LLM
+  policy when summaries are enabled.
 - `DELETE /files/{id}` removes the index record only, not the source file.
 - `POST /files/{id}/tags` adds a user tag to the indexed record.
 - `GET /config` returns the currently loaded watcher config.
 - `PATCH /config` updates safe runtime config fields.
 - `GET /export` exports the index as JSON or CSV.
+- `GET /playlist/new-arrivals` returns audio arrivals as JSON or M3U.
 - `POST /webhooks` registers a local HTTP subscriber for matching events.
 - `WS /watch` streams watcher events to connected subscribers.
 
@@ -102,9 +134,16 @@ adding routing shortcuts in code.
 
 - Focused tests live in `tests/test_folder_watcher.py`.
 - The repository verification pipeline must include the focused watcher tests.
+- Use `tools/FOLDER_WATCHER_DEMO_CONFIG.md` when you want an isolated visible
+  inbox instead of indexing the repository root.
 - The daemon uses the optional `watchdog` package for OS-backed file events.
 - If `watchdog` is missing, CLI run mode reports the missing dependency instead
   of pretending live watching is active.
+- PDF, Word, image, audio, and video extraction use optional local libraries and
+  record extractor status in metadata instead of hiding missing capability.
+- OCR and transcription hooks run only when the local dependencies and runtime
+  assets are available; otherwise metadata reports an unavailable or empty hook.
+- Deployment templates live under `deploy/folder_watcher/`.
 - Codex/IDE agent instruction files, local todo scratchpads, build outputs, and
   selector cache artifacts stay out of this watcher index. They are not KING
   runtime tool-control evidence.

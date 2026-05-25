@@ -1,0 +1,11 @@
+services:
+  folder-watcher:
+    build:
+      context: ../..
+      dockerfile: deploy/folder_watcher/Dockerfile
+    ports:
+      - "7474:7474"
+    volumes:
+      - ../../:/app
+    environment:
+      - PYTHONUNBUFFERED=1

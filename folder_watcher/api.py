@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .bus import EventBus
 from .configuration import WatcherConfig
+from .dashboard import dashboard_html
 from .index import FolderIndex
+from .llm import FolderWatcherLLM
+from .status import load_status
 from .webhooks import WebhookRegistry
 
 
@@ -25,7 +30,13 @@ class ConfigPatchRequest(BaseModel):
     ignore_globs: list[str] | None = None
     debounce_ms: int | None = None
     ai_summaries_enabled: bool | None = None
+    llm_queries_enabled: bool | None = None
     max_content_chars: int | None = None
+    hot_file_event_threshold: int | None = None
+
+
+class SummarizePendingRequest(BaseModel):
+    limit: int = 10
 
 
 class WebhookRequest(BaseModel):
@@ -34,11 +45,17 @@ class WebhookRequest(BaseModel):
     filter: dict[str, Any] = {}
 
 
-def create_app(config: WatcherConfig, index: FolderIndex, event_bus: EventBus | None = None) -> FastAPI:
+def create_app(
+    config: WatcherConfig,
+    index: FolderIndex,
+    event_bus: EventBus | None = None,
+    llm_service: FolderWatcherLLM | None = None,
+) -> FastAPI:
     app = FastAPI(title="KING Folder Watcher Service", version="1.0.0")
     bus = event_bus or EventBus()
-    webhook_registry = WebhookRegistry()
+    webhook_registry = WebhookRegistry(rate_limit_per_sec=config.webhook_rate_limit_per_sec)
     bus.add_listener(webhook_registry.dispatch)
+    llm = llm_service or FolderWatcherLLM(config, index)
 
     def require_auth(authorization: str | None = Header(default=None)):
         if not config.auth_token:
@@ -50,6 +67,22 @@ def create_app(config: WatcherConfig, index: FolderIndex, event_bus: EventBus | 
     @app.get("/health")
     def health(_: Any = Depends(require_auth)):
         return {"status": "ok", "watch_path": str(config.watch_path), "database_path": str(config.database_path)}
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard(_: Any = Depends(require_auth)):
+        return dashboard_html(config)
+
+    @app.get("/status")
+    def service_status(_: Any = Depends(require_auth)):
+        status = load_status(config.repo_root)
+        status["runtime"] = {
+            "watch_path": str(config.watch_path),
+            "database_path": str(config.database_path),
+            "fts_enabled": index.fts_enabled,
+            "auth_enabled": bool(config.auth_token),
+            "llm": llm.status(),
+        }
+        return status
 
     @app.get("/files/latest")
     def files_latest(
@@ -71,6 +104,24 @@ def create_app(config: WatcherConfig, index: FolderIndex, event_bus: EventBus | 
     ):
         return {"events": index.diff(since=since, from_ts=from_ts, to_ts=to_ts, limit=limit)}
 
+    @app.get("/files/snapshot")
+    def files_snapshot(at: float | None = None, _: Any = Depends(require_auth)):
+        return index.snapshot(at)
+
+    @app.get("/files/hot")
+    def files_hot(limit: int = Query(default=20, ge=1, le=200), _: Any = Depends(require_auth)):
+        return {
+            "files": index.hot_files(
+                threshold=config.hot_file_event_threshold,
+                window_seconds=config.hot_file_window_seconds,
+                limit=limit,
+            )
+        }
+
+    @app.get("/files/anomalies")
+    def files_anomalies(limit: int = Query(default=100, ge=1, le=500), _: Any = Depends(require_auth)):
+        return {"events": index.anomalies(limit)}
+
     @app.get("/files/search")
     def files_search(q: str, limit: int = Query(default=20, ge=1, le=100), _: Any = Depends(require_auth)):
         return {"query": q, "files": index.search(q, limit)}
@@ -79,23 +130,74 @@ def create_app(config: WatcherConfig, index: FolderIndex, event_bus: EventBus | 
     def files_query(request: QueryRequest, _: Any = Depends(require_auth)):
         if not request.query.strip():
             raise HTTPException(status_code=400, detail="query must not be empty")
+        if llm.query_available():
+            try:
+                generated = llm.generate_sql(request.query, request.limit)
+                result = index.readonly_query(
+                    generated["sql"],
+                    llm.policy.allowed_tables,
+                    llm.policy.allowed_functions,
+                    generated["row_limit"],
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"LLM query failed: {exc}") from exc
+            if result["status"] != "success":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": "LLM SQL was blocked by the read-only database guard.",
+                        "sql": generated.get("sql", ""),
+                        "result": result,
+                    },
+                )
+            return {
+                "mode": "llm_sql",
+                "provider_sql_generation": "active",
+                "query": request.query,
+                "sql": generated["sql"],
+                "explanation": generated.get("explanation", ""),
+                "columns": result["columns"],
+                "rows": result["rows"],
+                "files": _rows_as_files(result["rows"]),
+            }
         files = index.search(request.query, request.limit)
         if not files:
             files = index.latest(request.limit)
         return {
-            "mode": "local_index_resolution",
-            "provider_sql_generation": "not_configured",
+            "mode": "local_fallback",
+            "provider_sql_generation": "unavailable",
+            "llm": llm.status(),
             "query": request.query,
             "files": files,
         }
+
+    @app.get("/llm/status")
+    def llm_status(_: Any = Depends(require_auth)):
+        return llm.status()
 
     @app.get("/files/duplicates")
     def files_duplicates(_: Any = Depends(require_auth)):
         return {"groups": index.duplicates()}
 
+    @app.get("/files/duplicates/symlink-suggestions")
+    def duplicate_symlink_suggestions(_: Any = Depends(require_auth)):
+        return {"suggestions": index.duplicate_symlink_suggestions()}
+
     @app.get("/files/stats")
     def files_stats(_: Any = Depends(require_auth)):
         return index.stats()
+
+    @app.get("/playlist/new-arrivals")
+    def playlist_new_arrivals(format: str = "json", _: Any = Depends(require_auth)):
+        if format.strip().lower() == "m3u":
+            result = index.write_playlist(config.playlist_path)
+            if result.get("path"):
+                try:
+                    return Response(Path(result["path"]).read_text(encoding="utf-8"), media_type="audio/x-mpegurl")
+                except OSError:
+                    return Response("#EXTM3U\n", media_type="audio/x-mpegurl")
+            return Response("#EXTM3U\n", media_type="audio/x-mpegurl")
+        return {"files": index.audio_files(), "playlist": index.write_playlist(config.playlist_path)}
 
     @app.post("/webhooks")
     def register_webhook(request: WebhookRequest, _: Any = Depends(require_auth)):
@@ -145,6 +247,18 @@ def create_app(config: WatcherConfig, index: FolderIndex, event_bus: EventBus | 
             raise HTTPException(status_code=404, detail="file content not found")
         return {"file_id": file_id, "content": content}
 
+    @app.get("/files/{file_id}/dependencies")
+    def get_dependencies(file_id: str, _: Any = Depends(require_auth)):
+        if index.get_file(file_id) is None:
+            raise HTTPException(status_code=404, detail="file not found")
+        return {"file_id": file_id, "dependencies": index.dependencies(file_id)}
+
+    @app.get("/files/{file_id}/dependents")
+    def get_dependents(file_id: str, _: Any = Depends(require_auth)):
+        if index.get_file(file_id) is None:
+            raise HTTPException(status_code=404, detail="file not found")
+        return {"file_id": file_id, "dependents": index.dependents(file_id)}
+
     @app.get("/files/{file_id}/summary")
     def get_file_summary(file_id: str, _: Any = Depends(require_auth)):
         item = index.get_file(file_id)
@@ -152,11 +266,42 @@ def create_app(config: WatcherConfig, index: FolderIndex, event_bus: EventBus | 
             raise HTTPException(status_code=404, detail="file not found")
         if item.get("summary"):
             return {"file_id": file_id, "summary": item["summary"], "status": "ready"}
+        if llm.summaries_available():
+            content = index.get_content(file_id) or ""
+            try:
+                summary = llm.summarize_file(item, content)
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"LLM summary failed: {exc}") from exc
+            updated = index.update_summary(file_id, summary["summary"], summary["tags"])
+            return {
+                "file_id": file_id,
+                "summary": updated["summary"] if updated else summary["summary"],
+                "tags": updated["tags"] if updated else summary["tags"],
+                "status": "ready",
+                "provider": summary["provider"],
+            }
         return Response(
-            json.dumps({"file_id": file_id, "summary": "", "status": "pending", "ai_summaries_enabled": config.ai_summaries_enabled}),
+            json.dumps({"file_id": file_id, "summary": "", "status": "pending", "llm": llm.status()}),
             status_code=202,
             media_type="application/json",
         )
+
+    @app.post("/files/summarize-pending")
+    def summarize_pending(request: SummarizePendingRequest, _: Any = Depends(require_auth)):
+        if not llm.summaries_available():
+            raise HTTPException(status_code=503, detail={"message": "LLM summaries are not available.", "llm": llm.status()})
+        files = index.pending_summaries(request.limit)
+        summarized = []
+        failed = []
+        for item in files:
+            try:
+                content = index.get_content(item["id"]) or ""
+                summary = llm.summarize_file(item, content)
+                updated = index.update_summary(item["id"], summary["summary"], summary["tags"])
+                summarized.append(updated or item)
+            except Exception as exc:
+                failed.append({"file_id": item["id"], "error": str(exc)})
+        return {"summarized": summarized, "failed": failed, "count": len(summarized)}
 
     @app.delete("/files/{file_id}")
     def delete_file(file_id: str, _: Any = Depends(require_auth)):
@@ -182,17 +327,26 @@ def create_app(config: WatcherConfig, index: FolderIndex, event_bus: EventBus | 
         await websocket.accept()
         ext_filter = websocket.query_params.get("ext")
         mime_filter = websocket.query_params.get("mime")
+        minimum_gap = 1.0 / max(0.1, float(config.subscriber_rate_limit_per_sec or 20.0))
+        last_sent = 0.0
         with bus.subscribe() as queue:
             try:
                 while True:
                     event = await queue.get()
                     if _event_matches(event, ext_filter, mime_filter):
+                        import time
+
+                        now = time.time()
+                        if now - last_sent < minimum_gap:
+                            continue
+                        last_sent = now
                         await websocket.send_json(event)
             except WebSocketDisconnect:
                 return
 
     app.state.folder_watcher_event_bus = bus
     app.state.folder_watcher_webhooks = webhook_registry
+    app.state.folder_watcher_llm = llm
     return app
 
 
@@ -214,3 +368,11 @@ def _event_matches(event: dict, ext_filter: str | None, mime_filter: str | None)
         elif str(file_info.get("mime_type") or "") != wanted_mime:
             return False
     return True
+
+
+def _rows_as_files(rows: list[dict]) -> list[dict]:
+    files = []
+    for row in rows:
+        if "id" in row and "path" in row and "filename" in row:
+            files.append(row)
+    return files

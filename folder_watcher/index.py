@@ -74,6 +74,16 @@ class FolderIndex:
                     file_id TEXT PRIMARY KEY,
                     content TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS file_edges (
+                    source_file_id TEXT NOT NULL,
+                    target_file_id TEXT,
+                    target_path TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    UNIQUE(source_file_id, target_path, target_name, relation)
+                );
                 """
             )
             try:
@@ -240,6 +250,66 @@ class FolderIndex:
             self._conn.commit()
             return self.get_file(file_id)
 
+    def update_summary(self, file_id: str, summary: str, tags: list[str] | None = None) -> dict | None:
+        clean_summary = str(summary or "").strip()
+        clean_tags = [str(item).strip() for item in (tags or []) if str(item).strip()]
+        with self._lock:
+            row = self._conn.execute("SELECT tags_json FROM files WHERE id = ?", (file_id,)).fetchone()
+            if row is None:
+                return None
+            merged_tags = set(_json_list(row["tags_json"]))
+            for tag in clean_tags:
+                merged_tags.add(tag)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO tags(file_id, tag, source) VALUES (?, ?, ?)",
+                    (file_id, tag, "auto:ai"),
+                )
+            self._conn.execute(
+                "UPDATE files SET summary = ?, tags_json = ? WHERE id = ?",
+                (clean_summary, json.dumps(sorted(merged_tags), ensure_ascii=False), file_id),
+            )
+            self._conn.commit()
+            return self.get_file(file_id)
+
+    def update_relationships(self, file_id: str, edges: list[dict]):
+        with self._lock:
+            self._conn.execute("DELETE FROM file_edges WHERE source_file_id = ?", (file_id,))
+            for edge in edges:
+                target_path = str(edge.get("target_path", ""))
+                target_file_id = None
+                if target_path:
+                    row = self._conn.execute("SELECT id FROM files WHERE path = ?", (target_path,)).fetchone()
+                    target_file_id = row["id"] if row else None
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO file_edges(
+                        source_file_id, target_file_id, target_path, target_name, relation, metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        target_file_id,
+                        target_path,
+                        str(edge.get("target_name", "")),
+                        str(edge.get("relation", "related")),
+                        json.dumps(edge, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
+            self._conn.commit()
+
+    def dependencies(self, file_id: str) -> list[dict]:
+        return self._edge_rows("source_file_id = ?", (file_id,))
+
+    def dependents(self, file_id: str) -> list[dict]:
+        return self._edge_rows("target_file_id = ?", (file_id,))
+
+    def log_anomaly(self, file_id: str, path: str, anomaly: dict) -> dict:
+        with self._lock:
+            event = self._log_event_locked("ANOMALY", file_id, None, path, {"file_id": file_id, "path": path, "anomaly": anomaly})
+            self._conn.commit()
+            return event
+
     def get_file(self, file_id: str) -> dict | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
@@ -249,6 +319,22 @@ class FolderIndex:
         with self._lock:
             row = self._conn.execute("SELECT content FROM file_contents WHERE file_id = ?", (file_id,)).fetchone()
             return row["content"] if row else None
+
+    def pending_summaries(self, limit: int = 10) -> list[dict]:
+        bounded = _bounded_limit(limit, 1, 100)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT files.*
+                FROM files
+                JOIN file_contents ON files.id = file_contents.file_id
+                WHERE files.status = ? AND files.summary = '' AND file_contents.content != ''
+                ORDER BY files.indexed_ts DESC
+                LIMIT ?
+                """,
+                ("active", bounded),
+            ).fetchall()
+            return [self._row_to_file(row) for row in rows]
 
     def latest(self, limit: int = 10, extension: str | None = None, since: float | None = None, directory: str | None = None) -> list[dict]:
         limit = _bounded_limit(limit)
@@ -293,6 +379,29 @@ class FolderIndex:
             rows = self._conn.execute(query, params).fetchall()
             return [self._row_to_event(row) for row in rows]
 
+    def snapshot(self, at: float | None = None) -> dict:
+        cutoff = float(at if at is not None else time.time())
+        files: dict[str, dict] = {}
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM events WHERE timestamp <= ? ORDER BY timestamp ASC",
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                event = self._row_to_event(row)
+                file_id = event.get("file_id")
+                payload = event.get("payload", {})
+                if event["event_type"] == "FILE_DELETED" and file_id:
+                    files.pop(file_id, None)
+                    continue
+                snapshot = payload.get("file") if isinstance(payload, dict) else None
+                if isinstance(snapshot, dict) and file_id:
+                    item = dict(snapshot)
+                    item["id"] = file_id
+                    item["status"] = "active"
+                    files[file_id] = item
+        return {"at": cutoff, "files": list(files.values()), "count": len(files)}
+
     def search(self, query_text: str, limit: int = 20) -> list[dict]:
         terms = _plain_terms(query_text)
         if not terms:
@@ -336,6 +445,91 @@ class FolderIndex:
                     break
             return matches
 
+    def public_schema(self, allowed_tables: list[str]) -> dict:
+        schema: dict[str, list[dict]] = {}
+        with self._lock:
+            for table in allowed_tables:
+                if not _safe_identifier(table):
+                    continue
+                rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+                schema[table] = [
+                    {
+                        "name": row["name"],
+                        "type": row["type"],
+                        "notnull": bool(row["notnull"]),
+                        "primary_key": bool(row["pk"]),
+                    }
+                    for row in rows
+                ]
+        return schema
+
+    def readonly_query(self, sql: str, allowed_tables: list[str], allowed_functions: list[str], limit: int = 25) -> dict:
+        clean_sql = str(sql or "").strip()
+        if not clean_sql:
+            return {"status": "blocked", "error": "empty_sql", "rows": [], "columns": []}
+        allowed_table_set = {item for item in allowed_tables if _safe_identifier(item)}
+        allowed_function_set = {item.lower() for item in allowed_functions if _safe_identifier(item)}
+        denied: list[dict] = []
+        step_count = 0
+        max_steps = 20000
+
+        def authorize(action, arg1, arg2, db_name, source):
+            if action == sqlite3.SQLITE_SELECT:
+                return sqlite3.SQLITE_OK
+            if action == sqlite3.SQLITE_READ:
+                table = str(arg1 or "")
+                if table in allowed_table_set:
+                    return sqlite3.SQLITE_OK
+                denied.append({"action": "read", "target": table})
+                return sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_FUNCTION:
+                function_name = str(arg2 or arg1 or "").lower()
+                if function_name in allowed_function_set:
+                    return sqlite3.SQLITE_OK
+                denied.append({"action": "function", "target": function_name})
+                return sqlite3.SQLITE_DENY
+            denied.append({"action": str(action), "target": str(arg1 or arg2 or "")})
+            return sqlite3.SQLITE_DENY
+
+        def progress():
+            nonlocal step_count
+            step_count += 1
+            return 1 if step_count > max_steps else 0
+
+        with self._lock:
+            previous_authorizer = None
+            try:
+                previous_authorizer = self._conn.set_authorizer(authorize)
+                self._conn.set_progress_handler(progress, 1000)
+                cursor = self._conn.execute(clean_sql)
+                columns = [item[0] for item in (cursor.description or [])]
+                rows = cursor.fetchmany(_bounded_limit(limit, 1, 500))
+                return {
+                    "status": "success",
+                    "columns": columns,
+                    "rows": [dict(row) for row in rows],
+                    "denied": denied,
+                }
+            except sqlite3.DatabaseError as exc:
+                return {
+                    "status": "blocked",
+                    "error": str(exc),
+                    "columns": [],
+                    "rows": [],
+                    "denied": denied,
+                }
+            finally:
+                self._conn.set_progress_handler(None, 0)
+                self._conn.set_authorizer(previous_authorizer)
+
+    def anomalies(self, limit: int = 100) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM events WHERE event_type = ? ORDER BY timestamp DESC LIMIT ?",
+                ("ANOMALY", _bounded_limit(limit, 1, 500)),
+            ).fetchall()
+            return [self._row_to_event(row) for row in rows]
+
     def duplicates(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
@@ -357,6 +551,74 @@ class FolderIndex:
                 ).fetchall()
                 groups.append({"sha256": row["sha256"], "count": row["count"], "files": [self._row_to_file(item) for item in files]})
             return groups
+
+    def duplicate_symlink_suggestions(self) -> list[dict]:
+        suggestions = []
+        for group in self.duplicates():
+            files = group.get("files", [])
+            if len(files) < 2:
+                continue
+            canonical = sorted(files, key=lambda item: (len(item["path"]), item["path"]))[0]
+            duplicates = [item for item in files if item["id"] != canonical["id"]]
+            suggestions.append(
+                {
+                    "sha256": group["sha256"],
+                    "canonical": canonical,
+                    "duplicates": duplicates,
+                    "suggested_action": "replace duplicates with links to canonical path after user approval",
+                }
+            )
+        return suggestions
+
+    def hot_files(self, threshold: int = 5, window_seconds: int = 86400, limit: int = 20) -> list[dict]:
+        since = time.time() - max(1, int(window_seconds))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT file_id, COUNT(*) AS event_count
+                FROM events
+                WHERE file_id IS NOT NULL
+                  AND timestamp >= ?
+                  AND event_type IN ('FILE_CREATED', 'FILE_MODIFIED', 'FILE_UNCHANGED')
+                GROUP BY file_id
+                HAVING COUNT(*) >= ?
+                ORDER BY event_count DESC
+                LIMIT ?
+                """,
+                (since, max(1, int(threshold)), _bounded_limit(limit, 1, 200)),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = self.get_file(row["file_id"])
+                if not item:
+                    continue
+                tags = set(item.get("tags", []))
+                tags.add("hot")
+                item["tags"] = sorted(tags)
+                item["event_count"] = row["event_count"]
+                result.append(item)
+            return result
+
+    def audio_files(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM files WHERE status = ? AND mime_type LIKE ? ORDER BY indexed_ts DESC",
+                ("active", "audio/%"),
+            ).fetchall()
+            return [self._row_to_file(row) for row in rows]
+
+    def write_playlist(self, playlist_path: str | Path | None) -> dict:
+        audio_files = self.audio_files()
+        if playlist_path is None:
+            return {"written": False, "count": len(audio_files), "path": ""}
+        path = Path(playlist_path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["#EXTM3U"]
+        for item in audio_files:
+            lines.append("#EXTINF:-1," + item["filename"])
+            lines.append(item["path"])
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return {"written": True, "count": len(audio_files), "path": str(path)}
 
     def stats(self) -> dict:
         now = time.time()
@@ -382,6 +644,7 @@ class FolderIndex:
                 "fts_enabled": self._fts_enabled,
                 "by_extension": self._breakdown("extension"),
                 "by_mime_type": self._breakdown("mime_type"),
+                "hot_files": self.hot_files(),
             }
 
     def export_json(self) -> dict:
@@ -473,6 +736,32 @@ class FolderIndex:
             "payload": _json_dict(row["payload_json"]),
         }
 
+    def _edge_rows(self, where: str, params: tuple) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT file_edges.*, source.path AS source_path, target.path AS resolved_target_path
+                FROM file_edges
+                LEFT JOIN files AS source ON source.id = file_edges.source_file_id
+                LEFT JOIN files AS target ON target.id = file_edges.target_file_id
+                WHERE """ + where + """
+                ORDER BY target_name
+                """,
+                params,
+            ).fetchall()
+            return [
+                {
+                    "source_file_id": row["source_file_id"],
+                    "source_path": row["source_path"],
+                    "target_file_id": row["target_file_id"],
+                    "target_path": row["resolved_target_path"] or row["target_path"],
+                    "target_name": row["target_name"],
+                    "relation": row["relation"],
+                    "metadata": _json_dict(row["metadata_json"]),
+                }
+                for row in rows
+            ]
+
     def _scalar(self, sql: str, params: tuple) -> int:
         row = self._conn.execute(sql, params).fetchone()
         return int(row[0] or 0)
@@ -507,6 +796,16 @@ def _bounded_limit(value: int, low: int = 1, high: int = 500) -> int:
     except (TypeError, ValueError):
         return low
     return max(low, min(high, number))
+
+
+def _safe_identifier(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    for char in text:
+        if not (char.isalnum() or char == "_"):
+            return False
+    return True
 
 
 def _plain_terms(value: str) -> list[str]:

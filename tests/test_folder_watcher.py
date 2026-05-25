@@ -2,6 +2,7 @@ import sys
 import tempfile
 import time
 import unittest
+import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -14,6 +15,45 @@ from folder_watcher.configuration import load_config
 from folder_watcher.index import FolderIndex
 from folder_watcher.ingest import IngestPipeline
 from folder_watcher.watcher import DebouncedWatcher
+
+
+class FakeLLMPolicy:
+    allowed_tables = ["files", "tags", "events", "file_contents"]
+    allowed_functions = ["count", "max", "min", "like"]
+
+
+class FakeLLM:
+    policy = FakeLLMPolicy()
+
+    def status(self):
+        return {
+            "provider": "fake",
+            "provider_ready": True,
+            "model": "fake-model",
+            "summaries_enabled": True,
+            "queries_enabled": True,
+            "policy": {"allowed_tables": self.policy.allowed_tables},
+        }
+
+    def query_available(self):
+        return True
+
+    def summaries_available(self):
+        return True
+
+    def generate_sql(self, query: str, limit: int | None = None):
+        return {
+            "sql": "SELECT id, path, filename, extension, mime_type, summary, tags_json FROM files WHERE status = 'active' ORDER BY indexed_ts DESC LIMIT 5",
+            "explanation": "Return active indexed files.",
+            "row_limit": 5,
+        }
+
+    def summarize_file(self, file_record: dict, content: str):
+        return {
+            "summary": "This file is summarized by the fake LLM for deterministic tests.",
+            "tags": ["llm-summary", "test-evidence"],
+            "provider": "fake",
+        }
 
 
 def _write_config(root: Path) -> Path:
@@ -33,6 +73,16 @@ def _write_config(root: Path) -> Path:
                 "- hash_chunk_bytes: 4096",
                 "- large_file_size: 1KB",
                 "- ai_summaries_enabled: false",
+                "- llm_queries_enabled: true",
+                "- llm_policy_file: watcher-llm.md",
+                "- hot_file_event_threshold: 2",
+                "- hot_file_window_seconds: 3600",
+                "- anomaly_events_enabled: true",
+                "- ocr_enabled: false",
+                "- transcription_enabled: false",
+                "- subscriber_rate_limit_per_sec: 30",
+                "- webhook_rate_limit_per_sec: 10",
+                "- playlist_path: new-arrivals.m3u",
                 "## Ignore Globs",
                 "- ignored/**",
                 "- *.tmp",
@@ -44,8 +94,12 @@ def _write_config(root: Path) -> Path:
                 "- extension:.py -> python",
                 "- extension:.md -> markdown",
                 "- mime-prefix:text/ -> text",
+                "- mime-prefix:audio/ -> audio",
                 "- directory:models -> ml-model",
                 "- size-over:1KB -> large-file",
+                "## Directory Intent Rules",
+                "- prompts: .txt,.md,.json",
+                "- audio: .mp3,.wav,.flac",
             ]
         ),
         encoding="utf-8",
@@ -78,6 +132,9 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertTrue(self.config.should_ignore(ignored))
         self.assertFalse(self.config.should_ignore(self.watch / "keep.py"))
         self.assertEqual(self.config.large_file_size, 1024)
+        self.assertEqual(self.config.hot_file_event_threshold, 2)
+        self.assertEqual(self.config.playlist_path, (self.root / "new-arrivals.m3u").resolve())
+        self.assertEqual(self.config.directory_intents[0].directory, "prompts")
 
     def test_ingest_indexes_text_metadata_tags_search_and_stats(self):
         code = self.watch / "agent_loop.py"
@@ -136,6 +193,7 @@ class FolderWatcherTests(unittest.TestCase):
         note = self.watch / "note.md"
         note.write_text("folder watcher api search target", encoding="utf-8")
         file_item = self.pipeline.ingest_path(note)["file"]
+        self.config.llm_queries_enabled = False
         app = create_app(self.config, self.index)
         client = TestClient(app)
 
@@ -149,7 +207,7 @@ class FolderWatcherTests(unittest.TestCase):
 
         query = client.post("/files/query", json={"query": "what file mentions api search target", "limit": 5})
         self.assertEqual(query.status_code, 200)
-        self.assertEqual(query.json()["mode"], "local_index_resolution")
+        self.assertEqual(query.json()["mode"], "local_fallback")
 
         webhook = client.post(
             "/webhooks",
@@ -171,6 +229,175 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(delete.status_code, 200)
         missing = client.get(f"/files/{file_item['id']}")
         self.assertEqual(missing.status_code, 404)
+
+    def test_status_and_dashboard_make_runtime_visible(self):
+        note = self.watch / "visible.md"
+        note.write_text("visible dashboard target", encoding="utf-8")
+        self.pipeline.ingest_path(note)
+        app = create_app(self.config, self.index)
+        client = TestClient(app)
+
+        status = client.get("/status")
+        self.assertEqual(status.status_code, 200)
+        payload = status.json()
+        self.assertIn("implemented", payload)
+        self.assertIn("planned", payload)
+        self.assertEqual(payload["runtime"]["watch_path"], str(self.config.watch_path))
+        self.assertIn("llm", payload["runtime"])
+
+        dashboard = client.get("/dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("KING Folder Watcher", dashboard.text)
+        self.assertIn("/watch", dashboard.text)
+
+    def test_llm_query_summary_and_sql_guard_are_structural(self):
+        note = self.watch / "llm-note.md"
+        note.write_text("semantic model driven watcher target", encoding="utf-8")
+        file_item = self.pipeline.ingest_path(note)["file"]
+        app = create_app(self.config, self.index, llm_service=FakeLLM())
+        client = TestClient(app)
+
+        query = client.post("/files/query", json={"query": "show the latest active file", "limit": 5})
+        self.assertEqual(query.status_code, 200)
+        self.assertEqual(query.json()["mode"], "llm_sql")
+        self.assertEqual(query.json()["provider_sql_generation"], "active")
+        self.assertTrue(query.json()["rows"])
+
+        summary = client.get(f"/files/{file_item['id']}/summary")
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.json()["status"], "ready")
+        self.assertIn("llm-summary", summary.json()["tags"])
+
+        blocked = self.index.readonly_query(
+            "DELETE FROM files",
+            FakeLLM.policy.allowed_tables,
+            FakeLLM.policy.allowed_functions,
+            5,
+        )
+        self.assertEqual(blocked["status"], "blocked")
+
+    def test_document_and_media_extractors_store_real_metadata(self):
+        try:
+            from docx import Document
+            from PIL import Image
+            from pypdf import PdfWriter
+        except ImportError as exc:
+            self.skipTest(f"optional extractor dependency missing: {exc}")
+
+        pdf_path = self.watch / "brief.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.add_metadata({"/Title": "Watcher Brief"})
+        with pdf_path.open("wb") as handle:
+            writer.write(handle)
+
+        docx_path = self.watch / "notes.docx"
+        document = Document()
+        document.add_paragraph("docx semantic evidence paragraph")
+        document.save(docx_path)
+
+        image_path = self.watch / "pixel.png"
+        Image.new("RGB", (12, 8), color=(40, 80, 120)).save(image_path)
+
+        pdf_item = self.pipeline.ingest_path(pdf_path)["file"]
+        docx_item = self.pipeline.ingest_path(docx_path)["file"]
+        image_item = self.pipeline.ingest_path(image_path)["file"]
+
+        self.assertEqual(pdf_item["metadata"]["document_kind"], "pdf")
+        self.assertEqual(pdf_item["metadata"]["page_count"], 1)
+        self.assertEqual(pdf_item["metadata"]["title"], "Watcher Brief")
+        self.assertEqual(docx_item["metadata"]["document_kind"], "docx")
+        self.assertIn("docx semantic evidence", self.index.get_content(docx_item["id"]))
+        self.assertEqual(image_item["metadata"]["media_kind"], "image")
+        self.assertEqual(image_item["metadata"]["width"], 12)
+        self.assertEqual(image_item["metadata"]["height"], 8)
+
+    def test_graph_hot_anomaly_snapshot_duplicate_and_playlist_surfaces(self):
+        prompts = self.watch / "prompts"
+        prompts.mkdir()
+        bad_prompt = prompts / "unexpected.exe"
+        bad_prompt.write_bytes(b"MZnot really executable")
+
+        helper = self.watch / "helper.py"
+        helper.write_text("def answer():\n    return 42\n", encoding="utf-8")
+        main = self.watch / "main.py"
+        main.write_text("import helper\nprint(helper.answer())\n", encoding="utf-8-sig")
+
+        duplicate_one = self.watch / "copy-one.md"
+        duplicate_two = self.watch / "copy-two.md"
+        duplicate_one.write_text("duplicate body", encoding="utf-8")
+        duplicate_two.write_text("duplicate body", encoding="utf-8")
+
+        audio_dir = self.watch / "audio"
+        audio_dir.mkdir()
+        audio_path = audio_dir / "arrival.wav"
+        with wave.open(str(audio_path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(8000)
+            handle.writeframes(b"\x00\x00" * 800)
+
+        bad_item = self.pipeline.ingest_path(bad_prompt)["file"]
+        helper_item = self.pipeline.ingest_path(helper)["file"]
+        main_item = self.pipeline.ingest_path(main)["file"]
+        self.pipeline.ingest_path(main, "FILE_MODIFIED")
+        self.pipeline.ingest_path(duplicate_one)["file"]
+        self.pipeline.ingest_path(duplicate_two)["file"]
+        audio_item = self.pipeline.ingest_path(audio_path)["file"]
+
+        app = create_app(self.config, self.index)
+        client = TestClient(app)
+
+        dependencies = client.get(f"/files/{main_item['id']}/dependencies")
+        self.assertEqual(dependencies.status_code, 200)
+        self.assertEqual(dependencies.json()["dependencies"][0]["target_file_id"], helper_item["id"])
+
+        dependents = client.get(f"/files/{helper_item['id']}/dependents")
+        self.assertEqual(dependents.status_code, 200)
+        self.assertEqual(dependents.json()["dependents"][0]["source_file_id"], main_item["id"])
+
+        hot = client.get("/files/hot")
+        self.assertEqual(hot.status_code, 200)
+        self.assertTrue(any(item["id"] == main_item["id"] for item in hot.json()["files"]))
+
+        anomalies = client.get("/files/anomalies")
+        self.assertEqual(anomalies.status_code, 200)
+        self.assertEqual(anomalies.json()["events"][0]["file_id"], bad_item["id"])
+        self.assertIn("anomaly", bad_item["tags"])
+
+        snapshot = client.get("/files/snapshot")
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertGreaterEqual(snapshot.json()["count"], 6)
+
+        suggestions = client.get("/files/duplicates/symlink-suggestions")
+        self.assertEqual(suggestions.status_code, 200)
+        self.assertEqual(len(suggestions.json()["suggestions"]), 1)
+
+        playlist = client.get("/playlist/new-arrivals")
+        self.assertEqual(playlist.status_code, 200)
+        self.assertEqual(playlist.json()["playlist"]["count"], 1)
+        self.assertEqual(playlist.json()["files"][0]["id"], audio_item["id"])
+        self.assertTrue(self.config.playlist_path.exists())
+
+        m3u = client.get("/playlist/new-arrivals", params={"format": "m3u"})
+        self.assertEqual(m3u.status_code, 200)
+        self.assertIn("#EXTM3U", m3u.text)
+        self.assertIn("arrival.wav", m3u.text)
+
+    def test_config_refresh_applies_runtime_markdown_changes(self):
+        updated_path = self.root / "updated.m3u"
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                "- playlist_path: new-arrivals.m3u",
+                f"- playlist_path: {updated_path.name}",
+            ),
+            encoding="utf-8",
+        )
+        fresh = load_config(self.root, self.config_path)
+        self.config.refresh_from(fresh)
+
+        self.assertEqual(self.config.playlist_path, updated_path.resolve())
+        self.assertEqual(self.config.hot_file_event_threshold, 2)
 
     def test_watchdog_live_event_indexes_created_file_when_available(self):
         try:

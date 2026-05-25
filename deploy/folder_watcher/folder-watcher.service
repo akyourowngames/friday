@@ -1,0 +1,14 @@
+[Unit]
+Description=KING Folder Watcher
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/KING
+ExecStart=/usr/bin/python3 folder_watcher_service.py run --config tools/FOLDER_WATCHER_CONFIG.md
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

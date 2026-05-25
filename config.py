@@ -155,6 +155,8 @@ class Settings:
     verification_pipeline_timeout_ms: int = _env_int("KING_VERIFICATION_PIPELINE_TIMEOUT_MS", 60000)
     verification_pipeline_timeout_max_ms: int = _env_int("KING_VERIFICATION_PIPELINE_TIMEOUT_MAX_MS", 300000)
     verification_pipeline_output_chars: int = _env_int("KING_VERIFICATION_PIPELINE_OUTPUT_CHARS", 4000)
+    folder_watcher_config_file: str = _env("KING_FOLDER_WATCHER_CONFIG_FILE", "tools/FOLDER_WATCHER_CONFIG.md")
+    folder_watcher_llm_policy_file: str = _env("KING_FOLDER_WATCHER_LLM_POLICY_FILE", "tools/FOLDER_WATCHER_LLM_POLICY.md")
     browser_user_agent: str = _env("KING_BROWSER_USER_AGENT", "Mozilla/5.0 KING Browser Extractor")
 
 

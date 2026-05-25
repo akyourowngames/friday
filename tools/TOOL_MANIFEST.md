@@ -33,6 +33,9 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `TOOL_UPGRADE_SESSION.md` - heartbeat implementation and verification notes.
 - `BROWSER_TARGETS.md` - editable browser target URLs, wait policy, and extraction fields consumed by `browser_extract`.
 - `FOLDER_WATCHER_CONFIG.md` - editable folder watcher service config, ignore globs, tag rules, API contract, and verification notes.
+- `FOLDER_WATCHER_DEMO_CONFIG.md` - isolated demo watcher config for visible browser testing without indexing the repository root.
+- `FOLDER_WATCHER_LLM_POLICY.md` - markdown-owned prompts, public SQL tables, allowed SQL functions, and LLM limits for folder watcher semantic behavior.
+- `FOLDER_WATCHER_STATUS.md` - markdown-backed feature status matrix exposed by the folder watcher `/status` endpoint.
 - `FILE_PATH_ALIASES.md` - editable natural path aliases consumed by file tools after they are selected.
 
 ## Markdown Tool Contract: tool_readiness_audit
@@ -139,16 +142,23 @@ It exists because a change is not shipped until the project can prove what chang
 ### Purpose
 
 `folder_watcher_service` is the local filesystem intelligence service for indexing
-configured folders into SQLite, exposing latest-file, diff, search, duplicate,
-stats, content, tag, export, WebSocket, and webhook surfaces.
+configured folders into SQLite, exposing dashboard, status, LLM-driven query and
+summary generation, latest-file, diff, search, duplicate, stats, content, tag,
+export, snapshot, hot-file, anomaly, playlist, dependency graph, WebSocket, and
+webhook surfaces.
 
 ### Runtime
 
 - Entrypoint: `folder_watcher_service.py`.
 - Package: `folder_watcher/`.
 - Config file: `tools/FOLDER_WATCHER_CONFIG.md`.
+- LLM policy file: `tools/FOLDER_WATCHER_LLM_POLICY.md`.
 - Default API: configured by markdown, currently `127.0.0.1:7474`.
 - Live events: `watchdog` package, using OS-backed directory notifications.
+- Semantic layer: configured OpenAI-compatible NVIDIA provider, with fallback
+  status reporting when no provider key is present.
+- Extractor layer: optional local document and media libraries for PDF, Word,
+  image, audio, video, OCR, and transcript sidecar metadata.
 
 ### Inputs
 
@@ -163,6 +173,10 @@ stats, content, tag, export, WebSocket, and webhook surfaces.
   and status.
 - SQLite event log records for created, modified, deleted, moved, unchanged, and
   directory events.
+- Read-only LLM-generated SQL results guarded by SQLite authorizer callbacks.
+- LLM file summaries and semantic tags when summaries are enabled.
+- Snapshot, hot-file, anomaly, duplicate symlink suggestion, dependency,
+  dependent, and MUSE-compatible playlist responses.
 - FastAPI JSON responses and WebSocket event messages.
 - Optional webhook POST payloads for matching events.
 
@@ -175,10 +189,13 @@ stats, content, tag, export, WebSocket, and webhook surfaces.
 - If provider-backed summary or SQL generation is not configured, endpoints
   return a grounded pending or local-resolution status rather than claiming AI
   completion.
+- If optional extractor, OCR, transcription, or video probing dependencies are
+  unavailable, metadata records the missing or empty extractor state.
 
 ### Verification Method
 
 - Run `python -m unittest tests.test_folder_watcher`.
+- Run `python -m pytest -q`.
 - Run the repository verification pipeline after runtime changes.
 - For daemon readiness, the focused watcher tests must include a real watchdog
   create-event probe when the dependency is installed.

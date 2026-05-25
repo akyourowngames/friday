@@ -17,6 +17,7 @@ from .watcher import DebouncedWatcher
 
 def build_runtime(config_path: str | None = None):
     config = load_config(".", config_path or settings.folder_watcher_config_file)
+    config.watch_path.mkdir(parents=True, exist_ok=True)
     index = FolderIndex(config.database_path)
     pipeline = IngestPipeline(config, index)
     bus = EventBus()

@@ -18,6 +18,9 @@ storage/*_text.txt
 storage/onnx_models/
 storage/images/
 storage/browser_auth/
+storage/folder_watcher*.sqlite3*
+storage/folder_watcher*.m3u
+storage/folder_watcher_inbox/
 storage/gesture_data/
 storage/gesture_model.pkl
 storage/gesture_scaler.pkl

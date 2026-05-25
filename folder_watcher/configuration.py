@@ -13,6 +13,12 @@ class TagRule:
 
 
 @dataclass
+class DirectoryIntent:
+    directory: str
+    extensions: list[str]
+
+
+@dataclass
 class WatcherConfig:
     repo_root: Path
     config_path: Path
@@ -27,9 +33,20 @@ class WatcherConfig:
     hash_chunk_bytes: int = 65536
     large_file_size: int = 100 * 1024 * 1024
     ai_summaries_enabled: bool = False
+    llm_queries_enabled: bool = True
+    llm_policy_path: Path | None = None
+    hot_file_event_threshold: int = 5
+    hot_file_window_seconds: int = 86400
+    anomaly_events_enabled: bool = True
+    ocr_enabled: bool = True
+    transcription_enabled: bool = True
+    subscriber_rate_limit_per_sec: float = 20.0
+    webhook_rate_limit_per_sec: float = 5.0
+    playlist_path: Path | None = None
     ignore_globs: list[str] = field(default_factory=list)
     text_extensions: list[str] = field(default_factory=list)
     tag_rules: list[TagRule] = field(default_factory=list)
+    directory_intents: list[DirectoryIntent] = field(default_factory=list)
 
     def should_ignore(self, path: Path) -> bool:
         path = path.expanduser().resolve()
@@ -65,11 +82,25 @@ class WatcherConfig:
             "hash_chunk_bytes": self.hash_chunk_bytes,
             "large_file_size": self.large_file_size,
             "ai_summaries_enabled": self.ai_summaries_enabled,
+            "llm_queries_enabled": self.llm_queries_enabled,
+            "llm_policy_path": str(self.llm_policy_path) if self.llm_policy_path else "",
+            "hot_file_event_threshold": self.hot_file_event_threshold,
+            "hot_file_window_seconds": self.hot_file_window_seconds,
+            "anomaly_events_enabled": self.anomaly_events_enabled,
+            "ocr_enabled": self.ocr_enabled,
+            "transcription_enabled": self.transcription_enabled,
+            "subscriber_rate_limit_per_sec": self.subscriber_rate_limit_per_sec,
+            "webhook_rate_limit_per_sec": self.webhook_rate_limit_per_sec,
+            "playlist_path": str(self.playlist_path) if self.playlist_path else "",
             "ignore_globs": list(self.ignore_globs),
             "text_extensions": list(self.text_extensions),
             "tag_rules": [
                 {"kind": rule.kind, "value": rule.value, "tag": rule.tag}
                 for rule in self.tag_rules
+            ],
+            "directory_intents": [
+                {"directory": item.directory, "extensions": list(item.extensions)}
+                for item in self.directory_intents
             ],
         }
 
@@ -86,12 +117,43 @@ class WatcherConfig:
         if "ai_summaries_enabled" in patch:
             self.ai_summaries_enabled = _parse_bool(patch["ai_summaries_enabled"], self.ai_summaries_enabled)
             changed["ai_summaries_enabled"] = self.ai_summaries_enabled
+        if "llm_queries_enabled" in patch:
+            self.llm_queries_enabled = _parse_bool(patch["llm_queries_enabled"], self.llm_queries_enabled)
+            changed["llm_queries_enabled"] = self.llm_queries_enabled
         if "max_content_chars" in patch:
             value = _parse_int(patch["max_content_chars"], self.max_content_chars)
             if value > 0:
                 self.max_content_chars = value
                 changed["max_content_chars"] = value
+        if "hot_file_event_threshold" in patch:
+            value = _parse_int(patch["hot_file_event_threshold"], self.hot_file_event_threshold)
+            if value > 0:
+                self.hot_file_event_threshold = value
+                changed["hot_file_event_threshold"] = value
         return changed
+
+    def refresh_from(self, other: "WatcherConfig"):
+        self.debounce_ms = other.debounce_ms
+        self.scan_on_start = other.scan_on_start
+        self.auth_token = other.auth_token
+        self.max_content_chars = other.max_content_chars
+        self.hash_chunk_bytes = other.hash_chunk_bytes
+        self.large_file_size = other.large_file_size
+        self.ai_summaries_enabled = other.ai_summaries_enabled
+        self.llm_queries_enabled = other.llm_queries_enabled
+        self.llm_policy_path = other.llm_policy_path
+        self.hot_file_event_threshold = other.hot_file_event_threshold
+        self.hot_file_window_seconds = other.hot_file_window_seconds
+        self.anomaly_events_enabled = other.anomaly_events_enabled
+        self.ocr_enabled = other.ocr_enabled
+        self.transcription_enabled = other.transcription_enabled
+        self.subscriber_rate_limit_per_sec = other.subscriber_rate_limit_per_sec
+        self.webhook_rate_limit_per_sec = other.webhook_rate_limit_per_sec
+        self.playlist_path = other.playlist_path
+        self.ignore_globs = list(other.ignore_globs)
+        self.text_extensions = list(other.text_extensions)
+        self.tag_rules = list(other.tag_rules)
+        self.directory_intents = list(other.directory_intents)
 
 
 def load_config(repo_root: str | Path = ".", config_path: str | Path | None = None) -> WatcherConfig:
@@ -108,6 +170,7 @@ def load_config(repo_root: str | Path = ".", config_path: str | Path | None = No
     ignore_globs: list[str] = []
     text_extensions: list[str] = []
     tag_rules: list[TagRule] = []
+    directory_intents: list[DirectoryIntent] = []
 
     if path.exists():
         section = ""
@@ -134,9 +197,15 @@ def load_config(repo_root: str | Path = ".", config_path: str | Path | None = No
                 rule = _parse_tag_rule(item)
                 if rule is not None:
                     tag_rules.append(rule)
+            elif section == "directory_intent_rules":
+                intent = _parse_directory_intent(item)
+                if intent is not None:
+                    directory_intents.append(intent)
 
     watch_path = _resolve_path(root, values.get("watch_path", "."))
     database_path = _resolve_path(root, values.get("database_path", "storage/folder_watcher.sqlite3"))
+    llm_policy_path = _resolve_path(root, values.get("llm_policy_file", "tools/FOLDER_WATCHER_LLM_POLICY.md"))
+    playlist_path = _resolve_path(root, values.get("playlist_path", "storage/folder_watcher_new_arrivals.m3u"))
 
     return WatcherConfig(
         repo_root=root,
@@ -152,9 +221,20 @@ def load_config(repo_root: str | Path = ".", config_path: str | Path | None = No
         hash_chunk_bytes=_parse_int(values.get("hash_chunk_bytes"), 65536),
         large_file_size=_parse_size(values.get("large_file_size"), 100 * 1024 * 1024),
         ai_summaries_enabled=_parse_bool(values.get("ai_summaries_enabled"), False),
+        llm_queries_enabled=_parse_bool(values.get("llm_queries_enabled"), True),
+        llm_policy_path=llm_policy_path,
+        hot_file_event_threshold=_parse_int(values.get("hot_file_event_threshold"), 5),
+        hot_file_window_seconds=_parse_int(values.get("hot_file_window_seconds"), 86400),
+        anomaly_events_enabled=_parse_bool(values.get("anomaly_events_enabled"), True),
+        ocr_enabled=_parse_bool(values.get("ocr_enabled"), True),
+        transcription_enabled=_parse_bool(values.get("transcription_enabled"), True),
+        subscriber_rate_limit_per_sec=_parse_float(values.get("subscriber_rate_limit_per_sec"), 20.0),
+        webhook_rate_limit_per_sec=_parse_float(values.get("webhook_rate_limit_per_sec"), 5.0),
+        playlist_path=playlist_path,
         ignore_globs=ignore_globs,
         text_extensions=text_extensions,
         tag_rules=tag_rules,
+        directory_intents=directory_intents,
     )
 
 
@@ -195,6 +275,21 @@ def _parse_tag_rule(item: str) -> TagRule | None:
     return TagRule(kind=clean_kind, value=clean_value, tag=clean_tag)
 
 
+def _parse_directory_intent(item: str) -> DirectoryIntent | None:
+    directory, found, extensions = item.partition(":")
+    if not found:
+        return None
+    clean_directory = directory.strip().strip("/")
+    clean_extensions = [
+        _normalize_extension(value)
+        for value in extensions.split(",")
+        if value.strip()
+    ]
+    if not clean_directory or not clean_extensions:
+        return None
+    return DirectoryIntent(clean_directory, clean_extensions)
+
+
 def _parse_bool(value: object, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -213,6 +308,15 @@ def _parse_int(value: object, default: int) -> int:
         return default
     try:
         return int(str(value).strip())
+    except ValueError:
+        return default
+
+
+def _parse_float(value: object, default: float) -> float:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return float(str(value).strip())
     except ValueError:
         return default
 
