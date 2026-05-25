@@ -907,15 +907,28 @@ def _looks_like_local_system_control(user_input: str, q_emb) -> bool:
         return False
     system_text = _local_system_control_text()
     small_talk_text = _memory_context_texts()[1]
+    memory_text = _memory_context_texts()[0]
+    action_text = _load_routing_policy_section(
+        "Actionable Request Text",
+        "The user wants something done.",
+    )
     try:
-        compare_embs = embed([system_text, small_talk_text])
+        compare_embs = embed([system_text, small_talk_text, memory_text, action_text])
         if getattr(compare_embs, "ndim", 1) == 1:
             compare_embs = compare_embs.reshape(1, -1)
         system_score = float(np.dot(compare_embs[0], q_emb))
         chat_score = float(np.dot(compare_embs[1], q_emb))
+        memory_score = float(np.dot(compare_embs[2], q_emb))
+        action_score = float(np.dot(compare_embs[3], q_emb))
     except Exception:
         return False
-    return system_score >= chat_score and system_score >= settings.tool_similarity_threshold
+    if action_score < settings.local_system_action_min_score:
+        return False
+    return (
+        system_score >= chat_score
+        and system_score >= memory_score
+        and system_score >= settings.tool_similarity_threshold
+    )
 
 
 def _ensure_local_system_control_tool(selected_tools: list, user_input: str, q_emb, messages: list | None = None) -> list:
@@ -1233,7 +1246,9 @@ class Agent:
             context = brain_future.result() if brain_future else None
 
         memory_profile_context = False
-        if need_context and _should_use_memory_context(user_input, q_emb, selected_tools):
+        memory_context_requested = False
+        if need_context:
+            memory_context_requested = _should_use_memory_context(user_input, q_emb, selected_tools)
             memory_profile_context = _should_use_profile_context(
                 user_input,
                 q_emb,
@@ -1244,7 +1259,9 @@ class Agent:
                 if profile_context:
                     context = profile_context
 
-        if not _should_keep_memory_context(
+        if context and memory_profile_context:
+            pass
+        elif not memory_context_requested or not _should_keep_memory_context(
             context,
             user_input,
             q_emb,

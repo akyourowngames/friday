@@ -1895,3 +1895,29 @@ Verification evidence:
 [VERDICT] Navigator now opens from the main frontend and shows real provider
 route data with city labels. Memory recall keeps graph ranking without
 polluting precise recall with extra context when there is a clear winner.
+
+## 2026-05-24 Memory Identity Recall Repair
+
+Scope: fix a regression where identity questions could lose memory context or
+be mistaken for local system-control actions.
+
+Runtime changes:
+
+- Profile-style memory questions can now keep profile memory context even when
+  the small-talk contrast suppressor wins.
+- Profile memory ordering is relation-priority driven, so identity facts such
+  as the user's name are surfaced before newer relationship facts.
+- Local system-control gating now requires actionable-control intent before
+  adding `system_control`, preventing identity questions from triggering volume
+  actions.
+
+Verification evidence:
+
+- Real CLI: `whats my name` -> `Sir, your name is Krish Verma.`
+- Real CLI: `who i am king` -> `Sir, you are Krish Verma.`
+- `python -m pytest -q` -> 189 tests passed, 24 subtests passed.
+- `python -m compileall config.py agent memory tools tests main.py api_server.py`
+- `npm run typecheck`
+
+[VERDICT] The memory was not cleared. The regression was ranking/gating, and
+the CLI now recalls the stored identity fact again.

@@ -69,6 +69,7 @@ class Settings:
     chat_polish_policy_file: str = _env("KING_CHAT_POLISH_POLICY_FILE", "memory/CHAT_POLISH_POLICY.md")
     memory_store_notify: bool = _env_bool("KING_MEMORY_STORE_NOTIFY", False)
     backtick_tool_similarity_threshold: float = _env_float("KING_BACKTICK_TOOL_SIMILARITY_THRESHOLD", 0.65)
+    local_system_action_min_score: float = _env_float("KING_LOCAL_SYSTEM_ACTION_MIN_SCORE", 0.05)
     direct_single_tool_result: bool = _env_bool("KING_DIRECT_SINGLE_TOOL_RESULT", False)
     finalize_tool_results_with_llm: bool = _env_bool("KING_FINALIZE_TOOL_RESULTS_WITH_LLM", True)
     context_followup_tools: str = _env("KING_CONTEXT_FOLLOWUP_TOOLS", "web_search,web_fetch,hackernews,reddit,browser_extract")
@@ -132,6 +133,10 @@ class Settings:
     memory_graph_fallback_tier: str = _env("KING_MEMORY_GRAPH_FALLBACK_TIER", "semantic")
     memory_unified_graph_weight: float = _env_float("KING_MEMORY_UNIFIED_GRAPH_WEIGHT", 0.35)
     memory_unified_expansion_hops: int = _env_int("KING_MEMORY_UNIFIED_EXPANSION_HOPS", 1)
+    memory_profile_relation_priority: str = _env(
+        "KING_MEMORY_PROFILE_RELATION_PRIORITY",
+        "name,lives_in,in_class,age,health_status,crush,likes,prefers,building,working_on,remembers",
+    )
     memory_auto_relations_enabled: bool = _env_bool("KING_MEMORY_AUTO_RELATIONS_ENABLED", True)
     memory_auto_relations_file: str = _env("KING_MEMORY_AUTO_RELATIONS_FILE", "memory/MEMORY_AUTO_RELATIONS.md")
     sarvam_api_key: str = _env("SARVAM_API_KEY", "")

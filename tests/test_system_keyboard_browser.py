@@ -43,6 +43,14 @@ class SystemControlToolTests(unittest.TestCase):
         filtered = _filter_tools_for_conversation("you are being smarter huh", embed("you are being smarter huh"), tools)
         self.assertEqual(filtered, [])
 
+    def test_identity_question_does_not_force_system_control(self):
+        from agent.core import _ensure_local_system_control_tool
+        from agent.embedder import embed
+
+        selected = _ensure_local_system_control_tool([], "who i am king", embed("who i am king"), [])
+
+        self.assertEqual(selected, [])
+
     def test_forced_call_on_correction_nope(self):
         from agent.core import _forced_local_system_control_call
         from agent.embedder import embed

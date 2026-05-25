@@ -438,6 +438,17 @@ def _configured_relation_set(value: str) -> set[str]:
     return relations
 
 
+def _configured_relation_order(value: str) -> list[str]:
+    relations = []
+    seen = set()
+    for item in str(value or "").split(","):
+        relation = item.strip().casefold()
+        if relation and relation not in seen:
+            relations.append(relation)
+            seen.add(relation)
+    return relations
+
+
 def _weighted_confidence(values: list[tuple[float, float]]) -> float:
     weighted_total = 0.0
     total_weight = 0.0
@@ -1737,13 +1748,42 @@ class Brain:
         ranked = self.graph_ranked(query, limit=limit)
         return " | ".join(item["text"] for item in ranked)
 
+    def _profile_relation_score(self, item: dict) -> int:
+        order = _configured_relation_order(settings.memory_profile_relation_priority)
+        if not order:
+            return 0
+        priority = {relation: len(order) - index for index, relation in enumerate(order)}
+        graph = getattr(self, "_graph", {"edges": [], "memory_links": {}})
+        memory_id = str(item.get("id") or "")
+        linked_edge_ids = set(graph.get("memory_links", {}).get(memory_id, []))
+        best = 0
+        for edge in graph.get("edges", []):
+            if not edge.get("active", True):
+                continue
+            if linked_edge_ids and edge.get("id") not in linked_edge_ids:
+                continue
+            if not linked_edge_ids and str(edge.get("memory_id", "")) != memory_id:
+                continue
+            best = max(best, priority.get(str(edge.get("relation", "")).casefold(), 0))
+        return best
+
     def profile_context(self, limit: int = 8) -> str:
         try:
             safe_limit = max(1, min(int(limit), 50))
         except (TypeError, ValueError):
             safe_limit = 8
-        ranked = self.recall_unified("", k=safe_limit)
-        return self._unified_context_string(ranked)
+        ranked = self.recall_unified("", k=max(safe_limit * 3, safe_limit))
+        ranked.sort(
+            key=lambda item: (
+                self._profile_relation_score(item),
+                item.get("unified_score", item.get("score", 0.0)),
+                item.get("importance", 0.0),
+                item.get("date", ""),
+                item.get("time", ""),
+            ),
+            reverse=True,
+        )
+        return self._unified_context_string(ranked[:safe_limit])
 
     def _unified_context_string(self, ranked: list[dict]) -> str:
         if not ranked:

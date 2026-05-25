@@ -442,6 +442,19 @@ class MemoryBrainTests(unittest.TestCase):
             self.assertIn("Ankita likes short hair", context)
             self.assertNotIn("confidence", context.casefold())
 
+    def test_profile_context_prioritizes_identity_relation(self):
+        with isolated_memory():
+            brain = Brain()
+
+            self.assertTrue(brain.commit("My crush is Ankita", importance=0.9))
+            self.assertTrue(brain.commit("Ankita lives in Haryana", importance=0.9))
+            self.assertTrue(brain.commit("User name is Krish Verma", importance=0.5))
+
+            context = brain.profile_context(limit=3)
+
+            self.assertTrue(context.startswith("User name is Krish Verma"))
+            self.assertIn("User crush Ankita", context)
+
     def test_frontend_raw_personal_facts_create_graph_relations(self):
         with isolated_memory():
             brain = Brain()
