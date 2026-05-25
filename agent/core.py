@@ -17,6 +17,7 @@ from .tokenizer import count_messages_tokens
 from .validator import ToolValidator
 from .verifier import Verifier
 from memory.brain import Brain
+from memory.summaries import SummaryStore
 
 console = Console()
 
@@ -265,9 +266,13 @@ def _build_system_prompt(
     selected_tools,
     recent_action_context: str = "",
     memory_facts: str = "",
+    summary_context: str = "",
     conversational_turn: bool = False,
 ):
     lines = [_system_header(), "", _load_tool_policy()]
+    if summary_context:
+        lines.append("")
+        lines.append(summary_context)
     if memory_facts:
         lines.append("")
         lines.append(_load_chat_polish_section("Memory Presentation Rules", "State known facts naturally."))
@@ -1261,7 +1266,12 @@ def _repair_search_query_specificity(tool_name: str, args: dict, user_input: str
 
 class Agent:
     def __init__(self):
-        self.messages = [{"role": "system", "content": _system_header()}]
+        summary_path = Path(settings.summaries_path)
+        self.summary_store = SummaryStore(summary_path, max_summaries=settings.summaries_max_count)
+        self.summary_store.load()
+        self._summary_context = self.summary_store.context_string(n=settings.summaries_max_context)
+        initial_content = _build_system_prompt([], summary_context=self._summary_context)
+        self.messages = [{"role": "system", "content": initial_content}]
         self.llm = NIMClient()
         self.router = ToolRouter()
         self.validator = ToolValidator()
@@ -1293,6 +1303,9 @@ class Agent:
             self.messages = keep + [
                 {"role": "system", "content": f"Previous conversation summary: {summary}"}
             ] + recent
+            turn_count = len([m for m in older if m.get("role") == "user"])
+            self.summary_store.append(summary, turn_count=turn_count)
+            self._summary_context = self.summary_store.context_string(n=settings.summaries_max_context)
         else:
             self.messages = keep + recent
 
@@ -1375,6 +1388,7 @@ class Agent:
                 selected_tools,
                 recent_action_context,
                 memory_facts=memory_facts,
+                summary_context=self._summary_context,
                 conversational_turn=conversational_turn,
             ),
         }
@@ -1622,6 +1636,7 @@ class Agent:
                             [],
                             recent_action_context,
                             memory_facts=memory_facts,
+                            summary_context=self._summary_context,
                             conversational_turn=True,
                         ),
                     }

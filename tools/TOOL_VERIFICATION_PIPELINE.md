@@ -26,11 +26,15 @@ frontend changes through visible checks instead of hidden success claims.
   required: true
   reason: validates tool grounding, registry dispatch, manifest audit, runtime
     tool upgrades, and no false-positive execution claims.
+- command: `python -m unittest tests.test_folder_watcher`
+  required: true
+  reason: validates the folder watcher config, SQLite index, ingest pipeline,
+    search surface, duplicates, runtime patching, and FastAPI endpoints.
 - command: `python -m pytest -q`
   required: true
   reason: runs the broader Python suite, including isolated verification
     pipeline coverage.
-- command: `python -m compileall tools agent memory voice gesture main.py config.py`
+- command: `python -m compileall folder_watcher tools agent memory voice gesture main.py config.py folder_watcher_service.py`
   required: true
   reason: proves Python source compiles after tool or runtime edits.
 - command: `npm run typecheck`

@@ -40,6 +40,8 @@ def isolated_memory(fake_embed=_ones_embed, max_entries=2000, importance_min=0.0
         "memory_archive_file": brain_mod.settings.memory_archive_file,
         "memory_graph_file": brain_mod.settings.memory_graph_file,
         "memory_graph_relations_file": brain_mod.settings.memory_graph_relations_file,
+        "vector_store_index_path": brain_mod.settings.vector_store_index_path,
+        "vector_store_metadata_path": brain_mod.settings.vector_store_metadata_path,
         "memory_max_entries": brain_mod.settings.memory_max_entries,
         "memory_importance_min": brain_mod.settings.memory_importance_min,
         "memory_importance_max": brain_mod.settings.memory_importance_max,
@@ -58,6 +60,8 @@ def isolated_memory(fake_embed=_ones_embed, max_entries=2000, importance_min=0.0
         brain_mod.settings.memory_archive_file = "memory_archive.jsonl"
         brain_mod.settings.memory_graph_file = "memory_graph.json"
         brain_mod.settings.memory_graph_relations_file = original["memory_graph_relations_file"]
+        brain_mod.settings.vector_store_index_path = str(memory_dir / "vector_index.faiss")
+        brain_mod.settings.vector_store_metadata_path = str(memory_dir / "vector_metadata.json")
         brain_mod.settings.memory_max_entries = max_entries
         brain_mod.settings.memory_importance_min = importance_min
         brain_mod.settings.memory_importance_max = importance_max
@@ -75,6 +79,8 @@ def isolated_memory(fake_embed=_ones_embed, max_entries=2000, importance_min=0.0
             brain_mod.settings.memory_archive_file = original["memory_archive_file"]
             brain_mod.settings.memory_graph_file = original["memory_graph_file"]
             brain_mod.settings.memory_graph_relations_file = original["memory_graph_relations_file"]
+            brain_mod.settings.vector_store_index_path = original["vector_store_index_path"]
+            brain_mod.settings.vector_store_metadata_path = original["vector_store_metadata_path"]
             brain_mod.settings.memory_max_entries = original["memory_max_entries"]
             brain_mod.settings.memory_importance_min = original["memory_importance_min"]
             brain_mod.settings.memory_importance_max = original["memory_importance_max"]
@@ -334,6 +340,33 @@ class MemoryBrainTests(unittest.TestCase):
                     for edge in brain._graph["edges"]
                 )
             )
+
+    def test_graph_preference_survives_semantic_winner_margin(self):
+        vectors = {
+            "Ankita lives in Haryana": np.array([1.0, 0.0], dtype=np.float32),
+            "Ankita likes short hair": np.array([0.7, 0.3], dtype=np.float32),
+            "what does Ankita like": np.array([1.0, 0.0], dtype=np.float32),
+        }
+
+        def fake_embed(texts, normalize=True):
+            if isinstance(texts, str):
+                return vectors[texts]
+            return np.array([vectors[text] for text in texts], dtype=np.float32)
+
+        with isolated_memory(fake_embed=fake_embed):
+            original_margin = brain_mod.settings.memory_winner_margin
+            try:
+                brain_mod.settings.memory_winner_margin = 0.08
+                brain = Brain()
+                self.assertTrue(brain.commit("Ankita lives in Haryana", importance=0.8))
+                self.assertTrue(brain.commit("Ankita likes short hair", importance=0.5))
+
+                context = brain.recall_context("what does Ankita like", k=3)
+
+                self.assertIn("Ankita likes short hair", context)
+                self.assertTrue(context.startswith("Ankita likes short hair"))
+            finally:
+                brain_mod.settings.memory_winner_margin = original_margin
 
     def test_legacy_text_memory_is_repaired_into_graph_storage(self):
         with isolated_memory() as (memory_dir, _backup_dir):

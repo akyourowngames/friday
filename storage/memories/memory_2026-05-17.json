@@ -2,6 +2,18 @@
   {
     "text": "User name is Krish Verma",
     "importance": 0.5,
-    "ts": "21:05:24"
+    "ts": "21:05:24",
+    "id": "e442b278b12aa9e31caa6fd462dd1f4f64e3930a",
+    "tier": "graph",
+    "storage": "graph",
+    "graph_edges": [
+      "f24b03027026b5e206dcb412ac4b22a52a420481",
+      "6a73672f4a2cc56267897871f526f6fa43a82dc8"
+    ],
+    "graph_nodes": [
+      "krish",
+      "krish_verma",
+      "user"
+    ]
   }
 ]

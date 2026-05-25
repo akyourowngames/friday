@@ -11,6 +11,7 @@ import numpy as np
 
 from agent.embedder import embed
 from config import settings
+from memory.vector_store import VectorStore
 
 MEMORY_DIR = Path(settings.memory_dir)
 BACKUP_DIR = Path(settings.memory_backup_dir)
@@ -476,10 +477,26 @@ class Brain:
         self._query_cache_order = []
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        vindex_path = Path(settings.vector_store_index_path)
+        vmeta_path = Path(settings.vector_store_metadata_path)
+        self._vector_store = VectorStore(vindex_path, vmeta_path, dim=settings.vector_store_dim)
+        self._vector_store.load()
         self._load_graph()
         self._load_all()
+        if self._vector_store.size() > 0 and (self._embeddings is None or self._embeddings.size == 0):
+            self._embeddings = self._vector_store.get_embeddings()
         self._backfill_graph_from_memories()
         self._load_or_build_index()
+        if self._vector_store.size() == 0 and self._embeddings is not None and self._embeddings.size > 0:
+            self._sync_vector_store_from_embeddings()
+
+    def _sync_vector_store_from_embeddings(self):
+        if getattr(self, "_vector_store", None) is None:
+            return
+        if self._embeddings is None or self._embeddings.size == 0 or not self.memories:
+            return
+        self._vector_store.clear()
+        self._vector_store.migrate_from_embeddings(self._embeddings, self.memories)
 
     def _index_meta_path(self) -> Path:
         return MEMORY_DIR / settings.memory_index_file
@@ -657,7 +674,7 @@ class Brain:
             "entry_count": len(self.memories),
             "signature": _memory_signature(self.memories),
             "source_files": [path.name for path in self._memory_files()],
-            "last_backup": self._last_backup,
+            "last_backup": getattr(self, "_last_backup", None),
         }
 
     def create_backup(self, label: str = "manual") -> str:
@@ -712,6 +729,7 @@ class Brain:
                     self._embeddings = embeddings.astype(np.float32, copy=False)
                     self._index_state = "warm"
                     self._last_backup = meta.get("last_backup")
+                    self._sync_vector_store_from_embeddings()
                     return
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
@@ -766,6 +784,7 @@ class Brain:
         self._query_cache.clear()
         self._query_cache_order.clear()
         self._index_state = "warm"
+        self._sync_vector_store_from_embeddings()
         self._persist_index()
 
     def _persist_index(self):
@@ -774,6 +793,8 @@ class Brain:
         if self._embeddings is None:
             self._embeddings = np.empty((0, 0), dtype=np.float32)
         self._atomic_write_npy(self._index_embeddings_path(), self._embeddings)
+        if getattr(self, "_vector_store", None) is not None:
+            self._vector_store.save()
 
     def _save_dates(self, dirty_dates: set[str]):
         if not dirty_dates:
@@ -851,6 +872,7 @@ class Brain:
             self._embeddings = np.delete(self._embeddings, sorted(valid_indices), axis=0)
         else:
             self._embeddings = None
+        self._sync_vector_store_from_embeddings()
 
         return dirty_dates
 
@@ -887,18 +909,23 @@ class Brain:
         new_embedding = _ensure_2d(new_embedding)
         if self._embeddings is None or self._embeddings.size == 0:
             self._embeddings = new_embedding
+            self._vector_store.add(new_embedding[0], text)
             return
         expected_existing = len(self.memories) - 1
         if self._embeddings.shape[0] != expected_existing:
             self._embeddings = None
+            self._sync_vector_store_from_embeddings()
             return
         if self._embeddings.shape[1] != new_embedding.shape[1]:
             self._embeddings = None
+            self._sync_vector_store_from_embeddings()
             return
         if insert_idx is None or insert_idx >= self._embeddings.shape[0]:
             self._embeddings = np.vstack([self._embeddings, new_embedding])
+            self._vector_store.add(new_embedding[0], text)
             return
         self._embeddings = np.insert(self._embeddings, insert_idx, new_embedding[0], axis=0)
+        self._sync_vector_store_from_embeddings()
 
     def _ensure_graph_node(self, name: str, node_type: str = "concept", importance: float = 0.5) -> str:
         name = _clean_graph_value(name)
@@ -1417,8 +1444,13 @@ class Brain:
             for item in merged.values()
             if item["text"].strip().casefold() not in inactive_evidence
         ]
+        def _graph_sort_score(item: dict) -> float:
+            score = float(item.get("graph_score", 0.0) or 0.0)
+            return score if score >= graph_weight else 0.0
+
         ranked.sort(
             key=lambda item: (
+                _graph_sort_score(item),
                 item.get("unified_score", item.get("score", 0.0)),
                 item.get("similarity", 0.0),
                 item.get("importance", 0.0),
@@ -1428,7 +1460,14 @@ class Brain:
         if len(ranked) > 1:
             best = ranked[0]
             second = ranked[1]
-            if float(best.get("similarity", 0.0)) >= float(second.get("similarity", 0.0)) + settings.memory_winner_margin:
+            best_sources = set(best.get("sources") or [])
+            second_sources = set(second.get("sources") or [])
+            graph_sources = {"graph", "graph_expand"}
+            has_graph_candidate = bool(best_sources & graph_sources or second_sources & graph_sources)
+            if (
+                not has_graph_candidate
+                and float(best.get("similarity", 0.0)) >= float(second.get("similarity", 0.0)) + settings.memory_winner_margin
+            ):
                 if best.get("unified_score", 0.0) >= second.get("unified_score", 0.0):
                     ranked = [best]
         results = []
@@ -1614,12 +1653,20 @@ class Brain:
             q_emb = np.asarray(embed(query), dtype=np.float32)
             if q_emb.ndim != 1:
                 q_emb = q_emb.reshape(-1)
-            if self._embeddings is None or getattr(self._embeddings, "shape", (0,))[0] != len(self.memories):
-                self._rebuild_index()
-            mem_embs = self._embeddings
-            if mem_embs.size == 0 or len(mem_embs.shape) != 2 or mem_embs.shape[1] != q_emb.shape[0]:
-                return {"status": "not_found", "reason": "index_unavailable", "removed": []}
-            sims = np.dot(mem_embs, q_emb)
+            if self._vector_store is not None and self._vector_store.size() > 0:
+                vs_hits = self._vector_store.search(q_emb, k=len(self.memories))
+                sims = np.zeros(len(self.memories), dtype=np.float32)
+                for hit in vs_hits:
+                    idx = hit.get("id")
+                    if idx is not None and 0 <= idx < len(sims):
+                        sims[idx] = hit.get("score", 0.0)
+            else:
+                if self._embeddings is None or getattr(self._embeddings, "shape", (0,))[0] != len(self.memories):
+                    self._rebuild_index()
+                mem_embs = self._embeddings
+                if mem_embs.size == 0 or len(mem_embs.shape) != 2 or mem_embs.shape[1] != q_emb.shape[0]:
+                    return {"status": "not_found", "reason": "index_unavailable", "removed": []}
+                sims = np.dot(mem_embs, q_emb)
             ranked = np.argsort(sims)[::-1]
             best_idx = int(ranked[0])
             best_score = float(sims[best_idx])
@@ -2042,24 +2089,35 @@ class Brain:
         if q_emb.ndim != 1:
             q_emb = q_emb.reshape(-1)
 
-        if self._embeddings is None or getattr(self._embeddings, "shape", (0,))[0] != len(self.memories):
+        embeddings = getattr(self, "_embeddings", None)
+        if embeddings is None or getattr(embeddings, "shape", (0,))[0] != len(self.memories):
+            self._rebuild_index()
+        elif len(embeddings.shape) != 2 or embeddings.shape[1] != q_emb.shape[0]:
             self._rebuild_index()
 
-        mem_embs = self._embeddings
-        if mem_embs.size == 0:
-            return []
-        if len(mem_embs.shape) != 2:
-            self._rebuild_index()
+        vector_store = getattr(self, "_vector_store", None)
+        if vector_store is not None and vector_store.size() > 0:
+            vs_results = vector_store.search(q_emb, k=len(self.memories))
+            sims = np.zeros(len(self.memories), dtype=np.float32)
+            for hit in vs_results:
+                idx = hit.get("id")
+                if idx is not None and 0 <= idx < len(sims):
+                    sims[idx] = hit.get("score", 0.0)
+        else:
             mem_embs = self._embeddings
-        if mem_embs.size == 0 or len(mem_embs.shape) != 2:
-            return []
-        if mem_embs.shape[1] != q_emb.shape[0]:
-            self._rebuild_index()
-            mem_embs = self._embeddings
+            if mem_embs.size == 0:
+                return []
+            if len(mem_embs.shape) != 2:
+                self._rebuild_index()
+                mem_embs = self._embeddings
+            if mem_embs.size == 0 or len(mem_embs.shape) != 2:
+                return []
+            if mem_embs.shape[1] != q_emb.shape[0]:
+                self._rebuild_index()
+                mem_embs = self._embeddings
             if mem_embs.size == 0 or len(mem_embs.shape) != 2 or mem_embs.shape[1] != q_emb.shape[0]:
                 return []
-
-        sims = np.dot(mem_embs, q_emb)
+            sims = np.dot(mem_embs, q_emb)
         query_terms = _term_set(query, min_length=2)
         ranked = []
         for idx, memory in enumerate(self.memories):

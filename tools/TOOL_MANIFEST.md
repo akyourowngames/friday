@@ -32,6 +32,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `TOOL_INTAKE_CHECKLIST.md` - required intake questions, documentation path, and verification gate before new tool claims.
 - `TOOL_UPGRADE_SESSION.md` - heartbeat implementation and verification notes.
 - `BROWSER_TARGETS.md` - editable browser target URLs, wait policy, and extraction fields consumed by `browser_extract`.
+- `FOLDER_WATCHER_CONFIG.md` - editable folder watcher service config, ignore globs, tag rules, API contract, and verification notes.
 - `FILE_PATH_ALIASES.md` - editable natural path aliases consumed by file tools after they are selected.
 
 ## Markdown Tool Contract: tool_readiness_audit
@@ -133,6 +134,55 @@ It exists because a change is not shipped until the project can prove what chang
 - This contract does not allow network-only verification when local checks are available.
 - This contract does not permit broad success claims from narrow evidence.
 
+## Markdown Tool Contract: folder_watcher_service
+
+### Purpose
+
+`folder_watcher_service` is the local filesystem intelligence service for indexing
+configured folders into SQLite, exposing latest-file, diff, search, duplicate,
+stats, content, tag, export, WebSocket, and webhook surfaces.
+
+### Runtime
+
+- Entrypoint: `folder_watcher_service.py`.
+- Package: `folder_watcher/`.
+- Config file: `tools/FOLDER_WATCHER_CONFIG.md`.
+- Default API: configured by markdown, currently `127.0.0.1:7474`.
+- Live events: `watchdog` package, using OS-backed directory notifications.
+
+### Inputs
+
+- A markdown config path.
+- A watched directory path.
+- Optional bearer auth token from config.
+- File events from the OS watcher or explicit scan/ingest calls.
+
+### Outputs
+
+- SQLite file records with metadata, hashes, tags, summaries, content snippets,
+  and status.
+- SQLite event log records for created, modified, deleted, moved, unchanged, and
+  directory events.
+- FastAPI JSON responses and WebSocket event messages.
+- Optional webhook POST payloads for matching events.
+
+### Error Handling
+
+- If `watchdog` is missing, run mode reports the missing dependency and does not
+  claim live watching is active.
+- If SQLite FTS5 is unavailable, search falls back to local content matching and
+  reports `fts_enabled: false` in stats.
+- If provider-backed summary or SQL generation is not configured, endpoints
+  return a grounded pending or local-resolution status rather than claiming AI
+  completion.
+
+### Verification Method
+
+- Run `python -m unittest tests.test_folder_watcher`.
+- Run the repository verification pipeline after runtime changes.
+- For daemon readiness, the focused watcher tests must include a real watchdog
+  create-event probe when the dependency is installed.
+
 ## Markdown Tool Contract: markdown_verification_pipeline
 
 ### Purpose
@@ -146,6 +196,9 @@ It exists so each tool, prompt, manifest, runtime, or frontend change can be che
 - Callable name: `tool_verification_pipeline`.
 - Runtime module: `verification_pipeline.py`.
 - Pipeline file: configured by `KING_VERIFICATION_PIPELINE_FILE`, defaulting to `tools/TOOL_VERIFICATION_PIPELINE.md`.
+- Timeout bounds: configured by `KING_VERIFICATION_PIPELINE_TIMEOUT_MS` and
+  `KING_VERIFICATION_PIPELINE_TIMEOUT_MAX_MS` so the full local suite can finish
+  without weakening required-check failure handling.
 - Runtime status: `verified_runtime`.
 
 ### Inputs

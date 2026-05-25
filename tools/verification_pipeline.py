@@ -12,7 +12,6 @@ from tools.runtime import (
     make_trace,
     normalize_int,
     normalize_response_format,
-    normalize_timeout_ms,
     structured_error,
     structured_success,
     utc_now_iso,
@@ -152,6 +151,41 @@ def _run_step(command: str, root: Path, timeout_ms: int, output_limit: int, requ
         }
 
 
+def _normalize_pipeline_timeout_ms(value, default: int) -> tuple[int | None, dict | None]:
+    max_timeout = max(1000, int(settings.verification_pipeline_timeout_max_ms))
+    if value in (None, 0, "0", ""):
+        candidate = max(1, int(default))
+    elif isinstance(value, bool):
+        candidate = None
+    else:
+        try:
+            candidate = int(str(value).strip())
+        except (TypeError, ValueError):
+            candidate = None
+    expected = f"integer 1..{max_timeout}"
+    if candidate is None:
+        return None, error_payload(
+            "INVALID_TIMEOUT",
+            f"timeout_ms must be an integer between 1 and {max_timeout}.",
+            "timeout_ms",
+            value,
+            expected,
+            False,
+            f"Pass a timeout between 1 and {max_timeout} milliseconds, or omit timeout_ms.",
+        )
+    if candidate < 1 or candidate > max_timeout:
+        return None, error_payload(
+            "INVALID_TIMEOUT",
+            "timeout_ms is outside the supported range.",
+            "timeout_ms",
+            value,
+            expected,
+            False,
+            f"Use a timeout between 1 and {max_timeout} milliseconds.",
+        )
+    return candidate, None
+
+
 def _pipeline_trace(started_at: str, started: float, inputs_received: int, schema_valid: bool, execution_path: str, status: str, output_fields: int, command_count: int, error_code: str | None = None) -> dict:
     external_calls = {"count": command_count, "systems": ["shell"] if command_count else []}
     return make_trace(
@@ -282,7 +316,7 @@ def tool_verification_pipeline(
     if step_error is not None:
         return _pipeline_error(step_error, response_format, trace_enabled, started, started_at, "Status: blocked\nReason: invalid max_steps")
 
-    timeout_value, timeout_error = normalize_timeout_ms(
+    timeout_value, timeout_error = _normalize_pipeline_timeout_ms(
         timeout_ms,
         max(1, int(settings.verification_pipeline_timeout_ms)),
     )

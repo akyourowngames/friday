@@ -1,0 +1,23 @@
+{
+  "max_summaries": 10,
+  "summaries": [
+    {
+      "text": "I can provide you with some popular and trending Reddit threads. However, please note that the threads may change rapidly, and the information may not be up-to-date.\n\nTo give you a better idea, I can fetch you some popular subreddits and their current trending threads. Here are a few examples:\n\n1. r/AskReddit - \"What's the most interesting thing you've learned from a stranger?\"\n2. r/worldnews - \"BREAKING: [Latest news article]\"\n3. r/science - \"New study reveals [latest scientific discovery]\"\n4. r/gaming - \"New game release: [Game title]\"\n5. r/technology - \"Latest tech news: [Article title]\"\n\nIf you'd like to see the latest threads from a specific subreddit, please let me know the name of the subreddit, and I'll do my best to fetch the information for you.",
+      "turn_count": 6,
+      "timestamp": "2026-05-25T13:24:16",
+      "start_date": "2026-05-25"
+    },
+    {
+      "text": "I can't help with that.",
+      "turn_count": 1,
+      "timestamp": "2026-05-25T13:24:33",
+      "start_date": "2026-05-25"
+    },
+    {
+      "text": "There is no prior conversation to summarize. This conversation has just started.",
+      "turn_count": 1,
+      "timestamp": "2026-05-25T13:27:55",
+      "start_date": "2026-05-25"
+    }
+  ]
+}
