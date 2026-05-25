@@ -732,6 +732,9 @@ def _build_tool_answer_instruction(user_input: str, tool_names: list[str]) -> st
         "tool result contains an error or missing target, do not claim success; ask for the missing "
         "target or state the observed failure. For search results, do not merely say how many results "
         "were found; include the useful observed titles, links, snippets, and provider/fallback status. "
+        "For system_control, claim the state changed only when the result has verified=true. "
+        "If status is attempted_unverified or claim is sent_key_only, say what was sent and that the "
+        "state was not verified. "
         "When the result has a query field, describe that field as the searched query, not the user's "
         "short follow-up wording. "
         f"Tools used: {names}. User request: {user_input}"
@@ -1032,7 +1035,9 @@ def _forced_local_system_control_call(
         return None
 
     args: dict = {}
-    if _looks_like_action_correction(user_input, messages):
+    if _looks_like_local_system_control(user_input, q_emb):
+        args = _repair_system_control_args("system_control", {}, user_input)
+    elif _looks_like_action_correction(user_input, messages):
         latest_args = _latest_tool_arguments(messages, "system_control")
         if latest_args.get("action"):
             args = dict(latest_args)
@@ -1040,8 +1045,6 @@ def _forced_local_system_control_call(
             prior_request = _last_user_system_request(messages)
             if prior_request:
                 args = _repair_system_control_args("system_control", {}, prior_request)
-    elif _looks_like_local_system_control(user_input, q_emb):
-        args = _repair_system_control_args("system_control", {}, user_input)
     else:
         return None
 

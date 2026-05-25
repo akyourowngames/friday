@@ -96,6 +96,38 @@ class SystemControlToolTests(unittest.TestCase):
         self.assertEqual(forced["name"], "system_control")
         self.assertIn("brightness_down", forced["arguments"])
 
+    def test_concrete_system_request_overrides_previous_correction_context(self):
+        from agent.core import _forced_local_system_control_call
+        from agent.embedder import embed
+
+        messages = [
+            {"role": "user", "content": "increase volume"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "system_control",
+                            "arguments": '{"action": "volume_up", "response_format": "structured"}',
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "content": '{"result": {"action": "volume_up", "verified": true}}'},
+            {"role": "assistant", "content": "Your volume has been increased to 92%."},
+        ]
+        schemas = [{"function": {"name": "system_control", "parameters": {}}}]
+        forced = _forced_local_system_control_call(
+            "decrease brightness",
+            schemas,
+            messages,
+            embed("decrease brightness"),
+        )
+
+        self.assertIsNotNone(forced)
+        self.assertIn("brightness_down", forced["arguments"])
+        self.assertNotIn("volume_up", forced["arguments"])
+
     def test_repair_strips_hallucinated_config_path(self):
         from agent.core import _repair_system_control_args
 
@@ -158,6 +190,29 @@ class SystemControlToolTests(unittest.TestCase):
             result = system_mod.system_control("volume_up", config_path=str(path), response_format="structured")
         self.assertEqual(result["result"]["action"], "volume_up")
         mock_press.assert_called_once()
+
+    def test_volume_delta_verifies_core_audio_change(self):
+        with patch.object(system_mod, "_volume_get", side_effect=[(40, ""), (42, "")]):
+            with patch.object(system_mod, "_volume_set", return_value=(True, "")) as mock_set:
+                result = system_mod.system_control("volume_up", response_format="structured")
+
+        self.assertEqual(result["result"]["action"], "volume_up")
+        self.assertTrue(result["result"]["verified"])
+        self.assertEqual(result["result"]["status"], "verified_changed")
+        self.assertEqual(result["result"]["outcome"]["method"], "volume_delta")
+        mock_set.assert_called_once_with(42)
+
+    def test_brightness_hardware_fallback_is_unverified_partial(self):
+        system_mod._WMI_BRIGHTNESS_PROBE["checked"] = False
+        system_mod._WMI_BRIGHTNESS_PROBE["effective"] = None
+        with patch.object(system_mod, "_wmi_brightness_is_effective", return_value=False):
+            with patch.object(system_mod, "_brightness_get", side_effect=[(20, ""), (20, "")]):
+                with patch.object(system_mod, "_press_media_key", return_value=(True, "")):
+                    result = system_mod.system_control("brightness_down", response_format="structured")
+
+        self.assertFalse(result["result"]["verified"])
+        self.assertEqual(result["result"]["status"], "attempted_unverified")
+        self.assertEqual(result["result"]["claim"], "sent_key_only")
 
     def test_unknown_action_structured(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -32,6 +32,67 @@ _MEDIA_KEYS = {
 }
 _ACTION_ALIASES_PATH = Path(__file__).with_name("SYSTEM_CONTROL_ALIASES.md")
 _BUNDLED_CONTROLS_PATH = Path(__file__).with_name("SYSTEM_CONTROLS.md")
+_CORE_AUDIO_SOURCE = r"""
+using System;
+using System.Runtime.InteropServices;
+public enum EDataFlow { eRender = 0, eCapture = 1, eAll = 2 }
+public enum ERole { eConsole = 0, eMultimedia = 1, eCommunications = 2 }
+[Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"), ComImport]
+public class MMDeviceEnumeratorComObject { }
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+public interface IMMDeviceEnumerator {
+    int EnumAudioEndpoints(EDataFlow dataFlow, int dwStateMask, IntPtr ppDevices);
+    int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice ppEndpoint);
+}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+public interface IMMDevice {
+    int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, out IAudioEndpointVolume ppInterface);
+}
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+public interface IAudioEndpointVolume {
+    int RegisterControlChangeNotify(IntPtr pNotify);
+    int UnregisterControlChangeNotify(IntPtr pNotify);
+    int GetChannelCount(out uint pnChannelCount);
+    int SetMasterVolumeLevel(float fLevelDB, Guid pguidEventContext);
+    int SetMasterVolumeLevelScalar(float fLevel, Guid pguidEventContext);
+    int GetMasterVolumeLevel(out float pfLevelDB);
+    int GetMasterVolumeLevelScalar(out float pfLevel);
+    int SetChannelVolumeLevel(uint nChannel, float fLevelDB, Guid pguidEventContext);
+    int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, Guid pguidEventContext);
+    int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
+    int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
+    int SetMute(bool bMute, Guid pguidEventContext);
+    int GetMute(out bool pbMute);
+}
+public static class CoreAudioVolume {
+    public static IAudioEndpointVolume Endpoint() {
+        var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
+        IMMDevice device;
+        Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out device));
+        Guid iid = typeof(IAudioEndpointVolume).GUID;
+        IAudioEndpointVolume endpoint;
+        Marshal.ThrowExceptionForHR(device.Activate(ref iid, 23, IntPtr.Zero, out endpoint));
+        return endpoint;
+    }
+    public static int GetVolume() {
+        float level;
+        Marshal.ThrowExceptionForHR(Endpoint().GetMasterVolumeLevelScalar(out level));
+        return (int)Math.Round(level * 100.0f);
+    }
+    public static void SetVolume(int percent) {
+        float level = Math.Max(0, Math.Min(100, percent)) / 100.0f;
+        Marshal.ThrowExceptionForHR(Endpoint().SetMasterVolumeLevelScalar(level, Guid.Empty));
+    }
+    public static bool GetMute() {
+        bool muted;
+        Marshal.ThrowExceptionForHR(Endpoint().GetMute(out muted));
+        return muted;
+    }
+    public static void SetMute(bool muted) {
+        Marshal.ThrowExceptionForHR(Endpoint().SetMute(muted, Guid.Empty));
+    }
+}
+"""
 
 
 def _resolve_path(path: str) -> Path:
@@ -238,6 +299,56 @@ def _run_powershell(script: str, timeout_seconds: float = 15.0) -> tuple[bool, s
         return False, exc.__class__.__name__, ""
 
 
+def _core_audio_script(command: str) -> str:
+    return (
+        '$ErrorActionPreference = "Stop"; '
+        f'Add-Type -TypeDefinition @"\n{_CORE_AUDIO_SOURCE}\n"@; '
+        f"{command}"
+    )
+
+
+def _volume_get() -> tuple[int | None, str]:
+    if sys.platform != "win32":
+        return None, "core audio requires win32"
+    ok, err, out = _run_powershell(_core_audio_script("Write-Output ([CoreAudioVolume]::GetVolume())"))
+    if not ok:
+        return None, err
+    try:
+        return int(str(out).strip()), ""
+    except ValueError:
+        return None, "invalid volume value"
+
+
+def _volume_set(level: int) -> tuple[bool, str]:
+    if sys.platform != "win32":
+        return False, "core audio requires win32"
+    level = max(0, min(100, int(level)))
+    ok, err, _out = _run_powershell(_core_audio_script(f"[CoreAudioVolume]::SetVolume({level}); Write-Output {level}"))
+    return ok, err
+
+
+def _mute_get() -> tuple[bool | None, str]:
+    if sys.platform != "win32":
+        return None, "core audio requires win32"
+    ok, err, out = _run_powershell(_core_audio_script("Write-Output ([CoreAudioVolume]::GetMute())"))
+    if not ok:
+        return None, err
+    text = str(out).strip().lower()
+    if text == "true":
+        return True, ""
+    if text == "false":
+        return False, ""
+    return None, "invalid mute value"
+
+
+def _mute_set(muted: bool) -> tuple[bool, str]:
+    if sys.platform != "win32":
+        return False, "core audio requires win32"
+    value = "$true" if muted else "$false"
+    ok, err, _out = _run_powershell(_core_audio_script(f"[CoreAudioVolume]::SetMute({value}); Write-Output {value}"))
+    return ok, err
+
+
 def _brightness_get() -> tuple[int | None, str]:
     script = (
         "$b = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness -ErrorAction SilentlyContinue | "
@@ -295,6 +406,8 @@ def _brightness_delta_with_fallback(action: dict) -> tuple[dict, dict | None]:
                     "delta": delta,
                     "verified_level": after,
                     "verified": True,
+                    "status": "verified_changed" if target != current else "verified_noop",
+                    "claim": "changed" if target != current else "already_at_limit",
                 }, None
         read_error = err or read_error
 
@@ -322,6 +435,8 @@ def _brightness_delta_with_fallback(action: dict) -> tuple[dict, dict | None]:
         "previous": current,
         "verified_level": after,
         "verified": verified,
+        "status": "verified_changed" if verified else "attempted_unverified",
+        "claim": "changed" if verified else "sent_key_only",
         "note": (
             "WMI cannot change this display; sent brightness hardware keys. "
             "Watch for the on-screen brightness indicator."
@@ -330,6 +445,94 @@ def _brightness_delta_with_fallback(action: dict) -> tuple[dict, dict | None]:
     if current is not None and after is not None and verified:
         outcome["level"] = after
     return outcome, None
+
+
+def _fallback_media_key_outcome(action: dict, key_name: str, step: int, reason: str) -> tuple[dict, dict | None]:
+    vk = _MEDIA_KEYS.get(key_name)
+    if vk is None:
+        return {}, error_payload(
+            "UNKNOWN_MEDIA_KEY",
+            "The media key is not defined in the runtime map.",
+            "key",
+            key_name,
+            "supported media key name",
+            False,
+            "Use an action from SYSTEM_CONTROLS.md.",
+        )
+    ok, detail = _press_media_key(vk, step)
+    if not ok:
+        return {}, error_payload(
+            "ACTION_FAILED",
+            "The media key action did not complete.",
+            "action",
+            action.get("name", ""),
+            "successful key press",
+            True,
+            detail,
+        )
+    return {
+        "method": "media_key",
+        "key": key_name,
+        "repeats": step,
+        "platform": sys.platform,
+        "verified": False,
+        "status": "attempted_unverified",
+        "claim": "sent_key_only",
+        "fallback_reason": reason,
+    }, None
+
+
+def _volume_delta_with_verification(action: dict) -> tuple[dict, dict | None]:
+    delta = _coerce_int(action.get("delta", 0), 0)
+    key_name = "volume_up" if delta >= 0 else "volume_down"
+    step = max(1, _coerce_int(action.get("step", 1), 1))
+    current, read_error = _volume_get()
+    if current is None:
+        return _fallback_media_key_outcome(action, key_name, step, read_error)
+    target = max(0, min(100, current + delta))
+    ok, set_error = _volume_set(target)
+    if not ok:
+        return _fallback_media_key_outcome(action, key_name, step, set_error)
+    time.sleep(0.15)
+    after, verify_error = _volume_get()
+    verified = after is not None and int(after) == target
+    return {
+        "method": "volume_delta",
+        "path": "core_audio",
+        "previous": current,
+        "level": target,
+        "delta": delta,
+        "verified_level": after,
+        "verified": verified,
+        "status": "verified_changed" if verified and target != current else "verified_noop" if verified else "attempted_unverified",
+        "claim": "changed" if verified and target != current else "already_at_limit" if verified else "set_unverified",
+        "verify_error": "" if verified else verify_error,
+    }, None
+
+
+def _volume_mute_toggle_with_verification(action: dict) -> tuple[dict, dict | None]:
+    current, read_error = _mute_get()
+    step = max(1, _coerce_int(action.get("step", 1), 1))
+    if current is None:
+        return _fallback_media_key_outcome(action, "volume_mute", step, read_error)
+    target = not current
+    ok, set_error = _mute_set(target)
+    if not ok:
+        return _fallback_media_key_outcome(action, "volume_mute", step, set_error)
+    time.sleep(0.15)
+    after, verify_error = _mute_get()
+    verified = after is not None and bool(after) == target
+    return {
+        "method": "volume_mute_toggle",
+        "path": "core_audio",
+        "previous": current,
+        "muted": target,
+        "verified_muted": after,
+        "verified": verified,
+        "status": "verified_changed" if verified else "attempted_unverified",
+        "claim": "changed" if verified else "set_unverified",
+        "verify_error": "" if verified else verify_error,
+    }, None
 
 
 def _execute_action(action: dict, level: int = 0) -> tuple[dict, dict | None]:
@@ -359,7 +562,21 @@ def _execute_action(action: dict, level: int = 0) -> tuple[dict, dict | None]:
                 True,
                 detail,
             )
-        return {"method": method, "key": key_name, "repeats": step, "platform": sys.platform}, None
+        return {
+            "method": method,
+            "key": key_name,
+            "repeats": step,
+            "platform": sys.platform,
+            "verified": False,
+            "status": "attempted_unverified",
+            "claim": "sent_key_only",
+        }, None
+
+    if method == "volume_delta":
+        return _volume_delta_with_verification(action)
+
+    if method == "volume_mute_toggle":
+        return _volume_mute_toggle_with_verification(action)
 
     if method == "brightness_delta":
         if sys.platform != "win32":
@@ -406,7 +623,7 @@ def _execute_action(action: dict, level: int = 0) -> tuple[dict, dict | None]:
         "The action method is not supported.",
         "method",
         method,
-        "media_key, brightness_delta, or brightness_set",
+        "media_key, volume_delta, volume_mute_toggle, brightness_delta, or brightness_set",
         False,
         "Define the action in SYSTEM_CONTROLS.md.",
     )
@@ -520,10 +737,21 @@ def system_control(
         "action": action,
         "platform": sys.platform,
         "outcome": outcome,
+        "status": outcome.get("status", "verified" if outcome.get("verified") else "attempted_unverified"),
+        "verified": bool(outcome.get("verified")),
+        "claim": outcome.get("claim", "unknown"),
         "config_path": str(resolved_config_path or _BUNDLED_CONTROLS_PATH),
     }
     legacy = f"System action '{action}' completed on {sys.platform}"
-    if outcome.get("path") == "hardware_key" and "brightness" in str(outcome.get("key", "")):
+    if outcome.get("method") == "volume_delta" and outcome.get("verified"):
+        if outcome.get("claim") == "already_at_limit":
+            legacy = f"Volume is already at {outcome.get('level')}%."
+        else:
+            legacy = f"Volume changed from {outcome.get('previous')}% to {outcome.get('level')}%."
+    elif outcome.get("method") == "volume_mute_toggle" and outcome.get("verified"):
+        state = "muted" if outcome.get("muted") else "unmuted"
+        legacy = f"Volume is now {state}."
+    elif outcome.get("path") == "hardware_key" and "brightness" in str(outcome.get("key", "")):
         legacy = (
             f"Pressed {outcome.get('key')} {outcome.get('repeats', 1)} time(s) on {sys.platform}. "
             f"{outcome.get('note', 'Check the on-screen brightness indicator.')}"
@@ -537,7 +765,8 @@ def system_control(
         )
     elif outcome.get("key"):
         legacy = f"Sent {outcome.get('key')} key ({outcome.get('repeats', 1)}x) on {sys.platform}"
-    trace = _control_trace(started_at, started, inputs_received, "execute", "SUCCESS", len(result))
+    trace_status = "SUCCESS" if outcome.get("verified") else "PARTIAL"
+    trace = _control_trace(started_at, started, inputs_received, "execute", trace_status, len(result))
     emit_trace(trace, trace_enabled)
     if response_format == "structured":
         return structured_success("system_control", _SYSTEM_VERSION, result, started, trace)

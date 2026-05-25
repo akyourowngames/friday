@@ -2024,3 +2024,59 @@ Verification evidence:
 [VERDICT] The failing examples now use tools seamlessly through registry
 selection and schema-grounded execution. The fix does not add keyword routing or
 canned tool responses.
+
+## 2026-05-25 System Control Verification Repair
+
+Scope: stop local system-control false positives and prevent concrete
+brightness requests from repeating the previous volume action.
+
+Runtime changes:
+
+- `volume_up` and `volume_down` now use Windows CoreAudio through PowerShell and
+  verify before/after master volume levels instead of sending unverified media
+  keys.
+- `volume_mute` now uses a verified CoreAudio mute toggle when available.
+- Media-key and brightness hardware-key fallbacks now return
+  `status: attempted_unverified`, `verified: false`, and `claim:
+  sent_key_only` instead of a broad success claim.
+- The final tool-result answer instruction now tells the model to claim
+  `system_control` state changes only when `verified=true`.
+- Forced local system-control calls now prioritize the current concrete request
+  before retry/correction logic, so `decrease brightness` after `increase
+  volume` no longer repeats `volume_up`.
+- `tools/SYSTEM_CONTROLS.md` now defines volume actions as `volume_delta`
+  changes with `delta: 2` and mute as `volume_mute_toggle`.
+- `tests/live_gauntlet.py` now checks full-live web/Hacker News/Reddit
+  scenarios for returned topic evidence instead of the brittle word `search`.
+
+Verification evidence:
+
+- Direct action repair mapped `increase volume` to `volume_up`, `descrease
+  brightness` and `decrease brightness` to `brightness_down`, and `increase
+  brightness` to `brightness_up`.
+- Live direct system-control probe: volume verified `90 -> 92 -> 90`; brightness
+  returned `attempted_unverified` with WMI still reading `20`.
+- Live KING debug conversation: `increase volume` called `volume_up` and
+  answered volume `96%`; the next `decrease brightness` called
+  `brightness_down`, not `volume_up`, and answered that brightness was not
+  verified changed.
+- Restored volume to `90` after live probes.
+- Registry-wide safe smoke pass covered all 32 registered tools: 32 passed, 0
+  failed. Interactive or destructive tools used safe validation/read-only paths.
+- `python tests\live_gauntlet.py` passed 5 checks.
+- `python tests\live_gauntlet.py --full-live` passed 7 checks.
+- `python -m unittest tests.test_system_keyboard_browser.SystemControlToolTests -v`
+  passed 17 tests.
+- `python -m py_compile agent\core.py tools\system_control.py
+  tests\test_system_keyboard_browser.py` passed.
+- `python -m pytest -q` passed 196 tests and 24 subtests.
+- `python -m compileall config.py agent memory tools tests main.py api_server.py`
+  passed.
+- `npm run typecheck` passed.
+- `tool_verification_pipeline('.', 'tools/TOOL_VERIFICATION_PIPELINE.md',
+  timeout_ms=180000, response_format='structured')` returned `ship` with 6
+  passed checks, 0 failed, and 0 timed out.
+
+[VERDICT] Volume is now a verified CoreAudio state change, brightness no longer
+claims success when Windows reports no change, and concrete brightness actions
+do not get hijacked by previous volume context.

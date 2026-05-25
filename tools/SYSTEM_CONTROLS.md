@@ -11,20 +11,19 @@ The runtime only runs actions defined here.
 
 ### volume_up
 
-- method: media_key
-- key: volume_up
+- method: volume_delta
+- delta: 2
 - step: 1
 
 ### volume_down
 
-- method: media_key
-- key: volume_down
+- method: volume_delta
+- delta: -2
 - step: 1
 
 ### volume_mute
 
-- method: media_key
-- key: volume_mute
+- method: volume_mute_toggle
 - step: 1
 
 ### brightness_up

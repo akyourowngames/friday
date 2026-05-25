@@ -195,7 +195,7 @@ def run_full_live() -> list[CheckResult]:
                 "search hacker news for python, one result",
                 "search reddit for python, one result",
             ],
-            "search",
+            "python",
         ),
         (
             "cli_file_and_ambiguous_action",
