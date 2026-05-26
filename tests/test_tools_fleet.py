@@ -17,7 +17,7 @@ from tools.registry import execute_tool, get_tool
 
 class ToolsFleetPolishTests(unittest.TestCase):
     def test_memory_and_image_tools_registered(self):
-        for name in ("memory_assess", "memory_recall", "memory_remember", "memory_forget", "imagine", "gallery", "camera_vision"):
+        for name in ("memory_assess", "memory_recall", "memory_remember", "memory_forget", "imagine", "gallery", "camera_vision", "folder_watcher"):
             self.assertIsNotNone(get_tool(name))
 
     def test_execute_tool_allows_tool_parameter_named_name(self):
@@ -64,6 +64,18 @@ class ToolsFleetPolishTests(unittest.TestCase):
         selected = ToolRouter().select_tools(routing_input, q_emb)
 
         self.assertIn("file_read", [tool["name"] for tool in selected])
+
+    def test_folder_watcher_request_selects_folder_watcher_while_casual_chat_does_not(self):
+        from agent.core import _embedding_query
+        from agent.router import ToolRouter
+
+        router = ToolRouter()
+        q_emb, routing_input = _embedding_query("ask folder watcher for the total size of python files", [])
+        selected = router.select_tools(routing_input, q_emb)
+        casual_selected = router.select_tools("how are you doing")
+
+        self.assertIn("folder_watcher", [tool["name"] for tool in selected])
+        self.assertNotIn("folder_watcher", [tool["name"] for tool in casual_selected])
 
     def test_reddit_clamps_hallucinated_large_limit(self):
         import tools.reddit as reddit_mod

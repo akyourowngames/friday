@@ -115,6 +115,8 @@ adding routing shortcuts in code.
 - `GET /files/duplicates/symlink-suggestions` returns duplicate link plans
   without modifying the filesystem.
 - `GET /files/stats` returns index coverage and file breakdowns.
+- `GET /files/details` returns bounded batches of file metadata, optional
+  content excerpts, event counts, dependency counts, and selected filters.
 - `GET /files/{id}` returns one indexed file record.
 - `GET /files/{id}/content` returns extracted text content.
 - `GET /files/{id}/dependencies` returns indexed relationship edges from a file.
@@ -133,10 +135,14 @@ adding routing shortcuts in code.
 - `GET /playlist/new-arrivals` returns audio arrivals as JSON or M3U.
 - `POST /webhooks` registers a local HTTP subscriber for matching events.
 - `WS /watch` streams watcher events to connected subscribers.
+- KING's registered `folder_watcher` tool and main API `POST /folder-watcher`
+  bridge call these HTTP endpoints and do not bypass this service or read its
+  SQLite index directly.
 
 ## Verification Notes
 
 - Focused tests live in `tests/test_folder_watcher.py`.
+- KING tool bridge tests live in `tests/test_folder_watcher_tool.py`.
 - The repository verification pipeline must include the focused watcher tests.
 - Use `tools/FOLDER_WATCHER_DEMO_CONFIG.md` when you want an isolated visible
   inbox instead of indexing the repository root.

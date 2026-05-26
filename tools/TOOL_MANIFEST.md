@@ -10,6 +10,7 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 - `system_control.py` - volume, brightness, and media controls from SYSTEM_CONTROLS.md.
 - `datetime_tool.py` - timezone-aware date and time with human or ISO output, structured errors, and optional traces (v2.0.0).
 - `files.py` - file read, write, and list capability with path and mode validation.
+- `folder_watcher.py` - read-only KING bridge to the folder watcher HTTP service for chat, query, stats, details, search, latest, content, deep-dive, and status actions.
 - `hackernews.py` - Hacker News retrieval capability.
 - `image.py` - image generation and gallery management with structured output and provider status (v2.0.0).
 - `manifest_audit.py` - read-only manifest audit with structured output and traces (v2.0.0).
@@ -34,6 +35,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `TOOL_UPGRADE_SESSION.md` - heartbeat implementation and verification notes.
 - `BROWSER_TARGETS.md` - editable browser target URLs, wait policy, and extraction fields consumed by `browser_extract`.
 - `FOLDER_WATCHER_CONFIG.md` - editable folder watcher service config, ignore globs, tag rules, API contract, and verification notes.
+- `FOLDER_WATCHER_CLIENT.md` - editable registered-tool client targets, timeout, auth token source names, and enabled read-only actions.
 - `FOLDER_WATCHER_DEMO_CONFIG.md` - isolated demo watcher config for visible browser testing without indexing the repository root.
 - `FOLDER_WATCHER_LLM_POLICY.md` - markdown-owned prompts, public SQL tables, allowed SQL functions, and LLM limits for folder watcher semantic behavior.
 - `FOLDER_WATCHER_STATUS.md` - markdown-backed feature status matrix exposed by the folder watcher `/status` endpoint.
@@ -251,6 +253,61 @@ deep-dive, WebSocket, and webhook surfaces.
 - Run the repository verification pipeline after runtime changes.
 - For daemon readiness, the focused watcher tests must include a real watchdog
   create-event probe when the dependency is installed.
+
+## Runtime Tool: folder_watcher
+
+### Purpose
+
+`folder_watcher` is KING's first-class read-only bridge to the folder watcher
+HTTP service. It lets KING answer questions about indexed folder contents,
+recent files, extension size totals, file content, and file deep dives from the
+service's JSON responses instead of reading the watcher database directly or
+using phrase shortcuts.
+
+### Runtime
+
+- Entrypoint: `tools/folder_watcher.py`.
+- Client config: `tools/FOLDER_WATCHER_CLIENT.md`.
+- Main API bridge: `POST /folder-watcher`.
+- Default target, timeout, auth token environment name, and enabled actions are
+  markdown-owned, with environment overrides only for deployment differences.
+- Read-only v1 actions: `ask`, `query`, `stats`, `details`, `search`, `latest`,
+  `content`, `deep_dive`, and `status`.
+
+### Inputs
+
+- `action`: read-only watcher action.
+- `query`: natural-language question or search text for `ask`, `query`, and
+  `search`.
+- `file_id`: indexed watcher id for `content` and `deep_dive`.
+- Optional extension, directory, limit, content excerpt size, target, timeout,
+  response format, and trace toggle.
+
+### Outputs
+
+- Legacy mode returns concise text composed from the watcher response fields.
+- Structured mode returns action, target, attempted endpoint, status code,
+  query, file id, files, stats, answer, count, and raw returned JSON data.
+- The main API bridge returns panel-ready JSON with files, stats, answers,
+  counts, and selected evidence for frontend or external KING clients.
+
+### Error Handling
+
+- Offline or unreachable watcher returns `SERVICE_UNAVAILABLE` with attempted
+  base URL, endpoint, method, and action.
+- Authentication rejection returns `AUTH_FAILED` without returning token values.
+- Missing `query` or `file_id` returns typed validation errors.
+- HTTP, timeout, invalid JSON, disabled action, and unknown target states are
+  returned as structured errors instead of converted into absence claims.
+- Mutating watcher actions are not exposed in v1.
+
+### Verification
+
+- `python -m unittest tests.test_folder_watcher_tool`
+- `python -m unittest tests.test_tools_fleet`
+- `python -m unittest tests.test_folder_watcher`
+- `python -m pytest -q`
+- `tool_verification_pipeline` with final ship decision `ship`.
 
 ## Markdown Tool Contract: markdown_verification_pipeline
 

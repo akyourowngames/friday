@@ -110,6 +110,10 @@ Last verified by the default markdown pipeline on 2026-05-23:
 - `browser_extract` - `verified_runtime` for markdown-configured URL, saved-session reuse, and field extraction with mocked page-load evidence; live provider results remain scoped to the attempted URL and engine state.
 - `browser_login_session` - `verified_runtime` for visible manual-login schema, storage-state path handling, and credential-free session capture contract; live login success remains scoped to the saved storage-state result.
 - `navigator` - `verified_runtime` for open geocoding, open route distance, representative-point warnings for broad regions, reverse-geocoded route-through places, straight-line fallback, structured result fields, typed errors, and frontend route payload support; live provider results remain scoped to the attempted origin, destination, provider status, route mode, and sampled route places.
+- `folder_watcher` - `verified_runtime` for read-only HTTP bridge actions,
+  markdown-owned client target parsing, structured service/auth/validation
+  errors, mocked endpoint mapping, main API `POST /folder-watcher` JSON bridge,
+  and semantic router selection without keyword routing.
 - `system_control` - `verified_runtime` for CoreAudio-backed volume up/down
   with before/after verification, verified mute toggles, honest partial states
   for unverified brightness hardware-key fallbacks, and concrete system-action
@@ -150,6 +154,20 @@ Last verified by the default markdown pipeline on 2026-05-23:
   `python tests\live_gauntlet.py --full-live` passed 7 checks; the markdown
   verification pipeline returned `ship` with 6 passed checks, 0 failed, and 0
   timed out.
+
+## 2026-05-26 Folder Watcher KING Bridge Snapshot
+
+- Added registered executable module `tools/folder_watcher.py` and markdown
+  client config `tools/FOLDER_WATCHER_CLIENT.md`.
+- Manifest audit observed 18 tool modules, 18 manifest modules, 34 registered
+  callable schemas, and no manifest/file mismatches.
+- Focused bridge checks passed: `python -m unittest tests.test_folder_watcher_tool`.
+- Router and registry checks passed: `python -m unittest tests.test_tools_fleet`.
+- Source watcher service checks passed: `python -m unittest tests.test_folder_watcher`.
+- Repository suite passed: `python -m pytest -q` reported 232 passed tests and
+  33 passed subtests.
+- The markdown verification pipeline returned `ship` with 6 passed checks, 0
+  failed checks, and 0 timeouts.
 
 ## Escalation Rules
 

@@ -17,6 +17,7 @@ from agent.core import Agent
 from agent.router import ToolRouter
 from config import settings
 from memory.brain import Brain
+import tools  # noqa: F401 - import package to register executable tools
 from tools.registry import execute_tool
 
 
@@ -82,6 +83,21 @@ class CameraAnalyzeRequest(BaseModel):
 
 class CameraIntentRequest(BaseModel):
     message: str
+
+
+class FolderWatcherRequest(BaseModel):
+    action: str = "ask"
+    query: str = ""
+    file_id: str = ""
+    extension: str = ""
+    directory: str = ""
+    limit: int = 20
+    include_content: bool = False
+    max_content_chars: int = 2000
+    target: str = ""
+    timeout_ms: int = 0
+    response_format: str = "structured"
+    trace_enabled: bool = False
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -243,6 +259,15 @@ def _tool_events(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "tool_name": name,
                     }
                 )
+            if name == "folder_watcher":
+                events.append(
+                    {
+                        "event": "folder_watcher_querying",
+                        "message": "Gathering folder watcher evidence.",
+                        "route": "files",
+                        "tool_name": name,
+                    }
+                )
     return events
 
 
@@ -253,6 +278,8 @@ def _tool_route(tool_name: str) -> str:
         return "navigation"
     if tool_name == "camera_vision":
         return "vision"
+    if tool_name == "folder_watcher":
+        return "files"
     if tool_name in {"file_read", "file_list", "terminal"}:
         return "task"
     return "assistant"
@@ -406,6 +433,59 @@ def _panel_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | 
             ],
         }
 
+    if tool_name == "folder_watcher":
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        files = result.get("files") if isinstance(result.get("files"), list) else data.get("files")
+        if not isinstance(files, list):
+            files = []
+        stats = result.get("stats") if isinstance(result.get("stats"), dict) else data.get("stats")
+        if not isinstance(stats, dict):
+            stats = {}
+        answer = str(result.get("answer") or data.get("answer") or "").strip()
+        action = str(result.get("action") or data.get("action") or "folder_watcher")
+        query = str(result.get("query") or data.get("query") or action)
+        items = []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("filename") or item.get("path") or item.get("id") or "Indexed file")
+            detail_parts = []
+            for key in ("path", "extension", "mime_type", "size_bytes"):
+                value = item.get(key)
+                if value not in (None, ""):
+                    detail_parts.append(f"{key}: {value}")
+            excerpt = str(item.get("content_excerpt") or item.get("summary") or "").strip()
+            content = " | ".join(detail_parts)
+            if excerpt:
+                content = (content + "\n" if content else "") + excerpt[:700]
+            items.append({"title": title, "content": content, "url": ""})
+        if not items and stats:
+            details = stats.get("by_extension_details") if isinstance(stats.get("by_extension_details"), dict) else {}
+            stats_lines = [
+                f"active_files: {stats.get('active_files', 'unknown')}",
+                f"total_size_bytes: {stats.get('total_size_bytes', 'unknown')}",
+            ]
+            for extension, detail in list(details.items())[:6]:
+                if isinstance(detail, dict):
+                    stats_lines.append(f"{extension}: {detail.get('count', 0)} file(s), {detail.get('size_bytes', 0)} bytes")
+            items.append({"title": "Folder watcher stats", "content": "\n".join(stats_lines), "url": ""})
+        if not items and answer:
+            items.append({"title": "Folder watcher answer", "content": answer[:900], "url": ""})
+        if not items:
+            items.append({"title": "Folder watcher result", "content": "Structured folder watcher data is available.", "url": ""})
+        return {
+            "source": "folder_watcher",
+            "query": query,
+            "answer": answer or "Folder watcher panel opened with grounded service data.",
+            "action": action,
+            "mode": str(result.get("mode") or data.get("mode") or ""),
+            "stats": stats,
+            "count": result.get("count", data.get("count", len(files))),
+            "files": files,
+            "data": data,
+            "results": items,
+        }
+
     return None
 
 
@@ -433,6 +513,24 @@ def _run_camera_tool(prompt: str, image_base64: str, mime_type: str = "image/jpe
         mime_type=mime_type,
         timeout_ms=timeout_ms or settings.camera_default_timeout_ms,
         response_format="structured",
+    )
+
+
+def _run_folder_watcher_tool(payload: FolderWatcherRequest) -> dict[str, Any]:
+    return execute_tool(
+        "folder_watcher",
+        action=payload.action,
+        query=payload.query,
+        file_id=payload.file_id,
+        extension=payload.extension,
+        directory=payload.directory,
+        limit=payload.limit,
+        include_content=payload.include_content,
+        max_content_chars=payload.max_content_chars,
+        target=payload.target,
+        timeout_ms=payload.timeout_ms or settings.folder_watcher_timeout_ms,
+        response_format="structured",
+        trace_enabled=payload.trace_enabled,
     )
 
 
@@ -643,6 +741,20 @@ async def _stream_chat(payload: ChatRequest):
             )
             yield _sse({"session_id": session_id, "navigator_result": panel})
             continue
+        if panel.get("source") == "folder_watcher":
+            yield _sse(
+                {
+                    "session_id": session_id,
+                    "activity": {
+                        "event": "folder_watcher_completed",
+                        "message": panel.get("answer", "Folder watcher panel ready."),
+                        "route": "files",
+                        "tool_name": "folder_watcher",
+                    },
+                }
+            )
+            yield _sse({"session_id": session_id, "folder_watcher_result": panel, "search_results": panel})
+            continue
         yield _sse(
             {
                 "session_id": session_id,
@@ -758,6 +870,26 @@ def camera_analyze(payload: CameraAnalyzeRequest):
 @app.post("/camera/intent")
 def camera_intent(payload: CameraIntentRequest):
     return _camera_intent_payload(payload.message)
+
+
+def _folder_watcher_status_code(result: dict[str, Any]) -> int:
+    error = result.get("error") if isinstance(result, dict) else {}
+    code = error.get("code") if isinstance(error, dict) else ""
+    if code == "SERVICE_UNAVAILABLE":
+        return 503
+    if code == "AUTH_FAILED":
+        return 401
+    if code in {"UPSTREAM_ERROR", "INVALID_UPSTREAM_JSON"}:
+        return 502
+    return 400
+
+
+@app.post("/folder-watcher")
+def folder_watcher_bridge(payload: FolderWatcherRequest):
+    result = _run_folder_watcher_tool(payload)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_folder_watcher_status_code(result), detail=result["error"])
+    return _panel_payload("folder_watcher", result) or result
 
 
 @app.get("/app/audio/{filename}")

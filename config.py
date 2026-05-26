@@ -165,6 +165,11 @@ class Settings:
     verification_pipeline_output_chars: int = _env_int("KING_VERIFICATION_PIPELINE_OUTPUT_CHARS", 4000)
     folder_watcher_config_file: str = _env("KING_FOLDER_WATCHER_CONFIG_FILE", "tools/FOLDER_WATCHER_CONFIG.md")
     folder_watcher_llm_policy_file: str = _env("KING_FOLDER_WATCHER_LLM_POLICY_FILE", "tools/FOLDER_WATCHER_LLM_POLICY.md")
+    folder_watcher_client_file: str = _env("KING_FOLDER_WATCHER_CLIENT_FILE", "tools/FOLDER_WATCHER_CLIENT.md")
+    folder_watcher_target: str = _env("KING_FOLDER_WATCHER_TARGET", "")
+    folder_watcher_base_url: str = _env("KING_FOLDER_WATCHER_BASE_URL", "")
+    folder_watcher_auth_token: str = _env("KING_FOLDER_WATCHER_AUTH_TOKEN", "")
+    folder_watcher_timeout_ms: int = _env_int("KING_FOLDER_WATCHER_TIMEOUT_MS", 0)
     browser_user_agent: str = _env("KING_BROWSER_USER_AGENT", "Mozilla/5.0 KING Browser Extractor")
 
 
