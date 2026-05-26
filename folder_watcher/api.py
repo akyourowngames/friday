@@ -219,6 +219,27 @@ def create_app(
     def files_stats(_: Any = Depends(require_auth)):
         return index.stats()
 
+    @app.get("/files/details")
+    def files_details(
+        limit: int = Query(default=100, ge=1, le=500),
+        ext: str | None = None,
+        dir: str | None = None,
+        include_content: bool = False,
+        max_content_chars: int = Query(default=2000, ge=1, le=50000),
+        _: Any = Depends(require_auth),
+    ):
+        files = index.file_details(limit, ext, dir, include_content, max_content_chars)
+        return {
+            "files": files,
+            "count": len(files),
+            "filters": {
+                "extension": ext,
+                "directory": dir,
+                "include_content": include_content,
+                "max_content_chars": max_content_chars,
+            },
+        }
+
     @app.get("/playlist/new-arrivals")
     def playlist_new_arrivals(format: str = "json", _: Any = Depends(require_auth)):
         if format.strip().lower() == "m3u":

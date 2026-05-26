@@ -19,6 +19,7 @@ without pretending planned surfaces are already complete.
 - Duplicate detection by SHA256 hash
 - SQLite FTS5 search with local content fallback
 - REST API for health, latest files, diff, search, query, duplicates, stats, content, tags, config, export, webhooks, and status
+- Bulk file detail endpoint at `/files/details` with metadata, hashes, sizes, event counts, relationship counts, and optional content excerpts
 - WebSocket event stream at `/watch`
 - Webhook registration and background dispatch
 - Watchdog-backed recursive live folder watching
@@ -28,6 +29,7 @@ without pretending planned surfaces are already complete.
 - Provider-backed natural-language SQL generation when the configured LLM key is present
 - Provider-backed natural chat endpoint and dashboard chat panel
 - Simple provider-backed chat that can use indexed file evidence when helpful
+- Chat context includes extension and MIME size rollups so size/count questions are answered from the index
 - SQLite authorizer guard for read-only LLM-generated SQL
 - Provider-backed on-demand summaries and summarize-pending endpoint when summaries are enabled
 - PDF text extraction and document metadata

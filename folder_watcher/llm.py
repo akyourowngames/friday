@@ -283,11 +283,18 @@ class FolderWatcherLLM:
             "duplicate_suggestions": self.index.duplicate_symlink_suggestions()[:5] if relevant_files or selected_file else [],
             "stats": {
                 "active_files": stats.get("active_files", 0),
+                "total_size_bytes": stats.get("total_size_bytes", 0),
                 "events": stats.get("events", 0),
                 "summary_coverage": stats.get("summary_coverage", 0),
                 "fts_enabled": stats.get("fts_enabled", False),
                 "by_extension": stats.get("by_extension", {}),
                 "by_mime_type": stats.get("by_mime_type", {}),
+                "by_extension_details": stats.get("by_extension_details", {}),
+                "by_mime_type_details": stats.get("by_mime_type_details", {}),
+                "largest_files": [
+                    self._file_context(item, 0)
+                    for item in stats.get("largest_files", [])[:5]
+                ],
             },
         }
 

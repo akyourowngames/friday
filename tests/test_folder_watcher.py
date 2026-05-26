@@ -261,7 +261,17 @@ class FolderWatcherTests(unittest.TestCase):
         stats = self.index.stats()
         self.assertEqual(stats["active_files"], 1)
         self.assertEqual(stats["by_extension"][".py"], 1)
+        self.assertEqual(stats["by_extension_details"][".py"]["count"], 1)
+        self.assertEqual(stats["by_extension_details"][".py"]["size_bytes"], code.stat().st_size)
+        self.assertEqual(stats["largest_files"][0]["id"], file_item["id"])
         self.assertGreaterEqual(stats["events"], 1)
+
+        details = self.index.file_details(5, extension="py", include_content=True, max_content_chars=20)
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["id"], file_item["id"])
+        self.assertTrue(details[0]["details"]["content_available"])
+        self.assertGreaterEqual(details[0]["details"]["event_count"], 1)
+        self.assertIn("import json", details[0]["content_excerpt"])
 
     def test_duplicates_and_delete_events_are_grounded_in_hashes(self):
         first = self.watch / "first.md"
@@ -296,6 +306,14 @@ class FolderWatcherTests(unittest.TestCase):
         search = client.get("/files/search", params={"q": "api search target"})
         self.assertEqual(search.status_code, 200)
         self.assertEqual(search.json()["files"][0]["id"], file_item["id"])
+
+        details = client.get(
+            "/files/details",
+            params={"ext": "md", "limit": 5, "include_content": "true", "max_content_chars": 40},
+        )
+        self.assertEqual(details.status_code, 200)
+        self.assertEqual(details.json()["files"][0]["id"], file_item["id"])
+        self.assertIn("folder watcher api", details.json()["files"][0]["content_excerpt"])
 
         query = client.post("/files/query", json={"query": "what file mentions api search target", "limit": 5})
         self.assertEqual(query.status_code, 200)
@@ -459,6 +477,33 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(context["file_feature"]["search_result_count"], 1)
         self.assertEqual(recorder.completions.calls[0]["max_tokens"], 321)
         self.assertEqual(len(recorder.completions.calls), 1)
+
+    def test_chat_context_exposes_size_rollups_for_file_questions(self):
+        first = self.watch / "one.py"
+        second = self.watch / "two.py"
+        first.write_text("print('one')\n", encoding="utf-8")
+        second.write_text("print('two')\n", encoding="utf-8")
+        self.pipeline.ingest_path(first)
+        self.pipeline.ingest_path(second)
+        recorder = RecordingClient(["The Python files have indexed size data."])
+        policy = LLMPolicy(
+            path=self.config.llm_policy_path,
+            provider_enabled=True,
+            chat_enabled=True,
+            chat_prompt="Reply naturally.",
+            chat_response_tokens=512,
+        )
+        llm = FolderWatcherLLM(self.config, self.index, client_factory=lambda: recorder, policy=policy)
+
+        result = llm.chat("what is the total size for python files", [], None, 5)
+        payload = recorder.completions.calls[0]["messages"][-1]["content"]
+        context = json.loads(payload)
+
+        expected_size = first.stat().st_size + second.stat().st_size
+        self.assertEqual(result["stats"]["by_extension_details"][".py"]["count"], 2)
+        self.assertEqual(result["stats"]["by_extension_details"][".py"]["size_bytes"], expected_size)
+        self.assertEqual(context["stats"]["by_extension_details"][".py"]["size_bytes"], expected_size)
+        self.assertTrue(context["stats"]["largest_files"])
 
     def test_document_and_media_extractors_store_real_metadata(self):
         try:

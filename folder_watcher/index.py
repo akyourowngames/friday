@@ -360,6 +360,53 @@ class FolderIndex:
             rows = self._conn.execute(query, params).fetchall()
             return [self._row_to_file(row) for row in rows]
 
+    def file_details(
+        self,
+        limit: int = 100,
+        extension: str | None = None,
+        directory: str | None = None,
+        include_content: bool = False,
+        max_content_chars: int = 2000,
+    ) -> list[dict]:
+        limit = _bounded_limit(limit, 1, 500)
+        content_limit = _bounded_limit(max_content_chars, 1, 50000)
+        clauses = ["status = ?"]
+        params: list[object] = ["active"]
+        if extension:
+            ext = str(extension).strip().lower()
+            if ext and not ext.startswith("."):
+                ext = "." + ext
+            clauses.append("extension = ?")
+            params.append(ext)
+        if directory:
+            clean = str(directory).strip().replace("\\", "/").strip("/")
+            if clean:
+                clauses.append("path LIKE ?")
+                params.append("%/" + clean + "/%")
+        query = "SELECT * FROM files WHERE " + " AND ".join(clauses) + " ORDER BY extension, path LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+            result = []
+            for row in rows:
+                item = self._row_to_file(row)
+                content = self.get_content(item["id"]) or ""
+                dependencies = self.dependencies(item["id"])
+                dependents = self.dependents(item["id"])
+                event_summary = self._file_event_summary(item["id"])
+                item["details"] = {
+                    "content_available": bool(content),
+                    "content_chars": len(content),
+                    "dependency_count": len(dependencies),
+                    "dependent_count": len(dependents),
+                    "event_count": event_summary["count"],
+                    "last_event": event_summary["recent"][0] if event_summary["recent"] else None,
+                }
+                if include_content:
+                    item["content_excerpt"] = content[:content_limit]
+                result.append(item)
+            return result
+
     def diff(self, since: float | None = None, from_ts: float | None = None, to_ts: float | None = None, limit: int = 200) -> list[dict]:
         clauses: list[str] = []
         params: list[object] = []
@@ -644,6 +691,9 @@ class FolderIndex:
                 "fts_enabled": self._fts_enabled,
                 "by_extension": self._breakdown("extension"),
                 "by_mime_type": self._breakdown("mime_type"),
+                "by_extension_details": self._breakdown_details("extension"),
+                "by_mime_type_details": self._breakdown_details("mime_type"),
+                "largest_files": self._largest_files(10),
                 "hot_files": self.hot_files(),
             }
 
@@ -772,6 +822,64 @@ class FolderIndex:
             ("active",),
         ).fetchall()
         return {str(row[column] or "unknown"): row["count"] for row in rows}
+
+    def _breakdown_details(self, column: str) -> dict:
+        rows = self._conn.execute(
+            f"""
+            SELECT {column},
+                   COUNT(*) AS count,
+                   COALESCE(SUM(size_bytes), 0) AS size_bytes,
+                   COALESCE(AVG(size_bytes), 0) AS avg_size_bytes,
+                   COALESCE(MIN(size_bytes), 0) AS min_size_bytes,
+                   COALESCE(MAX(size_bytes), 0) AS max_size_bytes,
+                   COALESCE(MAX(modified_ts), 0) AS newest_modified_ts,
+                   COALESCE(MAX(indexed_ts), 0) AS newest_indexed_ts
+            FROM files
+            WHERE status = ?
+            GROUP BY {column}
+            ORDER BY size_bytes DESC, count DESC
+            """,
+            ("active",),
+        ).fetchall()
+        return {
+            str(row[column] or "unknown"): {
+                "count": int(row["count"] or 0),
+                "size_bytes": int(row["size_bytes"] or 0),
+                "avg_size_bytes": int(row["avg_size_bytes"] or 0),
+                "min_size_bytes": int(row["min_size_bytes"] or 0),
+                "max_size_bytes": int(row["max_size_bytes"] or 0),
+                "newest_modified_ts": float(row["newest_modified_ts"] or 0),
+                "newest_indexed_ts": float(row["newest_indexed_ts"] or 0),
+            }
+            for row in rows
+        }
+
+    def _largest_files(self, limit: int) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT *
+            FROM files
+            WHERE status = ?
+            ORDER BY size_bytes DESC, path
+            LIMIT ?
+            """,
+            ("active", _bounded_limit(limit, 1, 100)),
+        ).fetchall()
+        return [self._row_to_file(row) for row in rows]
+
+    def _file_event_summary(self, file_id: str) -> dict:
+        count = self._scalar("SELECT COUNT(*) FROM events WHERE file_id = ?", (file_id,))
+        rows = self._conn.execute(
+            """
+            SELECT *
+            FROM events
+            WHERE file_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 5
+            """,
+            (file_id,),
+        ).fetchall()
+        return {"count": count, "recent": [self._row_to_event(row) for row in rows]}
 
 
 def _json_dict(value: str) -> dict:
