@@ -242,10 +242,28 @@ Last verified by the default markdown pipeline on 2026-05-23:
   `GITHUB_LIST_REPOSITORY_ISSUES`, observed schema-rendered `owner` and `repo`
   fields prefilled from local repo defaults, clicked Run, and received provider
   output with `error: null`.
-- Final follow-up checks passed: `python -m pytest -q` with 261 passed tests and
+- Final follow-up checks passed: `python -m pytest -q` with 272 passed tests and
   35 subtests, `npm run typecheck`, `python -m unittest tests.test_tools_fleet`,
   compileall for the ship pipeline scope, and the markdown verification pipeline
   with 6 passed checks, 0 failed, 0 timed out, `ship`.
+- Follow-up gateway expansion added direct Composio catalog/session endpoints,
+  bulk markdown policy install, compact catalog items, and markdown-gated
+  semantic slug resolution for imprecise requests such as `get_repo_details`.
+- Direct dispatch proof executed `tool_slug=get_repo_details`; the gateway
+  resolved it to `GITHUB_GET_A_REPOSITORY`, applied local owner/repo defaults,
+  and returned provider output with `error: None`.
+- CLI-route proof found the model may pass filler arguments such as
+  `{"owner":"owner","repo":"repo"}`; the gateway now repairs only
+  markdown-listed placeholder values from local repo defaults before execution.
+- Real CLI proof for `use composio to get repo details for this repo` returned
+  live details for `akyourowngames/friday` after semantic slug recovery and
+  placeholder argument repair.
+- Catalog proof executed `action=tools`, `toolkit=github`, `query=issues`, and
+  returned 5 compact items with provider `total_items: 72`.
+- Focused follow-up checks passed: `python -m unittest tests.test_composio_tool
+  tests.test_composio_api`, `python -m py_compile tools\composio.py
+  api_server.py`, API probes for `/composio/tools`, `/composio/toolkits`, and
+  bulk `/composio/policy/tools`, plus the final markdown verification pipeline.
 
 ## Escalation Rules
 

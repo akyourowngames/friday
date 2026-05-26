@@ -124,6 +124,10 @@ class ComposioPolicyToolRequest(BaseModel):
     note: str = ""
 
 
+class ComposioPolicyToolsRequest(BaseModel):
+    tools: list[ComposioPolicyToolRequest]
+
+
 def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -1051,6 +1055,18 @@ def _composio_policy_tool_line(payload: ComposioPolicyToolRequest) -> str:
     return f"- {slug} | toolkit: {toolkit} | risk: {risk} | enabled: {enabled} | note: {note}"
 
 
+def _validate_composio_policy_tool(payload: ComposioPolicyToolRequest) -> None:
+    slug = payload.slug.strip().upper()
+    toolkit = payload.toolkit.strip().lower()
+    risk = payload.risk.strip().lower()
+    if not slug:
+        raise HTTPException(status_code=400, detail={"code": "MISSING_TOOL_SLUG", "message": "Tool slug is required."})
+    if not toolkit:
+        raise HTTPException(status_code=400, detail={"code": "MISSING_TOOLKIT", "message": "Toolkit is required."})
+    if risk not in {"read", "write", "destructive", "auth"}:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_RISK", "message": "Risk must be read, write, destructive, or auth."})
+
+
 def _insert_before_next_section(lines: list[str], section_name: str, new_line: str) -> list[str]:
     output = []
     active = ""
@@ -1075,19 +1091,12 @@ def _insert_before_next_section(lines: list[str], section_name: str, new_line: s
 
 
 def _update_composio_policy_tool(payload: ComposioPolicyToolRequest) -> dict[str, Any]:
-    slug = payload.slug.strip().upper()
-    toolkit = payload.toolkit.strip().lower()
-    risk = payload.risk.strip().lower()
-    if not slug:
-        raise HTTPException(status_code=400, detail={"code": "MISSING_TOOL_SLUG", "message": "Tool slug is required."})
-    if not toolkit:
-        raise HTTPException(status_code=400, detail={"code": "MISSING_TOOLKIT", "message": "Toolkit is required."})
-    if risk not in {"read", "write", "destructive", "auth"}:
-        raise HTTPException(status_code=400, detail={"code": "INVALID_RISK", "message": "Risk must be read, write, destructive, or auth."})
-
+    _validate_composio_policy_tool(payload)
     policy_path = _composio_policy_path()
     lines = policy_path.read_text(encoding="utf-8").splitlines()
     new_tool_line = _composio_policy_tool_line(payload)
+    slug = payload.slug.strip().upper()
+    toolkit = payload.toolkit.strip().lower()
 
     output = []
     section = ""
@@ -1115,6 +1124,52 @@ def _update_composio_policy_tool(payload: ComposioPolicyToolRequest) -> dict[str
     return _composio_policy_payload()
 
 
+def _update_composio_policy_tools(payloads: list[ComposioPolicyToolRequest]) -> dict[str, Any]:
+    if not payloads:
+        raise HTTPException(status_code=400, detail={"code": "MISSING_TOOLS", "message": "At least one tool is required."})
+    for payload in payloads:
+        _validate_composio_policy_tool(payload)
+
+    policy_path = _composio_policy_path()
+    lines = policy_path.read_text(encoding="utf-8").splitlines()
+    by_slug = {payload.slug.strip().upper(): payload for payload in payloads}
+    toolkits_to_add = {
+        payload.toolkit.strip().lower()
+        for payload in payloads
+        if payload.enabled
+    }
+    toolkit_present = set()
+    replaced = set()
+    output = []
+    section = ""
+    for line in lines:
+        next_section = _composio_section(line)
+        if next_section:
+            section = next_section
+        if section == "enabled toolkits" and line.strip().startswith("- "):
+            toolkit_present.add(line.strip()[2:].strip().lower())
+        slug = _composio_tool_slug_from_line(line)
+        if section == "enabled tools" and slug in by_slug:
+            output.append(_composio_policy_tool_line(by_slug[slug]))
+            replaced.add(slug)
+            continue
+        output.append(line)
+
+    for toolkit in sorted(toolkits_to_add - toolkit_present):
+        output = _insert_before_next_section(output, "enabled toolkits", "- " + toolkit)
+    for slug in sorted(set(by_slug) - replaced):
+        output = _insert_before_next_section(output, "enabled tools", _composio_policy_tool_line(by_slug[slug]))
+
+    policy_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    payload = _composio_policy_payload()
+    payload["bulk_update"] = {
+        "requested": len(payloads),
+        "updated": len(payloads),
+        "tool_slugs": sorted(by_slug),
+    }
+    return payload
+
+
 def _composio_policy_payload() -> dict[str, Any]:
     from tools import composio as composio_tool
 
@@ -1127,11 +1182,15 @@ def _composio_policy_payload() -> dict[str, Any]:
         "enabled": policy.enabled,
         "base_url": policy.base_url,
         "enabled_toolkits": sorted(policy.enabled_toolkits),
+        "semantic_slug_resolution": policy.semantic_slug_resolution,
+        "semantic_slug_min_score": policy.semantic_slug_min_score,
+        "semantic_slug_min_margin": policy.semantic_slug_min_margin,
         "local_repository": composio_tool._local_repository_hint(),
         "argument_defaults": {
             slug: composio_tool._argument_defaults(policy, slug)
             for slug in sorted(policy.argument_defaults)
         },
+        "argument_default_placeholders": sorted(policy.argument_default_placeholders),
         "enabled_tools": [
             {
                 "slug": rule.slug,
@@ -1166,6 +1225,38 @@ def composio_policy():
     return _composio_policy_payload()
 
 
+@app.get("/composio/toolkits")
+def composio_toolkits(query: str = "", limit: int = 20):
+    result = _run_composio_tool(ComposioRequest(action="toolkits", query=query, limit=limit))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
+@app.get("/composio/tools")
+def composio_tools(toolkit: str = "", query: str = "", limit: int = 20):
+    result = _run_composio_tool(ComposioRequest(action="tools", toolkit=toolkit, query=query, limit=limit))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
+@app.get("/composio/session/tools")
+def composio_session_tools(session_id: str = "", limit: int = 20):
+    result = _run_composio_tool(ComposioRequest(action="session_tools", session_id=session_id, limit=limit))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
+@app.get("/composio/session/toolkits")
+def composio_session_toolkits(session_id: str = ""):
+    result = _run_composio_tool(ComposioRequest(action="session_toolkits", session_id=session_id))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
 @app.post("/composio/action")
 def composio_action(payload: ComposioRequest):
     result = _run_composio_tool(payload)
@@ -1177,6 +1268,11 @@ def composio_action(payload: ComposioRequest):
 @app.post("/composio/policy/tool")
 def composio_policy_tool(payload: ComposioPolicyToolRequest):
     return _update_composio_policy_tool(payload)
+
+
+@app.post("/composio/policy/tools")
+def composio_policy_tools(payload: ComposioPolicyToolsRequest):
+    return _update_composio_policy_tools(payload.tools)
 
 
 @app.get("/app/audio/{filename}")

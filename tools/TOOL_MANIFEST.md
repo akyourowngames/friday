@@ -96,6 +96,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 
 - Entrypoint: `tools/composio.py`.
 - Management API: `/composio/status`, `/composio/policy`, `/composio/action`, and `/composio/policy/tool`.
+- Gateway catalog API: `/composio/toolkits`, `/composio/tools`, `/composio/session/toolkits`, `/composio/session/tools`, and bulk policy install through `/composio/policy/tools`.
 - Frontend: `public/frontend/composio.html`.
 - Policy file: configured by `KING_COMPOSIO_POLICY_FILE`, defaulting to `tools/COMPOSIO_GATEWAY.md`.
 - Provider API: configured by `KING_COMPOSIO_BASE_URL`, defaulting to Composio API v3.1.
@@ -106,21 +107,23 @@ The runtime registry remains the source of truth for callable schemas. This mani
 
 ### Inputs
 
-- `action`: `status`, `catalog`, `create_session`, `link`, `search`, `schema`, or `execute`.
+- `action`: `status`, `catalog`, `toolkits`, `tools`, `create_session`, `session_tools`, `session_toolkits`, `link`, `search`, `schema`, or `execute`.
 - `toolkit`: Composio toolkit slug, allowed only when listed under Enabled Toolkits.
 - `tool_slug`: exact Composio tool slug, allowed only when listed under Enabled Tools.
 - `arguments`: JSON object passed to Composio for `execute`.
 - Optional query, session id, user id, account alias, confirmation flag, limit, timeout, response format, and trace toggle.
-- Missing execution arguments may be filled only from the selected tool's markdown `Argument Defaults`; user-supplied arguments always win.
+- Missing execution arguments and markdown-listed placeholder values may be filled only from the selected tool's markdown `Argument Defaults`; concrete user-supplied arguments always win.
+- Imprecise requested tool slugs may be semantically resolved only to markdown-enabled tools when `COMPOSIO_GATEWAY.md` score and margin gates pass.
 
 ### Outputs
 
 - Local status showing enabled toolkits, enabled tool slugs, API-key presence, session-id presence, local repository hints, and resolved argument defaults.
+- Compact Composio toolkit/tool catalog items for endpoint consumers, plus bounded raw provider data.
 - Created Composio tool-router session id and MCP URL.
 - Composio hosted auth redirect URL for approved toolkits.
 - Approved tool schema, catalog, search, or execution JSON, bounded by markdown response limits.
 - Schema responses include compact `input_schema` and `required_arguments` beside bounded raw provider data so clients do not depend on oversized schema previews.
-- Execution payloads include `argument_defaults_applied` when the gateway fills omitted values before calling Composio.
+- Execution payloads include `argument_defaults_applied` when the gateway fills omitted or markdown-placeholder values before calling Composio.
 - Typed structured errors for disabled policy, missing API key, non-enabled toolkits/tools, confirmation-required risk, provider errors, and invalid JSON arguments.
 
 ### Error Handling
@@ -139,6 +142,8 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `python -m py_compile tools/composio.py`
 - `node --check public/frontend/composio.js`
 - Direct dispatch probe: execute `GITHUB_LIST_REPOSITORY_ISSUES` with empty arguments and verify the gateway applies local owner/repo defaults before the provider call.
+- Direct dispatch probe: execute `get_repo_details` and verify semantic slug resolution selects `GITHUB_GET_A_REPOSITORY`.
+- API probe: `GET /composio/tools?toolkit=github&query=issues&limit=5` returns compact catalog items.
 - `tool_manifest_audit` must show manifest/file alignment.
 
 ## Markdown Tool Contract: tool_readiness_audit
@@ -1172,6 +1177,8 @@ It exists so KING can recover from transient failures without hanging, looping i
 
 ## Evolution Log
 
+- 2026-05-26T00:58+05:30 - Added markdown-owned argument placeholder replacement so filler values such as `owner` and `repo` can be repaired from local repo defaults without overriding concrete arguments.
+- 2026-05-26T00:55+05:30 - Added Composio gateway catalog/session endpoints, bulk markdown policy install, compact catalog items, and semantic recovery for imprecise enabled tool slugs such as `get_repo_details`.
 - 2026-05-26T00:40+05:30 - Added markdown-owned Composio argument defaults, local Git remote context in status/policy endpoints, and execution-time default application so KING can call approved repo tools naturally without browser-only argument repair.
 - 2026-05-26T00:00+05:30 - Added `composio` runtime gateway and `COMPOSIO_GATEWAY.md` policy for markdown-limited Composio sessions, auth links, approved schemas, and approved external app execution.
 - 2026-05-23T18:10+00:00 - Upgraded `notes` tools to version 2.0.0 with config-driven storage path (`KING_NOTES_FILE`), structured legacy-preserving output, search limit, preview bounds, typed errors, and traces.
