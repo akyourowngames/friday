@@ -204,12 +204,12 @@ def _memory_graph_payload(brain: Brain) -> dict[str, Any]:
     }
 
 
-def _run_agent(agent: Agent, lock: threading.Lock, message: str) -> dict[str, Any]:
+def _run_agent(agent: Agent, lock: threading.Lock, message: str, emit_chunk=None) -> dict[str, Any]:
     with lock:
         before = len(agent.messages)
         capture = io.StringIO()
         with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
-            response = agent.process(message)
+            response = agent.process(message, emit_chunk=emit_chunk)
         new_messages = agent.messages[before:]
     return {
         "response": str(response or "").strip(),
@@ -218,17 +218,30 @@ def _run_agent(agent: Agent, lock: threading.Lock, message: str) -> dict[str, An
 
 
 def _chunk_text(text: str, target_size: int = 34) -> list[str]:
+    text = str(text or "")
+    if not text:
+        return ["(No response)"]
+    if target_size <= 0 or len(text) <= target_size:
+        return [text]
     chunks = []
-    current = ""
-    for word in str(text or "").split(" "):
-        next_part = word if not current else f" {word}"
-        if current and len(current) + len(next_part) > target_size:
-            chunks.append(current)
-            current = word
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + target_size)
+        if end < len(text):
+            split_at = 0
+            for index in range(end, start, -1):
+                if text[index - 1].isspace():
+                    split_at = index
+                    break
+            if split_at > start:
+                end = split_at
+        chunk = text[start:end]
+        if chunk:
+            chunks.append(chunk)
+        if end <= start:
+            start += target_size
         else:
-            current += next_part
-    if current:
-        chunks.append(current)
+            start = end
     return chunks or ["(No response)"]
 
 
@@ -691,7 +704,6 @@ async def _stream_camera_chat(payload: ChatRequest, session_id: str):
     )
     for chunk in _chunk_text(response or "(No response)", target_size=72):
         yield _sse({"session_id": session_id, "chunk": chunk})
-        await asyncio.sleep(0.015)
     yield _sse(
         {
             "session_id": session_id,
@@ -740,29 +752,92 @@ async def _stream_chat(payload: ChatRequest):
         }
     )
 
-    work = asyncio.create_task(asyncio.to_thread(_run_agent, agent, lock, message))
+    chunk_queue: asyncio.Queue[str] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def emit_chunk(text: str) -> None:
+        chunk = str(text or "")
+        if chunk:
+            loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
+
+    work = asyncio.create_task(asyncio.to_thread(_run_agent, agent, lock, message, emit_chunk))
     pulse = 0
-    while not work.done():
-        await asyncio.sleep(0.9)
-        pulse += 1
-        yield _sse(
-            {
-                "session_id": session_id,
-                "activity": {
-                    "event": "waiting_for_model",
-                    "message": "KING core is working...",
-                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
-                    "route": "assistant",
-                    "pulse": pulse,
-                },
-            }
-        )
+    last_pulse = time.perf_counter()
+    first_chunk_sent = False
+    while True:
+        try:
+            first_piece = await asyncio.wait_for(chunk_queue.get(), timeout=0.12)
+        except asyncio.TimeoutError:
+            first_piece = ""
+        if first_piece:
+            pieces = [first_piece]
+            while True:
+                try:
+                    pieces.append(chunk_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            chunk = "".join(pieces)
+            if not first_chunk_sent:
+                first_chunk_sent = True
+                yield _sse(
+                    {
+                        "session_id": session_id,
+                        "activity": {
+                            "event": "first_chunk",
+                            "message": "Assistant response ready.",
+                            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                            "route": "assistant",
+                        },
+                    }
+                )
+            yield _sse({"session_id": session_id, "chunk": chunk})
+            continue
+        if work.done():
+            break
+        now = time.perf_counter()
+        if now - last_pulse >= 0.8:
+            last_pulse = now
+            pulse += 1
+            yield _sse(
+                {
+                    "session_id": session_id,
+                    "activity": {
+                        "event": "waiting_for_model",
+                        "message": "KING core is working...",
+                        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                        "route": "assistant",
+                        "pulse": pulse,
+                    },
+                }
+            )
 
     try:
         result = await work
     except Exception as exc:
         yield _sse({"session_id": session_id, "error": f"KING API error: {exc}", "done": True})
         return
+
+    trailing_pieces = []
+    while True:
+        try:
+            trailing_pieces.append(chunk_queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    if trailing_pieces:
+        if not first_chunk_sent:
+            first_chunk_sent = True
+            yield _sse(
+                {
+                    "session_id": session_id,
+                    "activity": {
+                        "event": "first_chunk",
+                        "message": "Assistant response ready.",
+                        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                        "route": "assistant",
+                    },
+                }
+            )
+        yield _sse({"session_id": session_id, "chunk": "".join(trailing_pieces)})
 
     response = result["response"]
     messages = result["messages"]
@@ -811,20 +886,20 @@ async def _stream_chat(payload: ChatRequest):
         )
         yield _sse({"session_id": session_id, "search_results": panel})
 
-    yield _sse(
-        {
-            "session_id": session_id,
-            "activity": {
-                "event": "first_chunk",
-                "message": "Assistant response ready.",
-                "elapsed_ms": elapsed_ms,
-                "route": "assistant",
-            },
-        }
-    )
-    for chunk in _chunk_text(response or "(No response)"):
-        yield _sse({"session_id": session_id, "chunk": chunk})
-        await asyncio.sleep(0.025)
+    if not first_chunk_sent:
+        yield _sse(
+            {
+                "session_id": session_id,
+                "activity": {
+                    "event": "first_chunk",
+                    "message": "Assistant response ready.",
+                    "elapsed_ms": elapsed_ms,
+                    "route": "assistant",
+                },
+            }
+        )
+        for chunk in _chunk_text(response or "(No response)"):
+            yield _sse({"session_id": session_id, "chunk": chunk})
     yield _sse(
         {
             "session_id": session_id,

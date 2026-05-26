@@ -2,28 +2,40 @@ import json
 import argparse
 import sys
 import threading
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
+Panel = None
+Table = None
 
-from agent.core import Agent
-from config import settings
-from tools.registry import get_tools
-from voice.listener import Listener
-from voice.speaker import speak
-from gesture.collector import collect as gesture_collect
-from gesture.trainer import train as gesture_train
-from gesture.detector import GestureDetector
-from gesture.controller import execute as gesture_execute
 
-console = Console()
+class _PlainConsole:
+    def print(self, *values, end="\n", **_kwargs):
+        print(" ".join(str(value) for value in values), end=end)
+
+    def input(self, prompt: str = "") -> str:
+        return input(prompt)
+
+    def print_json(self, text: str):
+        print(text)
+
+
+console = _PlainConsole()
 _gesture_detector = None
 _gesture_enabled = False
 DEFAULT_API_BASE = "http://127.0.0.1:8000"
+
+
+def _enable_rich_console():
+    global console, Panel, Table
+    from rich.console import Console
+    from rich.panel import Panel as RichPanel
+    from rich.table import Table as RichTable
+
+    console = Console()
+    Panel = RichPanel
+    Table = RichTable
 
 
 def _configure_output_encoding():
@@ -36,6 +48,11 @@ def _configure_output_encoding():
 
 
 def print_welcome():
+    if not Panel:
+        console.print("KING - your AI assistant")
+        console.print("  /debug  /tools  /model <name>  /memory  /remember <fact>  /forget <fact>  /voice  /new  /exit")
+        console.print()
+        return
     title = Panel.fit(
         "[bold cyan] KING [/bold cyan]  [dim]— your AI assistant[/dim]",
         border_style="cyan",
@@ -77,10 +94,16 @@ def _looks_like_api_base(value: str) -> bool:
         return False
     if any(ch.isspace() for ch in text):
         return False
-    parsed = urlparse(text if "://" in text else "http://" + text)
+    has_scheme = "://" in text
+    parsed = urlparse(text if has_scheme else "http://" + text)
     if parsed.hostname and parsed.port:
         return True
-    if parsed.scheme in ("http", "https") and parsed.hostname:
+    if has_scheme and parsed.scheme in ("http", "https") and parsed.hostname:
+        return True
+    host = str(parsed.hostname or "")
+    if host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return True
+    if "." in host:
         return True
     return False
 
@@ -93,7 +116,8 @@ def _resolve_api_cli_inputs(api_arg: str, message_parts: list[str]) -> tuple[str
 
 
 def _iter_sse_events(response):
-    for raw_line in response.iter_lines():
+    source = response.iter_lines() if hasattr(response, "iter_lines") else response
+    for raw_line in source:
         line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
         line = line.strip()
         if not line.startswith("data:"):
@@ -109,6 +133,31 @@ def _iter_sse_events(response):
             yield parsed
 
 
+def _print_table(columns: list[str], rows: list[list[str]], right_aligned: set[int] | None = None):
+    right_aligned = right_aligned or set()
+    if Table:
+        table = Table(show_header=True, header_style="bold cyan")
+        for index, column in enumerate(columns):
+            table.add_column(column, justify="right" if index in right_aligned else "left")
+        for row in rows:
+            table.add_row(*[str(value) for value in row])
+        console.print(table)
+        return
+    widths = [len(str(column)) for column in columns]
+    for row in rows:
+        for index, value in enumerate(row):
+            widths[index] = max(widths[index], len(str(value)))
+    header = " | ".join(str(column).ljust(widths[index]) for index, column in enumerate(columns))
+    console.print(header)
+    console.print("-+-".join("-" * width for width in widths))
+    for row in rows:
+        cells = []
+        for index, value in enumerate(row):
+            text = str(value)
+            cells.append(text.rjust(widths[index]) if index in right_aligned else text.ljust(widths[index]))
+        console.print(" | ".join(cells))
+
+
 def _print_folder_panel(payload: dict):
     answer = str(payload.get("answer") or "").strip()
     if answer:
@@ -116,113 +165,117 @@ def _print_folder_panel(payload: dict):
     stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
     if stats:
         console.print(
-            f"[cyan]Folder watcher:[/cyan] {stats.get('active_files', payload.get('count', '?'))} active file(s), "
+            f"Folder watcher: {stats.get('active_files', payload.get('count', '?'))} active file(s), "
             f"{stats.get('total_size_bytes', '?')} bytes"
         )
         details = stats.get("by_extension_details") if isinstance(stats.get("by_extension_details"), dict) else {}
         if details:
-            table = Table(show_header=True, header_style="bold cyan")
-            table.add_column("Type")
-            table.add_column("Files", justify="right")
-            table.add_column("Bytes", justify="right")
+            rows = []
             for extension, item in list(details.items())[:10]:
                 if isinstance(item, dict):
-                    table.add_row(str(extension), str(item.get("count", "")), str(item.get("size_bytes", "")))
-            console.print(table)
+                    rows.append([str(extension), str(item.get("count", "")), str(item.get("size_bytes", ""))])
+            _print_table(["Type", "Files", "Bytes"], rows, right_aligned={1, 2})
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
     if files:
-        table = Table(show_header=True, header_style="bold cyan")
-        table.add_column("File")
-        table.add_column("Type")
-        table.add_column("Bytes", justify="right")
+        rows = []
         for item in files[:10]:
             if isinstance(item, dict):
-                table.add_row(
+                rows.append([
                     str(item.get("filename") or item.get("id") or ""),
                     str(item.get("extension") or item.get("mime_type") or ""),
                     str(item.get("size_bytes") or ""),
-                )
-        console.print(table)
+                ])
+        _print_table(["File", "Type", "Bytes"], rows, right_aligned={2})
 
 
 def _api_folder_request(base_url: str, action: str = "ask", query: str = "", **extra) -> dict:
     payload = {"action": action, "query": query}
     payload.update(extra)
-    with httpx.Client(timeout=60.0) as client:
-        response = client.post(_normalize_api_base(base_url) + "/folder-watcher", json=payload)
-        response.raise_for_status()
-        data = response.json()
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        _normalize_api_base(base_url) + "/folder-watcher",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = json.loads(response.read().decode("utf-8", errors="replace"))
     return data if isinstance(data, dict) else {"data": data}
 
 
-def _api_chat_once(base_url: str, message: str, session_id: str | None = None) -> tuple[str, str | None]:
+def _api_chat_once(base_url: str, message: str, session_id: str | None = None, show_panels: bool = False) -> tuple[str, str | None]:
     text_parts = []
     next_session_id = session_id
-    with httpx.Client(timeout=None) as client:
-        with client.stream(
-            "POST",
-            _normalize_api_base(base_url) + "/chat/jarvis/stream",
-            json={"message": message, "session_id": session_id, "tts": False},
-        ) as response:
-            response.raise_for_status()
-            for event in _iter_sse_events(response):
-                if event.get("session_id"):
-                    next_session_id = str(event["session_id"])
-                if event.get("chunk"):
-                    chunk = str(event["chunk"])
-                    text_parts.append(chunk)
-                    console.print(chunk, end="")
-                if event.get("folder_watcher_result"):
-                    console.print()
-                    _print_folder_panel(event["folder_watcher_result"])
-                if event.get("navigator_result"):
-                    console.print()
-                    console.print("[cyan]Navigator result received from API.[/cyan]")
-                if event.get("vision_result"):
-                    console.print()
-                    console.print(str(event["vision_result"].get("description") or ""))
-                if event.get("error"):
-                    console.print(f"\n[red]{event['error']}[/red]")
-            if text_parts:
+    payload = {"message": message, "session_id": session_id, "tts": False}
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        _normalize_api_base(base_url) + "/chat/jarvis/stream",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=300) as response:
+        for event in _iter_sse_events(response):
+            if event.get("session_id"):
+                next_session_id = str(event["session_id"])
+            if event.get("chunk"):
+                chunk = str(event["chunk"])
+                text_parts.append(chunk)
+                console.print(chunk, end="")
+            if show_panels and event.get("folder_watcher_result"):
                 console.print()
+                _print_folder_panel(event["folder_watcher_result"])
+            if show_panels and event.get("navigator_result"):
+                console.print()
+                console.print("Navigator result received from API.")
+            if show_panels and event.get("vision_result"):
+                console.print()
+                console.print(str(event["vision_result"].get("description") or ""))
+            if event.get("error"):
+                console.print(f"\n{event['error']}")
+        if text_parts:
+            console.print()
     return "".join(text_parts).strip(), next_session_id
 
 
 def _handle_api_command(base_url: str, raw: str) -> str:
     if raw == "/help":
-        console.print("[bold]Type naturally.[/bold] Slash commands are optional: /health  /folder <question>  /folder-stats  /exit")
+        console.print("Type naturally. Slash commands are optional: /health  /folder <question>  /folder-stats  /exit")
         return "handled"
     if raw == "/health":
         try:
-            with httpx.Client(timeout=10.0) as client:
-                console.print_json(json.dumps(client.get(base_url + "/health").json()))
+            with urllib.request.urlopen(base_url + "/health", timeout=10) as response:
+                console.print_json(response.read().decode("utf-8", errors="replace"))
         except Exception as exc:
-            console.print(f"[red]API health failed: {exc.__class__.__name__}[/red]")
+            console.print(f"API health failed: {exc.__class__.__name__}")
         return "handled"
     if raw == "/folder-stats":
         try:
             _print_folder_panel(_api_folder_request(base_url, action="stats"))
         except Exception as exc:
-            console.print(f"[red]Folder watcher request failed: {exc.__class__.__name__}[/red]")
+            console.print(f"Folder watcher request failed: {exc.__class__.__name__}")
         return "handled"
     if raw.startswith("/folder "):
         try:
             _print_folder_panel(_api_folder_request(base_url, action="ask", query=raw[len("/folder "):].strip()))
         except Exception as exc:
-            console.print(f"[red]Folder watcher request failed: {exc.__class__.__name__}[/red]")
+            console.print(f"Folder watcher request failed: {exc.__class__.__name__}")
         return "handled"
     if raw.startswith("/"):
-        console.print(f"[red]Unknown API command: {raw}. Try /help[/red]")
+        console.print(f"Unknown API command: {raw}. Try /help")
         return "handled"
     return "unhandled"
 
 
 def run_api_client(base_url: str, initial_message: str = ""):
     base_url = _normalize_api_base(base_url)
-    console.print(Panel.fit(f"[bold cyan]KING API CLI[/bold cyan]\n[dim]{base_url}[/dim]", border_style="cyan"))
-    console.print("[dim]Connected mode: type naturally like the frontend. Slash commands are optional.[/dim]")
-    console.print("  [dim]examples:[/dim] how many python files are there?  [dim]|[/dim] what's in this folder?")
-    console.print("  [dim]commands:[/dim] /health  /folder <question>  /folder-stats  /exit")
+    console.print("+-----------------------+")
+    console.print("| KING API CLI          |")
+    console.print(f"| {base_url.ljust(21)} |")
+    console.print("+-----------------------+")
+    console.print("Connected mode: type naturally like the frontend. Slash commands are optional.")
+    console.print("  examples: how many python files are there? | what's in this folder?")
+    console.print("  commands: /health  /folder <question>  /folder-stats  /exit")
     session_id = None
     if initial_message:
         if _handle_api_command(base_url, initial_message) == "handled":
@@ -231,14 +284,14 @@ def run_api_client(base_url: str, initial_message: str = ""):
         return
     while True:
         try:
-            raw = console.input("[bold yellow]api> [/bold yellow] ").strip()
+            raw = console.input("api> ").strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[cyan]Goodbye![/cyan]")
+            console.print("\nGoodbye!")
             return
         if not raw:
             continue
         if raw in ("/exit", "/quit"):
-            console.print("[cyan]Goodbye![/cyan]")
+            console.print("Goodbye!")
             return
         if raw == "/help":
             _handle_api_command(base_url, raw)
@@ -249,38 +302,40 @@ def run_api_client(base_url: str, initial_message: str = ""):
         try:
             _, session_id = _api_chat_once(base_url, raw, session_id)
         except Exception as exc:
-            console.print(f"[red]API chat failed: {exc.__class__.__name__}[/red]")
+            console.print(f"API chat failed: {exc.__class__.__name__}")
 
 
 def run_api_server(host: str, port: int):
     try:
         import uvicorn
     except ImportError:
-        console.print("[red]uvicorn is not installed, so API server mode cannot start.[/red]")
+        console.print("uvicorn is not installed, so API server mode cannot start.")
         return
-    console.print(f"[cyan]Starting KING API on http://{host}:{port}[/cyan]")
+    console.print(f"Starting KING API on http://{host}:{port}")
     uvicorn.run("api_server:app", host=host, port=port)
 
 
 def cmd_debug():
+    from config import settings
+
     settings.debug = not settings.debug
     console.print(f"[green]Debug mode: {'ON' if settings.debug else 'OFF'}[/green]")
 
 
 def cmd_tools():
+    from tools.registry import get_tools
+
     tools = get_tools()
     if not tools:
         console.print("[yellow]No tools registered yet.[/yellow]")
         return
-    table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("Tool")
-    table.add_column("Description")
-    for t in tools:
-        table.add_row(f"[cyan]{t['name']}[/cyan]", t["description"])
-    console.print(table)
+    rows = [[t["name"], t["description"]] for t in tools]
+    _print_table(["Tool", "Description"], rows)
 
 
 def cmd_model(args):
+    from config import settings
+
     if not args:
         console.print(f"[yellow]Current model: {settings.model_name}[/yellow]")
         return
@@ -288,7 +343,7 @@ def cmd_model(args):
     console.print(f"[green]Model set to: {settings.model_name}[/green]")
 
 
-def cmd_memory(agent: Agent, args: str = ""):
+def cmd_memory(agent, args: str = ""):
     try:
         limit = int(args.strip()) if args.strip() else 25
     except ValueError:
@@ -304,17 +359,14 @@ def cmd_memory(agent: Agent, args: str = ""):
     if not memories:
         console.print("[yellow]No memories stored.[/yellow]")
         return
-    table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("#", justify="right")
-    table.add_column("Fact")
-    table.add_column("When")
+    rows = []
     for item in memories:
         when = " ".join(part for part in (item.get("date", ""), item.get("time", "")) if part)
-        table.add_row(str(item["index"]), item["text"], when)
-    console.print(table)
+        rows.append([str(item["index"]), item["text"], when])
+    _print_table(["#", "Fact", "When"], rows, right_aligned={0})
 
 
-def cmd_remember(agent: Agent, fact: str):
+def cmd_remember(agent, fact: str):
     result = agent.brain.remember(fact)
     if result["stored"]:
         console.print(f"[green]Remembered:[/green] {result['text']}")
@@ -322,7 +374,7 @@ def cmd_remember(agent: Agent, fact: str):
         console.print(f"[yellow]Memory unchanged:[/yellow] {result['text'] or result['reason']}")
 
 
-def cmd_forget(agent: Agent, query: str):
+def cmd_forget(agent, query: str):
     result = agent.brain.forget(query)
     status = result.get("status")
     if status == "removed":
@@ -337,7 +389,11 @@ def cmd_forget(agent: Agent, query: str):
     console.print(f"[yellow]No memory removed:[/yellow] {result.get('reason', 'not found')}")
 
 
-def voice_loop(agent: Agent):
+def voice_loop(agent):
+    from config import settings
+    from voice.listener import Listener
+    from voice.speaker import speak
+
     listener = Listener()
     console.print("[cyan]Voice mode active. Speak or type /voice to exit.[/cyan]")
     while settings.voice_enabled:
@@ -352,7 +408,9 @@ def voice_loop(agent: Agent):
             threading.Event().wait(0.1)
 
 
-def gesture_loop(agent: Agent):
+def gesture_loop(agent):
+    from gesture.controller import execute as gesture_execute
+
     global _gesture_detector, _gesture_enabled
     mode = _gesture_detector.mode
     console.print(f"[cyan]Gesture control active. Mode: {mode}. ESC on camera or /gesture stop to exit.[/cyan]")
@@ -377,6 +435,10 @@ def main(argv: list[str] | None = None):
         base_url, initial_message = _resolve_api_cli_inputs(args.api, args.message)
         run_api_client(base_url, initial_message)
         return
+    _enable_rich_console()
+    from agent.core import Agent
+    from config import settings
+
     print_welcome()
     agent = Agent()
 
@@ -413,6 +475,8 @@ def main(argv: list[str] | None = None):
                 agent = Agent()
                 console.print("[green]New conversation started.[/green]")
             elif base == "voice":
+                from config import settings
+
                 settings.voice_enabled = not settings.voice_enabled
                 if settings.voice_enabled:
                     voice_loop(agent)
@@ -438,6 +502,10 @@ def main(argv: list[str] | None = None):
                     except Exception as e:
                         console.print(f"[red]Could not load playlist: {e}[/red]")
             elif base == "gesture":
+                from gesture.collector import collect as gesture_collect
+                from gesture.detector import GestureDetector
+                from gesture.trainer import train as gesture_train
+
                 global _gesture_detector, _gesture_enabled
                 sub = cmd[1].lower() if len(cmd) > 1 else "status"
                 if sub == "status":

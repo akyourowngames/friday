@@ -1,5 +1,6 @@
 import json
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -8,12 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import tools  # noqa: F401
 from agent.core import (
     _compact_tool_result_for_context,
+    _direct_answer_from_tool_result,
     _embedding_query,
     _forced_folder_watcher_call,
     _prefer_folder_watcher_for_folder_context,
 )
 from agent.router import ToolRouter
-from api_server import _panel_payload
+from api_server import _chunk_text, _panel_payload, _run_agent
 from main import _iter_sse_events, _normalize_api_base, _resolve_api_cli_inputs
 from tools.registry import get_tool_schemas
 
@@ -24,6 +26,19 @@ class FakeSseResponse:
 
     def iter_lines(self):
         return iter(self._lines)
+
+
+class FakeStreamingAgent:
+    def __init__(self):
+        self.messages = [{"role": "system", "content": "test"}]
+
+    def process(self, message, emit_chunk=None):
+        if emit_chunk:
+            emit_chunk("hello ")
+            emit_chunk("sir")
+        self.messages.append({"role": "user", "content": message})
+        self.messages.append({"role": "assistant", "content": "hello sir"})
+        return "hello sir"
 
 
 class CliApiAndFolderRoutingTests(unittest.TestCase):
@@ -37,6 +52,12 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
 
         self.assertEqual(base_url, "http://127.0.0.1:8000")
         self.assertEqual(message, "what is in this folder?")
+
+    def test_api_cli_accepts_short_natural_one_shot_without_url(self):
+        base_url, message = _resolve_api_cli_inputs("hi", [])
+
+        self.assertEqual(base_url, "http://127.0.0.1:8000")
+        self.assertEqual(message, "hi")
 
     def test_api_cli_accepts_explicit_url_and_natural_message(self):
         base_url, message = _resolve_api_cli_inputs("127.0.0.1:8011", ["how many python files are there?"])
@@ -57,6 +78,20 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
         events = list(_iter_sse_events(response))
 
         self.assertEqual(events, [{"chunk": "hello"}, {"done": True}])
+
+    def test_api_text_chunks_preserve_spaces_when_joined(self):
+        text = "Good evening, sir. How can I assist you?"
+
+        chunks = _chunk_text(text, target_size=14)
+
+        self.assertEqual("".join(chunks), text)
+
+    def test_run_agent_accepts_stream_callback(self):
+        emitted = []
+        result = _run_agent(FakeStreamingAgent(), threading.Lock(), "hi", emitted.append)
+
+        self.assertEqual("".join(emitted), "hello sir")
+        self.assertEqual(result["response"], "hello sir")
 
     def test_natural_folder_count_prompts_prefer_folder_watcher(self):
         for prompt in (
@@ -123,6 +158,13 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
         self.assertEqual(panel["source"], "folder_watcher")
         self.assertEqual(panel["stats"]["by_extension_details"][".py"]["count"], 1)
         self.assertLessEqual(len(parsed["result"]["files"]), 8)
+
+    def test_folder_watcher_answer_can_skip_second_llm_rewrite(self):
+        payload = {"result": {"answer": "There are 26 Python files."}, "meta": {"tool": "folder_watcher"}}
+
+        answer = _direct_answer_from_tool_result("folder_watcher", json.dumps(payload))
+
+        self.assertEqual(answer, "There are 26 Python files.")
 
 
 if __name__ == "__main__":

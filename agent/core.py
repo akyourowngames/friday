@@ -30,15 +30,19 @@ def _debug_safe(text) -> str:
     return str(text).encode("ascii", errors="backslashreplace").decode("ascii")
 
 
-def _print_assistant_content(content: str) -> None:
+def _print_assistant_content(content: str, emit_chunk=None) -> None:
     if not content:
         return
     console.print("          ", end="\r")
     for char in content:
         print(char, end="", flush=True)
+        if emit_chunk:
+            emit_chunk(char)
         if char not in ("\n", "\r"):
             time.sleep(TYPING_SPEED)
     print()
+    if emit_chunk:
+        emit_chunk("\n")
 
 
 @lru_cache(maxsize=1)
@@ -833,6 +837,25 @@ def _build_tool_answer_instruction(user_input: str, tool_names: list[str]) -> st
     )
 
 
+def _direct_answer_from_tool_result(tool_name: str, result_content: str) -> str:
+    if tool_name != "folder_watcher":
+        return ""
+    try:
+        parsed = json.loads(result_content or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict) or parsed.get("error"):
+        return ""
+    result = parsed.get("result")
+    if not isinstance(result, dict):
+        return ""
+    answer = str(result.get("answer") or "").strip()
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    if not answer:
+        answer = str(data.get("answer") or "").strip()
+    return answer
+
+
 def _tool_supports_parameter(tool_name: str, parameter_name: str) -> bool:
     registered = get_tool(tool_name)
     if not registered:
@@ -1460,7 +1483,7 @@ class Agent:
         if limit > 0 and len(self._memory_extraction_messages) > limit:
             self._memory_extraction_messages = self._memory_extraction_messages[-limit:]
 
-    def process(self, user_input: str):
+    def process(self, user_input: str, emit_chunk=None):
         recent_action_context = _recent_action_context(self.messages)
         q_emb, routing_input = _embedding_query(user_input, self.messages)
         need_context = q_emb is not None
@@ -1637,7 +1660,7 @@ class Agent:
                     if correction_retries >= settings.tool_call_retries:
                         content = err
                         if buffer_tool_text:
-                            _print_assistant_content(content)
+                            _print_assistant_content(content, emit_chunk=emit_chunk)
                         self.messages.append({"role": "assistant", "content": content})
                         break
                     correction_retries += 1
@@ -1652,7 +1675,7 @@ class Agent:
                     if correction_retries >= settings.tool_call_retries:
                         content = "I'm sorry, sir, but I cannot perform that action directly."
                         if buffer_tool_text:
-                            _print_assistant_content(content)
+                            _print_assistant_content(content, emit_chunk=emit_chunk)
                         self.messages.append({"role": "assistant", "content": content})
                         break
                     correction_retries += 1
@@ -1684,7 +1707,7 @@ class Agent:
                         })
                         continue
                     if buffer_tool_text:
-                        _print_assistant_content(content)
+                        _print_assistant_content(content, emit_chunk=emit_chunk)
                     self.messages.append({"role": "assistant", "content": content})
                 break
 
@@ -1802,6 +1825,18 @@ class Agent:
 
             tools_called_this_input = True
 
+            if len(formatted_calls) == 1:
+                fc = formatted_calls[0]
+                direct_answer = _direct_answer_from_tool_result(
+                    fc["function"]["name"],
+                    results.get(fc["id"], ""),
+                )
+                if direct_answer:
+                    _print_assistant_content(direct_answer, emit_chunk=emit_chunk)
+                    content = direct_answer
+                    self.messages.append({"role": "assistant", "content": direct_answer})
+                    break
+
             if tools_called_this_input and settings.finalize_tool_results_with_llm:
                 self.messages.append({
                     "role": "system",
@@ -1818,6 +1853,9 @@ class Agent:
                     if len(direct_result) > MAX_TOOL_RESULT_CHARS:
                         direct_result = direct_result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
                     print(direct_result)
+                    if emit_chunk:
+                        emit_chunk(direct_result)
+                        emit_chunk("\n")
                     content = direct_result
                     self.messages.append({"role": "assistant", "content": direct_result})
                     break
@@ -1849,7 +1887,7 @@ class Agent:
                     if self.messages and self.messages[-1].get("role") == "assistant":
                         self.messages.pop()
                     content = retry_content.strip()
-                    _print_assistant_content(content)
+                    _print_assistant_content(content, emit_chunk=emit_chunk)
                     self.messages.append({"role": "assistant", "content": content})
 
         extraction_context = self._memory_extraction_context()
