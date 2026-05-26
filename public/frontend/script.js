@@ -12,6 +12,7 @@ const API = (() => {
 let sessionId = null;
 let currentMode = 'jarvis';
 let isStreaming = false;
+let isPreparingSend = false;
 let isListening = false;
 let camStream = null;
 let autoListenMode = false;
@@ -505,6 +506,7 @@ function maybeRestartListening() {
 }
 
 const CAM_BYPASS_TOKEN = 'TTCAMTOKENTT';
+const CAMERA_INTENT_TIMEOUT_MS = (typeof window !== 'undefined' && Number(window.KING_CAMERA_INTENT_TIMEOUT_MS)) || 4500;
 
 function setCameraStatus(text, state = 'ready') {
     if (camStatus) camStatus.textContent = text;
@@ -520,17 +522,22 @@ function renderCameraResult(payload) {
 async function shouldAttachCameraFrame(text) {
     const query = String(text || '').trim();
     if (!query) return false;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CAMERA_INTENT_TIMEOUT_MS);
     try {
         const res = await fetch(`${API}/camera/intent`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: query }),
+            signal: controller.signal,
         });
         if (!res.ok) return false;
         const payload = await res.json();
         return Boolean(payload && payload.should_use_camera);
     } catch (_) {
         return false;
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
@@ -1349,6 +1356,10 @@ const ACTIVITY_STEPS = {
     search_completed:    { step: 0, label: 'Search completed' },
     navigation_planning:  { step: 0, label: 'Navigator' },
     navigation_completed: { step: 0, label: 'Route ready' },
+    camera_analyzing:    { step: 0, label: 'Camera vision' },
+    camera_waiting:      { step: 0, label: 'Camera vision' },
+    camera_completed:    { step: 0, label: 'Camera ready' },
+    camera_failed:       { step: 0, label: 'Camera failed' },
     context_retrieved:   { step: 0, label: 'Context retrieved' },
     background_dispatched: { step: 0, label: 'Background tasks' },
     waiting_for_model:   { step: 0, label: 'Waiting for model' },
@@ -1358,20 +1369,37 @@ const ACTIVITY_STEPS = {
 function appendActivity(activity) {
     if (!activityList || !activity) return;
     triggerToolAnimation(activity);
+    const elapsedText = (ms) => ms != null ? ` (${ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s'})` : '';
+    const updateActivity = (existing, label, detail) => {
+        const labelEl = existing.querySelector('.activity-event');
+        const detailEl = existing.querySelector('.activity-detail');
+        if (labelEl) labelEl.textContent = label;
+        if (detailEl) detailEl.textContent = detail;
+        existing.setAttribute('data-event', activity.event || '');
+        activityList.scrollTop = activityList.scrollHeight;
+    };
+    if (String(activity.event || '').startsWith('camera_')) {
+        const existing = activityList.querySelector('[data-group="camera_vision"]');
+        const stepInfo = ACTIVITY_STEPS[activity.event] || { label: 'Camera vision' };
+        const detail = (activity.message || 'Camera vision is working...') + elapsedText(activity.elapsed_ms);
+        if (existing) {
+            updateActivity(existing, stepInfo.label, detail);
+            return;
+        }
+    }
     if (activity.event === 'waiting_for_model') {
         const existing = activityList.querySelector('[data-event="waiting_for_model"]');
         if (existing) {
-            const detailEl = existing.querySelector('.activity-detail');
-            const ms = activity.elapsed_ms;
-            const elapsed = ms != null ? ` (${ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s'})` : '';
-            if (detailEl) detailEl.textContent = (activity.message || 'Waiting for model response...') + elapsed;
-            activityList.scrollTop = activityList.scrollHeight;
+            updateActivity(existing, 'Waiting for model', (activity.message || 'Waiting for model response...') + elapsedText(activity.elapsed_ms));
             return;
         }
     }
     const item = document.createElement('div');
     item.className = 'activity-item';
     item.setAttribute('data-event', activity.event || '');
+    if (String(activity.event || '').startsWith('camera_')) {
+        item.setAttribute('data-group', 'camera_vision');
+    }
     const stepInfo = ACTIVITY_STEPS[activity.event] || { step: 0, label: activity.event || 'Activity', icon: 'dot' };
     let detail = '';
     const addRouteClass = (route) => {
@@ -1439,6 +1467,9 @@ function appendActivity(activity) {
     } else if (activity.event === 'navigation_completed') {
         detail = activity.message || 'Route ready';
         item.classList.add('activity-sub', 'route-navigation');
+    } else if (String(activity.event || '').startsWith('camera_')) {
+        detail = (activity.message || 'Camera vision is working...') + elapsedText(activity.elapsed_ms);
+        item.classList.add('activity-sub', 'route-vision');
     } else if (activity.event === 'context_retrieved') {
         detail = activity.message || 'Knowledge base ready';
         item.classList.add('activity-sub', 'route-general');
@@ -1577,7 +1608,8 @@ function scrollToBottom() {
 
 async function sendMessage(textOverride) {
     let text = (textOverride || messageInput.value).trim();
-    if (!text || isStreaming) return;
+    if (!text || isStreaming || isPreparingSend) return;
+    isPreparingSend = true;
     if (isListening) {
         pendingSendTranscript = null;
         clearTimeout(speechSendTimeout);
@@ -1587,6 +1619,7 @@ async function sendMessage(textOverride) {
     const wantsCamera = await shouldAttachCameraFrame(text);
     if (wantsCamera && !camStream) {
         try {
+            setCameraStatus('Opening camera preview...', 'scanning');
             await startCamera();
             await new Promise((resolve) => {
                 if (!camVideo) { resolve(); return; }
@@ -1597,14 +1630,21 @@ async function sendMessage(textOverride) {
             });
         } catch (_) {
             showToast('Camera access is needed for that vision request.');
+            setCameraStatus('Camera access needed for vision.', 'error');
+            isPreparingSend = false;
             return;
         }
     }
     let imgBase64 = null;
     if (camStream && wantsCamera) {
         imgBase64 = await captureFrameAsBase64Safe();
-        if (!imgBase64) showToast('Camera frame not ready. Please try again.');
-        else setCameraStatus('Sending frame to Jarvis...', 'scanning');
+        if (!imgBase64) {
+            showToast('Camera frame not ready. Please try again.');
+            setCameraStatus('Frame not ready. Try again.', 'error');
+            isPreparingSend = false;
+            return;
+        }
+        setCameraStatus('Reading frame with Jarvis...', 'scanning');
     }
     messageInput.value = '';
     autoResizeInput();
@@ -1612,6 +1652,7 @@ async function sendMessage(textOverride) {
     addMessage('user', text);
     addTypingIndicator();
     isStreaming = true;
+    isPreparingSend = false;
     if (sendBtn) sendBtn.disabled = true;
     if (messageInput) messageInput.disabled = true;
     if (orbContainer) orbContainer.classList.add('active');

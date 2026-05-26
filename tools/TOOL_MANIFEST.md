@@ -72,6 +72,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - Provider failures return attempted model status without inventing a visual answer.
 - A camera frame sent from the frontend must be answered from the tool result or reported as a tool error.
 - Opening the camera panel is preview-only. It must not call the vision provider or send a frame until the user sends a message that routes semantically to `camera_vision`.
+- Frontend camera activity should update one existing camera card instead of appending repeated wait cards.
 
 ### Verification
 
@@ -79,6 +80,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `python -m unittest tests.test_camera_api`
 - Opening the frontend camera panel must not send `imgbase64`, call `/camera/analyze`, or start camera tool work.
 - Frontend vision asks must send `imgbase64` to `/chat/jarvis/stream` after `/camera/intent` selects `camera_vision`, without the assistant core fabricating a camera result.
+- Camera preparation must block duplicate sends while intent/capture is pending.
 
 ## Markdown Tool Contract: tool_readiness_audit
 

@@ -479,17 +479,6 @@ async def _stream_camera_chat(payload: ChatRequest, session_id: str):
         {
             "session_id": session_id,
             "activity": {
-                "event": "camera_frame_received",
-                "message": "Camera frame received.",
-                "route": "vision",
-                "tool_name": "camera_vision",
-            },
-        }
-    )
-    yield _sse(
-        {
-            "session_id": session_id,
-            "activity": {
                 "event": "camera_analyzing",
                 "message": "Inspecting the frame with the camera vision tool.",
                 "route": "vision",
@@ -500,7 +489,7 @@ async def _stream_camera_chat(payload: ChatRequest, session_id: str):
     work = asyncio.create_task(asyncio.to_thread(_run_camera_tool, prompt, payload.imgbase64 or "", "image/jpeg", settings.camera_default_timeout_ms))
     pulse = 0
     while not work.done():
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(1.3)
         pulse += 1
         yield _sse(
             {

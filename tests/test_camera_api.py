@@ -62,6 +62,7 @@ class CameraApiTests(unittest.TestCase):
         self.assertTrue(camera_tool.called)
         self.assertIn("vision_result", response.text)
         self.assertIn("I can see the test frame.", response.text)
+        self.assertNotIn("camera_frame_received", response.text)
 
 
 if __name__ == "__main__":
