@@ -14,6 +14,9 @@ const state = {
     policy: null,
     selectedTool: null,
     lastSessionId: '',
+    schemas: {},
+    activeSchema: null,
+    fields: [],
 };
 
 const els = {
@@ -36,6 +39,10 @@ const els = {
     riskSelect: $('risk-select'),
     toolNoteInput: $('tool-note-input'),
     selectedToolTitle: $('selected-tool-title'),
+    feedbackBox: $('feedback-box'),
+    argumentFields: $('argument-fields'),
+    argumentHint: $('argument-hint'),
+    syncJsonBtn: $('sync-json-btn'),
     schemaBtn: $('schema-btn'),
     executeBtn: $('execute-btn'),
     argumentsInput: $('arguments-input'),
@@ -60,6 +67,21 @@ function pretty(value) {
         return JSON.stringify(value, null, 2);
     } catch (_) {
         return String(value);
+    }
+}
+
+function setFeedback(kind, title, detail = '') {
+    els.feedbackBox.classList.remove('warn', 'error');
+    if (kind) els.feedbackBox.classList.add(kind);
+    els.feedbackBox.innerHTML = '';
+    const heading = document.createElement('span');
+    heading.className = 'feedback-title';
+    heading.textContent = title;
+    els.feedbackBox.appendChild(heading);
+    if (detail) {
+        const text = document.createElement('span');
+        text.textContent = detail;
+        els.feedbackBox.appendChild(text);
     }
 }
 
@@ -152,6 +174,7 @@ function renderTools(tools) {
         row.addEventListener('click', () => {
             state.selectedTool = tool.slug;
             renderTools(toolsFromStatus(state.status, state.policy));
+            loadSchemaForSelected(true);
         });
         els.toolList.appendChild(row);
     }
@@ -162,6 +185,9 @@ function renderTools(tools) {
         els.toolList.appendChild(empty);
     }
     els.selectedToolTitle.textContent = state.selectedTool || 'Run';
+    if (state.selectedTool) {
+        els.argumentHint.textContent = `${state.selectedTool} arguments`;
+    }
 }
 
 async function refresh() {
@@ -174,10 +200,269 @@ async function refresh() {
         state.status = status;
         state.policy = policy;
         renderStatus();
+        if (state.selectedTool) loadSchemaForSelected(true);
     } catch (error) {
         setStatus('error', 'Offline');
         els.outputBox.textContent = pretty(error.payload || error.message);
     }
+}
+
+function unwrapSchemaPayload(result) {
+    if (result?.input_schema) {
+        return { input_parameters: result.input_schema };
+    }
+    let data = result?.data || result;
+    if (data?.truncated && typeof data.preview === 'string') {
+        try {
+            data = JSON.parse(data.preview);
+        } catch (_) {}
+    }
+    return data || {};
+}
+
+function schemaInputParameters(schema) {
+    const candidates = [
+        schema?.input_parameters,
+        schema?.inputSchema,
+        schema?.input_schema,
+        schema?.parameters,
+        schema?.schema,
+    ];
+    for (const candidate of candidates) {
+        if (candidate && typeof candidate === 'object' && candidate.properties) return candidate;
+    }
+    return { properties: {}, required: [] };
+}
+
+function buildFieldsFromSchema(schema) {
+    const input = schemaInputParameters(schema);
+    const required = Array.isArray(input.required) ? input.required.map(String) : [];
+    const properties = input.properties || {};
+    const names = Object.keys(properties);
+    names.sort((a, b) => {
+        const ar = required.includes(a) ? 0 : 1;
+        const br = required.includes(b) ? 0 : 1;
+        if (ar !== br) return ar - br;
+        return a.localeCompare(b);
+    });
+    return names.slice(0, 10).map(name => {
+        const meta = properties[name] || {};
+        return {
+            name,
+            required: required.includes(name),
+            type: meta.type || 'string',
+            title: meta.human_parameter_name || meta.title || name,
+            description: meta.human_parameter_description || meta.description || '',
+            enum: Array.isArray(meta.enum) ? meta.enum : [],
+            defaultValue: meta.default,
+            examples: Array.isArray(meta.examples) ? meta.examples : [],
+        };
+    });
+}
+
+function parseArguments() {
+    try {
+        const parsed = JSON.parse(els.argumentsInput.value || '{}');
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_) {
+        return null;
+    }
+}
+
+function argumentValue(field, args) {
+    const value = args[field.name];
+    if (value !== undefined && value !== null) return value;
+    if (field.defaultValue !== undefined) return field.defaultValue;
+    return '';
+}
+
+function coerceFieldValue(field, value) {
+    if (value === '') return undefined;
+    if (field.type === 'integer') {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isNaN(parsed) ? value : parsed;
+    }
+    if (field.type === 'number') {
+        const parsed = Number(value);
+        return Number.isNaN(parsed) ? value : parsed;
+    }
+    if (field.type === 'boolean') {
+        return value === true || value === 'true';
+    }
+    return value;
+}
+
+function syncJsonFromFields() {
+    const args = parseArguments();
+    if (args === null) {
+        setFeedback('error', 'JSON needs a quick fix.', 'The payload must be a valid JSON object before the form can sync.');
+        return null;
+    }
+    for (const field of state.fields) {
+        const input = document.querySelector(`[data-arg-field="${field.name}"]`);
+        if (!input) continue;
+        const value = input.type === 'checkbox' ? input.checked : input.value;
+        const coerced = coerceFieldValue(field, value);
+        if (coerced === undefined) {
+            delete args[field.name];
+        } else {
+            args[field.name] = coerced;
+        }
+    }
+    els.argumentsInput.value = pretty(args);
+    return args;
+}
+
+function defaultsForSelected(result = null) {
+    return result?.argument_defaults
+        || state.status?.argument_defaults?.[state.selectedTool]
+        || state.policy?.argument_defaults?.[state.selectedTool]
+        || {};
+}
+
+function renderArgumentFields() {
+    const args = parseArguments() || {};
+    els.argumentFields.innerHTML = '';
+    if (!state.fields.length) {
+        setFeedback('warn', 'Schema loaded, but no input fields were exposed.', 'You can still edit the JSON payload directly.');
+        return;
+    }
+    const requiredNames = state.fields.filter(field => field.required).map(field => field.name);
+    setFeedback('', 'Inputs ready.', requiredNames.length ? `Required: ${requiredNames.join(', ')}` : 'No required fields for this tool.');
+    for (const field of state.fields) {
+        const wrap = document.createElement('div');
+        wrap.className = 'argument-field';
+        const label = document.createElement('label');
+        const title = document.createElement('span');
+        title.textContent = field.title || field.name;
+        label.appendChild(title);
+        if (field.required) {
+            const required = document.createElement('span');
+            required.className = 'required-mark';
+            required.textContent = 'required';
+            label.appendChild(required);
+        }
+        wrap.appendChild(label);
+        let input;
+        if (field.enum.length) {
+            input = document.createElement('select');
+            const blank = document.createElement('option');
+            blank.value = '';
+            blank.textContent = field.required ? 'Choose...' : 'Any';
+            input.appendChild(blank);
+            for (const optionValue of field.enum) {
+                const option = document.createElement('option');
+                option.value = optionValue;
+                option.textContent = optionValue;
+                input.appendChild(option);
+            }
+        } else {
+            input = document.createElement('input');
+            input.type = field.type === 'integer' || field.type === 'number' ? 'number' : 'text';
+            const example = field.examples[0] || '';
+            input.placeholder = example ? String(example) : field.name;
+        }
+        input.dataset.argField = field.name;
+        const value = argumentValue(field, args);
+        if (value !== undefined && value !== null && value !== '') input.value = String(value);
+        input.addEventListener('input', syncJsonFromFields);
+        input.addEventListener('change', syncJsonFromFields);
+        wrap.appendChild(input);
+        const help = document.createElement('div');
+        help.className = 'field-help';
+        help.textContent = field.description || field.name;
+        wrap.appendChild(help);
+        els.argumentFields.appendChild(wrap);
+    }
+}
+
+function applySchema(result) {
+    const schema = unwrapSchemaPayload(result);
+    state.activeSchema = schema;
+    state.schemas[state.selectedTool] = schema;
+    state.fields = buildFieldsFromSchema(schema);
+    const args = parseArguments() || {};
+    const defaults = { ...defaultsForSelected(result) };
+    for (const field of state.fields) {
+        if (field.defaultValue !== undefined && defaults[field.name] === undefined) defaults[field.name] = field.defaultValue;
+    }
+    if (Object.keys(defaults).length) {
+        const merged = { ...args };
+        const applied = [];
+        for (const [key, value] of Object.entries(defaults)) {
+            if (merged[key] === undefined || merged[key] === null || String(merged[key]).trim() === '') {
+                merged[key] = value;
+                applied.push(key);
+            }
+        }
+        if (applied.length) {
+            els.argumentsInput.value = pretty(merged);
+        }
+    } else if (Object.keys(args).length === 0) {
+        const fieldDefaults = {};
+        for (const field of state.fields) {
+            if (field.defaultValue !== undefined) fieldDefaults[field.name] = field.defaultValue;
+        }
+        els.argumentsInput.value = pretty(fieldDefaults);
+    }
+    renderArgumentFields();
+}
+
+async function loadSchemaForSelected(silent = false) {
+    if (!state.selectedTool) return;
+    if (state.schemas[state.selectedTool]) {
+        state.activeSchema = state.schemas[state.selectedTool];
+        state.fields = buildFieldsFromSchema(state.activeSchema);
+        renderArgumentFields();
+        return;
+    }
+    try {
+        if (!silent) setStatus('warn', 'Schema');
+        const result = await request('/composio/action', {
+            method: 'POST',
+            body: JSON.stringify({ action: 'schema', tool_slug: state.selectedTool }),
+        });
+        applySchema(result);
+        if (!silent) setStatus('', 'Ready');
+    } catch (error) {
+        if (!silent) setStatus('error', 'Blocked');
+        setFeedback('error', 'Could not load schema.', error.payload?.message || error.message);
+    }
+}
+
+function validateRequired(args) {
+    const missing = [];
+    for (const field of state.fields) {
+        const value = args[field.name];
+        if (field.required && (value === undefined || value === null || String(value).trim() === '')) {
+            missing.push(field.name);
+        }
+    }
+    return missing;
+}
+
+function extractProviderError(data) {
+    const payload = data?.data || data;
+    if (!payload || typeof payload !== 'object') return null;
+    if (payload.error || payload.data?.message) {
+        return {
+            message: payload.error || payload.data?.message || 'Provider returned an error.',
+            logId: payload.log_id || '',
+            status: payload.data?.status_code ?? '',
+        };
+    }
+    return null;
+}
+
+function renderResult(result) {
+    const providerError = extractProviderError(result.data || result);
+    if (providerError) {
+        setFeedback('error', 'Composio returned a provider error.', providerError.message + (providerError.logId ? ` Log: ${providerError.logId}` : ''));
+        els.outputBox.textContent = pretty(result.data || result);
+        return;
+    }
+    setFeedback('', 'Tool completed.', `Executed ${result.tool_slug || state.selectedTool}.`);
+    els.outputBox.textContent = pretty(result.data || result);
 }
 
 async function createSession() {
@@ -233,27 +518,24 @@ async function connectToolkit() {
 
 async function fetchSchema() {
     if (!state.selectedTool) return;
-    try {
-        setStatus('warn', 'Schema');
-        const result = await request('/composio/action', {
-            method: 'POST',
-            body: JSON.stringify({ action: 'schema', tool_slug: state.selectedTool }),
-        });
-        els.outputBox.textContent = pretty(result.data || result);
-        setStatus('', 'Ready');
-    } catch (error) {
-        setStatus('error', 'Blocked');
-        els.outputBox.textContent = pretty(error.payload || error.message);
-    }
+    await loadSchemaForSelected(false);
+    if (state.activeSchema) els.outputBox.textContent = pretty(state.activeSchema);
 }
 
 async function executeTool() {
     if (!state.selectedTool) return;
-    let args = {};
-    try {
-        args = JSON.parse(els.argumentsInput.value || '{}');
-    } catch (_) {
+    if (!state.activeSchema && !state.schemas[state.selectedTool]) {
+        await loadSchemaForSelected(true);
+    }
+    let args = syncJsonFromFields();
+    if (args === null) {
         showToast('Arguments must be JSON');
+        return;
+    }
+    const missing = validateRequired(args);
+    if (missing.length) {
+        setStatus('warn', 'Needs input');
+        setFeedback('warn', 'Missing required fields.', `Fill ${missing.join(', ')} before running ${state.selectedTool}.`);
         return;
     }
     try {
@@ -268,10 +550,11 @@ async function executeTool() {
             }),
         });
         if (result.session_id) state.lastSessionId = result.session_id;
-        els.outputBox.textContent = pretty(result.data || result);
+        renderResult(result);
         setStatus('', 'Ready');
     } catch (error) {
         setStatus('error', 'Blocked');
+        setFeedback('error', 'Composio action was blocked.', error.payload?.message || error.message);
         els.outputBox.textContent = pretty(error.payload || error.message);
     }
 }
@@ -357,6 +640,7 @@ function bind() {
     els.connectBtn.addEventListener('click', connectToolkit);
     els.schemaBtn.addEventListener('click', fetchSchema);
     els.executeBtn.addEventListener('click', executeTool);
+    els.syncJsonBtn.addEventListener('click', syncJsonFromFields);
     els.addToolForm.addEventListener('submit', updateTool);
     els.disableToolBtn.addEventListener('click', disableSelectedTool);
     els.catalogBtn.addEventListener('click', searchCatalog);

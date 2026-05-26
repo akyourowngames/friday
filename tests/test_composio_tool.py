@@ -51,6 +51,10 @@ class ComposioToolTests(unittest.TestCase):
                     "",
                     "- GITHUB_LIST_STARGAZERS | toolkit: github | risk: read | enabled: true | note: test read",
                     "- GITHUB_CREATE_AN_ISSUE | toolkit: github | risk: write | enabled: true | note: test write",
+                    "",
+                    "## Argument Defaults",
+                    "",
+                    "- GITHUB_LIST_STARGAZERS | owner: local.owner | repo: local.repo",
                 ]
             ),
             encoding="utf-8",
@@ -88,6 +92,15 @@ class ComposioToolTests(unittest.TestCase):
 
     def test_tool_is_registered(self):
         self.assertIsNotNone(get_tool("composio"))
+
+    def test_github_remote_parser_extracts_owner_and_repo(self):
+        https_result = composio_mod._github_owner_repo_from_remote("https://github.com/akyourowngames/friday.git")
+        ssh_result = composio_mod._github_owner_repo_from_remote("git@github.com:akyourowngames/friday.git")
+
+        self.assertEqual(https_result["owner"], "akyourowngames")
+        self.assertEqual(https_result["repo"], "friday")
+        self.assertEqual(ssh_result["owner"], "akyourowngames")
+        self.assertEqual(ssh_result["repo"], "friday")
 
     def test_status_is_local_and_reports_missing_key(self):
         result = composio_mod.composio(response_format="structured")
@@ -174,6 +187,71 @@ class ComposioToolTests(unittest.TestCase):
         self.assertTrue(calls[0]["url"].endswith("/tool_router/session/trs_test/execute"))
         self.assertEqual(calls[0]["json"]["tool_slug"], "GITHUB_LIST_STARGAZERS")
         self.assertEqual(calls[0]["json"]["arguments"]["owner"], "ComposioHQ")
+
+    def test_schema_returns_compact_input_schema(self):
+        os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"
+        original_request = composio_mod.httpx.request
+        original_hint = composio_mod._local_repository_hint
+
+        def fake_request(method, url, headers=None, params=None, json=None, timeout=None):
+            return FakeResponse(
+                200,
+                {
+                    "input_parameters": {
+                        "properties": {
+                            "owner": {"type": "string", "description": "Repository owner"},
+                            "repo": {"type": "string", "description": "Repository name"},
+                        },
+                        "required": ["owner", "repo"],
+                    },
+                    "description": "schema payload",
+                },
+            )
+
+        try:
+            composio_mod.httpx.request = fake_request
+            composio_mod._local_repository_hint = lambda: {"owner": "akyourowngames", "repo": "friday", "remote_url": "https://github.com/akyourowngames/friday.git"}
+            result = composio_mod.composio(
+                action="schema",
+                tool_slug="GITHUB_LIST_STARGAZERS",
+                response_format="structured",
+            )
+        finally:
+            composio_mod.httpx.request = original_request
+            composio_mod._local_repository_hint = original_hint
+
+        self.assertEqual(result["result"]["required_arguments"], ["owner", "repo"])
+        self.assertIn("owner", result["result"]["input_schema"]["properties"])
+        self.assertEqual(result["result"]["argument_defaults"]["repo"], "friday")
+
+    def test_execute_applies_markdown_argument_defaults(self):
+        os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"
+        calls = []
+        original_request = composio_mod.httpx.request
+        original_hint = composio_mod._local_repository_hint
+
+        def fake_request(method, url, headers=None, params=None, json=None, timeout=None):
+            calls.append({"method": method, "url": url, "headers": headers, "params": params, "json": json, "timeout": timeout})
+            return FakeResponse(200, {"data": {"stargazers": []}, "error": None, "log_id": "log_test"})
+
+        try:
+            composio_mod.httpx.request = fake_request
+            composio_mod._local_repository_hint = lambda: {"owner": "akyourowngames", "repo": "friday", "remote_url": "https://github.com/akyourowngames/friday.git"}
+            result = composio_mod.composio(
+                action="execute",
+                tool_slug="GITHUB_LIST_STARGAZERS",
+                arguments={"per_page": 5},
+                session_id="trs_test",
+                response_format="structured",
+            )
+        finally:
+            composio_mod.httpx.request = original_request
+            composio_mod._local_repository_hint = original_hint
+
+        self.assertEqual(result["result"]["arguments"]["owner"], "akyourowngames")
+        self.assertEqual(result["result"]["arguments"]["repo"], "friday")
+        self.assertEqual(result["result"]["argument_defaults_applied"], {"owner": "akyourowngames", "repo": "friday"})
+        self.assertEqual(calls[0]["json"]["arguments"]["owner"], "akyourowngames")
 
     def test_link_autocreates_limited_session(self):
         os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"

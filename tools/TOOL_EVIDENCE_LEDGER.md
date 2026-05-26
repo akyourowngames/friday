@@ -227,6 +227,25 @@ Last verified by the default markdown pipeline on 2026-05-23:
   passed tests and 35 subtests, compileall, `npm run typecheck`, and the
   markdown verification pipeline with 6 passed checks, 0 failed, 0 timed out,
   `ship`.
+- Follow-up endpoint and natural-call repair added markdown-owned `Argument
+  Defaults` for approved GitHub repo tools, local Git remote context in
+  `composio` status and `/composio/policy`, execution-time default application,
+  compact schema inputs for `/composio/action` schema calls, and schema-aware UI
+  feedback for missing inputs.
+- Direct dispatch proof executed `GITHUB_LIST_REPOSITORY_ISSUES` with `{}` and
+  returned provider success after applying `owner: akyourowngames` and
+  `repo: friday`; provider error was `None`.
+- Focused follow-up checks passed: `python -m unittest tests.test_composio_tool
+  tests.test_composio_api`, `node --check public\frontend\composio.js`, and
+  `python -m compileall tools\composio.py api_server.py`.
+- Browser verification loaded the Composio page, selected
+  `GITHUB_LIST_REPOSITORY_ISSUES`, observed schema-rendered `owner` and `repo`
+  fields prefilled from local repo defaults, clicked Run, and received provider
+  output with `error: null`.
+- Final follow-up checks passed: `python -m pytest -q` with 261 passed tests and
+  35 subtests, `npm run typecheck`, `python -m unittest tests.test_tools_fleet`,
+  compileall for the ship pipeline scope, and the markdown verification pipeline
+  with 6 passed checks, 0 failed, 0 timed out, `ship`.
 
 ## Escalation Rules
 

@@ -94,6 +94,49 @@ class ComposioApiTests(unittest.TestCase):
         self.assertIn("stars", text)
         self.assertIn("GITHUB_LIST_STARGAZERS", [item["slug"] for item in response.json()["enabled_tools"]])
 
+    def test_composio_policy_returns_repo_argument_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = Path(tmp) / "COMPOSIO_GATEWAY.md"
+            policy.write_text(
+                "\n".join(
+                    [
+                        "# Composio Gateway",
+                        "",
+                        "## Runtime",
+                        "",
+                        "- enabled: true",
+                        "",
+                        "## Enabled Toolkits",
+                        "",
+                        "- github",
+                        "",
+                        "## Enabled Tools",
+                        "",
+                        "- GITHUB_LIST_STARGAZERS | toolkit: github | risk: read | enabled: true | note: stars",
+                        "",
+                        "## Argument Defaults",
+                        "",
+                        "- GITHUB_LIST_STARGAZERS | owner: local.owner | repo: local.repo",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            old_file = api_server.settings.composio_policy_file
+            try:
+                api_server.settings.composio_policy_file = str(policy)
+                with patch(
+                    "tools.composio._local_repository_hint",
+                    return_value={"owner": "akyourowngames", "repo": "friday", "remote_url": "https://github.com/akyourowngames/friday.git"},
+                ):
+                    response = self.client.get("/composio/policy")
+            finally:
+                api_server.settings.composio_policy_file = old_file
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["local_repository"]["owner"], "akyourowngames")
+        self.assertEqual(payload["argument_defaults"]["GITHUB_LIST_STARGAZERS"]["repo"], "friday")
+
     def test_composio_policy_tool_rejects_invalid_risk(self):
         response = self.client.post(
             "/composio/policy/tool",

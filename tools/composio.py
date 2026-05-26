@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,10 +57,60 @@ class ComposioPolicy:
     create_sessions_with_workbench: bool = False
     enabled_toolkits: set[str] = field(default_factory=set)
     tools: dict[str, ComposioToolRule] = field(default_factory=dict)
+    argument_defaults: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _github_owner_repo_from_remote(remote_url: str) -> dict[str, str]:
+    clean = str(remote_url or "").strip()
+    if not clean:
+        return {}
+
+    path = ""
+    if clean.startswith("git@"):
+        separator = clean.find(":")
+        if separator >= 0:
+            path = clean[separator + 1 :]
+    else:
+        marker = "github.com/"
+        marker_index = clean.lower().find(marker)
+        if marker_index >= 0:
+            path = clean[marker_index + len(marker) :]
+
+    if not path:
+        return {}
+
+    path = path.split("?", 1)[0].split("#", 1)[0].strip().strip("/")
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 2:
+        return {}
+
+    repo = parts[1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if not parts[0] or not repo:
+        return {}
+
+    return {"owner": parts[0], "repo": repo, "remote_url": clean}
+
+
+def _local_repository_hint() -> dict[str, str]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(_repo_root()), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if completed.returncode != 0:
+        return {}
+    return _github_owner_repo_from_remote(completed.stdout)
 
 
 def _split_item(line: str) -> tuple[str, str]:
@@ -110,6 +161,22 @@ def _parse_tool_line(value: str) -> ComposioToolRule | None:
         enabled=_parse_bool(details["enabled"], True),
         note=details["note"].strip(),
     )
+
+
+def _parse_argument_defaults_line(value: str) -> tuple[str, dict[str, str]]:
+    pieces = [piece.strip() for piece in value.split("|") if piece.strip()]
+    if not pieces:
+        return "", {}
+    slug = pieces[0].strip().upper()
+    defaults: dict[str, str] = {}
+    for piece in pieces[1:]:
+        key, separator, item_value = piece.partition(":")
+        if separator:
+            clean_key = key.strip()
+            clean_value = item_value.strip()
+            if clean_key and clean_value:
+                defaults[clean_key] = clean_value
+    return slug, defaults
 
 
 def _load_policy(path: str | Path | None = None) -> ComposioPolicy:
@@ -167,6 +234,12 @@ def _load_policy(path: str | Path | None = None) -> ComposioPolicy:
             if rule is not None and rule.enabled:
                 policy.tools[rule.slug] = rule
                 policy.enabled_toolkits.add(rule.toolkit)
+            continue
+
+        if section == "argument defaults":
+            slug, defaults = _parse_argument_defaults_line(line[2:].strip())
+            if slug and defaults:
+                policy.argument_defaults[slug] = defaults
 
     return policy
 
@@ -477,7 +550,60 @@ def _truncate_payload(payload: Any, limit: int) -> Any:
     }
 
 
+def _schema_input_parameters(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"properties": {}, "required": []}
+    candidates = (
+        payload.get("input_parameters"),
+        payload.get("inputSchema"),
+        payload.get("input_schema"),
+        payload.get("parameters"),
+        payload.get("schema"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict) and isinstance(candidate.get("properties"), dict):
+            return candidate
+    return {"properties": {}, "required": []}
+
+
+def _resolve_default_value(value: str, local_repository: dict[str, str]) -> str:
+    if value == "local.owner":
+        return str(local_repository.get("owner") or "")
+    if value == "local.repo":
+        return str(local_repository.get("repo") or "")
+    if value == "local.remote_url":
+        return str(local_repository.get("remote_url") or "")
+    return str(value or "")
+
+
+def _argument_defaults(policy: ComposioPolicy, tool_slug: str) -> dict[str, str]:
+    defaults = policy.argument_defaults.get(tool_slug, {})
+    if not defaults:
+        return {}
+    local_repository = _local_repository_hint()
+    resolved: dict[str, str] = {}
+    for key, value in defaults.items():
+        clean_value = _resolve_default_value(value, local_repository).strip()
+        if clean_value:
+            resolved[key] = clean_value
+    return resolved
+
+
+def _apply_argument_defaults(arguments: dict[str, Any], defaults: dict[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not defaults:
+        return arguments, {}
+    applied: dict[str, Any] = {}
+    merged = dict(arguments)
+    for key, value in defaults.items():
+        existing = merged.get(key)
+        if existing is None or str(existing).strip() == "":
+            merged[key] = value
+            applied[key] = value
+    return merged, applied
+
+
 def _status_result(policy: ComposioPolicy) -> dict[str, Any]:
+    local_repository = _local_repository_hint()
     return {
         "action": "status",
         "enabled": policy.enabled,
@@ -498,6 +624,15 @@ def _status_result(policy: ComposioPolicy) -> dict[str, Any]:
             for rule in sorted(policy.tools.values(), key=lambda item: item.slug)
         ],
         "network_actions": sorted(_NETWORK_ACTIONS),
+        "local_repository": local_repository,
+        "argument_defaults": {
+            slug: {
+                key: _resolve_default_value(value, local_repository)
+                for key, value in defaults.items()
+                if _resolve_default_value(value, local_repository).strip()
+            }
+            for slug, defaults in sorted(policy.argument_defaults.items())
+        },
     }
 
 
@@ -729,15 +864,20 @@ def composio(
             error["tool_slug"] = clean_slug
             return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio action needs confirmation.", "risk_policy")
         if normalized_action == "schema":
+            defaults = _argument_defaults(policy, clean_slug)
             payload, error, count = _request(policy, "GET", "/tools/" + clean_slug, api_key, timeout_value)
             external_count += count
             if error is not None:
                 return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio schema lookup failed.", "composio_http", external_count)
+            input_schema = _schema_input_parameters(payload)
             result = {
                 "action": "schema",
                 "tool_slug": clean_slug,
                 "toolkit": rule.toolkit,
                 "risk": rule.risk,
+                "argument_defaults": defaults,
+                "input_schema": input_schema,
+                "required_arguments": list(input_schema.get("required") or []),
                 "data": _truncate_payload(payload, max_chars),
             }
             return _finish_success(result, response_format, trace_enabled, started, started_at, inputs_received, _legacy_summary(result), external_count)
@@ -745,6 +885,8 @@ def composio(
         clean_arguments, args_error = _safe_json_loads(arguments)
         if args_error is not None:
             return _finish_error(args_error, response_format, trace_enabled, started, started_at, inputs_received, "Composio received invalid arguments.", "input_validation")
+        argument_defaults = _argument_defaults(policy, clean_slug)
+        clean_arguments, defaults_applied = _apply_argument_defaults(clean_arguments, argument_defaults)
         clean_session, session_payload, error, count = _ensure_session(policy, api_key, clean_user_id, session_id, timeout_value)
         external_count += count
         if error is not None:
@@ -768,6 +910,7 @@ def composio(
             "session_id": clean_session,
             "session_created": bool(session_payload),
             "arguments": clean_arguments,
+            "argument_defaults_applied": defaults_applied,
             "data": _truncate_payload(payload, max_chars),
         }
         return _finish_success(result, response_format, trace_enabled, started, started_at, inputs_received, _legacy_summary(result), external_count)

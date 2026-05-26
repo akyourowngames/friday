@@ -25,6 +25,12 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - GITHUB_LIST_REPOSITORY_ISSUES | toolkit: github | risk: read | enabled: true | note: read repository issues after GitHub is connected
 - GITHUB_LIST_STARGAZERS | toolkit: github | risk: read | enabled: true | note: read repository stargazers after GitHub is connected
 
+## Argument Defaults
+
+- GITHUB_GET_A_REPOSITORY | owner: local.owner | repo: local.repo
+- GITHUB_LIST_REPOSITORY_ISSUES | owner: local.owner | repo: local.repo
+- GITHUB_LIST_STARGAZERS | owner: local.owner | repo: local.repo
+
 ## Risk Policy
 
 - read: allow after the tool slug is listed under Enabled Tools.
@@ -38,6 +44,7 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - Session creation must use only the markdown-enabled toolkits and enabled tool slugs.
 - Direct execution must reject any tool slug that is not listed as enabled here.
 - Provider errors, missing API keys, missing sessions, and auth requirements must return structured errors instead of false-negative capability claims.
+- Argument defaults are resolved by the gateway from local repo evidence such as `git remote.origin.url`; they fill only missing values and must not override user-supplied arguments.
 - Never store Composio API keys, OAuth tokens, connected account secrets, or private provider responses in this markdown file.
 
 ## Local Test Prompts

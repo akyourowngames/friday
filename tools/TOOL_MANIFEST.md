@@ -102,6 +102,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - API key source: `COMPOSIO_API_KEY`.
 - User/session sources: `KING_COMPOSIO_USER_ID` and `KING_COMPOSIO_SESSION_ID`.
 - Default action: `status`, which is local and does not call Composio.
+- Local repo context: Git remote metadata is exposed through status and policy payloads for markdown-approved argument defaults.
 
 ### Inputs
 
@@ -110,13 +111,16 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `tool_slug`: exact Composio tool slug, allowed only when listed under Enabled Tools.
 - `arguments`: JSON object passed to Composio for `execute`.
 - Optional query, session id, user id, account alias, confirmation flag, limit, timeout, response format, and trace toggle.
+- Missing execution arguments may be filled only from the selected tool's markdown `Argument Defaults`; user-supplied arguments always win.
 
 ### Outputs
 
-- Local status showing enabled toolkits, enabled tool slugs, API-key presence, and session-id presence.
+- Local status showing enabled toolkits, enabled tool slugs, API-key presence, session-id presence, local repository hints, and resolved argument defaults.
 - Created Composio tool-router session id and MCP URL.
 - Composio hosted auth redirect URL for approved toolkits.
 - Approved tool schema, catalog, search, or execution JSON, bounded by markdown response limits.
+- Schema responses include compact `input_schema` and `required_arguments` beside bounded raw provider data so clients do not depend on oversized schema previews.
+- Execution payloads include `argument_defaults_applied` when the gateway fills omitted values before calling Composio.
 - Typed structured errors for disabled policy, missing API key, non-enabled toolkits/tools, confirmation-required risk, provider errors, and invalid JSON arguments.
 
 ### Error Handling
@@ -134,6 +138,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `python -m unittest tests.test_tools_fleet`
 - `python -m py_compile tools/composio.py`
 - `node --check public/frontend/composio.js`
+- Direct dispatch probe: execute `GITHUB_LIST_REPOSITORY_ISSUES` with empty arguments and verify the gateway applies local owner/repo defaults before the provider call.
 - `tool_manifest_audit` must show manifest/file alignment.
 
 ## Markdown Tool Contract: tool_readiness_audit
@@ -1167,6 +1172,7 @@ It exists so KING can recover from transient failures without hanging, looping i
 
 ## Evolution Log
 
+- 2026-05-26T00:40+05:30 - Added markdown-owned Composio argument defaults, local Git remote context in status/policy endpoints, and execution-time default application so KING can call approved repo tools naturally without browser-only argument repair.
 - 2026-05-26T00:00+05:30 - Added `composio` runtime gateway and `COMPOSIO_GATEWAY.md` policy for markdown-limited Composio sessions, auth links, approved schemas, and approved external app execution.
 - 2026-05-23T18:10+00:00 - Upgraded `notes` tools to version 2.0.0 with config-driven storage path (`KING_NOTES_FILE`), structured legacy-preserving output, search limit, preview bounds, typed errors, and traces.
 - 2026-05-23T18:10+00:00 - Upgraded `datetime_info` to version 2.0.0 with ISO output style, structured fields (offset, unix, weekday), Windows-safe timezone resolution, ambiguous-match reporting, and traces.

@@ -1127,6 +1127,11 @@ def _composio_policy_payload() -> dict[str, Any]:
         "enabled": policy.enabled,
         "base_url": policy.base_url,
         "enabled_toolkits": sorted(policy.enabled_toolkits),
+        "local_repository": composio_tool._local_repository_hint(),
+        "argument_defaults": {
+            slug: composio_tool._argument_defaults(policy, slug)
+            for slug in sorted(policy.argument_defaults)
+        },
         "enabled_tools": [
             {
                 "slug": rule.slug,

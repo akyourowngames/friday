@@ -275,6 +275,12 @@ label span {
     color: white;
 }
 
+.small-button.subtle {
+    min-height: 30px;
+    padding: 0 9px;
+    color: var(--muted);
+}
+
 .field-stack {
     display: grid;
     gap: 12px;
@@ -304,7 +310,7 @@ select {
 }
 
 textarea {
-    min-height: 220px;
+    min-height: 150px;
     resize: vertical;
     padding: 12px;
     line-height: 1.55;
@@ -328,6 +334,86 @@ textarea:focus {
     background: rgba(255, 255, 255, 0.045);
     color: var(--muted);
     overflow-wrap: anywhere;
+}
+
+.feedback-box {
+    min-height: 58px;
+    margin-bottom: 12px;
+    padding: 12px;
+    border: 1px solid rgba(78, 205, 196, 0.24);
+    border-radius: 8px;
+    background: rgba(78, 205, 196, 0.06);
+    color: rgba(255, 255, 255, 0.82);
+    line-height: 1.45;
+}
+
+.feedback-box.warn {
+    border-color: rgba(240, 182, 75, 0.32);
+    background: rgba(240, 182, 75, 0.08);
+}
+
+.feedback-box.error {
+    border-color: rgba(255, 107, 107, 0.34);
+    background: rgba(255, 107, 107, 0.08);
+}
+
+.feedback-title {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text);
+    font-weight: 700;
+}
+
+.argument-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.argument-field {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.argument-field label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 600;
+}
+
+.required-mark {
+    color: var(--amber);
+    font-size: 0.72rem;
+}
+
+.field-help {
+    min-height: 16px;
+    color: rgba(255, 255, 255, 0.38);
+    font-size: 0.68rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.argument-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.argument-toolbar span {
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 600;
 }
 
 .tool-list {
@@ -490,7 +576,8 @@ textarea:focus {
 
     .metrics,
     .add-tool,
-    .catalog-row {
+    .catalog-row,
+    .argument-fields {
         grid-template-columns: 1fr;
     }
 
