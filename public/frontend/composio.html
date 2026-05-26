@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#050510">
+    <title>J.A.R.V.I.S Composio</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="composio.css">
+</head>
+<body>
+    <div class="composio-app">
+        <div class="ambient-grid" aria-hidden="true"></div>
+        <header class="topbar glass">
+            <a class="icon-link" href="index.html" title="Back to Jarvis" aria-label="Back to Jarvis">
+                <svg viewBox="0 0 24 24"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+            </a>
+            <div class="brand">
+                <span>J.A.R.V.I.S</span>
+                <strong>Composio</strong>
+            </div>
+            <div class="topbar-actions">
+                <div class="status-pill" id="status-pill">
+                    <span></span>
+                    <strong id="status-text">Checking</strong>
+                </div>
+                <button class="icon-button" id="refresh-btn" title="Refresh" aria-label="Refresh">
+                    <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M18 2v4h-4"/><path d="M6 22v-4h4"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="workspace">
+            <section class="metrics" aria-label="Gateway status">
+                <div class="metric glass">
+                    <span>API</span>
+                    <strong id="metric-api">--</strong>
+                </div>
+                <div class="metric glass">
+                    <span>Session</span>
+                    <strong id="metric-session">--</strong>
+                </div>
+                <div class="metric glass">
+                    <span>Toolkits</span>
+                    <strong id="metric-toolkits">0</strong>
+                </div>
+                <div class="metric glass">
+                    <span>Tools</span>
+                    <strong id="metric-tools">0</strong>
+                </div>
+            </section>
+
+            <section class="panel-grid">
+                <aside class="panel glass auth-panel">
+                    <div class="panel-head">
+                        <h2>Auth</h2>
+                        <button class="small-button" id="create-session-btn">
+                            <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                            <span>Session</span>
+                        </button>
+                    </div>
+                    <div class="field-stack">
+                        <label>
+                            <span>Toolkit</span>
+                            <select id="toolkit-select"></select>
+                        </label>
+                        <button class="primary-button" id="connect-btn">
+                            <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5"/></svg>
+                            <span>Connect</span>
+                        </button>
+                    </div>
+                    <div class="result-strip" id="auth-result">No auth link yet.</div>
+                </aside>
+
+                <section class="panel glass tools-panel">
+                    <div class="panel-head">
+                        <h2>Approved Tools</h2>
+                        <button class="icon-button" id="disable-tool-btn" title="Disable selected tool" aria-label="Disable selected tool">
+                            <svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6v14"/><path d="M16 6v14"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                        </button>
+                    </div>
+                    <div class="tool-list" id="tool-list"></div>
+                    <form class="add-tool" id="add-tool-form">
+                        <input id="tool-slug-input" placeholder="COMPOSIO_TOOL_SLUG" autocomplete="off">
+                        <input id="toolkit-input" placeholder="toolkit" autocomplete="off">
+                        <select id="risk-select" aria-label="Risk">
+                            <option value="read">read</option>
+                            <option value="write">write</option>
+                            <option value="auth">auth</option>
+                            <option value="destructive">destructive</option>
+                        </select>
+                        <input id="tool-note-input" placeholder="note" autocomplete="off">
+                        <button class="small-button" type="submit">
+                            <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                            <span>Allow</span>
+                        </button>
+                    </form>
+                </section>
+
+                <section class="panel glass run-panel">
+                    <div class="panel-head">
+                        <h2 id="selected-tool-title">Run</h2>
+                        <div class="inline-actions">
+                            <button class="small-button" id="schema-btn">
+                                <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>
+                                <span>Schema</span>
+                            </button>
+                            <button class="primary-button" id="execute-btn">
+                                <svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M13 5l7 7-7 7"/></svg>
+                                <span>Run</span>
+                            </button>
+                        </div>
+                    </div>
+                    <textarea id="arguments-input" spellcheck="false">{}</textarea>
+                    <pre class="output" id="output-box">Ready.</pre>
+                </section>
+            </section>
+
+            <section class="panel glass catalog-panel">
+                <div class="panel-head">
+                    <h2>Catalog</h2>
+                    <button class="small-button" id="catalog-btn">
+                        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                        <span>Search</span>
+                    </button>
+                </div>
+                <div class="catalog-row">
+                    <input id="catalog-query" placeholder="repo issues, stars, pull requests" autocomplete="off">
+                    <input id="catalog-limit" type="number" min="1" max="100" value="20" aria-label="Catalog limit">
+                </div>
+                <pre class="output compact" id="catalog-output">No catalog query yet.</pre>
+            </section>
+        </main>
+
+        <div class="toast" id="toast" aria-live="polite"></div>
+    </div>
+    <script src="composio.js?v=1"></script>
+</body>
+</html>

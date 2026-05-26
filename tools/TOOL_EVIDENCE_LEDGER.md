@@ -114,6 +114,11 @@ Last verified by the default markdown pipeline on 2026-05-23:
   markdown-owned client target parsing, structured service/auth/validation
   errors, mocked endpoint mapping, main API `POST /folder-watcher` JSON bridge,
   and semantic router selection without keyword routing.
+- `composio` - `verified_runtime` for markdown-limited external app gateway
+  status, session creation payloads, auth-link gating, approved tool execution
+  routing, structured missing-key/provider/policy errors, and mocked Composio
+  HTTP behavior; live provider success remains scoped to a configured
+  `COMPOSIO_API_KEY` and connected Composio account.
 - `system_control` - `verified_runtime` for CoreAudio-backed volume up/down
   with before/after verification, verified mute toggles, honest partial states
   for unverified brightness hardware-key fallbacks, and concrete system-action
@@ -180,6 +185,48 @@ Last verified by the default markdown pipeline on 2026-05-23:
   preserving the structured `TOOL_TIMEOUT` assertion.
 - Follow-up markdown verification pipeline returned `ship` with 6 passed checks,
   0 failed checks, and 0 timeouts.
+
+## 2026-05-26 Composio Gateway Snapshot
+
+- Added registered executable module `tools/composio.py` and markdown policy
+  `tools/COMPOSIO_GATEWAY.md`.
+- Added environment knobs for `COMPOSIO_API_KEY`, `KING_COMPOSIO_USER_ID`,
+  `KING_COMPOSIO_SESSION_ID`, `KING_COMPOSIO_BASE_URL`, and policy path.
+- Added focused tests in `tests/test_composio_tool.py` covering registration,
+  local status, missing API key, markdown-limited session creation, disabled
+  tool rejection, confirmation-required write risk, approved execution routing,
+  auth-link auto-session creation, and invalid JSON arguments.
+- Manifest audit observed 19 tool modules, 19 manifest modules, 35 registered
+  callable schemas, and no manifest/file mismatches.
+- Focused checks passed: `python -m py_compile tools\composio.py`,
+  `python -m unittest tests.test_composio_tool`, and
+  `python -m unittest tests.test_tools_fleet`.
+- Repository checks passed: `python -m unittest tests.test_grounding`,
+  `python -m pytest -q` with 245 passed tests and 35 subtests, compileall, and
+  `npm run typecheck`.
+- The markdown verification pipeline returned `ship` with 6 passed checks, 0
+  failed checks, and 0 timeouts when run with a 420000 ms per-command timeout.
+- Registry dispatch proof returned `composio` status successfully with
+  `api_key_present: false`, enabled toolkit `github`, and three enabled GitHub
+  read tools from markdown policy.
+- Follow-up management UI added `/composio/status`, `/composio/policy`,
+  `/composio/action`, and `/composio/policy/tool` API routes plus
+  `public/frontend/composio.html`, `composio.css`, and `composio.js`.
+- Live Composio status observed `api_key_present: true`, user id
+  `krish-local`, enabled toolkit `github`, and the same three markdown-approved
+  GitHub read tools.
+- Live session creation succeeded through both registry dispatch and
+  `POST /composio/action`, returning Composio tool-router session ids and MCP
+  URLs scoped to the approved GitHub tools.
+- Browser verification loaded `http://127.0.0.1:3000/frontend/composio.html`,
+  observed the Ready state and approved tool list, clicked Session, and clicked
+  Schema successfully.
+- Follow-up checks passed: `python -m unittest tests.test_composio_tool
+  tests.test_composio_api`, `node --check public\frontend\composio.js`,
+  `python -m unittest tests.test_tools_fleet`, `python -m pytest -q` with 253
+  passed tests and 35 subtests, compileall, `npm run typecheck`, and the
+  markdown verification pipeline with 6 passed checks, 0 failed, 0 timed out,
+  `ship`.
 
 ## Escalation Rules
 

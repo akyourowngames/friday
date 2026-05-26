@@ -7,6 +7,7 @@ from . import datetime_tool
 from . import youtube
 from . import image
 from . import camera
+from . import composio
 from . import folder_watcher
 from . import hackernews
 from . import reddit

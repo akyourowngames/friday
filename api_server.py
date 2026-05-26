@@ -100,6 +100,30 @@ class FolderWatcherRequest(BaseModel):
     trace_enabled: bool = False
 
 
+class ComposioRequest(BaseModel):
+    action: str = "status"
+    toolkit: str = ""
+    tool_slug: str = ""
+    query: str = ""
+    arguments: Any = None
+    session_id: str = ""
+    user_id: str = ""
+    account: str = ""
+    confirm: bool = False
+    limit: int = 20
+    timeout_ms: int = 0
+    response_format: str = "structured"
+    trace_enabled: bool = False
+
+
+class ComposioPolicyToolRequest(BaseModel):
+    slug: str
+    toolkit: str
+    risk: str = "read"
+    enabled: bool = True
+    note: str = ""
+
+
 def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -534,6 +558,25 @@ def _run_folder_watcher_tool(payload: FolderWatcherRequest) -> dict[str, Any]:
     )
 
 
+def _run_composio_tool(payload: ComposioRequest) -> dict[str, Any]:
+    return execute_tool(
+        "composio",
+        action=payload.action,
+        toolkit=payload.toolkit,
+        tool_slug=payload.tool_slug,
+        query=payload.query,
+        arguments=payload.arguments,
+        session_id=payload.session_id,
+        user_id=payload.user_id,
+        account=payload.account,
+        confirm=payload.confirm,
+        limit=payload.limit,
+        timeout_ms=payload.timeout_ms or settings.composio_default_timeout_ms,
+        response_format="structured",
+        trace_enabled=payload.trace_enabled,
+    )
+
+
 def _camera_intent_payload(message: str) -> dict[str, Any]:
     query = _clean_camera_prompt(message)
     if not query:
@@ -884,12 +927,176 @@ def _folder_watcher_status_code(result: dict[str, Any]) -> int:
     return 400
 
 
+def _composio_status_code(result: dict[str, Any]) -> int:
+    error = result.get("error") if isinstance(result, dict) else {}
+    code = error.get("code") if isinstance(error, dict) else ""
+    if code in {"COMPOSIO_UNAVAILABLE"}:
+        return 503
+    if code in {"COMPOSIO_AUTH_FAILED"}:
+        return 401
+    if code in {"COMPOSIO_UPSTREAM_ERROR", "INVALID_UPSTREAM_JSON"}:
+        return 502
+    return 400
+
+
+def _composio_policy_path() -> Path:
+    root = Path(__file__).resolve().parent
+    requested = Path(settings.composio_policy_file)
+    policy_path = requested if requested.is_absolute() else root / requested
+    policy_path = policy_path.resolve()
+    if policy_path.suffix.lower() != ".md":
+        raise HTTPException(status_code=400, detail={"code": "POLICY_NOT_MARKDOWN", "message": "Composio policy path must be a markdown file."})
+    if not policy_path.exists():
+        raise HTTPException(status_code=404, detail={"code": "POLICY_NOT_FOUND", "message": "Composio policy file was not found."})
+    return policy_path
+
+
+def _composio_section(line: str) -> str:
+    text = line.strip()
+    if text.startswith("## "):
+        return text[3:].strip().casefold()
+    return ""
+
+
+def _composio_tool_slug_from_line(line: str) -> str:
+    text = line.strip()
+    if not text.startswith("- "):
+        return ""
+    body = text[2:].strip()
+    first_piece = body.split("|", 1)[0].strip()
+    return first_piece.upper()
+
+
+def _composio_policy_tool_line(payload: ComposioPolicyToolRequest) -> str:
+    slug = payload.slug.strip().upper()
+    toolkit = payload.toolkit.strip().lower()
+    risk = payload.risk.strip().lower()
+    enabled = "true" if payload.enabled else "false"
+    note = payload.note.strip()
+    return f"- {slug} | toolkit: {toolkit} | risk: {risk} | enabled: {enabled} | note: {note}"
+
+
+def _insert_before_next_section(lines: list[str], section_name: str, new_line: str) -> list[str]:
+    output = []
+    active = ""
+    inserted = False
+    seen_section = False
+    for line in lines:
+        next_section = _composio_section(line)
+        if next_section:
+            if seen_section and active == section_name and next_section != section_name and not inserted:
+                output.append(new_line)
+                inserted = True
+            active = next_section
+            if active == section_name:
+                seen_section = True
+        output.append(line)
+    if seen_section and not inserted:
+        output.append(new_line)
+        inserted = True
+    if not seen_section:
+        output.extend(["", "## " + section_name.title(), "", new_line])
+    return output
+
+
+def _update_composio_policy_tool(payload: ComposioPolicyToolRequest) -> dict[str, Any]:
+    slug = payload.slug.strip().upper()
+    toolkit = payload.toolkit.strip().lower()
+    risk = payload.risk.strip().lower()
+    if not slug:
+        raise HTTPException(status_code=400, detail={"code": "MISSING_TOOL_SLUG", "message": "Tool slug is required."})
+    if not toolkit:
+        raise HTTPException(status_code=400, detail={"code": "MISSING_TOOLKIT", "message": "Toolkit is required."})
+    if risk not in {"read", "write", "destructive", "auth"}:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_RISK", "message": "Risk must be read, write, destructive, or auth."})
+
+    policy_path = _composio_policy_path()
+    lines = policy_path.read_text(encoding="utf-8").splitlines()
+    new_tool_line = _composio_policy_tool_line(payload)
+
+    output = []
+    section = ""
+    replaced = False
+    toolkit_present = False
+    for line in lines:
+        next_section = _composio_section(line)
+        if next_section:
+            section = next_section
+        if section == "enabled toolkits" and line.strip().startswith("- "):
+            if line.strip()[2:].strip().lower() == toolkit:
+                toolkit_present = True
+        if section == "enabled tools" and _composio_tool_slug_from_line(line) == slug:
+            output.append(new_tool_line)
+            replaced = True
+            continue
+        output.append(line)
+
+    if not toolkit_present and payload.enabled:
+        output = _insert_before_next_section(output, "enabled toolkits", "- " + toolkit)
+    if not replaced:
+        output = _insert_before_next_section(output, "enabled tools", new_tool_line)
+
+    policy_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    return _composio_policy_payload()
+
+
+def _composio_policy_payload() -> dict[str, Any]:
+    from tools import composio as composio_tool
+
+    try:
+        policy = composio_tool._load_policy()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={"code": "POLICY_NOT_FOUND", "message": str(exc)})
+    return {
+        "policy_path": str(policy.path),
+        "enabled": policy.enabled,
+        "base_url": policy.base_url,
+        "enabled_toolkits": sorted(policy.enabled_toolkits),
+        "enabled_tools": [
+            {
+                "slug": rule.slug,
+                "toolkit": rule.toolkit,
+                "risk": rule.risk,
+                "enabled": rule.enabled,
+                "note": rule.note,
+            }
+            for rule in sorted(policy.tools.values(), key=lambda item: item.slug)
+        ],
+    }
+
+
 @app.post("/folder-watcher")
 def folder_watcher_bridge(payload: FolderWatcherRequest):
     result = _run_folder_watcher_tool(payload)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=_folder_watcher_status_code(result), detail=result["error"])
     return _panel_payload("folder_watcher", result) or result
+
+
+@app.get("/composio/status")
+def composio_status():
+    result = _run_composio_tool(ComposioRequest(action="status"))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
+@app.get("/composio/policy")
+def composio_policy():
+    return _composio_policy_payload()
+
+
+@app.post("/composio/action")
+def composio_action(payload: ComposioRequest):
+    result = _run_composio_tool(payload)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
+@app.post("/composio/policy/tool")
+def composio_policy_tool(payload: ComposioPolicyToolRequest):
+    return _update_composio_policy_tool(payload)
 
 
 @app.get("/app/audio/{filename}")

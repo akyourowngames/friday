@@ -6,6 +6,7 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 
 - `browser.py` - browser page read, DOM iteration, field extraction, and login sessions (v2.0.0).
 - `camera.py` - live camera frame and image inspection with structured NIM vision output (v1.0.0).
+- `composio.py` - limited Composio gateway for markdown-enabled external app toolkits, sessions, auth links, schemas, and execution (v1.0.0).
 - `keyboard.py` - key press and markdown-defined keyboard shortcuts.
 - `system_control.py` - volume, brightness, and media controls from SYSTEM_CONTROLS.md.
 - `datetime_tool.py` - timezone-aware date and time with human or ISO output, structured errors, and optional traces (v2.0.0).
@@ -40,6 +41,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `FOLDER_WATCHER_LLM_POLICY.md` - markdown-owned prompts, public SQL tables, allowed SQL functions, and LLM limits for folder watcher semantic behavior.
 - `FOLDER_WATCHER_STATUS.md` - markdown-backed feature status matrix exposed by the folder watcher `/status` endpoint.
 - `FILE_PATH_ALIASES.md` - editable natural path aliases consumed by file tools after they are selected.
+- `COMPOSIO_GATEWAY.md` - editable Composio gateway policy for enabled toolkits, allowed tool slugs, risk gates, runtime settings, and test prompts.
 
 ## Runtime Tool: camera_vision
 
@@ -83,6 +85,56 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - Opening the frontend camera panel must not send `imgbase64`, call `/camera/analyze`, or start camera tool work.
 - Frontend vision asks must send `imgbase64` to `/chat/jarvis/stream` after `/camera/intent` selects `camera_vision`, without the assistant core fabricating a camera result.
 - Camera preparation must block duplicate sends while intent/capture is pending.
+
+## Runtime Tool: composio
+
+### Purpose
+
+`composio` is KING's bounded bridge to Composio external app toolkits. It gives KING one registry capability for limited Composio sessions, approved toolkit auth links, approved tool schema inspection, and execution of only markdown-enabled Composio tool slugs.
+
+### Runtime
+
+- Entrypoint: `tools/composio.py`.
+- Management API: `/composio/status`, `/composio/policy`, `/composio/action`, and `/composio/policy/tool`.
+- Frontend: `public/frontend/composio.html`.
+- Policy file: configured by `KING_COMPOSIO_POLICY_FILE`, defaulting to `tools/COMPOSIO_GATEWAY.md`.
+- Provider API: configured by `KING_COMPOSIO_BASE_URL`, defaulting to Composio API v3.1.
+- API key source: `COMPOSIO_API_KEY`.
+- User/session sources: `KING_COMPOSIO_USER_ID` and `KING_COMPOSIO_SESSION_ID`.
+- Default action: `status`, which is local and does not call Composio.
+
+### Inputs
+
+- `action`: `status`, `catalog`, `create_session`, `link`, `search`, `schema`, or `execute`.
+- `toolkit`: Composio toolkit slug, allowed only when listed under Enabled Toolkits.
+- `tool_slug`: exact Composio tool slug, allowed only when listed under Enabled Tools.
+- `arguments`: JSON object passed to Composio for `execute`.
+- Optional query, session id, user id, account alias, confirmation flag, limit, timeout, response format, and trace toggle.
+
+### Outputs
+
+- Local status showing enabled toolkits, enabled tool slugs, API-key presence, and session-id presence.
+- Created Composio tool-router session id and MCP URL.
+- Composio hosted auth redirect URL for approved toolkits.
+- Approved tool schema, catalog, search, or execution JSON, bounded by markdown response limits.
+- Typed structured errors for disabled policy, missing API key, non-enabled toolkits/tools, confirmation-required risk, provider errors, and invalid JSON arguments.
+
+### Error Handling
+
+- Missing `COMPOSIO_API_KEY` returns `MISSING_API_KEY`; KING must not claim Composio ran.
+- A toolkit not listed under Enabled Toolkits returns `TOOLKIT_NOT_ALLOWED`.
+- A tool slug not listed under Enabled Tools returns `TOOL_NOT_ALLOWED`.
+- Write, destructive, or auth risks require `confirm=true` before execution.
+- Composio upstream errors retain status code and safe provider detail without exposing tokens.
+
+### Verification
+
+- `python -m unittest tests.test_composio_tool`
+- `python -m unittest tests.test_composio_api`
+- `python -m unittest tests.test_tools_fleet`
+- `python -m py_compile tools/composio.py`
+- `node --check public/frontend/composio.js`
+- `tool_manifest_audit` must show manifest/file alignment.
 
 ## Markdown Tool Contract: tool_readiness_audit
 
@@ -1115,6 +1167,7 @@ It exists so KING can recover from transient failures without hanging, looping i
 
 ## Evolution Log
 
+- 2026-05-26T00:00+05:30 - Added `composio` runtime gateway and `COMPOSIO_GATEWAY.md` policy for markdown-limited Composio sessions, auth links, approved schemas, and approved external app execution.
 - 2026-05-23T18:10+00:00 - Upgraded `notes` tools to version 2.0.0 with config-driven storage path (`KING_NOTES_FILE`), structured legacy-preserving output, search limit, preview bounds, typed errors, and traces.
 - 2026-05-23T18:10+00:00 - Upgraded `datetime_info` to version 2.0.0 with ISO output style, structured fields (offset, unix, weekday), Windows-safe timezone resolution, ambiguous-match reporting, and traces.
 - 2026-05-23T20:00+00:00 - Memory GD tier: index schema v3, query cache, chunked rebuild, integrity/tier/maintain APIs, and `memory_ops` tools.
