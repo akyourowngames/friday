@@ -681,6 +681,24 @@ def _forced_contextual_tool_call(user_input: str, tool_schemas: list, messages: 
     }
 
 
+def _forced_folder_watcher_call(user_input: str, tool_schemas: list) -> dict | None:
+    if len(tool_schemas) != 1:
+        return None
+    function = tool_schemas[0].get("function", {})
+    if function.get("name") != "folder_watcher":
+        return None
+    args = {"action": "ask", "query": str(user_input or "").strip()}
+    if not args["query"]:
+        return None
+    if _tool_supports_parameter("folder_watcher", "response_format"):
+        args["response_format"] = "structured"
+    return {
+        "id": "call_folder_watcher_0",
+        "name": "folder_watcher",
+        "arguments": json.dumps(args, ensure_ascii=False),
+    }
+
+
 def _should_suppress_memory_context(router_decision: dict) -> bool:
     return router_decision.get("reason") == "small_talk_contrast_won"
 
@@ -723,6 +741,44 @@ def _compact_tool_result_for_context(result):
         return result
     meta = result.get("meta", {})
     tool_name = meta.get("tool", "")
+    if tool_name == "folder_watcher" and isinstance(result.get("result"), dict):
+        compact = dict(result)
+        payload = dict(result["result"])
+        stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+        compact_stats = {}
+        for key in ("active_files", "total_size_bytes", "events", "summary_coverage", "fts_enabled", "by_extension", "by_mime_type", "by_extension_details", "by_mime_type_details"):
+            if key in stats:
+                compact_stats[key] = stats[key]
+        files = []
+        for item in payload.get("files", []) or []:
+            if not isinstance(item, dict):
+                continue
+            compact_item = {}
+            for key in ("id", "path", "filename", "extension", "mime_type", "size_bytes", "summary", "tags", "status"):
+                if key in item:
+                    compact_item[key] = item[key]
+            excerpt = str(item.get("content_excerpt") or "")
+            if excerpt:
+                compact_item["content_excerpt"] = excerpt[:700]
+            files.append(compact_item)
+            if len(files) >= 8:
+                break
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        payload["data"] = {
+            "mode": data.get("mode", payload.get("mode", "")),
+            "message": data.get("message", payload.get("query", "")),
+            "answer": data.get("answer", payload.get("answer", "")),
+            "provider": data.get("provider", ""),
+            "context_mode": data.get("context_mode", ""),
+            "stats": compact_stats,
+            "files": files,
+        }
+        payload["stats"] = compact_stats
+        payload["files"] = files
+        payload["count"] = payload.get("count", len(files))
+        compact["result"] = payload
+        compact.pop("trace", None)
+        return compact
     if tool_name == "web_search" and isinstance(result.get("result"), dict):
         compact = dict(result)
         payload = dict(result["result"])
@@ -951,6 +1007,49 @@ def _filter_tools_for_conversation(user_input: str, q_emb, selected_tools: list)
             return selected_tools
         return []
     return selected_tools
+
+
+@lru_cache(maxsize=1)
+def _folder_watcher_route_texts() -> tuple[str, str]:
+    return (
+        _load_routing_policy_section(
+            "Folder Watcher Request Text",
+            "The user asks a natural question about current folder evidence, file counts, file types, sizes, images, media, search, or content.",
+        ),
+        _load_routing_policy_section(
+            "Raw Directory Listing Text",
+            "The user asks for raw filesystem directory entries or filenames for a specific path.",
+        ),
+    )
+
+
+def _prefer_folder_watcher_for_folder_context(user_input: str, q_emb, selected_tools: list) -> list:
+    if not selected_tools or q_emb is None:
+        return selected_tools
+    names = [tool.get("name", "") for tool in selected_tools]
+    if "folder_watcher" not in names:
+        return selected_tools
+    overlapping = {"file_list", "file_read", "gallery"}
+    if not any(name in overlapping for name in names):
+        return selected_tools
+    watcher_text, raw_listing_text = _folder_watcher_route_texts()
+    try:
+        compare_embs = embed([watcher_text, raw_listing_text])
+        if getattr(compare_embs, "ndim", 1) == 1:
+            compare_embs = compare_embs.reshape(1, -1)
+        watcher_score = float(np.dot(compare_embs[0], q_emb))
+        raw_listing_score = float(np.dot(compare_embs[1], q_emb))
+    except Exception:
+        return selected_tools
+    if watcher_score < raw_listing_score:
+        return selected_tools
+    folder_tool = next(tool for tool in selected_tools if tool.get("name") == "folder_watcher")
+    remaining = [
+        tool
+        for tool in selected_tools
+        if tool.get("name") != "folder_watcher" and tool.get("name") not in overlapping
+    ]
+    return [folder_tool] + remaining
 
 
 def _selected_tool_has_user_terms(user_input: str, selected_tools: list) -> bool:
@@ -1399,6 +1498,7 @@ class Agent:
             context = None
 
         selected_tools = _filter_tools_for_conversation(user_input, q_emb, selected_tools)
+        selected_tools = _prefer_folder_watcher_for_folder_context(user_input, q_emb, selected_tools)
         selected_tools = _maybe_reuse_latest_context_tool(user_input, selected_tools, self.messages)
         selected_tools = _ensure_local_system_control_tool(selected_tools, user_input, q_emb, self.messages)
 
@@ -1448,6 +1548,8 @@ class Agent:
                 self.messages,
                 q_emb,
             )
+        if not forced_contextual_call:
+            forced_contextual_call = _forced_folder_watcher_call(user_input, tool_schemas)
 
         while True:
             tool_rounds += 1

@@ -14,6 +14,8 @@ If the action target is ambiguous and the current request plus recent tool resul
 
 For bounded list tools such as Reddit, Hacker News, gallery, search, playlist, or files, use the tool's schema default when the user did not request a count. Do not invent large limits. If the user asks broadly for threads, stories, posts, results, or latest items without a topic, call the listing/default action exposed by the tool instead of asking again.
 
+When `folder_watcher` is selected, use it for natural questions about the current folder, indexed files, file type counts, images, media, Python files, total sizes, latest files, search, content, or deep dives. Use `file_list` only when the user wants a raw directory entry listing for an exact filesystem path.
+
 If the user asks for more detail after a search, fetch, Reddit, Hacker News, file, or terminal result, treat the latest relevant tool result as context. Reuse the previous topic or target and increase depth or breadth; do not turn the follow-up wording itself into the new search query.
 
 If the latest tool result failed and the assistant asks whether to retry, a later user confirmation applies to that latest failed tool call only. Do not repeat an older successful action from the conversation.

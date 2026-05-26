@@ -481,11 +481,15 @@ def file_write(
 
 @tool(
     name="file_list",
-    description="List files and folders in a directory (defaults to current folder)",
+    description=(
+        "Raw filesystem directory listing for an exact directory path. Use for names and "
+        "paths only; use folder_watcher for natural workspace questions, counts by type, "
+        "image or media inventory, sizes, search, content, and file details."
+    ),
     examples=[
-        "what files are here",
-        "list the current folder",
-        "what is in the tools directory",
+        "list raw filenames in .",
+        "list directory entries in .",
+        "show directory entries in tools",
     ],
     param_descriptions={
         "directory": "Directory to list",

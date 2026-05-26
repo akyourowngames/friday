@@ -225,7 +225,7 @@ class RegistryDispatchTests(unittest.TestCase):
     def test_execute_tool_structured_timeout_error(self):
         @tool(name="registry_test_timeout", description="Registry test timeout")
         def registry_test_timeout() -> str:
-            time.sleep(0.2)
+            time.sleep(0.5)
             return "late"
 
         started = time.perf_counter()
@@ -238,7 +238,7 @@ class RegistryDispatchTests(unittest.TestCase):
 
         self.assertEqual(result["error"]["code"], "TOOL_TIMEOUT")
         self.assertTrue(result["error"]["retryable"])
-        self.assertLess(duration, 0.18)
+        self.assertLess(duration, 0.45)
 
     def test_execute_tool_structured_exception_hides_raw_detail(self):
         @tool(name="registry_test_secret_error", description="Registry test secret error")

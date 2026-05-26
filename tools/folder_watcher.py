@@ -352,11 +352,15 @@ def _legacy_summary(result: dict[str, Any]) -> str:
     description=(
         "Read-only bridge to the KING folder watcher HTTP service for natural folder chat, "
         "file queries, stats, latest files, search, content, and deep dives. Use it when a "
-        "user asks about indexed folder contents, file details, total size by extension, "
-        "recent watcher files, or wants an LLM-backed answer from watcher evidence."
+        "user asks about indexed folder contents, file counts, image or media counts, file "
+        "details, total size by extension, recent watcher files, or wants an LLM-backed "
+        "answer from watcher evidence."
     ),
     examples=[
         "ask the folder watcher what is in this folder",
+        "what is in the current folder",
+        "how many python files and images are there in this folder",
+        "count files by type in the current folder",
         "what is the total size for python files in the folder watcher",
         "show latest indexed audio files from the watcher",
         "deep dive this watcher file id",

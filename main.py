@@ -1,8 +1,10 @@
 import json
+import argparse
 import sys
 import threading
 from pathlib import Path
 
+import httpx
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -20,6 +22,7 @@ from gesture.controller import execute as gesture_execute
 console = Console()
 _gesture_detector = None
 _gesture_enabled = False
+DEFAULT_API_BASE = "http://127.0.0.1:8000"
 
 
 def _configure_output_encoding():
@@ -40,6 +43,191 @@ def print_welcome():
     console.print(title)
     console.print("  [dim]/debug[/dim]  [dim]/tools[/dim]  [dim]/model <name>[/dim]  [dim]/memory[/dim]  [dim]/remember <fact>[/dim]  [dim]/forget <fact>[/dim]  [dim]/voice[/dim]  [dim]/new[/dim]  [dim]/exit[/dim]")
     console.print()
+
+
+def _parse_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="KING CLI, API client, or local API server.")
+    parser.add_argument("message", nargs="*", help="Optional one-shot message for --api mode.")
+    parser.add_argument("--api", default="", help="Connect this CLI to a running KING API base URL.")
+    parser.add_argument("--server", action="store_true", help="Run the KING FastAPI server instead of the local CLI agent.")
+    parser.add_argument("--host", default="127.0.0.1", help="API server host for --server mode.")
+    parser.add_argument("--port", type=int, default=8000, help="API server port for --server mode.")
+    return parser.parse_args(argv)
+
+
+def _normalize_api_base(base_url: str) -> str:
+    base = str(base_url or DEFAULT_API_BASE).strip()
+    if not base:
+        base = DEFAULT_API_BASE
+    return base.rstrip("/")
+
+
+def _iter_sse_events(response):
+    for raw_line in response.iter_lines():
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload:
+            continue
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            yield parsed
+
+
+def _print_folder_panel(payload: dict):
+    answer = str(payload.get("answer") or "").strip()
+    if answer:
+        console.print(answer)
+    stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+    if stats:
+        console.print(
+            f"[cyan]Folder watcher:[/cyan] {stats.get('active_files', payload.get('count', '?'))} active file(s), "
+            f"{stats.get('total_size_bytes', '?')} bytes"
+        )
+        details = stats.get("by_extension_details") if isinstance(stats.get("by_extension_details"), dict) else {}
+        if details:
+            table = Table(show_header=True, header_style="bold cyan")
+            table.add_column("Type")
+            table.add_column("Files", justify="right")
+            table.add_column("Bytes", justify="right")
+            for extension, item in list(details.items())[:10]:
+                if isinstance(item, dict):
+                    table.add_row(str(extension), str(item.get("count", "")), str(item.get("size_bytes", "")))
+            console.print(table)
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    if files:
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("File")
+        table.add_column("Type")
+        table.add_column("Bytes", justify="right")
+        for item in files[:10]:
+            if isinstance(item, dict):
+                table.add_row(
+                    str(item.get("filename") or item.get("id") or ""),
+                    str(item.get("extension") or item.get("mime_type") or ""),
+                    str(item.get("size_bytes") or ""),
+                )
+        console.print(table)
+
+
+def _api_folder_request(base_url: str, action: str = "ask", query: str = "", **extra) -> dict:
+    payload = {"action": action, "query": query}
+    payload.update(extra)
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(_normalize_api_base(base_url) + "/folder-watcher", json=payload)
+        response.raise_for_status()
+        data = response.json()
+    return data if isinstance(data, dict) else {"data": data}
+
+
+def _api_chat_once(base_url: str, message: str, session_id: str | None = None) -> tuple[str, str | None]:
+    text_parts = []
+    next_session_id = session_id
+    with httpx.Client(timeout=None) as client:
+        with client.stream(
+            "POST",
+            _normalize_api_base(base_url) + "/chat/jarvis/stream",
+            json={"message": message, "session_id": session_id, "tts": False},
+        ) as response:
+            response.raise_for_status()
+            for event in _iter_sse_events(response):
+                if event.get("session_id"):
+                    next_session_id = str(event["session_id"])
+                if event.get("chunk"):
+                    chunk = str(event["chunk"])
+                    text_parts.append(chunk)
+                    console.print(chunk, end="")
+                if event.get("folder_watcher_result"):
+                    console.print()
+                    _print_folder_panel(event["folder_watcher_result"])
+                if event.get("navigator_result"):
+                    console.print()
+                    console.print("[cyan]Navigator result received from API.[/cyan]")
+                if event.get("vision_result"):
+                    console.print()
+                    console.print(str(event["vision_result"].get("description") or ""))
+                if event.get("error"):
+                    console.print(f"\n[red]{event['error']}[/red]")
+            if text_parts:
+                console.print()
+    return "".join(text_parts).strip(), next_session_id
+
+
+def _handle_api_command(base_url: str, raw: str) -> str:
+    if raw == "/help":
+        console.print("[bold]Commands:[/bold] /health  /folder <question>  /folder-stats  /exit")
+        return "handled"
+    if raw == "/health":
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                console.print_json(json.dumps(client.get(base_url + "/health").json()))
+        except Exception as exc:
+            console.print(f"[red]API health failed: {exc.__class__.__name__}[/red]")
+        return "handled"
+    if raw == "/folder-stats":
+        try:
+            _print_folder_panel(_api_folder_request(base_url, action="stats"))
+        except Exception as exc:
+            console.print(f"[red]Folder watcher request failed: {exc.__class__.__name__}[/red]")
+        return "handled"
+    if raw.startswith("/folder "):
+        try:
+            _print_folder_panel(_api_folder_request(base_url, action="ask", query=raw[len("/folder "):].strip()))
+        except Exception as exc:
+            console.print(f"[red]Folder watcher request failed: {exc.__class__.__name__}[/red]")
+        return "handled"
+    if raw.startswith("/"):
+        console.print(f"[red]Unknown API command: {raw}. Try /help[/red]")
+        return "handled"
+    return "unhandled"
+
+
+def run_api_client(base_url: str, initial_message: str = ""):
+    base_url = _normalize_api_base(base_url)
+    console.print(Panel.fit(f"[bold cyan]KING API CLI[/bold cyan]\n[dim]{base_url}[/dim]", border_style="cyan"))
+    console.print("  [dim]/health[/dim]  [dim]/folder <question>[/dim]  [dim]/folder-stats[/dim]  [dim]/exit[/dim]")
+    session_id = None
+    if initial_message:
+        if _handle_api_command(base_url, initial_message) == "handled":
+            return
+        _, session_id = _api_chat_once(base_url, initial_message, session_id)
+        return
+    while True:
+        try:
+            raw = console.input("[bold yellow]api> [/bold yellow] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[cyan]Goodbye![/cyan]")
+            return
+        if not raw:
+            continue
+        if raw in ("/exit", "/quit"):
+            console.print("[cyan]Goodbye![/cyan]")
+            return
+        if raw == "/help":
+            _handle_api_command(base_url, raw)
+            continue
+        if raw.startswith("/"):
+            _handle_api_command(base_url, raw)
+            continue
+        try:
+            _, session_id = _api_chat_once(base_url, raw, session_id)
+        except Exception as exc:
+            console.print(f"[red]API chat failed: {exc.__class__.__name__}[/red]")
+
+
+def run_api_server(host: str, port: int):
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]uvicorn is not installed, so API server mode cannot start.[/red]")
+        return
+    console.print(f"[cyan]Starting KING API on http://{host}:{port}[/cyan]")
+    uvicorn.run("api_server:app", host=host, port=port)
 
 
 def cmd_debug():
@@ -147,8 +335,15 @@ def gesture_loop(agent: Agent):
                 console.print(f"[green]{result}[/green]")
 
 
-def main():
+def main(argv: list[str] | None = None):
     _configure_output_encoding()
+    args = _parse_args(argv)
+    if args.server:
+        run_api_server(args.host, args.port)
+        return
+    if args.api:
+        run_api_client(args.api, " ".join(args.message).strip())
+        return
     print_welcome()
     agent = Agent()
 

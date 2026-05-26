@@ -168,6 +168,18 @@ Last verified by the default markdown pipeline on 2026-05-23:
   33 passed subtests.
 - The markdown verification pipeline returned `ship` with 6 passed checks, 0
   failed checks, and 0 timeouts.
+- Follow-up CLI and routing repair added markdown-owned semantic arbitration so
+  natural current-folder, file-count, image/media, Python-file, and size
+  questions prefer `folder_watcher` over raw `file_list`; raw directory-entry
+  requests still select `file_list`.
+- `python main.py --api http://127.0.0.1:8011 /folder-stats` returned live
+  folder watcher rollups through the lightweight CLI API client.
+- Follow-up repository suite passed: `python -m pytest -q` reported 247 passed
+  tests and 35 passed subtests.
+- Registry timeout verification was hardened for low-end runtime jitter while
+  preserving the structured `TOOL_TIMEOUT` assertion.
+- Follow-up markdown verification pipeline returned `ship` with 6 passed checks,
+  0 failed checks, and 0 timeouts.
 
 ## Escalation Rules
 

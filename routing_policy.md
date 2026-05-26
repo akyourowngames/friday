@@ -44,6 +44,14 @@ The user is reacting, joking, teasing, venting, complimenting, expressing surpri
 
 The user wants something done: open an app, run a command, search the web, fetch a page, change volume or brightness, read a file, save a note, place an order flow, or otherwise cause an observable tool-backed outcome.
 
+## Folder Watcher Request Text
+
+The user asks a natural question about the current folder, watched workspace, indexed files, file type counts, images, media, Python files, total sizes, latest files, file details, file content, or search inside the folder evidence. The answer should come from the folder watcher service when that tool is available.
+
+## Raw Directory Listing Text
+
+The user asks for raw filesystem directory entries, filenames, or paths for a specific directory path, without asking for semantic counts, indexed evidence, file content, sizes by type, media inventory, or a natural folder answer.
+
 ## Incomplete Utterance Text
 
 The user started a question but trailed off, used ellipsis, left the object unstated, or continued a prior topic without repeating it. This applies to short fragments that cannot stand alone. It does not apply when the current message already has an action and a named source, target, or topic.
