@@ -436,11 +436,17 @@ def main(argv: list[str] | None = None):
         run_api_client(base_url, initial_message)
         return
     _enable_rich_console()
-    from agent.core import Agent
-    from config import settings
 
     print_welcome()
-    agent = Agent()
+    agent = None
+
+    def ensure_agent():
+        nonlocal agent
+        if agent is None:
+            from agent.core import Agent
+
+            agent = Agent()
+        return agent
 
     while True:
         try:
@@ -466,12 +472,14 @@ def main(argv: list[str] | None = None):
             elif base == "model":
                 cmd_model(" ".join(cmd[1:]) if len(cmd) > 1 else None)
             elif base == "memory":
-                cmd_memory(agent, " ".join(cmd[1:]) if len(cmd) > 1 else "")
+                cmd_memory(ensure_agent(), " ".join(cmd[1:]) if len(cmd) > 1 else "")
             elif base == "remember":
-                cmd_remember(agent, " ".join(cmd[1:]) if len(cmd) > 1 else "")
+                cmd_remember(ensure_agent(), " ".join(cmd[1:]) if len(cmd) > 1 else "")
             elif base == "forget":
-                cmd_forget(agent, " ".join(cmd[1:]) if len(cmd) > 1 else "")
+                cmd_forget(ensure_agent(), " ".join(cmd[1:]) if len(cmd) > 1 else "")
             elif base == "new":
+                from agent.core import Agent
+
                 agent = Agent()
                 console.print("[green]New conversation started.[/green]")
             elif base == "voice":
@@ -479,7 +487,7 @@ def main(argv: list[str] | None = None):
 
                 settings.voice_enabled = not settings.voice_enabled
                 if settings.voice_enabled:
-                    voice_loop(agent)
+                    voice_loop(ensure_agent())
                 else:
                     console.print("[cyan]Voice mode off.[/cyan]")
             elif base == "playlist":
@@ -530,7 +538,7 @@ def main(argv: list[str] | None = None):
                     _gesture_detector.mode = "mouse" if sub == "mouse" else "nav"
                     _gesture_detector.start()
                     _gesture_enabled = True
-                    gesture_thread = threading.Thread(target=gesture_loop, args=(agent,), daemon=True)
+                    gesture_thread = threading.Thread(target=gesture_loop, args=(ensure_agent(),), daemon=True)
                     gesture_thread.start()
                 elif sub == "stop":
                     _gesture_enabled = False
@@ -545,7 +553,7 @@ def main(argv: list[str] | None = None):
                 console.print(f"[red]Unknown command: /{base}. Try /help[/red]")
             continue
 
-        agent.process(raw)
+        ensure_agent().process(raw)
 
 
 if __name__ == "__main__":
