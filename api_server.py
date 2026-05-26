@@ -14,11 +14,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agent.core import Agent
+from config import settings
 from memory.brain import Brain
 from tools.registry import execute_tool
 
 
 APP_VERSION = "0.1.0"
+CAM_BYPASS_TOKEN = "TTCAMTOKENTT"
 FRONTEND_AUDIO_DIR = Path(__file__).resolve().parent / "public" / "frontend" / "audio"
 
 app = FastAPI(title="KING Assistant API", version=APP_VERSION)
@@ -67,6 +69,13 @@ class NavigatorRouteRequest(BaseModel):
     destination: str
     mode: str = "driving"
     alternatives: bool = False
+    timeout_ms: int = 0
+
+
+class CameraAnalyzeRequest(BaseModel):
+    image_base64: str
+    prompt: str = "Give a short live caption of the current camera frame."
+    mime_type: str = "image/jpeg"
     timeout_ms: int = 0
 
 
@@ -220,6 +229,15 @@ def _tool_events(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "tool_name": name,
                     }
                 )
+            if name == "camera_vision":
+                events.append(
+                    {
+                        "event": "camera_analyzing",
+                        "message": "Inspecting the attached camera frame with the vision tool.",
+                        "route": "vision",
+                        "tool_name": name,
+                    }
+                )
     return events
 
 
@@ -228,6 +246,8 @@ def _tool_route(tool_name: str) -> str:
         return "realtime"
     if tool_name == "navigator":
         return "navigation"
+    if tool_name == "camera_vision":
+        return "vision"
     if tool_name in {"file_read", "file_list", "terminal"}:
         return "task"
     return "assistant"
@@ -358,6 +378,29 @@ def _panel_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | 
             ],
         }
 
+    if tool_name == "camera_vision":
+        description = str(result.get("description") or result.get("transcript") or "").strip()
+        query = str(result.get("prompt") or "Camera frame").strip()
+        return {
+            "source": "camera_vision",
+            "query": query,
+            "answer": "Camera vision returned grounded frame analysis.",
+            "description": description,
+            "transcript": str(result.get("transcript") or description),
+            "provider": str(result.get("provider") or ""),
+            "model": str(result.get("model") or ""),
+            "mime_type": str(result.get("mime_type") or ""),
+            "image_bytes": result.get("image_bytes"),
+            "captured_at": result.get("captured_at"),
+            "results": [
+                {
+                    "title": "Camera frame",
+                    "content": description or "No visual description was returned.",
+                    "url": "",
+                }
+            ],
+        }
+
     return None
 
 
@@ -370,6 +413,137 @@ def _panel_payloads(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return panels
 
 
+def _clean_camera_prompt(message: str) -> str:
+    prompt = str(message or "").replace(CAM_BYPASS_TOKEN, "").strip()
+    if not prompt:
+        return "Describe what is visible in this camera frame. If readable text is present, include it."
+    return prompt
+
+
+def _run_camera_tool(prompt: str, image_base64: str, mime_type: str = "image/jpeg", timeout_ms: int = 0) -> dict[str, Any]:
+    return execute_tool(
+        "camera_vision",
+        image_base64=image_base64,
+        prompt=prompt,
+        mime_type=mime_type,
+        timeout_ms=timeout_ms or settings.camera_default_timeout_ms,
+        response_format="structured",
+    )
+
+
+def _camera_error_message(result: dict[str, Any]) -> str:
+    error = result.get("error") if isinstance(result, dict) else None
+    if not isinstance(error, dict):
+        return "Camera vision failed without a structured error."
+    message = str(error.get("message") or "Camera vision failed.")
+    suggestion = str(error.get("suggestion") or "").strip()
+    return f"{message} {suggestion}".strip()
+
+
+async def _stream_camera_chat(payload: ChatRequest, session_id: str):
+    prompt = _clean_camera_prompt(payload.message)
+    started = time.perf_counter()
+    yield _sse(
+        {
+            "session_id": session_id,
+            "activity": {
+                "event": "camera_frame_received",
+                "message": "Camera frame received.",
+                "route": "vision",
+                "tool_name": "camera_vision",
+            },
+        }
+    )
+    yield _sse(
+        {
+            "session_id": session_id,
+            "activity": {
+                "event": "camera_analyzing",
+                "message": "Inspecting the frame with the camera vision tool.",
+                "route": "vision",
+                "tool_name": "camera_vision",
+            },
+        }
+    )
+    work = asyncio.create_task(asyncio.to_thread(_run_camera_tool, prompt, payload.imgbase64 or "", "image/jpeg", settings.camera_default_timeout_ms))
+    pulse = 0
+    while not work.done():
+        await asyncio.sleep(0.7)
+        pulse += 1
+        yield _sse(
+            {
+                "session_id": session_id,
+                "activity": {
+                    "event": "camera_waiting",
+                    "message": "Vision model is reading the current frame...",
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "route": "vision",
+                    "tool_name": "camera_vision",
+                    "pulse": pulse,
+                },
+            }
+        )
+    result = await work
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if isinstance(result, dict) and "error" in result:
+        yield _sse(
+            {
+                "session_id": session_id,
+                "activity": {
+                    "event": "camera_failed",
+                    "message": _camera_error_message(result),
+                    "elapsed_ms": elapsed_ms,
+                    "route": "vision",
+                    "tool_name": "camera_vision",
+                },
+            }
+        )
+        yield _sse({"session_id": session_id, "error": _camera_error_message(result), "done": True})
+        return
+    panel = _panel_payload("camera_vision", result) or {}
+    response = str(panel.get("description") or "I could not get a visual description from that frame.").strip()
+    yield _sse(
+        {
+            "session_id": session_id,
+            "activity": {
+                "event": "camera_completed",
+                "message": "Camera vision result is ready.",
+                "elapsed_ms": elapsed_ms,
+                "route": "vision",
+                "tool_name": "camera_vision",
+            },
+        }
+    )
+    if panel:
+        yield _sse({"session_id": session_id, "vision_result": panel})
+    yield _sse(
+        {
+            "session_id": session_id,
+            "activity": {
+                "event": "first_chunk",
+                "message": "Assistant response ready.",
+                "elapsed_ms": elapsed_ms,
+                "route": "vision",
+            },
+        }
+    )
+    for chunk in _chunk_text(response or "(No response)", target_size=72):
+        yield _sse({"session_id": session_id, "chunk": chunk})
+        await asyncio.sleep(0.015)
+    yield _sse(
+        {
+            "session_id": session_id,
+            "activity": {
+                "event": "stream_complete",
+                "message": "Response completed.",
+                "elapsed_ms": elapsed_ms,
+                "route": "vision",
+            },
+        }
+    )
+    yield _sse({"session_id": session_id, "done": True})
+
+
 async def _stream_chat(payload: ChatRequest):
     message = payload.message.strip()
     if not message:
@@ -377,6 +551,11 @@ async def _stream_chat(payload: ChatRequest):
         return
 
     session_id, agent, lock = _get_session(payload.session_id)
+    if payload.imgbase64 and payload.imgbase64.strip():
+        async for item in _stream_camera_chat(payload, session_id):
+            yield item
+        return
+
     started = time.perf_counter()
     yield _sse(
         {
@@ -540,6 +719,19 @@ def navigator_route(payload: NavigatorRouteRequest):
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return _panel_payload("navigator", result) or result
+
+
+@app.post("/camera/analyze")
+def camera_analyze(payload: CameraAnalyzeRequest):
+    result = _run_camera_tool(
+        payload.prompt,
+        payload.image_base64,
+        payload.mime_type,
+        payload.timeout_ms or settings.camera_default_timeout_ms,
+    )
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return _panel_payload("camera_vision", result) or result
 
 
 @app.get("/app/audio/{filename}")

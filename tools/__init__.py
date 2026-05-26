@@ -6,6 +6,7 @@ from . import files
 from . import datetime_tool
 from . import youtube
 from . import image
+from . import camera
 from . import hackernews
 from . import reddit
 from . import terminal

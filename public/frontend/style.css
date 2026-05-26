@@ -759,6 +759,33 @@ textarea { font-family: var(--font); color: var(--text); }
     display: block;
 }
 
+.cam-scan-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -24px;
+    height: 24px;
+    background: linear-gradient(180deg, transparent, rgba(124, 243, 255, 0.45), transparent);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(0);
+}
+
+.cam-panel[data-vision-state="scanning"] .cam-scan-line {
+    opacity: 1;
+    animation: cam-scan 1.4s ease-in-out infinite;
+}
+
+.cam-panel[data-vision-state="scanning"] .cam-panel-dot {
+    background: #7cf3ff;
+    box-shadow: 0 0 12px #7cf3ff;
+}
+
+.cam-panel[data-vision-state="error"] .cam-panel-dot {
+    background: var(--danger);
+    box-shadow: 0 0 12px var(--danger);
+}
+
 .cam-panel-overlay {
     position: absolute;
     bottom: 0;
@@ -768,6 +795,19 @@ textarea { font-family: var(--font); color: var(--text); }
     background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
     font-size: 0.7rem;
     color: rgba(255, 255, 255, 0.85);
+}
+
+.cam-panel-status {
+    display: block;
+    max-height: 2.8em;
+    overflow: hidden;
+    line-height: 1.35;
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.65);
+}
+
+@keyframes cam-scan {
+    0% { transform: translateY(0); }
+    100% { transform: translateY(calc(var(--cam-h) + 48px)); }
 }
 
 .cam-panel-resize {

@@ -17,7 +17,7 @@ from tools.registry import execute_tool, get_tool
 
 class ToolsFleetPolishTests(unittest.TestCase):
     def test_memory_and_image_tools_registered(self):
-        for name in ("memory_assess", "memory_recall", "memory_remember", "memory_forget", "imagine", "gallery"):
+        for name in ("memory_assess", "memory_recall", "memory_remember", "memory_forget", "imagine", "gallery", "camera_vision"):
             self.assertIsNotNone(get_tool(name))
 
     def test_execute_tool_allows_tool_parameter_named_name(self):

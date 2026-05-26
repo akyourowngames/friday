@@ -5,6 +5,7 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 ## Active Executable Tools
 
 - `browser.py` - browser page read, DOM iteration, field extraction, and login sessions (v2.0.0).
+- `camera.py` - live camera frame and image inspection with structured NIM vision output (v1.0.0).
 - `keyboard.py` - key press and markdown-defined keyboard shortcuts.
 - `system_control.py` - volume, brightness, and media controls from SYSTEM_CONTROLS.md.
 - `datetime_tool.py` - timezone-aware date and time with human or ISO output, structured errors, and optional traces (v2.0.0).
@@ -37,6 +38,43 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `FOLDER_WATCHER_LLM_POLICY.md` - markdown-owned prompts, public SQL tables, allowed SQL functions, and LLM limits for folder watcher semantic behavior.
 - `FOLDER_WATCHER_STATUS.md` - markdown-backed feature status matrix exposed by the folder watcher `/status` endpoint.
 - `FILE_PATH_ALIASES.md` - editable natural path aliases consumed by file tools after they are selected.
+
+## Runtime Tool: camera_vision
+
+### Purpose
+
+`camera_vision` analyzes a current camera frame or uploaded image through a configured NVIDIA NIM vision-language model. It is the grounded camera surface for frontend vision mode and for user requests that ask Jarvis to inspect what is visible.
+
+### Runtime
+
+- Entrypoint: `tools/camera.py`.
+- Frontend frame source: `public/frontend/index.html` camera panel and `public/frontend/script.js`.
+- Chat bridge: `/chat/jarvis/stream` uses the tool directly when an image frame is attached.
+- Live preview bridge: `/camera/analyze` returns a short structured camera result for the panel overlay.
+- Default model: `KING_CAMERA_VISION_MODEL`, with `KING_CAMERA_VISION_FALLBACK_MODELS` tried in order.
+
+### Inputs
+
+- Raw base64 image payload or a `data:image/*;base64,...` URL.
+- Optional prompt describing what the vision model should inspect.
+- MIME type, timeout, response format, and trace toggle.
+
+### Outputs
+
+- Structured visual description and transcript text.
+- Provider, model, MIME type, byte size, timestamp, and model-attempt status.
+- Typed provider or validation errors when the frame cannot be analyzed.
+
+### Error Handling
+
+- Missing, invalid, too-small, too-large, or unsupported image data returns structured validation errors.
+- Provider failures return attempted model status without inventing a visual answer.
+- A camera frame sent from the frontend must be answered from the tool result or reported as a tool error.
+
+### Verification
+
+- `python -m unittest tests.test_camera_tool`
+- Frontend frame path must send `imgbase64` to `/chat/jarvis/stream` and `/camera/analyze` without the assistant core fabricating a camera result.
 
 ## Markdown Tool Contract: tool_readiness_audit
 

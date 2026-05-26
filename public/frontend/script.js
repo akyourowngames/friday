@@ -67,6 +67,7 @@ const camMinimize         = $('cam-minimize');
 const camClose            = $('cam-close');
 const camPanelHeader      = $('cam-panel-header');
 const camPanelResize      = $('cam-panel-resize');
+const camStatus           = document.querySelector('.cam-panel-status');
 const settingsPanel       = $('settings-panel');
 const settingsClose       = $('settings-close');
 const toggleAutoActivity  = $('toggle-auto-activity');
@@ -110,6 +111,9 @@ class PreStarterPlayer {
 }
 
 let preStarterPlayer = null;
+let liveVisionTimer = null;
+let liveVisionBusy = false;
+const LIVE_VISION_INTERVAL_MS = (typeof window !== 'undefined' && Number(window.KING_CAMERA_LIVE_INTERVAL_MS)) || 5000;
 
 class TTSPlayer {
     constructor() {
@@ -504,20 +508,66 @@ function maybeRestartListening() {
 }
 
 const CAM_BYPASS_TOKEN = 'TTCAMTOKENTT';
-const CAMERA_QUERY_PATTERNS = [
-    /what\s+(can|do)\s+you\s+see/i,
-    /can\s+you\s+see/i,
-    /describe\s+(what\s+you\s+see|this|the\s+image)/i,
-    /what('s|s)\sss+in\sss+(this\sss+)?(picture|image)/i,
-    /what\s+do\s+i\s+look\s+like/i,
-    /what\s+(am\s+i\s+)?holding/i,
-    /show\s+me\s+what\s+you\s+see/i,
-];
+
+function setCameraStatus(text, state = 'ready') {
+    if (camStatus) camStatus.textContent = text;
+    if (camPanel) camPanel.dataset.visionState = state;
+}
+
 function isCameraQuery(text) {
     if (!text || typeof text !== 'string') return false;
-    const t = text.trim().toLowerCase();
-    return CAMERA_QUERY_PATTERNS.some(r => r.test(t)) ||
-        (t.includes('see') && (t.includes('what') || t.includes('describe')));
+    return Boolean(camStream || (camVisionModeInput && camVisionModeInput.checked));
+}
+
+function stopLiveVisionLoop() {
+    if (liveVisionTimer) {
+        clearInterval(liveVisionTimer);
+        liveVisionTimer = null;
+    }
+    liveVisionBusy = false;
+}
+
+async function runLiveVisionFrame() {
+    if (liveVisionBusy || isStreaming || !camStream || !camVisionModeInput || !camVisionModeInput.checked) return;
+    liveVisionBusy = true;
+    setCameraStatus('Scanning frame...', 'scanning');
+    try {
+        const imgBase64 = await captureFrameAsBase64Safe();
+        if (!imgBase64) {
+            setCameraStatus('Waiting for camera frame...', 'waiting');
+            return;
+        }
+        const res = await fetch(`${API}/camera/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_base64: imgBase64,
+                prompt: 'Give a short live caption of the current camera frame. Mention readable text if visible.',
+                mime_type: 'image/jpeg',
+            }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        const caption = payload.description || payload.answer || payload.results?.[0]?.content || 'Vision result ready.';
+        setCameraStatus(caption, 'ready');
+    } catch (err) {
+        setCameraStatus('Vision provider not ready.', 'error');
+    } finally {
+        liveVisionBusy = false;
+    }
+}
+
+function startLiveVisionLoop() {
+    if (!camVisionModeInput || !camVisionModeInput.checked || !camStream) return;
+    stopLiveVisionLoop();
+    runLiveVisionFrame();
+    liveVisionTimer = setInterval(runLiveVisionFrame, LIVE_VISION_INTERVAL_MS);
+}
+
+function renderCameraResult(payload) {
+    if (!payload) return;
+    const caption = payload.description || payload.answer || payload.results?.[0]?.content || 'Camera vision result ready.';
+    setCameraStatus(caption, 'ready');
 }
 
 function startCamera() {
@@ -539,6 +589,8 @@ function startCamera() {
                 if (icon) icon.style.display = 'none';
                 if (iconActive) iconActive.style.display = '';
             }
+            setCameraStatus('Camera live. Ask Jarvis what this is.', 'ready');
+            startLiveVisionLoop();
         })
         .catch(err => {
             showToast('Camera access denied. ' + (err.message || ''));
@@ -547,6 +599,7 @@ function startCamera() {
 }
 
 function stopCamera() {
+    stopLiveVisionLoop();
     if (camStream) {
         camStream.getTracks().forEach(t => t.stop());
         camStream = null;
@@ -562,6 +615,7 @@ function stopCamera() {
         if (icon) icon.style.display = '';
         if (iconActive) iconActive.style.display = 'none';
     }
+    setCameraStatus('Vision ready', 'ready');
 }
 
 function initCameraPanel() {
@@ -569,6 +623,20 @@ function initCameraPanel() {
     let dragStart = { x: 0, y: 0, left: 0, top: 0 };
     let resizeStart = { x: 0, y: 0, w: 0, h: 0 };
     if (camClose) camClose.addEventListener('click', () => stopCamera());
+    if (camVisionModeInput) {
+        camVisionModeInput.addEventListener('change', () => {
+            if (camVisionModeInput.checked) {
+                if (camStream) startLiveVisionLoop();
+                else startCamera().catch(() => {
+                    camVisionModeInput.checked = false;
+                    setCameraStatus('Camera access needed for live vision.', 'error');
+                });
+            } else {
+                stopLiveVisionLoop();
+                setCameraStatus(camStream ? 'Camera live. Ask Jarvis what this is.' : 'Vision ready', 'ready');
+            }
+        });
+    }
     if (camMinimize) camMinimize.addEventListener('click', () => {
         camPanel.classList.toggle('minimized');
     });
@@ -886,6 +954,7 @@ async function captureFrameAsBase64Safe() {
 async function sendMessageWithImage(text, imgBase64) {
     if (!text || !imgBase64 || isStreaming) return;
     const messageToSend = text + ' ' + CAM_BYPASS_TOKEN;
+    setCameraStatus('Sending frame to Jarvis...', 'scanning');
     addMessage('user', text);
     addTypingIndicator();
     isStreaming = true;
@@ -938,6 +1007,9 @@ async function sendMessageWithImage(text, imgBase64) {
                     }
                     if (data.navigator_result) {
                         renderNavigatorResult(data.navigator_result);
+                    }
+                    if (data.vision_result) {
+                        renderCameraResult(data.vision_result);
                     }
                     if (data.actions) handleActions(data.actions, contentEl);
                     if (data.background_tasks) handleBackgroundTasks(data.background_tasks, contentEl);
@@ -1571,6 +1643,7 @@ async function sendMessage(textOverride) {
     if (camStream && wantsCamera) {
         imgBase64 = await captureFrameAsBase64Safe();
         if (!imgBase64) showToast('Camera frame not ready. Please try again.');
+        else setCameraStatus('Sending frame to Jarvis...', 'scanning');
     }
     messageInput.value = '';
     autoResizeInput();
@@ -1650,6 +1723,9 @@ async function sendMessage(textOverride) {
                     }
                     if (data.navigator_result) {
                         renderNavigatorResult(data.navigator_result);
+                    }
+                    if (data.vision_result) {
+                        renderCameraResult(data.vision_result);
                     }
                     if (data.actions) {
                         handleActions(data.actions, contentEl);

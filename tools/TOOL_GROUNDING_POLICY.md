@@ -14,6 +14,9 @@ Parameters listed here are structural/runtime fields. They are not required to a
 - max_chars
 - follow_redirects
 - alternatives
+- image_base64
+- mime_type
+- timeout_ms
 
 ## Loose Grounding Tools
 
@@ -22,3 +25,4 @@ Tools that may run when the tool name is grounded in the user turn even if a spe
 - memory_recall
 - memory_assess
 - system_control
+- camera_vision
