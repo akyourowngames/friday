@@ -27,6 +27,7 @@ without pretending planned surfaces are already complete.
 - Markdown-owned LLM policy in `tools/FOLDER_WATCHER_LLM_POLICY.md`
 - Provider-backed natural-language SQL generation when the configured LLM key is present
 - Provider-backed natural chat endpoint and dashboard chat panel
+- Simple provider-backed chat that can use indexed file evidence when helpful
 - SQLite authorizer guard for read-only LLM-generated SQL
 - Provider-backed on-demand summaries and summarize-pending endpoint when summaries are enabled
 - PDF text extraction and document metadata

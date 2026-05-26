@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import time
@@ -14,7 +15,7 @@ from folder_watcher.bus import EventBus
 from folder_watcher.configuration import load_config
 from folder_watcher.index import FolderIndex
 from folder_watcher.ingest import IngestPipeline
-from folder_watcher.llm import load_llm_policy
+from folder_watcher.llm import FolderWatcherLLM, LLMPolicy, load_llm_policy
 from folder_watcher.watcher import DebouncedWatcher
 
 
@@ -82,6 +83,39 @@ class FakeLLM:
             "dependents": [],
             "events": [],
         }
+
+
+class RecordingMessage:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class RecordingChoice:
+    def __init__(self, content: str):
+        self.message = RecordingMessage(content)
+
+
+class RecordingResponse:
+    def __init__(self, content: str):
+        self.choices = [RecordingChoice(content)]
+
+
+class RecordingCompletions:
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        index = min(len(self.calls) - 1, len(self.responses) - 1)
+        return RecordingResponse(self.responses[index])
+
+
+class RecordingClient:
+    def __init__(self, responses: list[str]):
+        self.completions = RecordingCompletions(responses)
+        self.client = self
+        self.chat = self
 
 
 def _write_config(root: Path) -> Path:
@@ -173,6 +207,7 @@ class FolderWatcherTests(unittest.TestCase):
                     "- deep_dive_enabled: true",
                     "- max_chat_chars: 900",
                     "- chat_context_files: 4",
+                    "- chat_response_tokens: 512",
                     "## Allowed SQL Tables",
                     "- files",
                     "## Allowed SQL Functions",
@@ -190,6 +225,7 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertTrue(policy.deep_dive_enabled)
         self.assertEqual(policy.max_chat_chars, 900)
         self.assertEqual(policy.chat_context_files, 4)
+        self.assertEqual(policy.chat_response_tokens, 512)
         self.assertIn("Chat from evidence", policy.chat_prompt)
 
     def test_ingest_indexes_text_metadata_tags_search_and_stats(self):
@@ -359,6 +395,70 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(deep_dive.status_code, 200)
         self.assertEqual(deep_dive.json()["mode"], "llm_deep_dive")
         self.assertIn(file_item["id"], deep_dive.json()["answer"])
+
+    def test_chat_keeps_tiny_messages_in_simple_chat_mode(self):
+        note = self.watch / "chat-context.md"
+        note.write_text("hi 1 folder evidence should not be dumped for a tiny turn", encoding="utf-8")
+        self.pipeline.ingest_path(note)
+        recorder = RecordingClient(["Hey, I am here."])
+        policy = LLMPolicy(
+            path=self.config.llm_policy_path,
+            provider_enabled=True,
+            chat_enabled=True,
+            chat_prompt="Reply naturally.",
+            chat_response_tokens=512,
+        )
+        llm = FolderWatcherLLM(self.config, self.index, client_factory=lambda: recorder, policy=policy)
+
+        result = llm.chat("hi", [], None, 5)
+        payload = recorder.completions.calls[0]["messages"][-1]["content"]
+        context = json.loads(payload)
+
+        self.assertEqual(result["answer"], "Hey, I am here.")
+        self.assertEqual(result["context_mode"], "chat_only")
+        self.assertEqual(result["files"], [])
+        self.assertEqual(context["context_mode"], "chat_only")
+        self.assertTrue(context["file_feature"]["available"])
+        self.assertFalse(context["file_feature"]["selected_file_attached"])
+        self.assertEqual(context["relevant_files"], [])
+        self.assertIsNone(context["selected_file"])
+        self.assertEqual(recorder.completions.calls[0]["max_tokens"], 512)
+        self.assertEqual(len(recorder.completions.calls), 1)
+
+        recorder.completions.responses.append("What would you like me to do with that?")
+        result = llm.chat("1", [], None, 5)
+        payload = recorder.completions.calls[1]["messages"][-1]["content"]
+        context = json.loads(payload)
+
+        self.assertEqual(result["context_mode"], "chat_only")
+        self.assertEqual(result["files"], [])
+        self.assertEqual(context["relevant_files"], [])
+        self.assertEqual(len(recorder.completions.calls), 2)
+
+    def test_chat_uses_search_backed_file_context_when_relevant(self):
+        note = self.watch / "chat-context.md"
+        note.write_text("folder evidence matters when the user asks about the folder", encoding="utf-8")
+        self.pipeline.ingest_path(note)
+        recorder = RecordingClient(["This folder has indexed evidence."])
+        policy = LLMPolicy(
+            path=self.config.llm_policy_path,
+            provider_enabled=True,
+            chat_enabled=True,
+            chat_prompt="Reply naturally.",
+            chat_response_tokens=321,
+        )
+        llm = FolderWatcherLLM(self.config, self.index, client_factory=lambda: recorder, policy=policy)
+
+        result = llm.chat("folder evidence", [], None, 5)
+        payload = recorder.completions.calls[0]["messages"][-1]["content"]
+        context = json.loads(payload)
+
+        self.assertEqual(result["context_mode"], "search_results")
+        self.assertTrue(context["relevant_files"])
+        self.assertTrue(context["stats"])
+        self.assertEqual(context["file_feature"]["search_result_count"], 1)
+        self.assertEqual(recorder.completions.calls[0]["max_tokens"], 321)
+        self.assertEqual(len(recorder.completions.calls), 1)
 
     def test_document_and_media_extractors_store_real_metadata(self):
         try:

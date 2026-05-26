@@ -177,6 +177,8 @@ deep-dive, WebSocket, and webhook surfaces.
 - LLM file summaries and semantic tags when summaries are enabled.
 - Natural chat responses grounded in indexed folder context and selected-file
   evidence.
+- Simple chat responses that can use indexed file evidence when selected or
+  relevant without turning every conversation into a folder report.
 - File deep-dive responses grounded in content, metadata, graph edges, events,
   duplicate state, and markdown-owned LLM policy.
 - Snapshot, hot-file, anomaly, duplicate symlink suggestion, dependency,

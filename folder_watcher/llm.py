@@ -24,6 +24,7 @@ class LLMPolicy:
     max_chat_chars: int = 3000
     max_chat_history: int = 8
     chat_context_files: int = 8
+    chat_response_tokens: int = 1200
     max_deep_dive_chars: int = 20000
     max_tags: int = 8
     query_row_limit: int = 25
@@ -49,6 +50,7 @@ class LLMPolicy:
             "max_chat_chars": self.max_chat_chars,
             "max_chat_history": self.max_chat_history,
             "chat_context_files": self.chat_context_files,
+            "chat_response_tokens": self.chat_response_tokens,
             "max_deep_dive_chars": self.max_deep_dive_chars,
             "max_tags": self.max_tags,
             "query_row_limit": self.query_row_limit,
@@ -181,11 +183,12 @@ class FolderWatcherLLM:
             self.policy.chat_prompt,
             context,
             history or [],
-            max_tokens=800,
+            max_tokens=max(256, int(self.policy.chat_response_tokens or 1200)),
         )
         return {
             "answer": answer[: self.policy.max_chat_chars],
             "provider": "llm",
+            "context_mode": context.get("context_mode"),
             "selected_file": context.get("selected_file"),
             "files": context.get("relevant_files", []),
             "stats": context.get("stats", {}),
@@ -250,15 +253,22 @@ class FolderWatcherLLM:
     def _chat_context(self, message: str, file_id: str | None, limit: int | None) -> dict:
         bounded = _bounded_int(limit or self.policy.chat_context_files, 1, self.policy.chat_context_files)
         selected_file = self.index.get_file(file_id) if file_id else None
-        relevant_files = self.index.search(message, bounded)
-        if not relevant_files:
-            relevant_files = self.index.latest(bounded)
+        relevant_files = self.index.search(message, bounded) if _has_search_signal(message) else []
         if selected_file and all(item["id"] != selected_file["id"] for item in relevant_files):
             relevant_files.insert(0, selected_file)
             relevant_files = relevant_files[:bounded]
         stats = self.index.stats()
+        context_mode = "selected_file" if selected_file else ("search_results" if relevant_files else "chat_only")
         return {
             "user_message": message,
+            "context_mode": context_mode,
+            "file_feature": {
+                "available": True,
+                "selected_file_attached": bool(selected_file),
+                "search_result_count": len(relevant_files),
+                "active_files": stats.get("active_files", 0),
+                "events": stats.get("events", 0),
+            },
             "selected_file": self._file_context(selected_file, self.policy.max_deep_dive_chars) if selected_file else None,
             "relevant_files": [
                 self._file_context(item, self.policy.max_file_chars)
@@ -268,9 +278,9 @@ class FolderWatcherLLM:
                 threshold=self.config.hot_file_event_threshold,
                 window_seconds=self.config.hot_file_window_seconds,
                 limit=5,
-            ),
-            "recent_anomalies": self.index.anomalies(5),
-            "duplicate_suggestions": self.index.duplicate_symlink_suggestions()[:5],
+            ) if relevant_files or selected_file else [],
+            "recent_anomalies": self.index.anomalies(5) if relevant_files or selected_file else [],
+            "duplicate_suggestions": self.index.duplicate_symlink_suggestions()[:5] if relevant_files or selected_file else [],
             "stats": {
                 "active_files": stats.get("active_files", 0),
                 "events": stats.get("events", 0),
@@ -388,6 +398,7 @@ def load_llm_policy(repo_root: str | Path = ".", policy_path: str | Path | None 
         max_chat_chars=_int_value(values.get("max_chat_chars"), 3000),
         max_chat_history=_int_value(values.get("max_chat_history"), 8),
         chat_context_files=_int_value(values.get("chat_context_files"), 8),
+        chat_response_tokens=_int_value(values.get("chat_response_tokens"), 1200),
         max_deep_dive_chars=_int_value(values.get("max_deep_dive_chars"), 20000),
         max_tags=_int_value(values.get("max_tags"), 8),
         query_row_limit=_int_value(values.get("query_row_limit"), 25),
@@ -477,6 +488,17 @@ def _bounded_int(value: int, low: int, high: int) -> int:
     except (TypeError, ValueError):
         return low
     return max(low, min(high, number))
+
+
+def _has_search_signal(value: str) -> bool:
+    alpha = 0
+    alnum = 0
+    for char in str(value or "").strip():
+        if char.isalpha():
+            alpha += 1
+        if char.isalnum():
+            alnum += 1
+    return alpha > 0 and alnum >= 3
 
 
 def _clean_history(history: list[dict], max_items: int, max_chars: int) -> list[dict]:
