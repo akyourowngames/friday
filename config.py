@@ -158,7 +158,6 @@ class Settings:
     camera_vision_max_tokens: int = _env_int("KING_CAMERA_VISION_MAX_TOKENS", 260)
     camera_max_image_bytes: int = _env_int("KING_CAMERA_MAX_IMAGE_BYTES", 4500000)
     camera_default_timeout_ms: int = _env_int("KING_CAMERA_DEFAULT_TIMEOUT_MS", 25000)
-    camera_live_interval_ms: int = _env_int("KING_CAMERA_LIVE_INTERVAL_MS", 5000)
     verification_pipeline_file: str = _env("KING_VERIFICATION_PIPELINE_FILE", "tools/TOOL_VERIFICATION_PIPELINE.md")
     verification_pipeline_max_steps: int = _env_int("KING_VERIFICATION_PIPELINE_MAX_STEPS", 8)
     verification_pipeline_timeout_ms: int = _env_int("KING_VERIFICATION_PIPELINE_TIMEOUT_MS", 180000)

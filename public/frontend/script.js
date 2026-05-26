@@ -111,9 +111,6 @@ class PreStarterPlayer {
 }
 
 let preStarterPlayer = null;
-let liveVisionTimer = null;
-let liveVisionBusy = false;
-const LIVE_VISION_INTERVAL_MS = (typeof window !== 'undefined' && Number(window.KING_CAMERA_LIVE_INTERVAL_MS)) || 5000;
 
 class TTSPlayer {
     constructor() {
@@ -514,60 +511,27 @@ function setCameraStatus(text, state = 'ready') {
     if (camPanel) camPanel.dataset.visionState = state;
 }
 
-function isCameraQuery(text) {
-    if (!text || typeof text !== 'string') return false;
-    return Boolean(camStream || (camVisionModeInput && camVisionModeInput.checked));
-}
-
-function stopLiveVisionLoop() {
-    if (liveVisionTimer) {
-        clearInterval(liveVisionTimer);
-        liveVisionTimer = null;
-    }
-    liveVisionBusy = false;
-}
-
-async function runLiveVisionFrame() {
-    if (liveVisionBusy || isStreaming || !camStream || !camVisionModeInput || !camVisionModeInput.checked) return;
-    liveVisionBusy = true;
-    setCameraStatus('Scanning frame...', 'scanning');
-    try {
-        const imgBase64 = await captureFrameAsBase64Safe();
-        if (!imgBase64) {
-            setCameraStatus('Waiting for camera frame...', 'waiting');
-            return;
-        }
-        const res = await fetch(`${API}/camera/analyze`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                image_base64: imgBase64,
-                prompt: 'Give a short live caption of the current camera frame. Mention readable text if visible.',
-                mime_type: 'image/jpeg',
-            }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const payload = await res.json();
-        const caption = payload.description || payload.answer || payload.results?.[0]?.content || 'Vision result ready.';
-        setCameraStatus(caption, 'ready');
-    } catch (err) {
-        setCameraStatus('Vision provider not ready.', 'error');
-    } finally {
-        liveVisionBusy = false;
-    }
-}
-
-function startLiveVisionLoop() {
-    if (!camVisionModeInput || !camVisionModeInput.checked || !camStream) return;
-    stopLiveVisionLoop();
-    runLiveVisionFrame();
-    liveVisionTimer = setInterval(runLiveVisionFrame, LIVE_VISION_INTERVAL_MS);
-}
-
 function renderCameraResult(payload) {
     if (!payload) return;
     const caption = payload.description || payload.answer || payload.results?.[0]?.content || 'Camera vision result ready.';
     setCameraStatus(caption, 'ready');
+}
+
+async function shouldAttachCameraFrame(text) {
+    const query = String(text || '').trim();
+    if (!query) return false;
+    try {
+        const res = await fetch(`${API}/camera/intent`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: query }),
+        });
+        if (!res.ok) return false;
+        const payload = await res.json();
+        return Boolean(payload && payload.should_use_camera);
+    } catch (_) {
+        return false;
+    }
 }
 
 function startCamera() {
@@ -590,7 +554,6 @@ function startCamera() {
                 if (iconActive) iconActive.style.display = '';
             }
             setCameraStatus('Camera live. Ask Jarvis what this is.', 'ready');
-            startLiveVisionLoop();
         })
         .catch(err => {
             showToast('Camera access denied. ' + (err.message || ''));
@@ -599,7 +562,6 @@ function startCamera() {
 }
 
 function stopCamera() {
-    stopLiveVisionLoop();
     if (camStream) {
         camStream.getTracks().forEach(t => t.stop());
         camStream = null;
@@ -626,13 +588,12 @@ function initCameraPanel() {
     if (camVisionModeInput) {
         camVisionModeInput.addEventListener('change', () => {
             if (camVisionModeInput.checked) {
-                if (camStream) startLiveVisionLoop();
-                else startCamera().catch(() => {
+                if (!camStream) startCamera().catch(() => {
                     camVisionModeInput.checked = false;
-                    setCameraStatus('Camera access needed for live vision.', 'error');
+                    setCameraStatus('Camera access needed for vision.', 'error');
                 });
+                else setCameraStatus('Camera live. Ask Jarvis to inspect when ready.', 'ready');
             } else {
-                stopLiveVisionLoop();
                 setCameraStatus(camStream ? 'Camera live. Ask Jarvis what this is.' : 'Vision ready', 'ready');
             }
         });
@@ -1616,9 +1577,6 @@ function scrollToBottom() {
 
 async function sendMessage(textOverride) {
     let text = (textOverride || messageInput.value).trim();
-    const visionModeOn = camVisionModeInput && camVisionModeInput.checked;
-    const wantsCamera = visionModeOn || isCameraQuery(text) || (camStream && text);
-    if (wantsCamera && !text) text = 'What do you see?';
     if (!text || isStreaming) return;
     if (isListening) {
         pendingSendTranscript = null;
@@ -1626,7 +1584,8 @@ async function sendMessage(textOverride) {
         speechSendTimeout = null;
         stopListening();
     }
-    if ((isCameraQuery(text) || visionModeOn) && !camStream) {
+    const wantsCamera = await shouldAttachCameraFrame(text);
+    if (wantsCamera && !camStream) {
         try {
             await startCamera();
             await new Promise((resolve) => {
@@ -1637,6 +1596,8 @@ async function sendMessage(textOverride) {
                 camVideo.addEventListener('loadeddata', onReady);
             });
         } catch (_) {
+            showToast('Camera access is needed for that vision request.');
+            return;
         }
     }
     let imgBase64 = null;

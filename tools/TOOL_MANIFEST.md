@@ -50,7 +50,8 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - Entrypoint: `tools/camera.py`.
 - Frontend frame source: `public/frontend/index.html` camera panel and `public/frontend/script.js`.
 - Chat bridge: `/chat/jarvis/stream` uses the tool directly when an image frame is attached.
-- Live preview bridge: `/camera/analyze` returns a short structured camera result for the panel overlay.
+- Intent bridge: `/camera/intent` uses semantic tool routing to decide whether the current message needs a camera frame.
+- One-shot analysis bridge: `/camera/analyze` returns a structured camera result when an image frame is explicitly submitted.
 - Default model: `KING_CAMERA_VISION_MODEL`, with `KING_CAMERA_VISION_FALLBACK_MODELS` tried in order.
 
 ### Inputs
@@ -70,11 +71,14 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - Missing, invalid, too-small, too-large, or unsupported image data returns structured validation errors.
 - Provider failures return attempted model status without inventing a visual answer.
 - A camera frame sent from the frontend must be answered from the tool result or reported as a tool error.
+- Opening the camera panel is preview-only. It must not call the vision provider or send a frame until the user sends a message that routes semantically to `camera_vision`.
 
 ### Verification
 
 - `python -m unittest tests.test_camera_tool`
-- Frontend frame path must send `imgbase64` to `/chat/jarvis/stream` and `/camera/analyze` without the assistant core fabricating a camera result.
+- `python -m unittest tests.test_camera_api`
+- Opening the frontend camera panel must not send `imgbase64`, call `/camera/analyze`, or start camera tool work.
+- Frontend vision asks must send `imgbase64` to `/chat/jarvis/stream` after `/camera/intent` selects `camera_vision`, without the assistant core fabricating a camera result.
 
 ## Markdown Tool Contract: tool_readiness_audit
 

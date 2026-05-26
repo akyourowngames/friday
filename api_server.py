@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agent.core import Agent
+from agent.router import ToolRouter
 from config import settings
 from memory.brain import Brain
 from tools.registry import execute_tool
@@ -77,6 +78,10 @@ class CameraAnalyzeRequest(BaseModel):
     prompt: str = "Give a short live caption of the current camera frame."
     mime_type: str = "image/jpeg"
     timeout_ms: int = 0
+
+
+class CameraIntentRequest(BaseModel):
+    message: str
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -431,6 +436,33 @@ def _run_camera_tool(prompt: str, image_base64: str, mime_type: str = "image/jpe
     )
 
 
+def _camera_intent_payload(message: str) -> dict[str, Any]:
+    query = _clean_camera_prompt(message)
+    if not query:
+        return {
+            "should_use_camera": False,
+            "selected": [],
+            "scores": [],
+            "reason": "empty_message",
+        }
+    router = ToolRouter()
+    selected = router.select_tools(query)
+    decision = router.last_decision()
+    names = [str(tool.get("name") or "") for tool in selected if isinstance(tool, dict)]
+    camera_score = 0.0
+    for item in decision.get("scores", []):
+        if isinstance(item, dict) and item.get("tool") == "camera_vision":
+            camera_score = float(item.get("score") or 0.0)
+            break
+    return {
+        "should_use_camera": "camera_vision" in names,
+        "selected": names,
+        "scores": decision.get("scores", []),
+        "camera_score": camera_score,
+        "reason": str(decision.get("reason") or ""),
+    }
+
+
 def _camera_error_message(result: dict[str, Any]) -> str:
     error = result.get("error") if isinstance(result, dict) else None
     if not isinstance(error, dict):
@@ -732,6 +764,11 @@ def camera_analyze(payload: CameraAnalyzeRequest):
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return _panel_payload("camera_vision", result) or result
+
+
+@app.post("/camera/intent")
+def camera_intent(payload: CameraIntentRequest):
+    return _camera_intent_payload(payload.message)
 
 
 @app.get("/app/audio/{filename}")
