@@ -14,7 +14,7 @@ from agent.core import (
 )
 from agent.router import ToolRouter
 from api_server import _panel_payload
-from main import _iter_sse_events, _normalize_api_base
+from main import _iter_sse_events, _normalize_api_base, _resolve_api_cli_inputs
 from tools.registry import get_tool_schemas
 
 
@@ -29,7 +29,20 @@ class FakeSseResponse:
 class CliApiAndFolderRoutingTests(unittest.TestCase):
     def test_api_base_normalization(self):
         self.assertEqual(_normalize_api_base("http://127.0.0.1:8011/"), "http://127.0.0.1:8011")
+        self.assertEqual(_normalize_api_base("127.0.0.1:8011/"), "http://127.0.0.1:8011")
         self.assertEqual(_normalize_api_base(""), "http://127.0.0.1:8000")
+
+    def test_api_cli_accepts_natural_one_shot_without_url(self):
+        base_url, message = _resolve_api_cli_inputs("what is in this folder?", [])
+
+        self.assertEqual(base_url, "http://127.0.0.1:8000")
+        self.assertEqual(message, "what is in this folder?")
+
+    def test_api_cli_accepts_explicit_url_and_natural_message(self):
+        base_url, message = _resolve_api_cli_inputs("127.0.0.1:8011", ["how many python files are there?"])
+
+        self.assertEqual(base_url, "http://127.0.0.1:8011")
+        self.assertEqual(message, "how many python files are there?")
 
     def test_sse_event_parser_reads_json_data_lines(self):
         response = FakeSseResponse(

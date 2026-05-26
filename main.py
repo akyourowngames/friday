@@ -3,6 +3,7 @@ import argparse
 import sys
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from rich.console import Console
@@ -48,7 +49,13 @@ def print_welcome():
 def _parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="KING CLI, API client, or local API server.")
     parser.add_argument("message", nargs="*", help="Optional one-shot message for --api mode.")
-    parser.add_argument("--api", default="", help="Connect this CLI to a running KING API base URL.")
+    parser.add_argument(
+        "--api",
+        nargs="?",
+        const=DEFAULT_API_BASE,
+        default="",
+        help="Connect this CLI to a running KING API. Optional value: base URL.",
+    )
     parser.add_argument("--server", action="store_true", help="Run the KING FastAPI server instead of the local CLI agent.")
     parser.add_argument("--host", default="127.0.0.1", help="API server host for --server mode.")
     parser.add_argument("--port", type=int, default=8000, help="API server port for --server mode.")
@@ -59,7 +66,30 @@ def _normalize_api_base(base_url: str) -> str:
     base = str(base_url or DEFAULT_API_BASE).strip()
     if not base:
         base = DEFAULT_API_BASE
+    if not base.startswith(("http://", "https://")):
+        base = "http://" + base
     return base.rstrip("/")
+
+
+def _looks_like_api_base(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if any(ch.isspace() for ch in text):
+        return False
+    parsed = urlparse(text if "://" in text else "http://" + text)
+    if parsed.hostname and parsed.port:
+        return True
+    if parsed.scheme in ("http", "https") and parsed.hostname:
+        return True
+    return False
+
+
+def _resolve_api_cli_inputs(api_arg: str, message_parts: list[str]) -> tuple[str, str]:
+    api_text = str(api_arg or "").strip()
+    if api_text and not message_parts and not _looks_like_api_base(api_text):
+        return DEFAULT_API_BASE, api_text
+    return _normalize_api_base(api_text or DEFAULT_API_BASE), " ".join(message_parts).strip()
 
 
 def _iter_sse_events(response):
@@ -160,7 +190,7 @@ def _api_chat_once(base_url: str, message: str, session_id: str | None = None) -
 
 def _handle_api_command(base_url: str, raw: str) -> str:
     if raw == "/help":
-        console.print("[bold]Commands:[/bold] /health  /folder <question>  /folder-stats  /exit")
+        console.print("[bold]Type naturally.[/bold] Slash commands are optional: /health  /folder <question>  /folder-stats  /exit")
         return "handled"
     if raw == "/health":
         try:
@@ -190,7 +220,9 @@ def _handle_api_command(base_url: str, raw: str) -> str:
 def run_api_client(base_url: str, initial_message: str = ""):
     base_url = _normalize_api_base(base_url)
     console.print(Panel.fit(f"[bold cyan]KING API CLI[/bold cyan]\n[dim]{base_url}[/dim]", border_style="cyan"))
-    console.print("  [dim]/health[/dim]  [dim]/folder <question>[/dim]  [dim]/folder-stats[/dim]  [dim]/exit[/dim]")
+    console.print("[dim]Connected mode: type naturally like the frontend. Slash commands are optional.[/dim]")
+    console.print("  [dim]examples:[/dim] how many python files are there?  [dim]|[/dim] what's in this folder?")
+    console.print("  [dim]commands:[/dim] /health  /folder <question>  /folder-stats  /exit")
     session_id = None
     if initial_message:
         if _handle_api_command(base_url, initial_message) == "handled":
@@ -342,7 +374,8 @@ def main(argv: list[str] | None = None):
         run_api_server(args.host, args.port)
         return
     if args.api:
-        run_api_client(args.api, " ".join(args.message).strip())
+        base_url, initial_message = _resolve_api_cli_inputs(args.api, args.message)
+        run_api_client(base_url, initial_message)
         return
     print_welcome()
     agent = Agent()
