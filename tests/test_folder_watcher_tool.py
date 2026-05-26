@@ -23,7 +23,7 @@ class FakeResponse:
         return self._payload
 
 
-def _client_config(enabled_actions=None):
+def _client_config(enabled_actions=None, action_semantics=None):
     return watcher_tool.FolderWatcherClientConfig(
         path=Path("client.md"),
         active_target="demo",
@@ -31,6 +31,7 @@ def _client_config(enabled_actions=None):
         max_limit=50,
         targets={"demo": watcher_tool.FolderWatcherTarget("demo", "http://watcher.test", "KING_FOLDER_WATCHER_TEST_TOKEN")},
         enabled_actions=set(enabled_actions or watcher_tool._ACTIONS),
+        action_semantics=action_semantics or {},
     )
 
 
@@ -61,6 +62,9 @@ class FolderWatcherToolTests(unittest.TestCase):
                         "## Enabled Actions",
                         "- ask",
                         "- stats",
+                        "## Action Semantics",
+                        "- ask: broad folder questions",
+                        "- stats: aggregate folder counts and sizes",
                     ]
                 ),
                 encoding="utf-8",
@@ -74,6 +78,83 @@ class FolderWatcherToolTests(unittest.TestCase):
         self.assertEqual(config.targets["demo"].base_url, "http://127.0.0.1:7475")
         self.assertEqual(config.targets["demo"].auth_env, "KING_FOLDER_WATCHER_TOKEN")
         self.assertEqual(config.enabled_actions, {"ask", "stats"})
+        self.assertEqual(config.action_semantics["stats"], "aggregate folder counts and sizes")
+
+    def test_natural_builder_uses_markdown_action_semantics(self):
+        config = _client_config(
+            action_semantics={
+                "ask": "broad folder answer",
+                "stats": "aggregate counts sizes and file type totals",
+                "latest": "recent indexed files",
+            }
+        )
+
+        def fake_scores(user_input, candidates):
+            return [(action, 0.91 if action == "stats" else 0.2) for action, _ in candidates]
+
+        with patch.object(watcher_tool, "_load_client_config", return_value=config):
+            with patch.object(watcher_tool, "_score_action_semantics", side_effect=fake_scores):
+                args = watcher_tool.build_natural_folder_watcher_args("how many python files and images")
+
+        self.assertEqual(args["action"], "stats")
+        self.assertEqual(args["query"], "how many python files and images")
+        self.assertEqual(args["response_format"], "structured")
+
+    def test_natural_builder_respects_enabled_actions(self):
+        config = _client_config(
+            enabled_actions={"ask"},
+            action_semantics={
+                "ask": "broad folder answer",
+                "stats": "aggregate counts sizes and file type totals",
+            },
+        )
+        seen_candidates = []
+
+        def fake_scores(user_input, candidates):
+            seen_candidates.extend(action for action, _ in candidates)
+            return [(action, 0.8) for action, _ in candidates]
+
+        with patch.object(watcher_tool, "_load_client_config", return_value=config):
+            with patch.object(watcher_tool, "_score_action_semantics", side_effect=fake_scores):
+                args = watcher_tool.build_natural_folder_watcher_args("how many files are there")
+
+        self.assertEqual(seen_candidates, ["ask"])
+        self.assertEqual(args["action"], "ask")
+
+    def test_natural_builder_resolves_single_recent_file_for_deep_dive(self):
+        config = _client_config(
+            action_semantics={
+                "ask": "broad folder answer",
+                "deep_dive": "detailed analysis for one identified file",
+            }
+        )
+
+        def fake_scores(user_input, candidates):
+            return [(action, 0.95 if action == "deep_dive" else 0.1) for action, _ in candidates]
+
+        recent_single = {
+            "result": {
+                "files": [{"id": "file-1", "filename": "notes.md"}],
+            },
+            "meta": {"tool": "folder_watcher"},
+        }
+        recent_ambiguous = {
+            "result": {
+                "files": [{"id": "file-1"}, {"id": "file-2"}],
+            },
+            "meta": {"tool": "folder_watcher"},
+        }
+
+        with patch.object(watcher_tool, "_load_client_config", return_value=config):
+            with patch.object(watcher_tool, "_score_action_semantics", side_effect=fake_scores):
+                single_args = watcher_tool.build_natural_folder_watcher_args("deep dive this file", recent_single)
+                missing_args = watcher_tool.build_natural_folder_watcher_args("deep dive this file", None)
+                ambiguous_args = watcher_tool.build_natural_folder_watcher_args("deep dive this file", recent_ambiguous)
+
+        self.assertEqual(single_args["action"], "deep_dive")
+        self.assertEqual(single_args["file_id"], "file-1")
+        self.assertEqual(missing_args["action"], "ask")
+        self.assertEqual(ambiguous_args["action"], "ask")
 
     def test_invalid_action_and_missing_query_return_structured_errors(self):
         with patch.object(watcher_tool, "_load_client_config", return_value=_client_config()):

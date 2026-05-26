@@ -27,6 +27,18 @@ here instead of adding routing shortcuts in code.
 - deep_dive
 - status
 
+## Action Semantics
+
+- ask: Natural conversation with the folder watcher when the user wants a grounded answer from indexed folder evidence, especially broad questions, mixed requests, or requests that need the watcher's LLM policy.
+- query: Natural-language file query over indexed folder evidence when the user wants matching files, filtered evidence, or a watcher-backed search result that may include local fallback or provider status.
+- stats: Folder inventory statistics when the user wants counts, total size, file type distribution, extension totals, media/image/Python counts, largest files, or other aggregate facts.
+- details: Bounded file metadata when the user wants file rows, paths, sizes, hashes, tags, timestamps, event counts, relationship counts, or optional content excerpts.
+- search: Text search across indexed files when the user wants matching filenames, paths, content snippets, or specific terms found in the watched folder.
+- latest: Recent indexed files when the user wants newest watcher events, latest files, recent audio/media/documents, or files changed most recently.
+- content: Raw readable content for one previously identified watcher file when the user asks to read, open, show, quote, or inspect that specific file.
+- deep_dive: Detailed analysis for one previously identified watcher file when the user asks to deeply inspect, explain, summarize, or investigate that specific file.
+- status: Watcher runtime health when the user asks whether the watcher service, target, index, providers, OCR, transcription, or background runtime is available.
+
 ## Contract
 
 - The client is read-only in v1.

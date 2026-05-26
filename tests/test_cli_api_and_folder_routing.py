@@ -3,14 +3,17 @@ import sys
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import tools  # noqa: F401
+import tools.folder_watcher as watcher_tool
 from agent.core import (
     _compact_tool_result_for_context,
     _direct_answer_from_tool_result,
     _embedding_query,
+    _filter_tools_for_conversation,
     _forced_folder_watcher_call,
     _prefer_folder_watcher_for_folder_context,
 )
@@ -114,13 +117,72 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
 
         self.assertEqual(preferred[0]["name"], "file_list")
 
-    def test_single_selected_folder_watcher_is_forced_to_execute(self):
+    def test_casual_chat_does_not_select_folder_watcher(self):
+        prompt = "hi how are you bud"
+        q_emb, routing_input = _embedding_query(prompt, [])
+        selected = ToolRouter().select_tools(routing_input, q_emb)
+        filtered = _filter_tools_for_conversation(prompt, q_emb, selected)
+
+        self.assertNotIn("folder_watcher", [tool["name"] for tool in filtered])
+
+    def test_single_selected_folder_watcher_uses_semantic_action(self):
         schema = [item for item in get_tool_schemas() if item["function"]["name"] == "folder_watcher"]
-        call = _forced_folder_watcher_call("how many python files are there and images", schema)
+        config = watcher_tool.FolderWatcherClientConfig(
+            path=Path("client.md"),
+            active_target="demo",
+            targets={"demo": watcher_tool.FolderWatcherTarget("demo", "http://watcher.test")},
+            enabled_actions=set(watcher_tool._ACTIONS),
+            action_semantics={
+                "ask": "broad folder answer",
+                "stats": "aggregate counts sizes and file type totals",
+            },
+        )
+
+        def fake_scores(user_input, candidates):
+            return [(action, 0.9 if action == "stats" else 0.2) for action, _ in candidates]
+
+        with patch.object(watcher_tool, "_load_client_config", return_value=config):
+            with patch.object(watcher_tool, "_score_action_semantics", side_effect=fake_scores):
+                call = _forced_folder_watcher_call("how many python files are there and images", schema)
 
         self.assertIsNotNone(call)
         self.assertEqual(call["name"], "folder_watcher")
-        self.assertEqual(json.loads(call["arguments"])["action"], "ask")
+        args = json.loads(call["arguments"])
+        self.assertEqual(args["action"], "stats")
+        self.assertEqual(args["query"], "how many python files are there and images")
+
+    def test_folder_watcher_followup_uses_single_recent_file_id(self):
+        schema = [item for item in get_tool_schemas() if item["function"]["name"] == "folder_watcher"]
+        config = watcher_tool.FolderWatcherClientConfig(
+            path=Path("client.md"),
+            active_target="demo",
+            targets={"demo": watcher_tool.FolderWatcherTarget("demo", "http://watcher.test")},
+            enabled_actions=set(watcher_tool._ACTIONS),
+            action_semantics={
+                "ask": "broad folder answer",
+                "deep_dive": "detailed analysis for one identified file",
+            },
+        )
+        messages = [
+            {
+                "role": "tool",
+                "content": json.dumps({
+                    "result": {"files": [{"id": "file-1", "filename": "notes.md"}]},
+                    "meta": {"tool": "folder_watcher"},
+                }),
+            }
+        ]
+
+        def fake_scores(user_input, candidates):
+            return [(action, 0.9 if action == "deep_dive" else 0.2) for action, _ in candidates]
+
+        with patch.object(watcher_tool, "_load_client_config", return_value=config):
+            with patch.object(watcher_tool, "_score_action_semantics", side_effect=fake_scores):
+                call = _forced_folder_watcher_call("deep dive this file", schema, messages)
+
+        args = json.loads(call["arguments"])
+        self.assertEqual(args["action"], "deep_dive")
+        self.assertEqual(args["file_id"], "file-1")
 
     def test_folder_watcher_tool_context_stays_panel_parseable_after_compaction(self):
         big_file = {

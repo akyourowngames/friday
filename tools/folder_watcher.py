@@ -47,6 +47,7 @@ class FolderWatcherClientConfig:
     max_limit: int = 500
     targets: dict[str, FolderWatcherTarget] = field(default_factory=dict)
     enabled_actions: set[str] = field(default_factory=set)
+    action_semantics: dict[str, str] = field(default_factory=dict)
 
 
 def _repo_root() -> Path:
@@ -128,10 +129,149 @@ def _load_client_config(root: Path | None = None, path: str | Path | None = None
             action = _clean_action(line[2:])
             if action:
                 config.enabled_actions.add(action)
+            continue
+
+        if section == "action semantics":
+            key, value = _split_config_item(line)
+            action = _clean_action(key)
+            if action in _ACTIONS and value:
+                config.action_semantics[action] = value
 
     if not config.enabled_actions:
         config.enabled_actions = set(_ACTIONS)
     return config
+
+
+def _enabled_actions(config: FolderWatcherClientConfig) -> set[str]:
+    return {action for action in config.enabled_actions if action in _ACTIONS}
+
+
+def _fallback_action(enabled_actions: set[str]) -> str:
+    if "ask" in enabled_actions:
+        return "ask"
+    for action in _ACTIONS:
+        if action in enabled_actions:
+            return action
+    return ""
+
+
+def _score_action_semantics(user_input: str, candidates: list[tuple[str, str]]) -> list[tuple[str, float]]:
+    if not candidates:
+        return []
+    try:
+        import numpy as np
+        from agent.embedder import embed
+
+        query_emb = embed(str(user_input or ""))
+        candidate_embs = embed([action + ": " + text for action, text in candidates])
+        if getattr(candidate_embs, "ndim", 1) == 1:
+            candidate_embs = candidate_embs.reshape(1, -1)
+        scores = np.dot(candidate_embs, query_emb)
+        return [
+            (action, float(scores[index]))
+            for index, (action, _) in enumerate(candidates)
+        ]
+    except Exception:
+        return []
+
+
+def _semantic_action_for_request(user_input: str, config: FolderWatcherClientConfig) -> str:
+    enabled = _enabled_actions(config)
+    fallback = _fallback_action(enabled)
+    if not str(user_input or "").strip():
+        return ""
+
+    candidates = [
+        (action, config.action_semantics[action])
+        for action in _ACTIONS
+        if action in enabled and config.action_semantics.get(action)
+    ]
+    scored = _score_action_semantics(user_input, candidates)
+    if not scored:
+        return fallback
+
+    best_action, best_score = max(scored, key=lambda item: item[1])
+    rounded_scores = {round(score, 6) for _, score in scored}
+    if len(rounded_scores) <= 1:
+        return fallback
+    if best_score < settings.tool_argument_grounding_threshold:
+        return fallback
+    return best_action
+
+
+def _recent_folder_watcher_files(recent_result: dict | None) -> list[dict[str, Any]]:
+    if not isinstance(recent_result, dict):
+        return []
+    result = recent_result.get("result")
+    if not isinstance(result, dict):
+        return []
+
+    files: list[dict[str, Any]] = []
+
+    def add_file(item: Any) -> None:
+        if isinstance(item, dict):
+            files.append(item)
+
+    for item in result.get("files") or []:
+        add_file(item)
+
+    data = result.get("data")
+    if isinstance(data, dict):
+        for item in data.get("files") or []:
+            add_file(item)
+        add_file(data.get("file"))
+
+    add_file(result.get("file"))
+    if result.get("file_id"):
+        files.append({"id": result.get("file_id")})
+    return files
+
+
+def _single_recent_file_id(recent_result: dict | None) -> str:
+    unique_ids: dict[str, bool] = {}
+    for item in _recent_folder_watcher_files(recent_result):
+        file_id = str(item.get("id") or item.get("file_id") or "").strip()
+        if file_id:
+            unique_ids[file_id] = True
+    if len(unique_ids) != 1:
+        return ""
+    return next(iter(unique_ids))
+
+
+def build_natural_folder_watcher_args(
+    user_input: str,
+    recent_result: dict | None = None,
+    response_format: str = "structured",
+) -> dict[str, Any]:
+    query = str(user_input or "").strip()
+    if not query:
+        return {}
+
+    try:
+        config = _load_client_config()
+        enabled = _enabled_actions(config)
+        action = _semantic_action_for_request(query, config)
+    except FileNotFoundError:
+        enabled = set(_ACTIONS)
+        action = "ask"
+
+    if not action:
+        return {}
+
+    args: dict[str, Any] = {"action": action, "query": query}
+    if action in _FILE_ID_ACTIONS:
+        file_id = _single_recent_file_id(recent_result)
+        if file_id:
+            args["file_id"] = file_id
+        else:
+            fallback = _fallback_action({item for item in enabled if item not in _FILE_ID_ACTIONS})
+            if not fallback:
+                return {}
+            args["action"] = fallback
+
+    if response_format:
+        args["response_format"] = response_format
+    return args
 
 
 def _target_from_config(config: FolderWatcherClientConfig, requested_target: str) -> tuple[str, FolderWatcherTarget | None]:

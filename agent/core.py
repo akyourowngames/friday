@@ -685,17 +685,26 @@ def _forced_contextual_tool_call(user_input: str, tool_schemas: list, messages: 
     }
 
 
-def _forced_folder_watcher_call(user_input: str, tool_schemas: list) -> dict | None:
+def _forced_folder_watcher_call(user_input: str, tool_schemas: list, messages: list | None = None) -> dict | None:
     if len(tool_schemas) != 1:
         return None
     function = tool_schemas[0].get("function", {})
     if function.get("name") != "folder_watcher":
         return None
-    args = {"action": "ask", "query": str(user_input or "").strip()}
-    if not args["query"]:
+
+    try:
+        from tools.folder_watcher import build_natural_folder_watcher_args
+    except Exception:
         return None
-    if _tool_supports_parameter("folder_watcher", "response_format"):
-        args["response_format"] = "structured"
+
+    recent_result = _latest_tool_result(messages or [], "folder_watcher")
+    args = build_natural_folder_watcher_args(
+        user_input,
+        recent_result=recent_result,
+        response_format="structured" if _tool_supports_parameter("folder_watcher", "response_format") else "",
+    )
+    if not args:
+        return None
     return {
         "id": "call_folder_watcher_0",
         "name": "folder_watcher",
@@ -833,6 +842,10 @@ def _build_tool_answer_instruction(user_input: str, tool_names: list[str]) -> st
         "state was not verified. "
         "When the result has a query field, describe that field as the searched query, not the user's "
         "short follow-up wording. "
+        "For folder_watcher stats, use returned by_extension, by_mime_type, by_extension_details, "
+        "and by_mime_type_details maps for counts and sizes; if the user asks about a file family "
+        "that is absent from those returned maps, say the returned stats show zero for that family "
+        "instead of saying the data is unavailable. "
         f"Tools used: {names}. User request: {user_input}"
     )
 
@@ -1572,7 +1585,7 @@ class Agent:
                 q_emb,
             )
         if not forced_contextual_call:
-            forced_contextual_call = _forced_folder_watcher_call(user_input, tool_schemas)
+            forced_contextual_call = _forced_folder_watcher_call(user_input, tool_schemas, self.messages)
 
         while True:
             tool_rounds += 1
