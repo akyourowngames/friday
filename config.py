@@ -10,7 +10,11 @@ def _load_env():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, _, val = line.partition("=")
-                os.environ.setdefault(key.strip(), val.strip())
+                os.environ.setdefault(_clean_env_key(key), val.strip())
+
+
+def _clean_env_key(value: str) -> str:
+    return str(value or "").lstrip("\ufeff").strip()
 
 
 _load_env()
