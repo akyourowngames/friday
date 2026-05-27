@@ -4,19 +4,19 @@
 
 :root {
     color-scheme: dark;
-    --bg: #050510;
-    --panel: rgba(14, 13, 32, 0.78);
-    --panel-strong: rgba(20, 19, 42, 0.9);
-    --line: rgba(255, 255, 255, 0.1);
-    --line-strong: rgba(255, 255, 255, 0.18);
-    --text: rgba(255, 255, 255, 0.94);
-    --muted: rgba(255, 255, 255, 0.54);
-    --soft: rgba(255, 255, 255, 0.06);
-    --violet: #7c6aef;
-    --cyan: #4ecdc4;
-    --green: #65e88e;
-    --amber: #f0b64b;
-    --red: #ff6b6b;
+    --bg: #060807;
+    --panel: rgba(10, 14, 13, 0.88);
+    --panel-strong: rgba(13, 18, 17, 0.96);
+    --line: rgba(142, 255, 206, 0.14);
+    --line-strong: rgba(142, 255, 206, 0.28);
+    --text: rgba(240, 255, 249, 0.94);
+    --muted: rgba(202, 221, 214, 0.56);
+    --soft: rgba(142, 255, 206, 0.06);
+    --violet: #6e74ff;
+    --cyan: #40dfc3;
+    --green: #85ffb5;
+    --amber: #ffc861;
+    --red: #ff6d6d;
     --shadow: rgba(0, 0, 0, 0.28);
 }
 
@@ -63,19 +63,20 @@ svg {
     min-height: 100dvh;
     padding: 16px;
     background:
-        radial-gradient(circle at 20% 12%, rgba(78, 205, 196, 0.18), transparent 26%),
-        radial-gradient(circle at 76% 8%, rgba(124, 106, 239, 0.24), transparent 24%),
-        linear-gradient(145deg, #050510 0%, #080819 44%, #061014 100%);
+        linear-gradient(180deg, rgba(133, 255, 181, 0.045) 0, transparent 1px),
+        linear-gradient(90deg, rgba(64, 223, 195, 0.05) 0, transparent 1px),
+        linear-gradient(145deg, #060807 0%, #07110f 55%, #080a10 100%);
+    background-size: 100% 4px, 4px 100%, auto;
 }
 
 .ambient-grid {
     position: fixed;
     inset: 0;
     pointer-events: none;
-    opacity: 0.26;
+    opacity: 0.34;
     background-image:
-        linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+        linear-gradient(rgba(133, 255, 181, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(64, 223, 195, 0.08) 1px, transparent 1px);
     background-size: 54px 54px;
     mask-image: linear-gradient(to bottom, black, transparent 82%);
 }
@@ -83,9 +84,9 @@ svg {
 .glass {
     background: var(--panel);
     border: 1px solid var(--line);
-    box-shadow: 0 18px 50px var(--shadow);
-    backdrop-filter: blur(28px) saturate(1.22);
-    -webkit-backdrop-filter: blur(28px) saturate(1.22);
+    box-shadow: 0 18px 50px var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(18px) saturate(1.08);
+    -webkit-backdrop-filter: blur(18px) saturate(1.08);
 }
 
 .topbar {
@@ -227,6 +228,99 @@ label span {
     align-items: stretch;
 }
 
+.connect-deck {
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    border-radius: 8px;
+}
+
+.toolkit-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 10px;
+}
+
+.toolkit-card {
+    min-width: 0;
+    min-height: 132px;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(2, 4, 3, 0.42);
+}
+
+.toolkit-card.active {
+    border-color: rgba(64, 223, 195, 0.62);
+    box-shadow: inset 0 0 22px rgba(64, 223, 195, 0.08);
+}
+
+.toolkit-card.connected {
+    border-color: rgba(133, 255, 181, 0.5);
+}
+
+.toolkit-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
+.toolkit-title strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.94rem;
+}
+
+.connection-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--amber);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.connection-state::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: currentColor;
+    box-shadow: 0 0 14px currentColor;
+}
+
+.toolkit-card.connected .connection-state {
+    color: var(--green);
+}
+
+.toolkit-meta {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 0.74rem;
+}
+
+.toolkit-count {
+    color: var(--text);
+    font-size: 1.6rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.toolkit-actions {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+}
+
 .panel {
     min-width: 0;
     border-radius: 8px;
@@ -270,9 +364,10 @@ label span {
 }
 
 .primary-button {
-    background: linear-gradient(135deg, rgba(124, 106, 239, 0.96), rgba(78, 205, 196, 0.74));
-    border-color: rgba(255, 255, 255, 0.12);
-    color: white;
+    background: rgba(133, 255, 181, 0.16);
+    border-color: rgba(133, 255, 181, 0.46);
+    color: var(--green);
+    box-shadow: inset 0 0 18px rgba(133, 255, 181, 0.08);
 }
 
 .small-button.subtle {
@@ -298,7 +393,7 @@ textarea {
     min-width: 0;
     border: 1px solid var(--line);
     border-radius: 8px;
-    background: rgba(3, 4, 13, 0.58);
+    background: rgba(2, 4, 3, 0.62);
     color: var(--text);
     outline: none;
 }
@@ -414,6 +509,31 @@ textarea:focus {
     color: var(--muted);
     font-size: 0.76rem;
     font-weight: 600;
+}
+
+.confirm-toggle {
+    width: auto;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--muted);
+    cursor: pointer;
+}
+
+.confirm-toggle input {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--green);
+}
+
+.confirm-toggle span {
+    color: inherit;
+    font-size: 0.72rem;
 }
 
 .tool-list {

@@ -50,6 +50,19 @@
                 </div>
             </section>
 
+            <section class="connect-deck glass" aria-label="Toolkit connections">
+                <div class="panel-head">
+                    <h2>Connections</h2>
+                    <div class="inline-actions">
+                        <button class="small-button" id="auth-status-btn">
+                            <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M18 2v4h-4"/><path d="M6 22v-4h4"/></svg>
+                            <span>Check</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="toolkit-cards" id="toolkit-cards"></div>
+            </section>
+
             <section class="panel-grid">
                 <aside class="panel glass auth-panel">
                     <div class="panel-head">
@@ -115,10 +128,16 @@
                     <div class="argument-fields" id="argument-fields"></div>
                     <div class="argument-toolbar">
                         <span id="argument-hint">JSON payload</span>
-                        <button class="small-button subtle" id="sync-json-btn" type="button">
-                            <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/></svg>
-                            <span>Sync</span>
-                        </button>
+                        <div class="inline-actions">
+                            <label class="confirm-toggle" title="Required for write, auth, and destructive tools">
+                                <input id="confirm-risk-checkbox" type="checkbox">
+                                <span>Confirm</span>
+                            </label>
+                            <button class="small-button subtle" id="sync-json-btn" type="button">
+                                <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/></svg>
+                                <span>Sync</span>
+                            </button>
+                        </div>
                     </div>
                     <textarea id="arguments-input" spellcheck="false">{}</textarea>
                     <pre class="output" id="output-box">Ready.</pre>
@@ -150,6 +169,6 @@
 
         <div class="toast" id="toast" aria-live="polite"></div>
     </div>
-    <script src="composio.js?v=2"></script>
+    <script src="composio.js?v=3"></script>
 </body>
 </html>

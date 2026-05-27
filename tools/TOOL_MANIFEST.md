@@ -115,7 +115,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `arguments`: JSON object passed to Composio for `execute`.
 - Optional query, session id, user id, connected account id or alias, auth-link alias, callback URL, confirmation flag, limit, timeout, response format, and trace toggle.
 - Missing execution arguments and markdown-listed placeholder values may be filled only from the selected tool's markdown `Argument Defaults`; concrete user-supplied arguments always win.
-- Imprecise requested tool slugs may be semantically resolved only to markdown-enabled tools when `COMPOSIO_GATEWAY.md` score and margin gates pass.
+- Imprecise requested tool slugs may be semantically or lexically resolved only to markdown-enabled tools when `COMPOSIO_GATEWAY.md` score and margin gates pass. Lexical recovery uses the enabled policy text and risk metadata, not phrase tables.
 
 ### Outputs
 
@@ -150,7 +150,9 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - Direct dispatch probe: run `install_tools` with multiple exact slugs against a temporary markdown policy and verify all requested slugs are written once.
 - API probe: `POST /composio/connect` and `GET /composio/auth-status` dispatch to the Composio gateway with alias/session fields preserved.
 - Direct dispatch probe: execute `get_repo_details` and verify semantic slug resolution selects `GITHUB_GET_A_REPOSITORY`.
+- Direct dispatch probe: request `gmail-get-emails` and `latest gmail emails` and verify lexical slug recovery selects `GMAIL_FETCH_EMAILS`.
 - API probe: `GET /composio/tools?toolkit=github&query=issues&limit=5` returns compact catalog items.
+- Frontend probe: load `public/frontend/composio.html`, verify the connection card deck, select Gmail, and load the `GMAIL_FETCH_EMAILS` schema form.
 - `tool_manifest_audit` must show manifest/file alignment.
 
 ## Markdown Tool Contract: tool_readiness_audit
@@ -1241,6 +1243,7 @@ It exists so KING can recover from transient failures without hanging, looping i
 
 ## Evolution Log
 
+- 2026-05-27T19:40+05:30 - Added policy-derived Composio lexical slug recovery, surfaced lexical runtime gates in policy/API payloads, expanded the approved pack with Google Contacts, Google Meet, Google Slides, and GitHub pull request/read tools, and upgraded the Composio frontend connection deck without touching core routing.
 - 2026-05-27T12:20+05:30 - Installed a markdown-approved Composio starter pack for Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Tasks, Slack, and Notion, keeping writes behind the existing confirmation gate and leaving core routing unchanged.
 - 2026-05-27T00:00+05:30 - Added Telegram watcher service runtime and markdown config for natural Telegram file delivery, allowed-zone security, Folder Watcher integration, local fallback, lockdown, pick lists, and push notifications without core routing changes.
 - 2026-05-27T00:35+05:30 - Added Composio `install_tools`, `auth_status`, and `connect` gateway flows plus frontend catalog approve controls so more exact tool slugs can be added and auth can be verified without core or keyword hardcoding.

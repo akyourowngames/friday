@@ -12,8 +12,10 @@ const $ = id => document.getElementById(id);
 const state = {
     status: null,
     policy: null,
+    authStatus: null,
     selectedTool: null,
-    lastSessionId: '',
+    selectedToolkit: '',
+    lastSessionId: window.localStorage?.getItem('king_composio_session_id') || '',
     schemas: {},
     activeSchema: null,
     fields: [],
@@ -28,6 +30,8 @@ const els = {
     metricToolkits: $('metric-toolkits'),
     metricTools: $('metric-tools'),
     refreshBtn: $('refresh-btn'),
+    authStatusBtn: $('auth-status-btn'),
+    toolkitCards: $('toolkit-cards'),
     createSessionBtn: $('create-session-btn'),
     connectBtn: $('connect-btn'),
     toolkitSelect: $('toolkit-select'),
@@ -44,6 +48,7 @@ const els = {
     argumentFields: $('argument-fields'),
     argumentHint: $('argument-hint'),
     syncJsonBtn: $('sync-json-btn'),
+    confirmRisk: $('confirm-risk-checkbox'),
     schemaBtn: $('schema-btn'),
     executeBtn: $('execute-btn'),
     argumentsInput: $('arguments-input'),
@@ -94,6 +99,15 @@ function setStatus(kind, text) {
     els.statusText.textContent = text;
 }
 
+function rememberSession(sessionId) {
+    const clean = String(sessionId || '').trim();
+    if (!clean) return;
+    state.lastSessionId = clean;
+    try {
+        window.localStorage?.setItem('king_composio_session_id', clean);
+    } catch (_) {}
+}
+
 async function request(path, options = {}) {
     const response = await fetch(`${API}${path}`, {
         headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -120,6 +134,88 @@ function toolkitsFromStatus(status, policy) {
 function toolsFromStatus(status, policy) {
     const tools = status?.enabled_tools?.length ? status.enabled_tools : policy?.enabled_tools || [];
     return [...tools].sort((a, b) => String(a.slug).localeCompare(String(b.slug)));
+}
+
+function renderToolkitCards(toolkits, tools) {
+    if (!els.toolkitCards) return;
+    const connected = new Set(state.authStatus?.connected_toolkits || []);
+    els.toolkitCards.innerHTML = '';
+    for (const toolkit of toolkits) {
+        const count = tools.filter(tool => tool.toolkit === toolkit).length;
+        const isConnected = connected.has(toolkit);
+        const card = document.createElement('article');
+        card.className = `toolkit-card${state.selectedToolkit === toolkit ? ' active' : ''}${isConnected ? ' connected' : ''}`;
+        card.innerHTML = `
+            <div class="toolkit-title">
+                <strong></strong>
+                <span class="connection-state"></span>
+            </div>
+            <div class="toolkit-meta">
+                <span>approved</span>
+                <span class="toolkit-count"></span>
+            </div>
+            <div class="toolkit-actions">
+                <button class="primary-button" type="button">
+                    <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5"/></svg>
+                    <span>Connect</span>
+                </button>
+                <button class="small-button" type="button">
+                    <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>
+                </button>
+            </div>
+        `;
+        card.querySelector('.toolkit-title strong').textContent = toolkit;
+        card.querySelector('.connection-state').textContent = isConnected ? 'Live' : 'Link';
+        card.querySelector('.toolkit-count').textContent = String(count);
+        const buttons = card.querySelectorAll('button');
+        buttons[0].addEventListener('click', event => {
+            event.stopPropagation();
+            selectToolkit(toolkit);
+            connectToolkit(toolkit);
+        });
+        buttons[1].addEventListener('click', event => {
+            event.stopPropagation();
+            selectToolkit(toolkit);
+        });
+        card.addEventListener('click', () => selectToolkit(toolkit));
+        els.toolkitCards.appendChild(card);
+    }
+}
+
+function selectToolkit(toolkit) {
+    state.selectedToolkit = toolkit || state.selectedToolkit;
+    if (state.selectedToolkit) {
+        els.toolkitInput.value = state.selectedToolkit;
+        els.toolkitSelect.value = state.selectedToolkit;
+    }
+    renderStatus();
+}
+
+async function loadAuthStatus(silent = false) {
+    if (!state.lastSessionId && silent) return;
+    try {
+        if (!silent) setStatus('warn', 'Checking');
+        const params = new URLSearchParams();
+        if (state.lastSessionId) params.set('session_id', state.lastSessionId);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const result = await request(`/composio/auth-status${suffix}`);
+        state.authStatus = result;
+        rememberSession(result.session_id);
+        if (result.session_created) {
+            showToast('Composio session created');
+        }
+        renderStatus();
+        if (!silent) {
+            const connected = result.connected_toolkits || [];
+            setStatus('', 'Ready');
+            setFeedback('', 'Connection status refreshed.', connected.length ? `Live: ${connected.join(', ')}` : 'No connected toolkit reported yet.');
+        }
+    } catch (error) {
+        if (!silent) {
+            setStatus('error', 'Blocked');
+            setFeedback('error', 'Could not check Composio auth.', error.payload?.message || error.message);
+        }
+    }
 }
 
 function renderStatus() {
@@ -149,18 +245,29 @@ function renderStatus() {
     if (!els.toolkitInput.value && toolkits[0]) {
         els.toolkitInput.value = toolkits[0];
     }
+    if (!state.selectedToolkit && toolkits[0]) {
+        state.selectedToolkit = toolkits[0];
+        els.toolkitInput.value = toolkits[0];
+        els.toolkitSelect.value = toolkits[0];
+    }
+    if (state.selectedToolkit) {
+        els.toolkitInput.value = state.selectedToolkit;
+        els.toolkitSelect.value = state.selectedToolkit;
+    }
+    renderToolkitCards(toolkits, tools);
     renderTools(tools);
 }
 
 function renderTools(tools) {
     els.toolList.innerHTML = '';
-    if (!state.selectedTool && tools.length) {
-        state.selectedTool = tools[0].slug;
+    const visibleTools = state.selectedToolkit ? tools.filter(tool => tool.toolkit === state.selectedToolkit) : tools;
+    if (!state.selectedTool && visibleTools.length) {
+        state.selectedTool = visibleTools[0].slug;
     }
-    if (!tools.some(tool => tool.slug === state.selectedTool)) {
-        state.selectedTool = tools[0]?.slug || '';
+    if (!visibleTools.some(tool => tool.slug === state.selectedTool)) {
+        state.selectedTool = visibleTools[0]?.slug || '';
     }
-    for (const tool of tools) {
+    for (const tool of visibleTools) {
         const row = document.createElement('button');
         row.type = 'button';
         row.className = `tool-row${tool.slug === state.selectedTool ? ' active' : ''}`;
@@ -181,10 +288,10 @@ function renderTools(tools) {
         });
         els.toolList.appendChild(row);
     }
-    if (!tools.length) {
+    if (!visibleTools.length) {
         const empty = document.createElement('div');
         empty.className = 'result-strip';
-        empty.textContent = 'No approved tools in policy.';
+        empty.textContent = state.selectedToolkit ? 'No approved tools for this toolkit.' : 'No approved tools in policy.';
         els.toolList.appendChild(empty);
     }
     els.selectedToolTitle.textContent = state.selectedTool || 'Run';
@@ -203,6 +310,7 @@ async function refresh() {
         state.status = status;
         state.policy = policy;
         renderStatus();
+        await loadAuthStatus(true);
         if (state.selectedTool) loadSchemaForSelected(true);
     } catch (error) {
         setStatus('error', 'Offline');
@@ -545,7 +653,7 @@ async function createSession() {
             method: 'POST',
             body: JSON.stringify({ action: 'create_session' }),
         });
-        state.lastSessionId = result.session_id || '';
+        rememberSession(result.session_id);
         els.authResult.textContent = result.mcp_url ? `Session ${result.session_id}\n${result.mcp_url}` : `Session ${result.session_id || 'created'}`;
         els.outputBox.textContent = pretty(result);
         showToast('Composio session ready');
@@ -556,16 +664,21 @@ async function createSession() {
     }
 }
 
-async function connectToolkit() {
-    const toolkit = els.toolkitSelect.value;
+async function connectToolkit(toolkitOverride = '') {
+    const toolkit = toolkitOverride || els.toolkitSelect.value || state.selectedToolkit;
     if (!toolkit) return;
     try {
+        selectToolkit(toolkit);
         setStatus('warn', 'Linking');
-        const result = await request('/composio/action', {
+        const result = await request('/composio/connect', {
             method: 'POST',
-            body: JSON.stringify({ action: 'link', toolkit, session_id: state.lastSessionId }),
+            body: JSON.stringify({
+                toolkit,
+                session_id: state.lastSessionId,
+                alias: `${toolkit}-local`,
+            }),
         });
-        if (result.session_id) state.lastSessionId = result.session_id;
+        rememberSession(result.session_id);
         const url = result.redirect_url || '';
         els.authResult.innerHTML = '';
         const line = document.createElement('div');
@@ -583,6 +696,7 @@ async function connectToolkit() {
         }
         els.outputBox.textContent = pretty(result);
         showToast('Auth link created');
+        await loadAuthStatus(true);
     } catch (error) {
         setStatus('error', 'Blocked');
         els.authResult.textContent = pretty(error.payload || error.message);
@@ -620,9 +734,10 @@ async function executeTool() {
                 tool_slug: state.selectedTool,
                 arguments: args,
                 session_id: state.lastSessionId,
+                confirm: Boolean(els.confirmRisk?.checked),
             }),
         });
-        if (result.session_id) state.lastSessionId = result.session_id;
+        rememberSession(result.session_id);
         renderResult(result);
         setStatus('', 'Ready');
     } catch (error) {
@@ -653,6 +768,7 @@ async function updateTool(event) {
         });
         state.policy = policy;
         state.selectedTool = slug;
+        state.selectedToolkit = toolkit;
         els.toolSlugInput.value = '';
         els.toolNoteInput.value = '';
         renderStatus();
@@ -712,6 +828,7 @@ async function searchCatalog() {
 
 function bind() {
     els.refreshBtn.addEventListener('click', refresh);
+    if (els.authStatusBtn) els.authStatusBtn.addEventListener('click', () => loadAuthStatus(false));
     els.createSessionBtn.addEventListener('click', createSession);
     els.connectBtn.addEventListener('click', connectToolkit);
     els.schemaBtn.addEventListener('click', fetchSchema);
@@ -722,7 +839,7 @@ function bind() {
     els.catalogBtn.addEventListener('click', searchCatalog);
     els.catalogAllowBtn.addEventListener('click', () => approveCatalogItems());
     els.toolkitSelect.addEventListener('change', () => {
-        els.toolkitInput.value = els.toolkitSelect.value;
+        selectToolkit(els.toolkitSelect.value);
     });
 }
 

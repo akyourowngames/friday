@@ -1206,6 +1206,9 @@ def _composio_policy_payload() -> dict[str, Any]:
         "semantic_slug_resolution": policy.semantic_slug_resolution,
         "semantic_slug_min_score": policy.semantic_slug_min_score,
         "semantic_slug_min_margin": policy.semantic_slug_min_margin,
+        "lexical_slug_resolution": policy.lexical_slug_resolution,
+        "lexical_slug_min_score": policy.lexical_slug_min_score,
+        "lexical_slug_min_margin": policy.lexical_slug_min_margin,
         "local_repository": composio_tool._local_repository_hint(),
         "argument_defaults": {
             slug: composio_tool._argument_defaults(policy, slug)

@@ -44,6 +44,9 @@ class ComposioToolTests(unittest.TestCase):
                     "- semantic_slug_resolution: true",
                     "- semantic_slug_min_score: 0.35",
                     "- semantic_slug_min_margin: 0.03",
+                    "- lexical_slug_resolution: true",
+                    "- lexical_slug_min_score: 0.45",
+                    "- lexical_slug_min_margin: 0.02",
                     "- create_sessions_with_search: true",
                     "- create_sessions_with_manage_connections: true",
                     "- create_sessions_with_workbench: false",
@@ -307,6 +310,53 @@ class ComposioToolTests(unittest.TestCase):
         self.assertEqual(result["result"]["tool_slug"], "GITHUB_GET_A_REPOSITORY")
         self.assertTrue(result["result"]["tool_resolution"]["resolved"])
         self.assertEqual(calls[0]["json"]["tool_slug"], "GITHUB_GET_A_REPOSITORY")
+
+    def test_lexical_resolution_recovers_enabled_gmail_email_slug(self):
+        os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"
+        original_request = composio_mod.httpx.request
+
+        composio_mod.composio(
+            action="install_tools",
+            tools=[
+                {"slug": "GMAIL_FETCH_EMAILS", "toolkit": "gmail", "risk": "read", "note": "fetch and search Gmail emails after Gmail is connected"},
+                {"slug": "GMAIL_GET_CONTACTS", "toolkit": "gmail", "risk": "read", "note": "read Google contacts through Gmail"},
+                {"slug": "GMAIL_GET_PROFILE", "toolkit": "gmail", "risk": "read", "note": "read Gmail profile after Gmail is connected"},
+            ],
+            response_format="structured",
+        )
+
+        def fake_request(method, url, headers=None, params=None, json=None, timeout=None):
+            return FakeResponse(
+                200,
+                {
+                    "input_parameters": {
+                        "properties": {"query": {"type": "string"}},
+                        "required": [],
+                    },
+                    "description": "schema payload",
+                },
+            )
+
+        try:
+            composio_mod.httpx.request = fake_request
+            result = composio_mod.composio(
+                action="schema",
+                tool_slug="gmail-get-emails",
+                response_format="structured",
+            )
+            latest_result = composio_mod.composio(
+                action="schema",
+                tool_slug="latest gmail emails",
+                response_format="structured",
+            )
+        finally:
+            composio_mod.httpx.request = original_request
+
+        self.assertEqual(result["result"]["tool_slug"], "GMAIL_FETCH_EMAILS")
+        self.assertEqual(result["result"]["tool_resolution"]["method"], "lexical_policy")
+        self.assertTrue(result["result"]["tool_resolution"]["resolved"])
+        self.assertEqual(latest_result["result"]["tool_slug"], "GMAIL_FETCH_EMAILS")
+        self.assertEqual(latest_result["result"]["tool_resolution"]["method"], "lexical_policy")
 
     def test_schema_returns_compact_input_schema(self):
         os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"

@@ -294,6 +294,23 @@ Last verified by the default markdown pipeline on 2026-05-23:
   `CONFIRMATION_REQUIRED`, focused Composio tests passed 29 tests, fleet tests
   passed 17 tests, `python -m pytest -q` passed 290 tests and 35 subtests, and
   the markdown verification pipeline returned `ship` with 6 passed checks.
+- Lexical slug recovery follow-up resolved `gmail-get-emails`, `gmail get
+  emails`, `fetch latest gmail emails`, and `latest gmail emails` to
+  `GMAIL_FETCH_EMAILS` from enabled markdown policy text and risk metadata.
+- The approved Composio pack now includes Google Contacts, Google Meet, Google
+  Slides, and additional GitHub pull request/read tools; write tools remain
+  behind the existing `confirm=true` gate.
+- Frontend verification in Chrome loaded
+  `http://127.0.0.1:3000/frontend/composio.html`, observed 12 toolkit cards and
+  116 approved tools, selected Gmail, loaded `GMAIL_FETCH_EMAILS`, and rendered
+  schema-derived input fields plus the confirmation toggle.
+- Verification passed for this follow-up: focused Composio/API tests passed 30
+  tests, fleet tests passed 17 tests, `node --check
+  public\frontend\composio.js`, `python -m py_compile tools\composio.py
+  api_server.py`, `npm run typecheck`, `python -m pytest -q` passed 300 tests
+  and 35 subtests, a live Composio schema probe returned `GMAIL_FETCH_EMAILS`
+  with `lexical_policy`, and the markdown verification pipeline returned
+  success with 6 passed checks, 0 failed, and 0 timed out.
 
 ## 2026-05-27 Telegram Watcher Service Snapshot
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import time
@@ -71,6 +72,9 @@ class ComposioPolicy:
     semantic_slug_resolution: bool = True
     semantic_slug_min_score: float = 0.35
     semantic_slug_min_margin: float = 0.03
+    lexical_slug_resolution: bool = True
+    lexical_slug_min_score: float = 0.45
+    lexical_slug_min_margin: float = 0.02
     create_sessions_with_search: bool = True
     create_sessions_with_manage_connections: bool = True
     create_sessions_with_workbench: bool = False
@@ -351,6 +355,12 @@ def _load_policy(path: str | Path | None = None) -> ComposioPolicy:
                 policy.semantic_slug_min_score = _parse_float(value, policy.semantic_slug_min_score)
             elif key == "semantic_slug_min_margin":
                 policy.semantic_slug_min_margin = _parse_float(value, policy.semantic_slug_min_margin)
+            elif key == "lexical_slug_resolution":
+                policy.lexical_slug_resolution = _parse_bool(value, policy.lexical_slug_resolution)
+            elif key == "lexical_slug_min_score":
+                policy.lexical_slug_min_score = _parse_float(value, policy.lexical_slug_min_score)
+            elif key == "lexical_slug_min_margin":
+                policy.lexical_slug_min_margin = _parse_float(value, policy.lexical_slug_min_margin)
             elif key == "create_sessions_with_search":
                 policy.create_sessions_with_search = _parse_bool(value, policy.create_sessions_with_search)
             elif key == "create_sessions_with_manage_connections":
@@ -895,6 +905,79 @@ def _semantic_tool_text(rule: ComposioToolRule) -> str:
     )
 
 
+def _resolution_token(value: str) -> str:
+    token = str(value or "").strip().lower()
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _resolution_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for character in str(value or "").lower():
+        if character.isalnum():
+            current.append(character)
+        elif current:
+            token = _resolution_token("".join(current))
+            if token:
+                tokens.append(token)
+            current = []
+    if current:
+        token = _resolution_token("".join(current))
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _rank_tool_rules_lexically(resolution_query: str, rules: list[ComposioToolRule], confirm_risk_penalty: float = 0.0) -> list[dict[str, Any]]:
+    query_tokens = set(_resolution_tokens(resolution_query))
+    if not query_tokens or not rules:
+        return []
+
+    documents: list[tuple[ComposioToolRule, set[str]]] = [
+        (rule, set(_resolution_tokens(_semantic_tool_text(rule))))
+        for rule in rules
+    ]
+    document_frequency: dict[str, int] = {}
+    for _rule, token_set in documents:
+        for token in token_set:
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+
+    known_query_tokens = [token for token in query_tokens if document_frequency.get(token, 0) > 0]
+    if not known_query_tokens:
+        return []
+
+    document_count = len(documents)
+
+    def token_weight(token: str) -> float:
+        frequency = document_frequency.get(token, 0)
+        return 1.0 + math.log((document_count + 1.0) / (frequency + 1.0))
+
+    denominator = sum(token_weight(token) for token in known_query_tokens)
+    if denominator <= 0:
+        return []
+
+    ranked: list[dict[str, Any]] = []
+    for rule, token_set in documents:
+        overlap = sorted(token for token in known_query_tokens if token in token_set)
+        overlap_weight = sum(token_weight(token) for token in overlap)
+        base_score = float(overlap_weight / denominator)
+        risk_penalty = float(confirm_risk_penalty) if rule.risk in _CONFIRM_RISKS else 0.0
+        ranked.append(
+            {
+                "slug": rule.slug,
+                "score": max(0.0, base_score - risk_penalty),
+                "base_score": base_score,
+                "risk": rule.risk,
+                "matched_tokens": overlap,
+            }
+        )
+    return sorted(ranked, key=lambda item: item["score"], reverse=True)
+
+
 def _embed_texts_local(texts: list[str]):
     try:
         from agent.embedder import _local_embed
@@ -918,6 +1001,9 @@ def _resolve_tool_rule(policy: ComposioPolicy, requested_slug: str, query: str =
         "score": 0.0,
         "margin": 0.0,
         "candidates": [],
+        "lexical_score": 0.0,
+        "lexical_margin": 0.0,
+        "lexical_candidates": [],
     }
     if not policy.semantic_slug_resolution or not policy.tools:
         return clean_slug, None, resolution
@@ -927,6 +1013,25 @@ def _resolve_tool_rule(policy: ComposioPolicy, requested_slug: str, query: str =
         return clean_slug, None, resolution
 
     ordered_rules = sorted(policy.tools.values(), key=lambda item: item.slug)
+    if policy.lexical_slug_resolution:
+        lexical_ranked = _rank_tool_rules_lexically(resolution_query, ordered_rules, policy.lexical_slug_min_margin)
+        resolution["lexical_candidates"] = lexical_ranked[:3]
+        if lexical_ranked:
+            lexical_best = lexical_ranked[0]
+            lexical_second_score = float(lexical_ranked[1]["score"]) if len(lexical_ranked) > 1 else -1.0
+            lexical_score = float(lexical_best["score"])
+            lexical_margin = lexical_score - lexical_second_score
+            resolution["lexical_score"] = lexical_score
+            resolution["lexical_margin"] = lexical_margin
+            if lexical_score >= policy.lexical_slug_min_score and lexical_margin + 0.000000001 >= policy.lexical_slug_min_margin:
+                resolved_slug = str(lexical_best["slug"])
+                resolution["resolved"] = True
+                resolution["method"] = "lexical_policy"
+                resolution["selected"] = resolved_slug
+                resolution["score"] = lexical_score
+                resolution["margin"] = lexical_margin
+                return resolved_slug, policy.tools.get(resolved_slug), resolution
+
     texts = [resolution_query] + [_semantic_tool_text(rule) for rule in ordered_rules]
     embeddings = _embed_texts_local(texts)
     if embeddings is None:
@@ -986,6 +1091,9 @@ def _status_result(policy: ComposioPolicy) -> dict[str, Any]:
         "semantic_slug_resolution": policy.semantic_slug_resolution,
         "semantic_slug_min_score": policy.semantic_slug_min_score,
         "semantic_slug_min_margin": policy.semantic_slug_min_margin,
+        "lexical_slug_resolution": policy.lexical_slug_resolution,
+        "lexical_slug_min_score": policy.lexical_slug_min_score,
+        "lexical_slug_min_margin": policy.lexical_slug_min_margin,
         "enabled_toolkits": sorted(policy.enabled_toolkits),
         "enabled_tools": [
             {

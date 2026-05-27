@@ -14,6 +14,9 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - semantic_slug_resolution: true
 - semantic_slug_min_score: 0.35
 - semantic_slug_min_margin: 0.03
+- lexical_slug_resolution: true
+- lexical_slug_min_score: 0.45
+- lexical_slug_min_margin: 0.02
 - create_sessions_with_search: true
 - create_sessions_with_manage_connections: true
 - create_sessions_with_workbench: false
@@ -30,6 +33,9 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - notion
 - slack
 
+- googlecontacts
+- googlemeet
+- googleslides
 ## Enabled Tools
 
 - GITHUB_GET_A_REPOSITORY | toolkit: github | risk: read | enabled: true | note: get repository details and metadata after GitHub is connected
@@ -115,11 +121,57 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - SLACK_LIST_SCHEDULED_MESSAGES | toolkit: slack | risk: read | enabled: true | note: list scheduled Slack messages
 - SLACK_OPEN_DM | toolkit: slack | risk: write | enabled: true | note: open Slack DMs with confirmation
 
+- GITHUB_COMPARE_TWO_COMMITS | toolkit: github | risk: read | enabled: true | note: compare GitHub commits branches or tags
+- GITHUB_CREATE_AN_ISSUE_COMMENT | toolkit: github | risk: write | enabled: true | note: comment on GitHub issues or pull requests with confirmation
+- GITHUB_CREATE_A_PULL_REQUEST | toolkit: github | risk: write | enabled: true | note: create GitHub pull requests with confirmation
+- GITHUB_DOWNLOAD_WORKFLOW_RUN_LOGS | toolkit: github | risk: read | enabled: true | note: download GitHub Actions workflow run logs
+- GITHUB_FIND_PULL_REQUESTS | toolkit: github | risk: read | enabled: true | note: find GitHub pull requests
+- GITHUB_GET_A_REPOSITORY_README | toolkit: github | risk: read | enabled: true | note: read a GitHub repository README
+- GITHUB_GET_A_WORKFLOW_RUN | toolkit: github | risk: read | enabled: true | note: get a GitHub Actions workflow run
+- GITHUB_GET_RAW_REPOSITORY_CONTENT | toolkit: github | risk: read | enabled: true | note: read raw GitHub repository file content
+- GITHUB_LIST_PULL_REQUESTS | toolkit: github | risk: read | enabled: true | note: list GitHub repository pull requests
+- GITHUB_LIST_PULL_REQUESTS_FILES | toolkit: github | risk: read | enabled: true | note: list files changed in a GitHub pull request
+- GITHUB_LIST_REVIEWS_FOR_A_PULL_REQUEST | toolkit: github | risk: read | enabled: true | note: list GitHub pull request reviews
+- GITHUB_LIST_REVIEW_COMMENTS_ON_A_PULL_REQUEST | toolkit: github | risk: read | enabled: true | note: list GitHub pull request review comments
+- GOOGLECONTACTS_CREATE_CONTACT | toolkit: googlecontacts | risk: write | enabled: true | note: create Google Contacts entries with confirmation
+- GOOGLECONTACTS_CREATE_CONTACT_GROUP | toolkit: googlecontacts | risk: write | enabled: true | note: create Google Contacts groups with confirmation
+- GOOGLECONTACTS_GET_CONTACT_GROUP | toolkit: googlecontacts | risk: read | enabled: true | note: read a Google Contacts group
+- GOOGLECONTACTS_LIST_CONNECTIONS | toolkit: googlecontacts | risk: read | enabled: true | note: list Google Contacts connections
+- GOOGLECONTACTS_LIST_CONTACT_GROUPS | toolkit: googlecontacts | risk: read | enabled: true | note: list Google Contacts groups
+- GOOGLECONTACTS_MODIFY_CONTACT_GROUP_MEMBERS | toolkit: googlecontacts | risk: write | enabled: true | note: modify Google Contacts group members with confirmation
+- GOOGLECONTACTS_SEARCH_CONTACTS | toolkit: googlecontacts | risk: read | enabled: true | note: search Google Contacts by name email phone or organization
+- GOOGLEMEET_CREATE_MEET | toolkit: googlemeet | risk: write | enabled: true | note: create Google Meet spaces with confirmation
+- GOOGLEMEET_GET_MEET | toolkit: googlemeet | risk: read | enabled: true | note: get Google Meet space details
+- GOOGLEMEET_GET_RECORDINGS_BY_CONFERENCE_RECORD_ID | toolkit: googlemeet | risk: read | enabled: true | note: get Google Meet recordings by conference record
+- GOOGLEMEET_GET_TRANSCRIPTS_BY_CONFERENCE_RECORD_ID | toolkit: googlemeet | risk: read | enabled: true | note: get Google Meet transcripts by conference record
+- GOOGLEMEET_LIST_CONFERENCE_RECORDS | toolkit: googlemeet | risk: read | enabled: true | note: list Google Meet conference records
+- GOOGLEMEET_LIST_PARTICIPANTS | toolkit: googlemeet | risk: read | enabled: true | note: list Google Meet participants
+- GOOGLEMEET_LIST_RECORDINGS | toolkit: googlemeet | risk: read | enabled: true | note: list Google Meet recordings
+- GOOGLEMEET_LIST_TRANSCRIPT_ENTRIES | toolkit: googlemeet | risk: read | enabled: true | note: list Google Meet transcript entries
+- GOOGLEMEET_UPDATE_SPACE | toolkit: googlemeet | risk: write | enabled: true | note: update Google Meet spaces with confirmation
+- GOOGLESLIDES_CREATE_PRESENTATION | toolkit: googleslides | risk: write | enabled: true | note: create Google Slides presentations with confirmation
+- GOOGLESLIDES_CREATE_SLIDES_MARKDOWN | toolkit: googleslides | risk: write | enabled: true | note: create Google Slides from markdown with confirmation
+- GOOGLESLIDES_GET_PAGE_THUMBNAIL2 | toolkit: googleslides | risk: read | enabled: true | note: get Google Slides page thumbnails
+- GOOGLESLIDES_PRESENTATIONS_BATCH_UPDATE | toolkit: googleslides | risk: write | enabled: true | note: update Google Slides presentations with confirmation
+- GOOGLESLIDES_PRESENTATIONS_COPY_FROM_TEMPLATE | toolkit: googleslides | risk: write | enabled: true | note: copy Google Slides from templates with confirmation
+- GOOGLESLIDES_PRESENTATIONS_GET | toolkit: googleslides | risk: read | enabled: true | note: get Google Slides presentation details
+- GOOGLESLIDES_PRESENTATIONS_PAGES_GET | toolkit: googleslides | risk: read | enabled: true | note: get Google Slides page details
 ## Argument Defaults
 
 - GITHUB_GET_A_REPOSITORY | owner: local.owner | repo: local.repo
 - GITHUB_LIST_REPOSITORY_ISSUES | owner: local.owner | repo: local.repo
 - GITHUB_LIST_STARGAZERS | owner: local.owner | repo: local.repo
+- GITHUB_CREATE_AN_ISSUE_COMMENT | owner: local.owner | repo: local.repo
+- GITHUB_CREATE_A_PULL_REQUEST | owner: local.owner | repo: local.repo
+- GITHUB_LIST_PULL_REQUESTS | owner: local.owner | repo: local.repo
+- GITHUB_LIST_PULL_REQUESTS_FILES | owner: local.owner | repo: local.repo
+- GITHUB_LIST_REVIEWS_FOR_A_PULL_REQUEST | owner: local.owner | repo: local.repo
+- GITHUB_LIST_REVIEW_COMMENTS_ON_A_PULL_REQUEST | owner: local.owner | repo: local.repo
+- GITHUB_COMPARE_TWO_COMMITS | owner: local.owner | repo: local.repo
+- GITHUB_GET_RAW_REPOSITORY_CONTENT | owner: local.owner | repo: local.repo
+- GITHUB_GET_A_REPOSITORY_README | owner: local.owner | repo: local.repo
+- GITHUB_GET_A_WORKFLOW_RUN | owner: local.owner | repo: local.repo
+- GITHUB_DOWNLOAD_WORKFLOW_RUN_LOGS | owner: local.owner | repo: local.repo
 
 ## Argument Default Placeholders
 
@@ -141,6 +193,7 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - Auth connection should use the Composio tool-router session link flow for enabled toolkits, with optional alias and callback URL passed through provider fields rather than hardcoded app logic.
 - Auth status should be read from the Composio session toolkit metadata; KING must not assume a toolkit is connected just because a link was created.
 - Semantic slug resolution may map an imprecise requested slug to an already-enabled tool only when the configured score and margin gates pass.
+- Lexical slug recovery may use tokens from enabled markdown policy entries and prefer lower-risk tied candidates; it must not use hardcoded phrase tables.
 - Provider errors, missing API keys, missing sessions, and auth requirements must return structured errors instead of false-negative capability claims.
 - Argument defaults are resolved by the gateway from local repo evidence such as `git remote.origin.url`; they fill missing values and markdown-listed placeholder values without overriding concrete user-supplied arguments.
 - Never store Composio API keys, OAuth tokens, connected account secrets, or private provider responses in this markdown file.
@@ -161,11 +214,18 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - `connect googledrive through composio`
 - `connect googledocs through composio`
 - `connect googlesheets through composio`
+- `connect googlecontacts through composio`
+- `connect googlemeet through composio`
+- `connect googleslides through composio`
 - `connect googletasks through composio`
 - `connect slack through composio`
 - `connect notion through composio`
+- `get latest gmail emails through composio`
 - `fetch my latest Gmail emails through composio`
 - `find free slots in my Google Calendar tomorrow through composio`
 - `find my recent Google Drive files through composio`
+- `search my Google Contacts through composio`
+- `create a Google Meet through composio`
+- `create Google Slides from markdown through composio`
 - `search Slack for project updates through composio`
 - `search Notion pages for meeting notes through composio`
