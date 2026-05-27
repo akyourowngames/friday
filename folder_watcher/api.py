@@ -14,6 +14,7 @@ from .dashboard import dashboard_html
 from .index import FolderIndex
 from .llm import FolderWatcherLLM
 from .status import load_status
+from .understanding import file_understanding
 from .webhooks import WebhookRegistry
 
 
@@ -294,11 +295,30 @@ def create_app(
         return item
 
     @app.get("/files/{file_id}/content")
-    def get_file_content(file_id: str, _: Any = Depends(require_auth)):
+    def get_file_content(
+        file_id: str,
+        offset: int = Query(default=0, ge=0),
+        max_chars: int = Query(default=0, ge=0, le=200000),
+        _: Any = Depends(require_auth),
+    ):
         content = index.get_content(file_id)
         if content is None:
             raise HTTPException(status_code=404, detail="file content not found")
-        return {"file_id": file_id, "content": content}
+        start = min(offset, len(content))
+        if max_chars:
+            end = min(len(content), start + max_chars)
+        else:
+            end = len(content)
+        next_offset = end if end < len(content) else None
+        return {
+            "file_id": file_id,
+            "content": content[start:end],
+            "offset": start,
+            "max_chars": max_chars,
+            "total_chars": len(content),
+            "truncated": next_offset is not None,
+            "next_offset": next_offset,
+        }
 
     @app.get("/files/{file_id}/dependencies")
     def get_dependencies(file_id: str, _: Any = Depends(require_auth)):
@@ -328,6 +348,7 @@ def create_app(
             "file_id": file_id,
             "answer": _local_deep_dive_answer(item),
             "file": item,
+            "understanding": file_understanding(item, index.get_content(file_id) or ""),
             "content_excerpt": (index.get_content(file_id) or "")[:5000],
             "dependencies": index.dependencies(file_id),
             "dependents": index.dependents(file_id),

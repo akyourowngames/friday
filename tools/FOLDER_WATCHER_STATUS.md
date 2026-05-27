@@ -8,13 +8,15 @@ without pretending planned surfaces are already complete.
 
 - Markdown config loading from `tools/FOLDER_WATCHER_CONFIG.md`
 - Isolated demo config in `tools/FOLDER_WATCHER_DEMO_CONFIG.md`
+- Environment overrides for watched folder destination, database path, API host, API port, and max indexed content size
 - SQLite file index with active and deleted status
 - SQLite event log for create, modify, delete, move, unchanged, and directory events
 - SHA256 content hashing with configured chunk size
 - MIME sniffing from common magic bytes with extension fallback
 - Text extraction for configured text extensions
-- Python AST metadata extraction for imports, functions, and classes
-- JSON and TOML top-level metadata extraction
+- Content understanding metadata for indexed text, including counts, headings, and reading status
+- Python AST metadata extraction for imports, functions, classes, docstrings, signatures, and line spans
+- JSON and TOML structure extraction with nested key paths
 - Configured auto-tag rules for extension, MIME prefix, directory, and size
 - Duplicate detection by SHA256 hash
 - SQLite FTS5 search with local content fallback
@@ -38,7 +40,7 @@ without pretending planned surfaces are already complete.
 - Image metadata and EXIF extraction with OCR hook support
 - Video metadata extraction through OpenCV and optional ffprobe detail
 - File relationship graph and dependency/dependent endpoints
-- File deep-dive endpoint using selected file content, metadata, graph, events, and LLM policy
+- File deep-dive endpoint using selected file content, structured understanding metadata, graph, events, and LLM policy
 - Change velocity tracking and hot-file tagging in API responses
 - Directory intent anomaly detection
 - Snapshot reconstruction endpoint

@@ -27,6 +27,14 @@ you want to see the service working without indexing the whole project tree.
 - webhook_rate_limit_per_sec: 5
 - playlist_path: storage/folder_watcher_demo_new_arrivals.m3u
 
+## Environment Overrides
+
+- KING_FOLDER_WATCHER_WATCH_PATH overrides `watch_path` at service startup.
+- KING_FOLDER_WATCHER_DATABASE_PATH overrides `database_path` at service startup.
+- KING_FOLDER_WATCHER_API_HOST overrides `api_host` at service startup.
+- KING_FOLDER_WATCHER_API_PORT overrides `api_port` at service startup.
+- KING_FOLDER_WATCHER_MAX_CONTENT_CHARS overrides `max_content_chars` at service startup.
+
 ## Ignore Globs
 
 - .git/**

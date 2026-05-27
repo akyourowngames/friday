@@ -29,6 +29,16 @@ adding routing shortcuts in code.
 - webhook_rate_limit_per_sec: 5
 - playlist_path: storage/folder_watcher_new_arrivals.m3u
 
+## Environment Overrides
+
+- KING_FOLDER_WATCHER_WATCH_PATH overrides `watch_path` at service startup.
+- KING_FOLDER_WATCHER_DATABASE_PATH overrides `database_path` at service startup.
+- KING_FOLDER_WATCHER_API_HOST overrides `api_host` at service startup.
+- KING_FOLDER_WATCHER_API_PORT overrides `api_port` at service startup.
+- KING_FOLDER_WATCHER_MAX_CONTENT_CHARS overrides `max_content_chars` at service startup.
+- KING_FOLDER_WATCHER_CONFIG_FILE selects the markdown config file used by KING settings.
+- KING_FOLDER_WATCHER_TARGET, KING_FOLDER_WATCHER_BASE_URL, and KING_FOLDER_WATCHER_TIMEOUT_MS control the registered KING `folder_watcher` client bridge.
+
 ## Ignore Globs
 
 - AGENTS.md
@@ -119,10 +129,11 @@ adding routing shortcuts in code.
   content excerpts, event counts, dependency counts, and selected filters.
 - `GET /files/{id}` returns one indexed file record.
 - `GET /files/{id}/content` returns extracted text content.
+- `GET /files/{id}/content?offset=0&max_chars=5000` returns bounded content windows with `next_offset`.
 - `GET /files/{id}/dependencies` returns indexed relationship edges from a file.
 - `GET /files/{id}/dependents` returns indexed reverse relationship edges.
 - `GET /files/{id}/deep-dive` returns provider-backed or local deep-dive context
-  for one indexed file.
+  for one indexed file, including structured file understanding metadata.
 - `GET /files/{id}/summary` returns a stored summary or generates one through
   the LLM policy when summaries are enabled and the provider is available.
 - `POST /files/summarize-pending` summarizes pending text files through the LLM

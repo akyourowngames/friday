@@ -426,7 +426,7 @@ def _request_spec(
             params["dir"] = directory
         return "GET", "/files/latest", params, {}
     if action == "content":
-        return "GET", "/files/" + quote(file_id, safe="") + "/content", {}, {}
+        return "GET", "/files/" + quote(file_id, safe="") + "/content", {"max_chars": max_content_chars}, {}
     if action == "deep_dive":
         return "GET", "/files/" + quote(file_id, safe="") + "/deep-dive", {}, {}
     return "GET", "/status", {}, {}

@@ -33,6 +33,7 @@ class IngestPipeline:
         extracted_metadata, extracted_content = extract_document_or_media(resolved, mime_type, self.config)
         metadata.update(extracted_metadata)
         content = extracted_content or _extract_content(resolved, mime_type, self.config)
+        metadata.update(_content_understanding(resolved, content, self.config))
         tags = _tags_for(resolved, mime_type, stat.st_size, self.config)
         anomaly = _directory_anomaly(resolved, self.config)
         if anomaly:
@@ -206,6 +207,8 @@ def _python_metadata(path: Path) -> dict:
         "imports": [],
         "functions": [],
         "classes": [],
+        "function_details": [],
+        "class_details": [],
         "parse_status": "ok",
     }
     try:
@@ -214,9 +217,14 @@ def _python_metadata(path: Path) -> dict:
         result["parse_status"] = "syntax_error"
         result["syntax_error"] = str(exc)
         return result
+    module_docstring = ast.get_docstring(tree) or ""
+    if module_docstring:
+        result["module_docstring"] = module_docstring[:700]
     imports: list[str] = []
     functions: list[str] = []
     classes: list[str] = []
+    function_details: list[dict] = []
+    class_details: list[dict] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.extend(alias.name for alias in node.names)
@@ -225,12 +233,63 @@ def _python_metadata(path: Path) -> dict:
                 imports.append(node.module)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions.append(node.name)
+            if len(function_details) < 80:
+                function_details.append(_function_detail(node))
         elif isinstance(node, ast.ClassDef):
             classes.append(node.name)
+            if len(class_details) < 60:
+                class_details.append(_class_detail(node))
     result["imports"] = sorted(set(imports))
     result["functions"] = sorted(set(functions))
     result["classes"] = sorted(set(classes))
+    result["import_count"] = len(result["imports"])
+    result["function_count"] = len(result["functions"])
+    result["class_count"] = len(result["classes"])
+    result["function_details"] = function_details
+    result["class_details"] = class_details
     return result
+
+
+def _function_detail(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
+    args = [item.arg for item in getattr(node.args, "posonlyargs", [])]
+    args.extend(item.arg for item in node.args.args)
+    args.extend(item.arg for item in node.args.kwonlyargs)
+    if node.args.vararg:
+        args.append("*" + node.args.vararg.arg)
+    if node.args.kwarg:
+        args.append("**" + node.args.kwarg.arg)
+    return {
+        "name": node.name,
+        "line": getattr(node, "lineno", 0),
+        "end_line": getattr(node, "end_lineno", getattr(node, "lineno", 0)),
+        "async": isinstance(node, ast.AsyncFunctionDef),
+        "args": args[:24],
+        "docstring": bool(ast.get_docstring(node)),
+    }
+
+
+def _class_detail(node: ast.ClassDef) -> dict:
+    methods = [
+        item.name
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    bases = []
+    for base in node.bases:
+        if isinstance(base, ast.Name):
+            bases.append(base.id)
+        elif isinstance(base, ast.Attribute):
+            bases.append(base.attr)
+        else:
+            bases.append(type(base).__name__)
+    return {
+        "name": node.name,
+        "line": getattr(node, "lineno", 0),
+        "end_line": getattr(node, "end_lineno", getattr(node, "lineno", 0)),
+        "bases": bases[:12],
+        "methods": methods[:40],
+        "docstring": bool(ast.get_docstring(node)),
+    }
 
 
 def _json_metadata(path: Path) -> dict:
@@ -239,9 +298,20 @@ def _json_metadata(path: Path) -> dict:
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return {"format": "json", "parse_status": "parse_error"}
     if isinstance(parsed, dict):
-        return {"format": "json", "parse_status": "ok", "top_level_keys": sorted(str(key) for key in parsed.keys())}
+        return {
+            "format": "json",
+            "parse_status": "ok",
+            "top_level_keys": sorted(str(key) for key in parsed.keys()),
+            "nested_key_paths": _nested_key_paths(parsed),
+        }
     if isinstance(parsed, list):
-        return {"format": "json", "parse_status": "ok", "top_level_type": "list", "item_count": len(parsed)}
+        return {
+            "format": "json",
+            "parse_status": "ok",
+            "top_level_type": "list",
+            "item_count": len(parsed),
+            "nested_key_paths": _nested_key_paths(parsed),
+        }
     return {"format": "json", "parse_status": "ok", "top_level_type": type(parsed).__name__}
 
 
@@ -250,7 +320,108 @@ def _toml_metadata(path: Path) -> dict:
         parsed = tomllib.loads(path.read_text(encoding="utf-8"))
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
         return {"format": "toml", "parse_status": "parse_error"}
-    return {"format": "toml", "parse_status": "ok", "top_level_keys": sorted(str(key) for key in parsed.keys())}
+    return {
+        "format": "toml",
+        "parse_status": "ok",
+        "top_level_keys": sorted(str(key) for key in parsed.keys()),
+        "nested_key_paths": _nested_key_paths(parsed),
+    }
+
+
+def _nested_key_paths(value: object, prefix: str = "", limit: int = 80) -> list[str]:
+    paths: list[str] = []
+
+    def walk(item: object, current: str) -> None:
+        if len(paths) >= limit:
+            return
+        if isinstance(item, dict):
+            for key in sorted(item.keys(), key=lambda part: str(part)):
+                clean = str(key)
+                next_path = clean if not current else current + "." + clean
+                paths.append(next_path)
+                walk(item[key], next_path)
+                if len(paths) >= limit:
+                    return
+        elif isinstance(item, list):
+            for index, child in enumerate(item[:10]):
+                next_path = current + "[]" if current else "[]"
+                if index == 0:
+                    paths.append(next_path)
+                walk(child, next_path)
+                if len(paths) >= limit:
+                    return
+
+    walk(value, prefix)
+    return paths[:limit]
+
+
+def _content_understanding(path: Path, content: str, config: WatcherConfig) -> dict:
+    text = str(content or "")
+    lines = text.splitlines()
+    non_empty = [line.strip() for line in lines if line.strip()]
+    profile = {
+        "content_available": bool(text),
+        "chars_indexed": len(text),
+        "line_count": len(lines),
+        "non_empty_line_count": len(non_empty),
+        "word_count": _word_count(text),
+        "content_truncated": bool(text) and len(text) >= max(1, int(config.max_content_chars or 1)),
+        "first_non_empty_lines": non_empty[:5],
+        "headings": _markdown_headings(lines),
+        "code_block_count": _fenced_code_block_count(lines),
+        "source_suffix": path.suffix.lower(),
+    }
+    if not text:
+        profile["reading_status"] = "no_text_content"
+    elif profile["content_truncated"]:
+        profile["reading_status"] = "truncated_to_config_limit"
+    else:
+        profile["reading_status"] = "indexed"
+    return {"content_profile": profile}
+
+
+def _word_count(text: str) -> int:
+    count = 0
+    in_word = False
+    for char in text:
+        if char.isalnum() or char in ("_", "-"):
+            if not in_word:
+                count += 1
+                in_word = True
+        else:
+            in_word = False
+    return count
+
+
+def _markdown_headings(lines: list[str]) -> list[dict]:
+    headings = []
+    for index, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        level = 0
+        for char in stripped:
+            if char == "#":
+                level += 1
+                continue
+            break
+        if level <= 0 or level > 6:
+            continue
+        title = stripped[level:].strip()
+        if not title:
+            continue
+        headings.append({"level": level, "text": title[:160], "line": index})
+        if len(headings) >= 40:
+            break
+    return headings
+
+
+def _fenced_code_block_count(lines: list[str]) -> int:
+    count = 0
+    for line in lines:
+        if line.strip().startswith("```"):
+            count += 1
+    return count // 2
 
 
 def _extract_content(path: Path, mime_type: str, config: WatcherConfig) -> str:

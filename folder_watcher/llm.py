@@ -9,6 +9,7 @@ from config import settings
 
 from .configuration import WatcherConfig
 from .index import FolderIndex
+from .understanding import file_understanding
 
 
 @dataclass
@@ -209,6 +210,7 @@ class FolderWatcherLLM:
             "answer": answer[: self.policy.max_chat_chars],
             "provider": "llm",
             "file": context["file"],
+            "understanding": context["understanding"],
             "dependencies": context["dependencies"],
             "dependents": context["dependents"],
             "events": context["events"],
@@ -311,8 +313,10 @@ class FolderWatcherLLM:
             duplicates = suggestion.get("duplicates", [])
             if canonical.get("id") == file_id or any(item.get("id") == file_id for item in duplicates):
                 duplicate_groups.append(suggestion)
+        content = self.index.get_content(file_id) or ""
         return {
             "file": self._file_context(file_record, self.policy.max_deep_dive_chars),
+            "understanding": file_understanding(file_record, content),
             "dependencies": self.index.dependencies(file_id),
             "dependents": self.index.dependents(file_id),
             "events": events,

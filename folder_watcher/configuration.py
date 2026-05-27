@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
@@ -47,6 +48,7 @@ class WatcherConfig:
     text_extensions: list[str] = field(default_factory=list)
     tag_rules: list[TagRule] = field(default_factory=list)
     directory_intents: list[DirectoryIntent] = field(default_factory=list)
+    env_overrides: dict[str, str] = field(default_factory=dict)
 
     def should_ignore(self, path: Path) -> bool:
         path = path.expanduser().resolve()
@@ -102,6 +104,7 @@ class WatcherConfig:
                 {"directory": item.directory, "extensions": list(item.extensions)}
                 for item in self.directory_intents
             ],
+            "env_overrides": dict(self.env_overrides),
         }
 
     def apply_runtime_patch(self, patch: dict) -> dict:
@@ -154,6 +157,7 @@ class WatcherConfig:
         self.text_extensions = list(other.text_extensions)
         self.tag_rules = list(other.tag_rules)
         self.directory_intents = list(other.directory_intents)
+        self.env_overrides = dict(other.env_overrides)
 
 
 def load_config(repo_root: str | Path = ".", config_path: str | Path | None = None) -> WatcherConfig:
@@ -202,8 +206,15 @@ def load_config(repo_root: str | Path = ".", config_path: str | Path | None = No
                 if intent is not None:
                     directory_intents.append(intent)
 
-    watch_path = _resolve_path(root, values.get("watch_path", "."))
-    database_path = _resolve_path(root, values.get("database_path", "storage/folder_watcher.sqlite3"))
+    env_overrides: dict[str, str] = {}
+    watch_path_value = _config_value(values, "watch_path", ".", "KING_FOLDER_WATCHER_WATCH_PATH", env_overrides)
+    database_path_value = _config_value(values, "database_path", "storage/folder_watcher.sqlite3", "KING_FOLDER_WATCHER_DATABASE_PATH", env_overrides)
+    api_host_value = _config_value(values, "api_host", "127.0.0.1", "KING_FOLDER_WATCHER_API_HOST", env_overrides)
+    api_port_value = _config_value(values, "api_port", "7474", "KING_FOLDER_WATCHER_API_PORT", env_overrides)
+    max_content_value = _config_value(values, "max_content_chars", "200000", "KING_FOLDER_WATCHER_MAX_CONTENT_CHARS", env_overrides)
+
+    watch_path = _resolve_path(root, watch_path_value)
+    database_path = _resolve_path(root, database_path_value)
     llm_policy_path = _resolve_path(root, values.get("llm_policy_file", "tools/FOLDER_WATCHER_LLM_POLICY.md"))
     playlist_path = _resolve_path(root, values.get("playlist_path", "storage/folder_watcher_new_arrivals.m3u"))
 
@@ -212,12 +223,12 @@ def load_config(repo_root: str | Path = ".", config_path: str | Path | None = No
         config_path=path,
         watch_path=watch_path,
         database_path=database_path,
-        api_host=values.get("api_host", "127.0.0.1") or "127.0.0.1",
-        api_port=_parse_int(values.get("api_port"), 7474),
+        api_host=api_host_value or "127.0.0.1",
+        api_port=_parse_int(api_port_value, 7474),
         debounce_ms=_parse_int(values.get("debounce_ms"), 300),
         scan_on_start=_parse_bool(values.get("scan_on_start"), True),
         auth_token=values.get("auth_token", ""),
-        max_content_chars=_parse_int(values.get("max_content_chars"), 200000),
+        max_content_chars=_parse_int(max_content_value, 200000),
         hash_chunk_bytes=_parse_int(values.get("hash_chunk_bytes"), 65536),
         large_file_size=_parse_size(values.get("large_file_size"), 100 * 1024 * 1024),
         ai_summaries_enabled=_parse_bool(values.get("ai_summaries_enabled"), False),
@@ -235,6 +246,7 @@ def load_config(repo_root: str | Path = ".", config_path: str | Path | None = No
         text_extensions=text_extensions,
         tag_rules=tag_rules,
         directory_intents=directory_intents,
+        env_overrides=env_overrides,
     )
 
 
@@ -247,6 +259,14 @@ def _resolve_path(root: Path, value: str) -> Path:
     if not path.is_absolute():
         path = root / path
     return path.resolve()
+
+
+def _config_value(values: dict[str, str], key: str, default: str, env_name: str, env_overrides: dict[str, str]) -> str:
+    env_value = os.getenv(env_name)
+    if env_value is not None and str(env_value).strip():
+        env_overrides[key] = env_name
+        return str(env_value).strip()
+    return values.get(key, default)
 
 
 def _normalize_extension(value: str) -> str:

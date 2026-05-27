@@ -5,6 +5,7 @@ import time
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -83,6 +84,33 @@ class FakeLLM:
             "dependents": [],
             "events": [],
         }
+
+
+class UnavailableLLM:
+    policy = FakeLLMPolicy()
+
+    def status(self):
+        return {
+            "provider": "fake",
+            "provider_ready": False,
+            "summaries_enabled": False,
+            "queries_enabled": False,
+            "chat_enabled": False,
+            "deep_dive_enabled": False,
+            "policy": {"allowed_tables": self.policy.allowed_tables},
+        }
+
+    def query_available(self):
+        return False
+
+    def summaries_available(self):
+        return False
+
+    def chat_available(self):
+        return False
+
+    def deep_dive_available(self):
+        return False
 
 
 class RecordingMessage:
@@ -228,6 +256,30 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(policy.chat_response_tokens, 512)
         self.assertIn("Chat from evidence", policy.chat_prompt)
 
+    def test_env_overrides_can_change_watched_destination(self):
+        env_watch = self.root / "env-watch"
+        env_database = self.root / "env.sqlite3"
+
+        with patch.dict(
+            "os.environ",
+            {
+                "KING_FOLDER_WATCHER_WATCH_PATH": str(env_watch),
+                "KING_FOLDER_WATCHER_DATABASE_PATH": str(env_database),
+                "KING_FOLDER_WATCHER_API_HOST": "0.0.0.0",
+                "KING_FOLDER_WATCHER_API_PORT": "7555",
+                "KING_FOLDER_WATCHER_MAX_CONTENT_CHARS": "12345",
+            },
+        ):
+            config = load_config(self.root, self.config_path)
+
+        self.assertEqual(config.watch_path, env_watch.resolve())
+        self.assertEqual(config.database_path, env_database.resolve())
+        self.assertEqual(config.api_host, "0.0.0.0")
+        self.assertEqual(config.api_port, 7555)
+        self.assertEqual(config.max_content_chars, 12345)
+        self.assertEqual(config.env_overrides["watch_path"], "KING_FOLDER_WATCHER_WATCH_PATH")
+        self.assertEqual(config.public_dict()["env_overrides"]["api_port"], "KING_FOLDER_WATCHER_API_PORT")
+
     def test_ingest_indexes_text_metadata_tags_search_and_stats(self):
         code = self.watch / "agent_loop.py"
         code.write_text(
@@ -249,6 +301,11 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(file_item["filename"], "agent_loop.py")
         self.assertEqual(file_item["metadata"]["language"], "python")
         self.assertIn("AgentLoop", file_item["metadata"]["classes"])
+        self.assertEqual(file_item["metadata"]["function_count"], 1)
+        self.assertEqual(file_item["metadata"]["class_details"][0]["name"], "AgentLoop")
+        self.assertEqual(file_item["metadata"]["function_details"][0]["name"], "run_loop")
+        self.assertEqual(file_item["metadata"]["content_profile"]["reading_status"], "indexed")
+        self.assertGreater(file_item["metadata"]["content_profile"]["word_count"], 0)
         self.assertIn("python", file_item["tags"])
 
         search = self.index.search("semantic folder watcher")
@@ -315,6 +372,15 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(details.json()["files"][0]["id"], file_item["id"])
         self.assertIn("folder watcher api", details.json()["files"][0]["content_excerpt"])
 
+        content_window = client.get(
+            f"/files/{file_item['id']}/content",
+            params={"offset": 7, "max_chars": 7},
+        )
+        self.assertEqual(content_window.status_code, 200)
+        self.assertEqual(content_window.json()["content"], "watcher")
+        self.assertEqual(content_window.json()["offset"], 7)
+        self.assertTrue(content_window.json()["truncated"])
+
         query = client.post("/files/query", json={"query": "what file mentions api search target", "limit": 5})
         self.assertEqual(query.status_code, 200)
         self.assertEqual(query.json()["mode"], "local_fallback")
@@ -339,6 +405,21 @@ class FolderWatcherTests(unittest.TestCase):
         self.assertEqual(delete.status_code, 200)
         missing = client.get(f"/files/{file_item['id']}")
         self.assertEqual(missing.status_code, 404)
+
+    def test_local_deep_dive_returns_understanding_metadata(self):
+        note = self.watch / "deep.md"
+        note.write_text("# Deep File\n\nfolder watcher understands headings", encoding="utf-8")
+        file_item = self.pipeline.ingest_path(note)["file"]
+        app = create_app(self.config, self.index, llm_service=UnavailableLLM())
+        client = TestClient(app)
+
+        deep_dive = client.get(f"/files/{file_item['id']}/deep-dive")
+
+        self.assertEqual(deep_dive.status_code, 200)
+        payload = deep_dive.json()
+        self.assertEqual(payload["mode"], "local_context")
+        self.assertEqual(payload["understanding"]["content_profile"]["headings"][0]["text"], "Deep File")
+        self.assertEqual(payload["understanding"]["content_chars_available"], len(self.index.get_content(file_item["id"])))
 
     def test_status_and_dashboard_make_runtime_visible(self):
         note = self.watch / "visible.md"
