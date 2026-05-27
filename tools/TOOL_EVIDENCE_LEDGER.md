@@ -283,6 +283,17 @@ Last verified by the default markdown pipeline on 2026-05-23:
   tests.test_tools_fleet`, `node --check public\frontend\composio.js`,
   compileall, browser catalog-card verification, and the markdown verification
   pipeline with 6 passed checks, 0 failed, 0 timed out, `ship`.
+- Starter pack follow-up installed exact Composio slugs for Gmail, Google
+  Calendar, Google Drive, Google Docs, Google Sheets, Google Tasks, Slack, and
+  Notion through the local `install_tools` gateway action. Read tools are
+  enabled directly; send, create, append, update, and post actions are marked
+  `write` and remain behind `confirm=true`.
+- Verification passed for the starter pack: live `/composio/status` reported
+  the new enabled toolkits, direct schema probes resolved Gmail, Calendar,
+  Drive, Slack, and Notion slugs, write-risk probes returned
+  `CONFIRMATION_REQUIRED`, focused Composio tests passed 29 tests, fleet tests
+  passed 17 tests, `python -m pytest -q` passed 290 tests and 35 subtests, and
+  the markdown verification pipeline returned `ship` with 6 passed checks.
 
 ## 2026-05-27 Telegram Watcher Service Snapshot
 

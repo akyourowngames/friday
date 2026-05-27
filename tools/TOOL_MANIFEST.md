@@ -1241,6 +1241,7 @@ It exists so KING can recover from transient failures without hanging, looping i
 
 ## Evolution Log
 
+- 2026-05-27T12:20+05:30 - Installed a markdown-approved Composio starter pack for Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Tasks, Slack, and Notion, keeping writes behind the existing confirmation gate and leaving core routing unchanged.
 - 2026-05-27T00:00+05:30 - Added Telegram watcher service runtime and markdown config for natural Telegram file delivery, allowed-zone security, Folder Watcher integration, local fallback, lockdown, pick lists, and push notifications without core routing changes.
 - 2026-05-27T00:35+05:30 - Added Composio `install_tools`, `auth_status`, and `connect` gateway flows plus frontend catalog approve controls so more exact tool slugs can be added and auth can be verified without core or keyword hardcoding.
 - 2026-05-26T00:58+05:30 - Added markdown-owned argument placeholder replacement so filler values such as `owner` and `repo` can be repaired from local repo defaults without overriding concrete arguments.
