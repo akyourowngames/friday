@@ -17,6 +17,7 @@ const state = {
     schemas: {},
     activeSchema: null,
     fields: [],
+    catalogItems: [],
 };
 
 const els = {
@@ -48,8 +49,10 @@ const els = {
     argumentsInput: $('arguments-input'),
     outputBox: $('output-box'),
     catalogBtn: $('catalog-btn'),
+    catalogAllowBtn: $('catalog-allow-btn'),
     catalogQuery: $('catalog-query'),
     catalogLimit: $('catalog-limit'),
+    catalogResults: $('catalog-results'),
     catalogOutput: $('catalog-output'),
     toast: $('toast'),
 };
@@ -465,6 +468,76 @@ function renderResult(result) {
     els.outputBox.textContent = pretty(result.data || result);
 }
 
+function renderCatalogResults(items) {
+    state.catalogItems = Array.isArray(items) ? items : [];
+    els.catalogResults.innerHTML = '';
+    if (!state.catalogItems.length) {
+        const empty = document.createElement('div');
+        empty.className = 'result-strip';
+        empty.textContent = 'No catalog tools returned.';
+        els.catalogResults.appendChild(empty);
+        return;
+    }
+    for (const item of state.catalogItems) {
+        const row = document.createElement('div');
+        row.className = 'catalog-item';
+        const main = document.createElement('div');
+        main.className = 'catalog-main';
+        const slug = document.createElement('strong');
+        slug.textContent = item.slug || item.name || 'Unknown tool';
+        const detail = document.createElement('span');
+        const required = Array.isArray(item.required_arguments) && item.required_arguments.length
+            ? `Required: ${item.required_arguments.join(', ')}`
+            : 'No required fields exposed';
+        detail.textContent = `${item.toolkit || els.toolkitInput.value || els.toolkitSelect.value || ''} - ${required}`;
+        const description = document.createElement('p');
+        description.textContent = item.description || item.name || '';
+        main.appendChild(slug);
+        main.appendChild(detail);
+        if (description.textContent) main.appendChild(description);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'small-button';
+        button.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg><span>Allow</span>';
+        button.addEventListener('click', () => approveCatalogItems([item]));
+        row.appendChild(main);
+        row.appendChild(button);
+        els.catalogResults.appendChild(row);
+    }
+}
+
+function policyToolFromCatalogItem(item) {
+    const toolkit = item.toolkit || els.toolkitInput.value.trim() || els.toolkitSelect.value;
+    return {
+        slug: String(item.slug || '').toUpperCase(),
+        toolkit: String(toolkit || '').toLowerCase(),
+        risk: els.riskSelect.value || 'read',
+        enabled: true,
+        note: item.description || item.name || '',
+    };
+}
+
+async function approveCatalogItems(items = state.catalogItems) {
+    const tools = (items || []).map(policyToolFromCatalogItem).filter(item => item.slug && item.toolkit);
+    if (!tools.length) {
+        showToast('No catalog tools to allow');
+        return;
+    }
+    try {
+        setStatus('warn', 'Allowing');
+        state.policy = await request('/composio/policy/tools', {
+            method: 'POST',
+            body: JSON.stringify({ tools }),
+        });
+        showToast(`${tools.length} tool${tools.length === 1 ? '' : 's'} allowed`);
+        await refresh();
+        setStatus('', 'Ready');
+    } catch (error) {
+        setStatus('error', 'Blocked');
+        els.catalogOutput.textContent = pretty(error.payload || error.message);
+    }
+}
+
 async function createSession() {
     try {
         setStatus('warn', 'Working');
@@ -617,15 +690,18 @@ async function disableSelectedTool() {
 async function searchCatalog() {
     try {
         setStatus('warn', 'Searching');
-        const result = await request('/composio/action', {
-            method: 'POST',
-            body: JSON.stringify({
-                action: 'catalog',
-                toolkit: els.toolkitSelect.value,
-                query: els.catalogQuery.value.trim(),
-                limit: Number(els.catalogLimit.value || 20),
-            }),
+        let toolkit = els.toolkitInput.value.trim() || els.toolkitSelect.value;
+        if (!toolkit) {
+            await refresh();
+            toolkit = els.toolkitInput.value.trim() || els.toolkitSelect.value;
+        }
+        const params = new URLSearchParams({
+            toolkit,
+            query: els.catalogQuery.value.trim(),
+            limit: String(Number(els.catalogLimit.value || 20)),
         });
+        const result = await request(`/composio/tools?${params.toString()}`);
+        renderCatalogResults(result.items || []);
         els.catalogOutput.textContent = pretty(result.data || result);
         setStatus('', 'Ready');
     } catch (error) {
@@ -644,6 +720,7 @@ function bind() {
     els.addToolForm.addEventListener('submit', updateTool);
     els.disableToolBtn.addEventListener('click', disableSelectedTool);
     els.catalogBtn.addEventListener('click', searchCatalog);
+    els.catalogAllowBtn.addEventListener('click', () => approveCatalogItems());
     els.toolkitSelect.addEventListener('change', () => {
         els.toolkitInput.value = els.toolkitSelect.value;
     });

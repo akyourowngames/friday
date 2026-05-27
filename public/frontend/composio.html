@@ -128,21 +128,28 @@
             <section class="panel glass catalog-panel">
                 <div class="panel-head">
                     <h2>Catalog</h2>
-                    <button class="small-button" id="catalog-btn">
-                        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-                        <span>Search</span>
-                    </button>
+                    <div class="inline-actions">
+                        <button class="small-button" id="catalog-allow-btn">
+                            <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                            <span>Allow shown</span>
+                        </button>
+                        <button class="small-button" id="catalog-btn">
+                            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                            <span>Search</span>
+                        </button>
+                    </div>
                 </div>
                 <div class="catalog-row">
                     <input id="catalog-query" placeholder="repo issues, stars, pull requests" autocomplete="off">
                     <input id="catalog-limit" type="number" min="1" max="100" value="20" aria-label="Catalog limit">
                 </div>
+                <div class="catalog-results" id="catalog-results"></div>
                 <pre class="output compact" id="catalog-output">No catalog query yet.</pre>
             </section>
         </main>
 
         <div class="toast" id="toast" aria-live="polite"></div>
     </div>
-    <script src="composio.js?v=1"></script>
+    <script src="composio.js?v=2"></script>
 </body>
 </html>

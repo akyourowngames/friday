@@ -114,6 +114,11 @@ Last verified by the default markdown pipeline on 2026-05-23:
   markdown-owned client target parsing, structured service/auth/validation
   errors, mocked endpoint mapping, main API `POST /folder-watcher` JSON bridge,
   and semantic router selection without keyword routing.
+- `telegram_watcher_service` - `verified_runtime` as a standalone Telegram
+  daemon for markdown-configured natural file delivery, authorized-user checks,
+  allowed-zone enforcement, blocked-file policy, Folder Watcher integration,
+  local scan fallback, pick lists, lockdown, and push notifications. It is not
+  a registry callable tool and does not change core routing.
 - `composio` - `verified_runtime` for markdown-limited external app gateway
   status, session creation payloads, auth-link gating, approved tool execution
   routing, structured missing-key/provider/policy errors, and mocked Composio
@@ -260,10 +265,55 @@ Last verified by the default markdown pipeline on 2026-05-23:
   placeholder argument repair.
 - Catalog proof executed `action=tools`, `toolkit=github`, `query=issues`, and
   returned 5 compact items with provider `total_items: 72`.
+- Seamless auth/install follow-up adds `install_tools` as a local markdown
+  policy write action, `connect` as an alias-preserving Composio tool-router
+  auth link action, and `auth_status` to compact session toolkit connection
+  metadata instead of assuming auth succeeded.
+- Composio frontend catalog search now renders returned tools with one-click
+  allow controls and an allow-shown bulk path backed by `/composio/policy/tools`.
+- Live auth-status probe returned GitHub as connected from Composio's
+  `connected_account` session metadata, and live connect probe returned a
+  provider redirect URL with the requested alias preserved.
 - Focused follow-up checks passed: `python -m unittest tests.test_composio_tool
   tests.test_composio_api`, `python -m py_compile tools\composio.py
   api_server.py`, API probes for `/composio/tools`, `/composio/toolkits`, and
   bulk `/composio/policy/tools`, plus the final markdown verification pipeline.
+- Final seamless-auth checks passed: `python -m pytest -q` with 288 passed tests
+  and 35 subtests, `npm run typecheck`, `python -m unittest
+  tests.test_tools_fleet`, `node --check public\frontend\composio.js`,
+  compileall, browser catalog-card verification, and the markdown verification
+  pipeline with 6 passed checks, 0 failed, 0 timed out, `ship`.
+
+## 2026-05-27 Telegram Watcher Service Snapshot
+
+- Added standalone package `telegram_watcher/`, entrypoint
+  `telegram_watcher_service.py`, and markdown control surface
+  `tools/TELEGRAM_WATCHER_CONFIG.md`.
+- The service uses markdown-configured action semantics for natural Telegram
+  text, optional slash command aliases, per-chat numeric pick lists, and no
+  `agent/core.py` routing changes.
+- Security controls are config-driven: token source, authorized numeric user-id
+  source, allowed zones, blocked suffixes, blocked name fragments, blocked path
+  parts, rate limits, lockdown PIN source, state path, and append-only session
+  log path.
+- File intelligence goes through Folder Watcher HTTP first and degrades to a
+  bounded local scan of allowed zones only when Folder Watcher is unavailable.
+- Focused checks passed: `python -m unittest tests.test_telegram_watcher -v`
+  reported 8 tests covering config load, silent unauthorized ignore, natural
+  send, multi-match pick lists, blocked-file policy, local fallback, push
+  notification mode, lockdown, and unlock.
+- Service status probe passed: `python telegram_watcher_service.py status`
+  loaded the markdown config, resolved desktop/downloads/documents/drop zones,
+  and correctly reported `token_present: false` and
+  `authorized_ids_configured: false` in this checkout rather than claiming a
+  live bot without credentials.
+- Manifest audit passed with 19 observed tool modules, 19 manifest modules, 35
+  registered callable schemas, and no manifest/file mismatches.
+- Repository checks passed: `python -m pytest -q` reported 288 passed tests and
+  35 passed subtests; `npm run typecheck` passed.
+- The markdown verification pipeline returned `ship` with 6 passed checks, 0
+  failed checks, and 0 timeouts after adding `telegram_watcher` to the compile
+  gate.
 
 ## Escalation Rules
 

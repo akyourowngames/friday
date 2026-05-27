@@ -155,6 +155,37 @@ class ComposioApiTests(unittest.TestCase):
         self.assertEqual(run_tool.call_args.kwargs["query"], "repo")
         self.assertEqual(run_tool.call_args.kwargs["limit"], 5)
 
+    def test_composio_connect_endpoint_dispatches_connect_action(self):
+        tool_result = {
+            "result": {"action": "link", "toolkit": "github", "redirect_url": "https://app.composio.dev/link/lt_test"},
+            "meta": {"tool": "composio"},
+        }
+        with patch("api_server.execute_tool", return_value=tool_result) as run_tool:
+            response = self.client.post(
+                "/composio/connect",
+                json={"toolkit": "github", "session_id": "trs_test", "alias": "main", "callback_url": "http://127.0.0.1:8000/done"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["redirect_url"], "https://app.composio.dev/link/lt_test")
+        self.assertEqual(run_tool.call_args.kwargs["action"], "connect")
+        self.assertEqual(run_tool.call_args.kwargs["toolkit"], "github")
+        self.assertEqual(run_tool.call_args.kwargs["alias"], "main")
+        self.assertEqual(run_tool.call_args.kwargs["callback_url"], "http://127.0.0.1:8000/done")
+
+    def test_composio_auth_status_endpoint_dispatches_auth_status_action(self):
+        tool_result = {
+            "result": {"action": "auth_status", "session_id": "trs_test", "connected_toolkits": ["github"]},
+            "meta": {"tool": "composio"},
+        }
+        with patch("api_server.execute_tool", return_value=tool_result) as run_tool:
+            response = self.client.get("/composio/auth-status?session_id=trs_test")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["connected_toolkits"], ["github"])
+        self.assertEqual(run_tool.call_args.kwargs["action"], "auth_status")
+        self.assertEqual(run_tool.call_args.kwargs["session_id"], "trs_test")
+
     def test_composio_policy_returns_repo_argument_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             policy = Path(tmp) / "COMPOSIO_GATEWAY.md"

@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent.core import Agent
 from agent.router import ToolRouter
@@ -104,11 +104,17 @@ class ComposioRequest(BaseModel):
     action: str = "status"
     toolkit: str = ""
     tool_slug: str = ""
+    tools: list[Any] = Field(default_factory=list)
     query: str = ""
     arguments: Any = None
     session_id: str = ""
     user_id: str = ""
     account: str = ""
+    alias: str = ""
+    callback_url: str = ""
+    risk: str = "read"
+    note: str = ""
+    enabled: bool = True
     confirm: bool = False
     limit: int = 20
     timeout_ms: int = 0
@@ -126,6 +132,15 @@ class ComposioPolicyToolRequest(BaseModel):
 
 class ComposioPolicyToolsRequest(BaseModel):
     tools: list[ComposioPolicyToolRequest]
+
+
+class ComposioConnectRequest(BaseModel):
+    toolkit: str
+    session_id: str = ""
+    user_id: str = ""
+    alias: str = ""
+    callback_url: str = ""
+    timeout_ms: int = 0
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -581,11 +596,17 @@ def _run_composio_tool(payload: ComposioRequest) -> dict[str, Any]:
         action=payload.action,
         toolkit=payload.toolkit,
         tool_slug=payload.tool_slug,
+        tools=payload.tools,
         query=payload.query,
         arguments=payload.arguments,
         session_id=payload.session_id,
         user_id=payload.user_id,
         account=payload.account,
+        alias=payload.alias,
+        callback_url=payload.callback_url,
+        risk=payload.risk,
+        note=payload.note,
+        enabled=payload.enabled,
         confirm=payload.confirm,
         limit=payload.limit,
         timeout_ms=payload.timeout_ms or settings.composio_default_timeout_ms,
@@ -1252,6 +1273,32 @@ def composio_session_tools(session_id: str = "", limit: int = 20):
 @app.get("/composio/session/toolkits")
 def composio_session_toolkits(session_id: str = ""):
     result = _run_composio_tool(ComposioRequest(action="session_toolkits", session_id=session_id))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
+@app.get("/composio/auth-status")
+def composio_auth_status(session_id: str = ""):
+    result = _run_composio_tool(ComposioRequest(action="auth_status", session_id=session_id))
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
+    return result.get("result", result)
+
+
+@app.post("/composio/connect")
+def composio_connect(payload: ComposioConnectRequest):
+    result = _run_composio_tool(
+        ComposioRequest(
+            action="connect",
+            toolkit=payload.toolkit,
+            session_id=payload.session_id,
+            user_id=payload.user_id,
+            alias=payload.alias,
+            callback_url=payload.callback_url,
+            timeout_ms=payload.timeout_ms,
+        )
+    )
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=_composio_status_code(result), detail=result["error"])
     return result.get("result", result)

@@ -50,6 +50,9 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - KING exposes one registry tool named `composio`; it must not expose the whole Composio catalog as direct callable schemas.
 - Session creation must use only the markdown-enabled toolkits and enabled tool slugs.
 - Direct execution must reject any tool slug that is not listed as enabled here.
+- Bulk tool installation may add exact Composio slugs to this markdown file through the gateway, but it must not enable fuzzy catalog results without explicit slugs.
+- Auth connection should use the Composio tool-router session link flow for enabled toolkits, with optional alias and callback URL passed through provider fields rather than hardcoded app logic.
+- Auth status should be read from the Composio session toolkit metadata; KING must not assume a toolkit is connected just because a link was created.
 - Semantic slug resolution may map an imprecise requested slug to an already-enabled tool only when the configured score and margin gates pass.
 - Provider errors, missing API keys, missing sessions, and auth requirements must return structured errors instead of false-negative capability claims.
 - Argument defaults are resolved by the gateway from local repo evidence such as `git remote.origin.url`; they fill missing values and markdown-listed placeholder values without overriding concrete user-supplied arguments.
@@ -60,7 +63,9 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - `composio status`
 - `create a composio session for github`
 - `connect github through composio`
+- `check composio auth status`
 - `list composio github tools for issues`
+- `install composio tools GITHUB_LIST_REPOSITORY_ISSUES and GITHUB_LIST_STARGAZERS for github`
 - `use composio to get repo details for owner akyourowngames repo friday`
 - `use composio to get repo details for this repo`
 - `use composio to list issues for owner akyourowngames repo friday`

@@ -33,16 +33,20 @@ _ACTIONS = (
     "catalog",
     "toolkits",
     "tools",
+    "install_tools",
     "create_session",
     "session_tools",
     "session_toolkits",
+    "auth_status",
+    "connect",
     "link",
     "search",
     "schema",
     "execute",
 )
-_NETWORK_ACTIONS = {"catalog", "toolkits", "tools", "create_session", "session_tools", "session_toolkits", "link", "search", "schema", "execute"}
+_NETWORK_ACTIONS = {"catalog", "toolkits", "tools", "create_session", "session_tools", "session_toolkits", "auth_status", "connect", "link", "search", "schema", "execute"}
 _CONFIRM_RISKS = {"write", "destructive", "auth"}
+_RISK_LEVELS = {"read", "write", "destructive", "auth"}
 
 
 @dataclass
@@ -209,6 +213,100 @@ def _parse_placeholder_line(value: str) -> set[str]:
     if body.lower().startswith("values:"):
         body = body.split(":", 1)[1].strip()
     return {piece.strip().casefold() for piece in body.split(",") if piece.strip()}
+
+
+def _policy_section(line: str) -> str:
+    text = line.strip()
+    if text.startswith("## "):
+        return text[3:].strip().casefold()
+    return ""
+
+
+def _policy_tool_slug_from_line(line: str) -> str:
+    text = line.strip()
+    if not text.startswith("- "):
+        return ""
+    return text[2:].strip().split("|", 1)[0].strip().upper()
+
+
+def _policy_tool_line(rule: ComposioToolRule) -> str:
+    enabled = "true" if rule.enabled else "false"
+    return f"- {rule.slug} | toolkit: {rule.toolkit} | risk: {rule.risk} | enabled: {enabled} | note: {rule.note}"
+
+
+def _insert_before_next_section(lines: list[str], section_name: str, new_line: str) -> list[str]:
+    output = []
+    active = ""
+    inserted = False
+    seen_section = False
+    for line in lines:
+        next_section = _policy_section(line)
+        if next_section:
+            if seen_section and active == section_name and next_section != section_name and not inserted:
+                output.append(new_line)
+                inserted = True
+            active = next_section
+            if active == section_name:
+                seen_section = True
+        output.append(line)
+    if seen_section and not inserted:
+        output.append(new_line)
+        inserted = True
+    if not seen_section:
+        output.extend(["", "## " + section_name.title(), "", new_line])
+    return output
+
+
+def _tool_items_from_value(value: Any, tool_slug: str = "") -> list[Any]:
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, tuple):
+        items = list(value)
+    elif isinstance(value, dict):
+        items = [value]
+    elif isinstance(value, str) and value.strip():
+        clean_value = value.strip()
+        if clean_value.startswith("[") or clean_value.startswith("{"):
+            try:
+                parsed = json.loads(clean_value)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, dict):
+                items = [parsed]
+            else:
+                items = [piece.strip() for piece in clean_value.split(",") if piece.strip()]
+        else:
+            items = [piece.strip() for piece in clean_value.split(",") if piece.strip()]
+    else:
+        items = []
+    clean_slug = _normalize_slug(tool_slug)
+    if clean_slug:
+        items.append(clean_slug)
+    return items
+
+
+def _rule_from_install_item(item: Any, default_toolkit: str, default_risk: str, default_note: str, enabled: bool) -> tuple[ComposioToolRule | None, dict | None]:
+    if isinstance(item, dict):
+        slug = _normalize_slug(item.get("slug") or item.get("tool_slug") or item.get("name") or "")
+        toolkit = _normalize_toolkit(item.get("toolkit") or item.get("toolkit_slug") or default_toolkit)
+        risk = str(item.get("risk") or default_risk or "read").strip().lower()
+        note = str(item.get("note") or item.get("description") or default_note or "").strip()
+        item_enabled = coerce_bool(item.get("enabled", enabled))
+    else:
+        slug = _normalize_slug(str(item or ""))
+        toolkit = default_toolkit
+        risk = default_risk or "read"
+        note = default_note
+        item_enabled = enabled
+    if not slug:
+        return None, error_payload("MISSING_TOOL_SLUG", "Composio install needs every tool to include a slug.", "tools", item, "Composio tool slug", False, "Pass exact slugs returned by the Composio tools catalog.")
+    if not toolkit:
+        return None, error_payload("MISSING_TOOLKIT", "Composio install needs every tool to include a toolkit.", "toolkit", toolkit, "Composio toolkit slug", False, "Pass toolkit once or include toolkit on each tool item.")
+    if risk not in _RISK_LEVELS:
+        return None, error_payload("INVALID_RISK", "Composio install received an unsupported risk level.", "risk", risk, ", ".join(sorted(_RISK_LEVELS)), False, "Use read, write, destructive, or auth.")
+    return ComposioToolRule(slug=slug, toolkit=toolkit, risk=risk, enabled=item_enabled, note=note), None
 
 
 def _load_policy(path: str | Path | None = None) -> ComposioPolicy:
@@ -635,6 +733,53 @@ def _compact_catalog_items(payload: Any, max_items: int = 20) -> list[dict[str, 
     return compact
 
 
+def _payload_items(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ("items", "toolkits", "data"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _compact_account(account: Any) -> dict[str, Any]:
+    if not isinstance(account, dict):
+        return {}
+    return {
+        "id": account.get("id") or account.get("nanoid") or account.get("connected_account_id") or account.get("uuid") or "",
+        "status": account.get("status") or account.get("state") or "",
+        "alias": account.get("alias") or account.get("name") or "",
+        "toolkit": account.get("toolkit_slug") or account.get("toolkit") or "",
+    }
+
+
+def _compact_session_toolkits(payload: Any) -> list[dict[str, Any]]:
+    compact = []
+    for item in _payload_items(payload):
+        if not isinstance(item, dict):
+            continue
+        toolkit = item.get("toolkit") if isinstance(item.get("toolkit"), dict) else {}
+        raw_accounts = item.get("connected_accounts") or item.get("accounts") or item.get("connections") or []
+        if not raw_accounts and isinstance(item.get("connected_account"), dict):
+            raw_accounts = [item.get("connected_account")]
+        accounts = [_compact_account(account) for account in raw_accounts if isinstance(account, dict)]
+        accounts = [account for account in accounts if any(account.values())]
+        compact.append(
+            {
+                "slug": item.get("slug") or item.get("toolkit_slug") or toolkit.get("slug") or "",
+                "name": item.get("name") or toolkit.get("name") or "",
+                "no_auth": bool(item.get("no_auth", False)),
+                "auth_schemes": item.get("auth_schemes") if isinstance(item.get("auth_schemes"), list) else [],
+                "connected_accounts": accounts,
+                "connected": bool(accounts),
+            }
+        )
+    return compact
+
+
 def _resolve_default_value(value: str, local_repository: dict[str, str]) -> str:
     if value == "local.owner":
         return str(local_repository.get("owner") or "")
@@ -676,6 +821,52 @@ def _apply_argument_defaults(arguments: dict[str, Any], defaults: dict[str, str]
             merged[key] = value
             applied[key] = value
     return merged, applied
+
+
+def _write_policy_tools(policy: ComposioPolicy, rules: list[ComposioToolRule]) -> dict[str, Any]:
+    lines = policy.path.read_text(encoding="utf-8").splitlines()
+    by_slug = {rule.slug: rule for rule in rules}
+    toolkits_to_add = {rule.toolkit for rule in rules if rule.enabled}
+    toolkit_present = set()
+    existing = set()
+    output = []
+    section = ""
+    for line in lines:
+        next_section = _policy_section(line)
+        if next_section:
+            section = next_section
+        if section == "enabled toolkits" and line.strip().startswith("- "):
+            toolkit_present.add(line.strip()[2:].strip().lower())
+        slug = _policy_tool_slug_from_line(line)
+        if section == "enabled tools" and slug in by_slug:
+            existing.add(slug)
+            output.append(line)
+            continue
+        output.append(line)
+
+    for toolkit in sorted(toolkits_to_add - toolkit_present):
+        output = _insert_before_next_section(output, "enabled toolkits", "- " + toolkit)
+    for slug in sorted(set(by_slug) - existing):
+        output = _insert_before_next_section(output, "enabled tools", _policy_tool_line(by_slug[slug]))
+
+    policy.path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    updated_policy = _load_policy(policy.path)
+    return {
+        "policy_path": str(policy.path),
+        "installed": [
+            {
+                "slug": rule.slug,
+                "toolkit": rule.toolkit,
+                "risk": rule.risk,
+                "enabled": rule.enabled,
+                "note": rule.note,
+            }
+            for rule in sorted(rules, key=lambda item: item.slug)
+        ],
+        "already_present": sorted(existing),
+        "enabled_toolkits": sorted(updated_policy.enabled_toolkits),
+        "enabled_tools": sorted(updated_policy.tools),
+    }
 
 
 def _semantic_resolution_query(requested_slug: str, query: str = "") -> str:
@@ -833,6 +1024,10 @@ def _legacy_summary(result: dict[str, Any]) -> str:
         return "Composio session created: " + str(result.get("session_id")) + "\nMCP URL: " + str(result.get("mcp_url") or "")
     if action == "link":
         return "Open this Composio auth link to connect " + str(result.get("toolkit")) + ": " + str(result.get("redirect_url") or "")
+    if action == "install_tools":
+        return "Installed Composio tools in markdown policy: " + ", ".join(result.get("enabled_tools", []))
+    if action == "auth_status":
+        return "Composio auth status: " + json.dumps(result.get("toolkits"), ensure_ascii=False)[:3000]
     if action == "execute":
         return "Composio executed " + str(result.get("tool_slug")) + ". Result: " + json.dumps(result.get("data"), ensure_ascii=False)[:3000]
     if action == "schema":
@@ -852,8 +1047,9 @@ def _legacy_summary(result: dict[str, Any]) -> str:
     name=_TOOL_NAME,
     description=(
         "Gateway to approved Composio external app toolkits. Use for Composio status, "
-        "browsing Composio toolkits and tools, creating limited Composio sessions, "
-        "generating Composio auth links, searching approved Composio session tools, "
+        "browsing Composio toolkits and tools, installing exact tool slugs into "
+        "the markdown policy, creating limited Composio sessions, generating "
+        "Composio auth links, checking session auth status, searching approved Composio session tools, "
         "inspecting approved tool schemas, and executing only markdown-enabled "
         "Composio tool slugs."
     ),
@@ -862,19 +1058,27 @@ def _legacy_summary(result: dict[str, Any]) -> str:
         "create a composio session",
         "connect github through composio",
         "list composio github tools",
+        "install these composio github tools",
+        "check composio auth status",
         "search approved composio tools for listing repository issues",
         "use composio to get repo details for this repo",
         "use composio tool GITHUB_LIST_STARGAZERS with owner and repo",
     ],
     param_descriptions={
-        "action": "status, catalog, toolkits, tools, create_session, session_tools, session_toolkits, link, search, schema, or execute.",
+        "action": "status, catalog, toolkits, tools, install_tools, create_session, session_tools, session_toolkits, auth_status, connect, link, search, schema, or execute.",
         "toolkit": "Composio toolkit slug, such as github, allowed only when listed in tools/COMPOSIO_GATEWAY.md.",
         "tool_slug": "Exact enabled Composio tool slug when known. If the model provides an imprecise slug, the gateway may semantically resolve it only to a markdown-enabled tool.",
+        "tools": "List of exact Composio tool slugs or objects with slug, toolkit, risk, enabled, and note for install_tools.",
         "query": "Catalog or tool-router search query.",
         "arguments": "Object arguments for the selected Composio tool.",
         "session_id": "Optional Composio tool router session id. Falls back to KING_COMPOSIO_SESSION_ID.",
         "user_id": "Optional Composio user id. Falls back to KING_COMPOSIO_USER_ID.",
         "account": "Optional Composio connected account alias or id for execution.",
+        "alias": "Optional alias for a Composio connected account auth link.",
+        "callback_url": "Optional callback URL for a Composio auth link.",
+        "risk": "Risk level to write when installing tools: read, write, destructive, or auth.",
+        "note": "Policy note to write when installing tools.",
+        "enabled": "Whether installed tools should be enabled in markdown policy.",
         "confirm": "Required true for markdown tools marked write, destructive, or auth.",
         "limit": "Catalog result limit from 1 to 100.",
         "timeout_ms": "Composio request timeout in milliseconds.",
@@ -886,11 +1090,17 @@ def composio(
     action: str = "status",
     toolkit: str = "",
     tool_slug: str = "",
+    tools: list = None,
     query: str = "",
     arguments: dict = None,
     session_id: str = "",
     user_id: str = "",
     account: str = "",
+    alias: str = "",
+    callback_url: str = "",
+    risk: str = "read",
+    note: str = "",
+    enabled: bool = True,
     confirm: bool = False,
     limit: int = 20,
     timeout_ms: int = 0,
@@ -899,10 +1109,11 @@ def composio(
 ):
     started = time.perf_counter()
     started_at = utc_now_iso()
-    inputs_received = 13
+    inputs_received = 18
     response_format = normalize_response_format(response_format)
     trace_enabled = coerce_bool(trace_enabled)
     confirm = coerce_bool(confirm)
+    enabled = coerce_bool(enabled)
 
     try:
         policy = _load_policy()
@@ -919,6 +1130,8 @@ def composio(
         return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio policy is missing.", "policy")
 
     normalized_action = str(action or "status").strip().lower()
+    if normalized_action == "connect":
+        normalized_action = "link"
     if normalized_action not in _ACTIONS:
         error = error_payload(
             "INVALID_ACTION",
@@ -931,8 +1144,27 @@ def composio(
         )
         return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio action is not supported.", "input_validation")
 
+    clean_toolkit = _normalize_toolkit(toolkit)
+    clean_slug = _normalize_slug(tool_slug)
+
     if normalized_action == "status":
         result = _status_result(policy)
+        return _finish_success(result, response_format, trace_enabled, started, started_at, inputs_received, _legacy_summary(result))
+
+    if normalized_action == "install_tools":
+        install_items = _tool_items_from_value(tools, tool_slug)
+        if not install_items:
+            error = error_payload("MISSING_TOOLS", "Composio install_tools needs at least one exact tool slug.", "tools", tools, "list of Composio tool slugs", False, "Search the catalog first, then pass exact slugs to install_tools.")
+            return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio install needs tools.", "input_validation")
+        install_rules = []
+        for item in install_items:
+            rule, item_error = _rule_from_install_item(item, clean_toolkit, str(risk or "read").strip().lower(), str(note or "").strip(), enabled)
+            if item_error is not None:
+                return _finish_error(item_error, response_format, trace_enabled, started, started_at, inputs_received, "Composio install received invalid tool policy.", "input_validation")
+            if rule is not None:
+                install_rules.append(rule)
+        result = _write_policy_tools(policy, install_rules)
+        result["action"] = "install_tools"
         return _finish_success(result, response_format, trace_enabled, started, started_at, inputs_received, _legacy_summary(result))
 
     if not policy.enabled:
@@ -965,8 +1197,6 @@ def composio(
         return _finish_error(timeout_error, response_format, trace_enabled, started, started_at, inputs_received, "Composio received an invalid timeout.", "input_validation")
     timeout_value = int(clean_timeout or policy.default_timeout_ms)
     clean_user_id = _user_id(policy, user_id)
-    clean_toolkit = _normalize_toolkit(toolkit)
-    clean_slug = _normalize_slug(tool_slug)
     max_chars = max(1000, int(policy.max_response_chars or 12000))
     external_count = 0
 
@@ -997,7 +1227,14 @@ def composio(
         external_count += count
         if error is not None:
             return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio session creation failed.", "composio_http", external_count)
-        payload, error, count = _request(policy, "POST", "/tool_router/session/" + clean_session + "/link", api_key, timeout_value, json_payload={"toolkit": clean_toolkit})
+        link_body: dict[str, Any] = {"toolkit": clean_toolkit}
+        clean_alias = str(alias or "").strip()
+        clean_callback_url = str(callback_url or "").strip()
+        if clean_alias:
+            link_body["alias"] = clean_alias
+        if clean_callback_url:
+            link_body["callback_url"] = clean_callback_url
+        payload, error, count = _request(policy, "POST", "/tool_router/session/" + clean_session + "/link", api_key, timeout_value, json_payload=link_body)
         external_count += count
         if error is not None:
             return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio auth link failed.", "composio_http", external_count)
@@ -1008,6 +1245,8 @@ def composio(
             "session_created": bool(session_payload),
             "redirect_url": payload.get("redirect_url") if isinstance(payload, dict) else "",
             "connected_account_id": payload.get("connected_account_id") if isinstance(payload, dict) else "",
+            "alias": clean_alias,
+            "callback_url": clean_callback_url,
             "data": _truncate_payload(payload, max_chars),
         }
         return _finish_success(result, response_format, trace_enabled, started, started_at, inputs_received, _legacy_summary(result), external_count)
@@ -1090,6 +1329,26 @@ def composio(
             "action": normalized_action,
             "session_id": clean_session,
             "session_created": bool(session_payload),
+            "data": _truncate_payload(payload, max_chars),
+        }
+        return _finish_success(result, response_format, trace_enabled, started, started_at, inputs_received, _legacy_summary(result), external_count)
+
+    if normalized_action == "auth_status":
+        clean_session, session_payload, error, count = _ensure_session(policy, api_key, clean_user_id, session_id, timeout_value)
+        external_count += count
+        if error is not None:
+            return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio session creation failed.", "composio_http", external_count)
+        payload, error, count = _request(policy, "GET", "/tool_router/session/" + clean_session + "/toolkits", api_key, timeout_value)
+        external_count += count
+        if error is not None:
+            return _finish_error(error, response_format, trace_enabled, started, started_at, inputs_received, "Composio auth status lookup failed.", "composio_http", external_count)
+        compact_toolkits = _compact_session_toolkits(payload)
+        result = {
+            "action": "auth_status",
+            "session_id": clean_session,
+            "session_created": bool(session_payload),
+            "toolkits": compact_toolkits,
+            "connected_toolkits": [item["slug"] for item in compact_toolkits if item.get("connected")],
             "data": _truncate_payload(payload, max_chars),
         }
         return _finish_success(result, response_format, trace_enabled, started, started_at, inputs_received, _legacy_summary(result), external_count)

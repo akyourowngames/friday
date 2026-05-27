@@ -126,6 +126,35 @@ class ComposioToolTests(unittest.TestCase):
 
         self.assertEqual(result["error"]["code"], "MISSING_API_KEY")
 
+    def test_install_tools_updates_markdown_without_api_key(self):
+        result = composio_mod.composio(
+            action="install_tools",
+            toolkit="slack",
+            tools=["SLACK_LIST_CHANNELS", "SLACK_FETCH_CONVERSATION_HISTORY"],
+            risk="read",
+            note="test install",
+            response_format="structured",
+        )
+        text = self.policy_path.read_text(encoding="utf-8")
+
+        self.assertIn("result", result)
+        self.assertIn("- slack", text)
+        self.assertIn("SLACK_LIST_CHANNELS", text)
+        self.assertIn("SLACK_FETCH_CONVERSATION_HISTORY", text)
+        self.assertIn("SLACK_LIST_CHANNELS", result["result"]["enabled_tools"])
+
+    def test_install_tools_preserves_existing_policy_lines(self):
+        result = composio_mod.composio(
+            action="install_tools",
+            toolkit="github",
+            tools=[{"slug": "GITHUB_GET_A_REPOSITORY", "toolkit": "github", "risk": "write", "note": "changed"}],
+            response_format="structured",
+        )
+        text = self.policy_path.read_text(encoding="utf-8")
+
+        self.assertIn("GITHUB_GET_A_REPOSITORY | toolkit: github | risk: read", text)
+        self.assertIn("GITHUB_GET_A_REPOSITORY", result["result"]["already_present"])
+
     def test_create_session_uses_markdown_limits(self):
         os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"
         calls = []
@@ -393,6 +422,63 @@ class ComposioToolTests(unittest.TestCase):
         self.assertTrue(result["result"]["session_created"])
         self.assertEqual(calls[0]["json"]["toolkits"], {"enable": ["github"]})
         self.assertTrue(calls[1]["url"].endswith("/tool_router/session/trs_test/link"))
+
+    def test_connect_alias_posts_auth_alias_and_callback(self):
+        os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"
+        calls = []
+        original = composio_mod.httpx.request
+
+        def fake_request(method, url, headers=None, params=None, json=None, timeout=None):
+            calls.append({"method": method, "url": url, "json": json})
+            return FakeResponse(201, {"redirect_url": "https://app.composio.dev/link/lt_test", "connected_account_id": "ca_test"})
+
+        try:
+            composio_mod.httpx.request = fake_request
+            result = composio_mod.composio(
+                action="connect",
+                toolkit="github",
+                session_id="trs_test",
+                alias="main",
+                callback_url="http://127.0.0.1:8000/composio/callback",
+                response_format="structured",
+            )
+        finally:
+            composio_mod.httpx.request = original
+
+        self.assertEqual(result["result"]["action"], "link")
+        self.assertEqual(calls[0]["json"]["toolkit"], "github")
+        self.assertEqual(calls[0]["json"]["alias"], "main")
+        self.assertEqual(calls[0]["json"]["callback_url"], "http://127.0.0.1:8000/composio/callback")
+
+    def test_auth_status_compacts_connected_accounts(self):
+        os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"
+        calls = []
+        original = composio_mod.httpx.request
+
+        def fake_request(method, url, headers=None, params=None, json=None, timeout=None):
+            calls.append({"method": method, "url": url, "json": json})
+            return FakeResponse(
+                200,
+                {
+                    "items": [
+                        {
+                            "slug": "github",
+                            "name": "GitHub",
+                            "connected_account": {"id": "ca_test", "status": "ACTIVE", "alias": "main", "toolkit_slug": "github"},
+                        }
+                    ]
+                },
+            )
+
+        try:
+            composio_mod.httpx.request = fake_request
+            result = composio_mod.composio(action="auth_status", session_id="trs_test", response_format="structured")
+        finally:
+            composio_mod.httpx.request = original
+
+        self.assertEqual(result["result"]["connected_toolkits"], ["github"])
+        self.assertEqual(result["result"]["toolkits"][0]["connected_accounts"][0]["id"], "ca_test")
+        self.assertTrue(calls[0]["url"].endswith("/tool_router/session/trs_test/toolkits"))
 
     def test_invalid_json_arguments_are_rejected(self):
         os.environ["KING_TEST_COMPOSIO_API_KEY"] = "cmp_test"

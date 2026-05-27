@@ -514,6 +514,53 @@ textarea:focus {
     gap: 10px;
 }
 
+.catalog-results {
+    display: grid;
+    gap: 8px;
+}
+
+.catalog-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    min-height: 74px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.045);
+}
+
+.catalog-main {
+    min-width: 0;
+}
+
+.catalog-main strong,
+.catalog-main span,
+.catalog-main p {
+    display: block;
+}
+
+.catalog-main strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.88rem;
+}
+
+.catalog-main span {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 0.72rem;
+}
+
+.catalog-main p {
+    margin: 6px 0 0;
+    color: rgba(255, 255, 255, 0.44);
+    font-size: 0.72rem;
+    line-height: 1.35;
+}
+
 .catalog-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 92px;
@@ -577,6 +624,7 @@ textarea:focus {
     .metrics,
     .add-tool,
     .catalog-row,
+    .catalog-item,
     .argument-fields {
         grid-template-columns: 1fr;
     }

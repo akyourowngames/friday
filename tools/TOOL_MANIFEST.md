@@ -40,6 +40,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `FOLDER_WATCHER_DEMO_CONFIG.md` - isolated demo watcher config for visible browser testing without indexing the repository root.
 - `FOLDER_WATCHER_LLM_POLICY.md` - markdown-owned prompts, public SQL tables, allowed SQL functions, and LLM limits for folder watcher semantic behavior.
 - `FOLDER_WATCHER_STATUS.md` - markdown-backed feature status matrix exposed by the folder watcher `/status` endpoint.
+- `TELEGRAM_WATCHER_CONFIG.md` - editable Telegram watcher daemon config for bot token source, authorized user ids, allowed zones, blocked file policy, natural action semantics, push mode, and Folder Watcher integration.
 - `FILE_PATH_ALIASES.md` - editable natural path aliases consumed by file tools after they are selected.
 - `COMPOSIO_GATEWAY.md` - editable Composio gateway policy for enabled toolkits, allowed tool slugs, risk gates, runtime settings, and test prompts.
 
@@ -90,12 +91,12 @@ The runtime registry remains the source of truth for callable schemas. This mani
 
 ### Purpose
 
-`composio` is KING's bounded bridge to Composio external app toolkits. It gives KING one registry capability for limited Composio sessions, approved toolkit auth links, approved tool schema inspection, and execution of only markdown-enabled Composio tool slugs.
+`composio` is KING's bounded bridge to Composio external app toolkits. It gives KING one registry capability for limited Composio sessions, approved toolkit auth links, approved tool installation, approved tool schema inspection, and execution of only markdown-enabled Composio tool slugs.
 
 ### Runtime
 
 - Entrypoint: `tools/composio.py`.
-- Management API: `/composio/status`, `/composio/policy`, `/composio/action`, and `/composio/policy/tool`.
+- Management API: `/composio/status`, `/composio/policy`, `/composio/action`, `/composio/connect`, `/composio/auth-status`, and `/composio/policy/tool`.
 - Gateway catalog API: `/composio/toolkits`, `/composio/tools`, `/composio/session/toolkits`, `/composio/session/tools`, and bulk policy install through `/composio/policy/tools`.
 - Frontend: `public/frontend/composio.html`.
 - Policy file: configured by `KING_COMPOSIO_POLICY_FILE`, defaulting to `tools/COMPOSIO_GATEWAY.md`.
@@ -107,11 +108,12 @@ The runtime registry remains the source of truth for callable schemas. This mani
 
 ### Inputs
 
-- `action`: `status`, `catalog`, `toolkits`, `tools`, `create_session`, `session_tools`, `session_toolkits`, `link`, `search`, `schema`, or `execute`.
+- `action`: `status`, `catalog`, `toolkits`, `tools`, `install_tools`, `create_session`, `session_tools`, `session_toolkits`, `auth_status`, `connect`, `link`, `search`, `schema`, or `execute`.
 - `toolkit`: Composio toolkit slug, allowed only when listed under Enabled Toolkits.
 - `tool_slug`: exact Composio tool slug, allowed only when listed under Enabled Tools.
+- `tools`: exact Composio tool slugs or slug/toolkit/risk objects for markdown bulk installation.
 - `arguments`: JSON object passed to Composio for `execute`.
-- Optional query, session id, user id, account alias, confirmation flag, limit, timeout, response format, and trace toggle.
+- Optional query, session id, user id, connected account id or alias, auth-link alias, callback URL, confirmation flag, limit, timeout, response format, and trace toggle.
 - Missing execution arguments and markdown-listed placeholder values may be filled only from the selected tool's markdown `Argument Defaults`; concrete user-supplied arguments always win.
 - Imprecise requested tool slugs may be semantically resolved only to markdown-enabled tools when `COMPOSIO_GATEWAY.md` score and margin gates pass.
 
@@ -121,6 +123,8 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - Compact Composio toolkit/tool catalog items for endpoint consumers, plus bounded raw provider data.
 - Created Composio tool-router session id and MCP URL.
 - Composio hosted auth redirect URL for approved toolkits.
+- Session auth status compacted from Composio toolkit metadata, including connected account ids and aliases when provided upstream.
+- Markdown policy install results showing newly enabled toolkits and exact enabled tool slugs.
 - Approved tool schema, catalog, search, or execution JSON, bounded by markdown response limits.
 - Schema responses include compact `input_schema` and `required_arguments` beside bounded raw provider data so clients do not depend on oversized schema previews.
 - Execution payloads include `argument_defaults_applied` when the gateway fills omitted or markdown-placeholder values before calling Composio.
@@ -131,6 +135,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - Missing `COMPOSIO_API_KEY` returns `MISSING_API_KEY`; KING must not claim Composio ran.
 - A toolkit not listed under Enabled Toolkits returns `TOOLKIT_NOT_ALLOWED`.
 - A tool slug not listed under Enabled Tools returns `TOOL_NOT_ALLOWED`.
+- `install_tools` requires exact slugs and toolkit evidence; it does not infer arbitrary catalog results into policy.
 - Write, destructive, or auth risks require `confirm=true` before execution.
 - Composio upstream errors retain status code and safe provider detail without exposing tokens.
 
@@ -142,6 +147,8 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `python -m py_compile tools/composio.py`
 - `node --check public/frontend/composio.js`
 - Direct dispatch probe: execute `GITHUB_LIST_REPOSITORY_ISSUES` with empty arguments and verify the gateway applies local owner/repo defaults before the provider call.
+- Direct dispatch probe: run `install_tools` with multiple exact slugs against a temporary markdown policy and verify all requested slugs are written once.
+- API probe: `POST /composio/connect` and `GET /composio/auth-status` dispatch to the Composio gateway with alias/session fields preserved.
 - Direct dispatch probe: execute `get_repo_details` and verify semantic slug resolution selects `GITHUB_GET_A_REPOSITORY`.
 - API probe: `GET /composio/tools?toolkit=github&query=issues&limit=5` returns compact catalog items.
 - `tool_manifest_audit` must show manifest/file alignment.
@@ -315,6 +322,63 @@ deep-dive, WebSocket, and webhook surfaces.
 - Run the repository verification pipeline after runtime changes.
 - For daemon readiness, the focused watcher tests must include a real watchdog
   create-event probe when the dependency is installed.
+
+## Runtime Service Contract: telegram_watcher_service
+
+### Purpose
+
+`telegram_watcher_service` is KING's Telegram-facing filesystem courier. It lets
+an authorized Telegram user ask naturally for allowed-zone files, recent
+arrivals, status, metadata, and push notifications without requiring slash
+commands for every turn.
+
+### Runtime
+
+- Entrypoint: `telegram_watcher_service.py`.
+- Package: `telegram_watcher/`.
+- Config file: `tools/TELEGRAM_WATCHER_CONFIG.md`.
+- Telegram bot token source: markdown names an environment variable; credentials
+  are not stored in markdown.
+- Folder intelligence source: Folder Watcher HTTP service first, bounded local
+  scan fallback second.
+- Natural action selection: semantic scores over markdown action semantics,
+  with slash commands as optional explicit aliases.
+
+### Inputs
+
+- Telegram Bot API updates from authorized numeric Telegram user ids.
+- Natural text, optional slash commands, and numeric replies to the active
+  per-chat pick list.
+- Folder Watcher file records or allowed-zone local files.
+
+### Outputs
+
+- Telegram messages composed from current config, status, file candidates,
+  policy blocks, or Folder Watcher answers.
+- Telegram document sends only for files inside allowed zones that pass blocked
+  suffix, name-fragment, path-part, size, and rate-limit checks.
+- Session state and append-only JSONL activity logs under configured storage
+  paths.
+- Optional proactive notifications for new Folder Watcher events after watch
+  mode is enabled.
+
+### Error Handling
+
+- Unauthorized Telegram user ids are silently ignored.
+- Missing token or authorized ids blocks daemon run mode instead of pretending
+  Telegram is active.
+- Files outside allowed zones are not listed, sent, or acknowledged.
+- Files blocked by policy are reported as blocked when they are otherwise a
+  deliverable in-scope match.
+- Folder Watcher HTTP failure degrades to bounded allowed-zone local scanning.
+- Rate limits, lockdown state, missing files, oversized files, and Telegram send
+  failures remain separate observable outcomes.
+
+### Verification Method
+
+- Run `python -m unittest tests.test_telegram_watcher`.
+- Run `python -m compileall telegram_watcher telegram_watcher_service.py`.
+- Run the repository verification pipeline after runtime changes.
 
 ## Runtime Tool: folder_watcher
 
@@ -1177,6 +1241,8 @@ It exists so KING can recover from transient failures without hanging, looping i
 
 ## Evolution Log
 
+- 2026-05-27T00:00+05:30 - Added Telegram watcher service runtime and markdown config for natural Telegram file delivery, allowed-zone security, Folder Watcher integration, local fallback, lockdown, pick lists, and push notifications without core routing changes.
+- 2026-05-27T00:35+05:30 - Added Composio `install_tools`, `auth_status`, and `connect` gateway flows plus frontend catalog approve controls so more exact tool slugs can be added and auth can be verified without core or keyword hardcoding.
 - 2026-05-26T00:58+05:30 - Added markdown-owned argument placeholder replacement so filler values such as `owner` and `repo` can be repaired from local repo defaults without overriding concrete arguments.
 - 2026-05-26T00:55+05:30 - Added Composio gateway catalog/session endpoints, bulk markdown policy install, compact catalog items, and semantic recovery for imprecise enabled tool slugs such as `get_repo_details`.
 - 2026-05-26T00:40+05:30 - Added markdown-owned Composio argument defaults, local Git remote context in status/policy endpoints, and execution-time default application so KING can call approved repo tools naturally without browser-only argument repair.
