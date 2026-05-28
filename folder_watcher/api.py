@@ -76,6 +76,25 @@ def create_app(
     def health(_: Any = Depends(require_auth)):
         return {"status": "ok", "watch_path": str(config.watch_path), "database_path": str(config.database_path)}
 
+    @app.get("/maintenance/daily/status")
+    def maintenance_daily_status(_: Any = Depends(require_auth)):
+        from maintenance.engine import build_engine
+        from maintenance.steps import register_default_steps
+
+        engine = build_engine(str(config.repo_root))
+        register_default_steps(engine)
+        return engine.status()
+
+    @app.post("/maintenance/daily/run")
+    def maintenance_daily_run(force: bool = False, dry_run: bool = False, _: Any = Depends(require_auth)):
+        from maintenance.engine import build_engine
+        from maintenance.steps import register_default_steps
+
+        engine = build_engine(str(config.repo_root))
+        register_default_steps(engine)
+        result = engine.run(triggered_by="folder_watcher_api", dry_run=bool(dry_run), force=bool(force))
+        return result.to_dict()
+
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard(_: Any = Depends(require_auth)):
         return dashboard_html(config)

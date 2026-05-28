@@ -321,20 +321,32 @@ Last verified by the default markdown pipeline on 2026-05-23:
   text, optional slash command aliases, per-chat numeric pick lists, and no
   `agent/core.py` routing changes.
 - Security controls are config-driven: token source, authorized numeric user-id
-  source, allowed zones, blocked suffixes, blocked name fragments, blocked path
-  parts, rate limits, lockdown PIN source, state path, and append-only session
-  log path.
+  source, authorized numeric chat-id source, allowed zones, blocked suffixes,
+  blocked name fragments, blocked path parts, rate limits, lockdown PIN source,
+  state path, and append-only session log path.
+- Follow-up polish added explicit chat-id authorization, a token-safe
+  `verify` command backed by Telegram `getMe`, markdown-controlled startup
+  notices, automatic creation of repo-local Telegram drop/state/log paths, and
+  a privacy-safe unauthorized setup breadcrumb that stores only chat/user/update
+  ids.
 - File intelligence goes through Folder Watcher HTTP first and degrades to a
   bounded local scan of allowed zones only when Folder Watcher is unavailable.
 - Focused checks passed: `python -m unittest tests.test_telegram_watcher -v`
-  reported 8 tests covering config load, silent unauthorized ignore, natural
-  send, multi-match pick lists, blocked-file policy, local fallback, push
-  notification mode, lockdown, and unlock.
+  reported 10 tests covering config load, user-id auth, chat-id auth, token-safe
+  verify, startup notices, natural send, multi-match pick lists, blocked-file
+  policy, local fallback, push notification mode, lockdown, and unlock.
 - Service status probe passed: `python telegram_watcher_service.py status`
   loaded the markdown config, resolved desktop/downloads/documents/drop zones,
-  and correctly reported `token_present: false` and
-  `authorized_ids_configured: false` in this checkout rather than claiming a
-  live bot without credentials.
+  and reported local token and authorized id configuration without printing the
+  token.
+- Live token verification passed: `python telegram_watcher_service.py verify`
+  returned `telegram_api_ok: true` for bot username `king_201009_bot` while
+  keeping the token out of output.
+- `getUpdates` inspection returned zero recent updates, so no separate private
+  chat id was discoverable from Telegram at verification time.
+- Startup notice to the supplied id returned `sent: 0`, `failed: 1`, confirming
+  that id is not currently a reachable Telegram chat even though it is a valid
+  bot id.
 - Manifest audit passed with 19 observed tool modules, 19 manifest modules, 35
   registered callable schemas, and no manifest/file mismatches.
 - Repository checks passed: `python -m pytest -q` reported 288 passed tests and
@@ -342,6 +354,57 @@ Last verified by the default markdown pipeline on 2026-05-23:
 - The markdown verification pipeline returned `ship` with 6 passed checks, 0
   failed checks, and 0 timeouts after adding `telegram_watcher` to the compile
   gate.
+
+## 2026-05-27 Telegram Watcher Main CLI Endpoint Bridge
+
+- Added a local endpoint service around the Telegram watcher with `/health`,
+  `/status`, `/verify`, `/push-check`, and `/cli/message`.
+- Normal `python main.py` now auto-starts the separate watcher service when
+  markdown autostart is enabled and token/auth env values exist. It does not
+  register Telegram watcher as a tool and does not edit `agent/core.py`.
+- CLI forwarding is controlled by the `CLI Forward Actions` section in
+  `tools/TELEGRAM_WATCHER_CONFIG.md`; broad `ask` chat remains with the normal
+  KING agent.
+- Natural action scoring uses embeddings plus a generic markdown-semantics term
+  score when embeddings are degenerate or unavailable. No phrase-match shortcut
+  table was added.
+- Focused checks passed: `python -m unittest tests.test_telegram_watcher -v`
+  reported 14 tests; `python -m unittest tests.test_cli_api_and_folder_routing
+  -v` reported 14 tests.
+- Runtime checks passed: status loaded API and CLI bridge config, verify
+  returned `telegram_api_ok: true`, compileall passed, `/health` returned
+  `status: ok`, and `/cli/message` handled natural `show me watcher health`
+  as action `health`.
+- Normal CLI proof passed: piped `python main.py` displayed the watcher bridge
+  as running at `http://127.0.0.1:7480` and printed the watcher health answer.
+- Markdown verification pipeline returned `ship` with 6 passed checks, 0
+  failed checks, and 0 timeouts. The broad Python suite reported 296 passed
+  tests and 35 subtests; frontend typecheck passed.
+- Live Telegram recipient proof remains pending until the bot receives a real
+  private chat message and Telegram exposes the reachable chat id.
+
+## 2026-05-27 Telegram Watcher Routing Boundary Fix
+
+- Telegram watcher now supports `folder_watcher_base_url: client_active_target`
+  and resolves it from `tools/FOLDER_WATCHER_CLIENT.md`, keeping Telegram and
+  KING's registered Folder Watcher bridge on the same active service.
+- `stats` was removed from Telegram `CLI Forward Actions`, so folder
+  inventory/count/type questions are no longer swallowed by the Telegram file
+  delivery bridge.
+- Natural selection text like `send me the 2` now uses the pending file list.
+- Latest zone requests are scoped to the named allowed zone and prefer root
+  files for natural prompts such as `latest files on my desktop`.
+- `desktop.ini` is blocked by Telegram watcher file policy as Windows metadata
+  noise.
+- Focused verification passed: 18 Telegram watcher tests and 31 combined
+  Telegram/CLI routing tests.
+- Live verification passed: Folder Watcher on `7475` returned 61 active files
+  with 26 Python files; normal `python main.py` answered the folder count
+  through Folder Watcher; Telegram `/cli/message` listed top-level Desktop
+  files and natural pick selected the requested item.
+- Markdown verification pipeline returned `ship` with 6 passed checks, 0
+  failed checks, and 0 timeouts. The broad Python suite reported 300 passed
+  tests and 35 subtests; frontend typecheck passed.
 
 ## Escalation Rules
 

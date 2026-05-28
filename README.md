@@ -83,7 +83,25 @@ flowchart LR
 | Memory | Graph storage, vector recall, relation rules, profile context | `memory/brain.py`, `memory/MEMORY_UNIFIED_MODEL.md`, `memory/MEMORY_GRAPH_RELATIONS.md` |
 | Frontend | Local web assistant, memory graph, navigator surface | `api_server.py`, `public/frontend/`, `src/app/` |
 | Folder watcher | Local file intelligence service with API, index, dashboard, deploy templates | `folder_watcher/`, `deploy/folder_watcher/` |
+| Telegram watcher | Separate Telegram bot endpoint service for natural allowed-zone file delivery, push notifications, and normal `python main.py` CLI bridging | `telegram_watcher/`, `telegram_watcher_service.py`, `tools/TELEGRAM_WATCHER_CONFIG.md` |
 | Verification | Markdown-defined ship checks and evidence | `tools/TOOL_VERIFICATION_PIPELINE.md`, `tests/` |
+
+## Obsidian Memory Vault
+
+The repo includes an Obsidian-ready memory vault at `obsidian/King`. Open that
+folder in Obsidian to browse KING memory as a graph. Start at `Home.md`, keep
+`index.md` and `log.md` current, and follow `AGENTS.md` plus
+`memory/MEMORY_OBSIDIAN_VAULT.md` when adding, updating, querying, or removing
+memory. The vault is a markdown projection; runtime recall still belongs to the
+structured memory tools. Runtime graph persistence also regenerates
+`obsidian/King/Generated Memory Graph`, so remembered facts, graph nodes, graph
+edges, updates, and removals show up in Obsidian automatically.
+
+Normal `python main.py` starts the Telegram watcher endpoint service when
+`tools/TELEGRAM_WATCHER_CONFIG.md` enables `main_cli_autostart` and Telegram
+token/auth env values are present. CLI file-service requests go through that
+separate service's `/cli/message` endpoint; ordinary broad chat stays with the
+main KING agent.
 
 ## Tool Surface
 
@@ -132,6 +150,7 @@ needed. The most important configuration areas are:
 - `KING_MEMORY_*` for graph memory, vector recall, and ranking
 - `KING_TOOL_*` for routing, retries, grounding, and result bounds
 - `KING_BROWSER_*`, `KING_SYSTEM_*`, and `KING_NAVIGATOR_*` for tool providers
+- `TELEGRAM_BOT_TOKEN` and `KING_TELEGRAM_*` for the Telegram watcher daemon
 - `KING_VERIFICATION_PIPELINE_*` for bounded ship checks
 
 ## Verification

@@ -41,3 +41,16 @@ Results are deduplicated by memory id and sorted by unified score.
 - `Brain.recall_context()` - natural-language context string from graph memory
 - `Brain.profile_context()` - profile-style graph context
 - `memory_recall` tool - structured graph-backed hits with optional graph paths
+
+## Obsidian Projection
+
+`obsidian/King` is the markdown projection for browsing and managing memory in
+Obsidian Graph view. It does not replace runtime graph memory. A vault edit only
+proves the markdown layer changed; runtime add, recall, forget, and maintenance
+claims still require structured memory tool results.
+
+See `memory/MEMORY_OBSIDIAN_VAULT.md` and `obsidian/King/AGENTS.md`.
+
+Runtime graph persistence also regenerates
+`obsidian/King/Generated Memory Graph`, where active nodes, edges, and memory
+entries become Obsidian pages linked from the actual `memory_graph.json` shape.

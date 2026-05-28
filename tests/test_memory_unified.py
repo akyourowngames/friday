@@ -57,6 +57,31 @@ class UnifiedMemoryTests(unittest.TestCase):
             self.assertTrue(hits)
             self.assertTrue(hits[0].get("sources"))
 
+    @patch.object(brain_mod, "embed", _ones_embed)
+    def test_obsidian_graph_sync_tracks_remember_and_forget(self):
+        with isolated_memory():
+            brain = brain_mod.Brain()
+            stored = brain.remember("User prefers dark mode")
+            graph_root = (
+                Path(brain_mod.settings.memory_obsidian_vault_dir)
+                / brain_mod.settings.memory_obsidian_graph_dir
+            )
+
+            self.assertEqual(stored["obsidian_graph"]["status"], "synced")
+            self.assertTrue((graph_root / "Index.md").exists())
+            self.assertTrue((graph_root / "Nodes" / "user.md").exists())
+            self.assertTrue((graph_root / "Nodes" / "dark_mode.md").exists())
+            self.assertTrue(list((graph_root / "Memories").glob("*.md")))
+            user_page = (graph_root / "Nodes" / "user.md").read_text(encoding="utf-8")
+            self.assertIn("[[Generated Memory Graph/Nodes/dark_mode|dark mode]]", user_page)
+
+            removed = brain.forget("dark mode")
+
+            self.assertEqual(removed["obsidian_graph"]["status"], "synced")
+            self.assertFalse((graph_root / "Nodes" / "dark_mode.md").exists())
+            removed_page = (graph_root / "Removed Memory.md").read_text(encoding="utf-8")
+            self.assertIn("dark mode", removed_page)
+
 
 if __name__ == "__main__":
     unittest.main()

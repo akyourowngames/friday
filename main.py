@@ -315,6 +315,49 @@ def run_api_server(host: str, port: int):
     uvicorn.run("api_server:app", host=host, port=port)
 
 
+def _start_telegram_watcher_for_normal_cli():
+    try:
+        from telegram_watcher.client import ensure_service_for_cli
+    except Exception as exc:
+        console.print("Telegram watcher bridge unavailable: " + exc.__class__.__name__)
+        return None
+    try:
+        config, status = ensure_service_for_cli()
+    except Exception as exc:
+        console.print("Telegram watcher bridge startup failed: " + exc.__class__.__name__)
+        return None
+    state = str(status.get("status") or "")
+    if state in ("running", "started"):
+        console.print("[dim]Telegram watcher bridge: " + state + " at " + config.service_base_url + "[/dim]")
+        return config
+    reason = str(status.get("reason") or state or "unavailable")
+    console.print("[dim]Telegram watcher bridge not started: " + reason + "[/dim]")
+    return None
+
+
+def _try_telegram_watcher_cli(raw: str, config) -> bool:
+    if config is None:
+        return False
+    try:
+        from telegram_watcher.client import ensure_service_for_cli, send_cli_message
+
+        result = send_cli_message(config, raw)
+        if result.get("status") == "unavailable":
+            config, _status = ensure_service_for_cli()
+            result = send_cli_message(config, raw)
+    except Exception as exc:
+        console.print("[dim]Telegram watcher bridge error: " + exc.__class__.__name__ + "[/dim]")
+        return False
+    if not isinstance(result, dict) or not result.get("handled"):
+        return False
+    text = str(result.get("text") or "").strip()
+    if text:
+        console.print(text)
+    else:
+        console.print("[dim]Telegram watcher handled " + str(result.get("action") or "request") + ".[/dim]")
+    return True
+
+
 def cmd_debug():
     from config import settings
 
@@ -437,6 +480,7 @@ def main(argv: list[str] | None = None):
         return
     _enable_rich_console()
 
+    telegram_watcher_config = _start_telegram_watcher_for_normal_cli()
     print_welcome()
     agent = None
 
@@ -550,9 +594,13 @@ def main(argv: list[str] | None = None):
             elif base == "help":
                 console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /memory [limit]  /remember <fact>  /forget <fact>  /voice  /gesture  /playlist  /new  /help  /exit")
             else:
+                if _try_telegram_watcher_cli(raw, telegram_watcher_config):
+                    continue
                 console.print(f"[red]Unknown command: /{base}. Try /help[/red]")
             continue
 
+        if _try_telegram_watcher_cli(raw, telegram_watcher_config):
+            continue
         ensure_agent().process(raw)
 
 

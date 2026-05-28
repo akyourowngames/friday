@@ -18,6 +18,9 @@ storage/*_text.txt
 storage/onnx_models/
 storage/images/
 storage/browser_auth/
+storage/telegram_drop/
+storage/telegram_watcher_state.json
+storage/telegram_watcher_session.jsonl
 storage/folder_watcher*.sqlite3*
 storage/folder_watcher*.m3u
 storage/folder_watcher_inbox/

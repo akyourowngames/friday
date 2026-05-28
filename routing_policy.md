@@ -14,7 +14,7 @@ The user is giving a fresh standalone search topic, a new named target, a differ
 
 ## Memory Recall Text
 
-The user asks who they are, what the assistant knows about them, what has been remembered, their saved preferences, personal facts, location, name, project context, or prior conversation facts.
+The user asks who they are, what the assistant knows about them, what has been remembered, their saved preferences, personal facts, location, name, project context, prior conversation facts, current situation, current preparation, ongoing studies, ongoing relationships, recent struggles, recent recovery, mood check-ins about their own life, or any open thread from earlier conversations.
 
 ## Broad Memory Recall Text
 

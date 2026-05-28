@@ -2143,3 +2143,195 @@ Verification evidence:
 
 [VERDICT] The tool fleet is registry-exposed and live-verified again without
 adding phrase-match response shortcuts in `agent/core.py`.
+
+## 2026-05-27 Telegram Watcher Service
+
+Scope: implement the `todo.md` Telegram watcher plan as a real parallel daemon
+so Telegram can ask naturally for local files without requiring slash commands
+on every turn.
+
+Runtime changes:
+
+- Added `telegram_watcher/` package plus `telegram_watcher_service.py`.
+- Added `tools/TELEGRAM_WATCHER_CONFIG.md` as the markdown control surface for
+  token env, authorized user-id env, allowed zones, blocked file policy, rate
+  limits, natural action semantics, command aliases, Folder Watcher integration,
+  push notifications, state, and session logs.
+- Natural Telegram text selects actions by semantic scoring over markdown
+  action semantics. Slash commands remain optional explicit aliases, and numeric
+  replies only act on the current chat's pick list.
+- File delivery checks canonical allowed-zone membership, blocked suffixes,
+  blocked name fragments, blocked path parts, size limits, rate limits, live
+  file existence, and lockdown state before sending a Telegram document.
+- Folder intelligence calls the Folder Watcher HTTP service first and falls
+  back to bounded local scans of allowed zones only when the service is
+  unavailable.
+- Push mode stores per-chat watch state and sends notifications for new
+  Folder Watcher events without requiring the user to keep sending commands.
+
+Verification evidence:
+
+- `python -m unittest tests.test_telegram_watcher -v` -> 8 tests passed.
+- `python -m unittest tests.test_telegram_watcher tests.test_verification_pipeline -v` -> 13 tests passed.
+- `python -m unittest tests.test_folder_watcher -v` -> 16 tests passed.
+- `python telegram_watcher_service.py status` loaded the config and honestly
+  reported missing Telegram token and authorized ids in this checkout.
+- `python -m pytest -q` -> 288 tests passed, 35 subtests passed.
+- `npm run typecheck` passed.
+- Markdown verification pipeline -> `ship`, 6 passed checks, 0 failed, 0 timed
+  out.
+
+[VERDICT] Telegram watcher is shipped as a standalone verified runtime service.
+It does not add keyword routing, does not touch `agent/core.py`, and does not
+claim the live Telegram bot is active until token and authorized user id env
+values are configured.
+
+## 2026-05-27 Telegram Watcher Live Credential Polish
+
+Scope: wire the provided BotFather token into local ignored config, verify the
+bot safely, and improve authorization/setup ergonomics without adding keyword
+routing.
+
+Runtime changes:
+
+- Added markdown-owned `authorized_chat_ids_env` alongside
+  `authorized_user_ids_env`, so deployments can allow a private user id or a
+  chat id.
+- Added token-safe `verify` CLI mode that calls Telegram `getMe` and reports
+  bot identity fields without printing the token.
+- Added markdown-controlled startup notices to authorized chat ids when the
+  daemon starts.
+- The service now creates repo-local Telegram drop, state, and log directories
+  as needed.
+- Health/status now distinguishes authorized user-id and chat-id configuration.
+- Unauthorized setup probes now store only the latest chat/user/update ids in
+  state; unauthorized message text is not written to the session log.
+- Local `.env` now contains the Telegram token and the supplied id as both
+  authorized user and authorized chat configuration. The token remains out of
+  tracked markdown and command output.
+
+Verification evidence:
+
+- `python -m unittest tests.test_telegram_watcher -v` -> 10 tests passed.
+- `python telegram_watcher_service.py status` -> token present, authorized user
+  ids configured, authorized chat ids configured, 4 allowed zones.
+- `python telegram_watcher_service.py verify` -> `telegram_api_ok: true`, bot
+  username `king_201009_bot`, bot id matched the token prefix, token not shown.
+- `getUpdates` inspection returned zero recent updates, so no separate private
+  chat id was discoverable from Telegram at verification time.
+- Startup notice to the supplied id returned `sent: 0`, `failed: 1`, confirming
+  that the number is a valid bot id but not currently a reachable chat id.
+
+[VERDICT] Local Telegram credentials are configured and token connectivity is
+verified. The supplied number is accepted in both user-id and chat-id
+allowlists; if Telegram later shows a different private chat id, the config can
+accept it through the existing chat-id env without code changes.
+
+## 2026-05-27 Telegram Watcher Main CLI Endpoint Bridge
+
+Scope: make the Telegram watcher compulsory for normal `python main.py` CLI
+startup while keeping it a separate endpoint service, not a registry tool or
+core router change.
+
+Runtime changes:
+
+- Added `telegram_watcher/api.py` with `/health`, `/status`, `/verify`,
+  `/push-check`, and `/cli/message` endpoints.
+- Changed `telegram_watcher_service.py run` to serve the endpoint API and run
+  Telegram polling in the same separate service process. `poll` remains
+  available for polling-only debugging.
+- Added `telegram_watcher/client.py` so normal `python main.py` can start the
+  service in the background and send CLI text to `/cli/message` without asking
+  the user to run service commands manually.
+- Added markdown-owned runtime controls for API host/port, service base URL,
+  main CLI autostart, CLI bridge enablement, startup wait, and local CLI
+  session ids.
+- Added markdown-owned `CLI Forward Actions`; broad `ask` remains outside this
+  list so normal KING conversation falls through to the main agent.
+- Local CLI delivery reuses the Telegram watcher handlers through a local
+  bridge, so file delivery still checks allowed zones, blocked file policy,
+  rate limits, size, and Telegram send results.
+- Natural action scoring now combines embeddings with a generic term overlap
+  over markdown action names and descriptions when embeddings are weak or
+  unavailable. No phrase table or hardcoded command rescue was added.
+
+Verification evidence:
+
+- `python -m unittest tests.test_telegram_watcher -v` -> 14 tests passed.
+- `python -m unittest tests.test_cli_api_and_folder_routing -v` -> 14 tests
+  passed.
+- `python telegram_watcher_service.py status` -> token present, auth present,
+  CLI bridge enabled, autostart enabled, API on `127.0.0.1:7480`, and 10 CLI
+  forward actions loaded from markdown.
+- `python telegram_watcher_service.py verify` -> `telegram_api_ok: true` for
+  bot username `king_201009_bot`; token was not printed.
+- `python -m compileall telegram_watcher main.py telegram_watcher_service.py`
+  passed.
+- Background watcher process was restarted from the updated entrypoint and
+  `/health` returned `status: ok`.
+- `/cli/message` with natural text `show me watcher health` returned
+  `handled: true`, action `health`, and health details without exposing the
+  token.
+- Piped normal CLI probe `python main.py` with `show me watcher health` showed
+  `Telegram watcher bridge: running at http://127.0.0.1:7480` and printed the
+  watcher health response before `/exit`.
+- Markdown verification pipeline -> `ship`, 6 passed checks, 0 failed, 0 timed
+  out. The broad Python suite inside it reported 296 passed tests and 35
+  subtests; `npm run typecheck` also passed.
+
+[VERDICT] Normal `python main.py` now brings up and talks to the separate
+Telegram watcher endpoint service naturally. The live bot token verifies, but
+actual Telegram file delivery still needs a reachable private chat id from a
+real message to the bot; the earlier supplied number remains configured but is
+the bot id, not a proven recipient chat.
+
+## 2026-05-27 Telegram Watcher Routing Boundary Fix
+
+Scope: fix the rough CLI behavior where Telegram watcher intercepted folder
+inventory questions, pointed at the wrong Folder Watcher URL, listed unrelated
+zone files, and treated natural pick replies as new searches.
+
+Runtime changes:
+
+- Telegram watcher now derives `folder_watcher_base_url` from the active target
+  in `tools/FOLDER_WATCHER_CLIENT.md` when configured as
+  `client_active_target`, so it follows the same service as KING's normal
+  folder watcher bridge.
+- Removed `stats` from `CLI Forward Actions`; folder inventory/count/type
+  questions now fall through to the normal KING Folder Watcher path.
+- Natural pick replies such as `send me the 2` select from the existing pending
+  list instead of launching a new search.
+- Latest-file requests now respect requested allowed-zone scope, and when a
+  zone such as `desktop` is named, top-level files are preferred over deep
+  internal cache/database paths.
+- Added `desktop.ini` to the Telegram blocked-name policy so Windows metadata
+  files do not show up as deliverable user files.
+- CLI delivery failure now includes the found local path and the exact missing
+  setup condition: the bot needs one real Telegram message so a reachable chat
+  id can be learned.
+
+Verification evidence:
+
+- `python -m unittest tests.test_telegram_watcher -v` -> 18 tests passed.
+- Combined focused routing run
+  `python -m unittest tests.test_telegram_watcher tests.test_cli_api_and_folder_routing -v`
+  -> 31 tests passed.
+- Telegram watcher status now reports `folder_watcher_base_url:
+  http://127.0.0.1:7475` and no `stats` action in CLI forwards.
+- Folder Watcher live stats on `http://127.0.0.1:7475/files/stats` reported
+  61 active files, including 30 markdown files and 26 Python files.
+- Piped `python main.py` with `how many files are there in this folder` now
+  answered from Folder Watcher with 61 files and 26 Python files.
+- Live `/cli/message` for `what are the latest files on my desktop?` returned
+  top-level Desktop files only: Antigravity, Trae, TRAE SOLO, and OpenCode
+  shortcuts.
+- Live `/cli/message` after that list with `send me the 2` selected the
+  existing second item and reported the local path when Telegram delivery could
+  not complete because the recipient chat id is not yet proven.
+- Markdown verification pipeline -> `ship`, 6 passed checks, 0 failed, 0 timed
+  out. The broad Python suite inside it reported 300 passed tests and 35
+  subtests; frontend typecheck passed.
+
+[VERDICT] The accidental Telegram/Folder Watcher mixing is fixed. Folder
+inventory is back on the Folder Watcher path, Telegram watcher follows the
+active Folder Watcher target, and natural pick/list behavior is smoother.

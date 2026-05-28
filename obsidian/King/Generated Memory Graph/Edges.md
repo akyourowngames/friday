@@ -1,0 +1,52 @@
+---
+type: generated-memory-list
+status: active
+generated: 2026-05-28T23:45:30
+kind: "edges"
+---
+
+# Edges
+
+- [[Generated Memory Graph/Edges/63c4c54d03ac9c7a9174eba0c1a591e4cb3463a5|an unspecified location associated with Krish]]
+- [[Generated Memory Graph/Edges/274af146e72a71a5ee3f80277902c58b1b4b62fd|ankita associated with 11th]]
+- [[Generated Memory Graph/Edges/f700375cb9756ee180c8761cb8e754824d1e5d9f|ankita associated with Krish]]
+- [[Generated Memory Graph/Edges/6633e2200a5506751f566f3937a10edb8ba57ade|ankita in class 11th]]
+- [[Generated Memory Graph/Edges/7d442fe13ffd2a6e74fcff361fe9e328e727105e|ankita likes short hair]]
+- [[Generated Memory Graph/Edges/64f9ab2fe4f3e4fcc36dea4d31f81c028dcbc48b|ankita lives in haryana]]
+- [[Generated Memory Graph/Edges/3f929eb870c4755ddec44bca275941cb3158f5cf|Ankita has short hair associated with ankita]]
+- [[Generated Memory Graph/Edges/64076b2a85ab393be6fe419eb36730bfc97411b1|Ankita has short hair associated with short hair]]
+- [[Generated Memory Graph/Edges/ed4f84203b7215e46ad655575bc7261367ccfae8|Ankita is Krish's girlfriend associated with ankita]]
+- [[Generated Memory Graph/Edges/c543261413c9aa272f834fa23a3e29fad51969a3|Ankita is Krish's girlfriend associated with Krish]]
+- [[Generated Memory Graph/Edges/a2865807ca7a39b9cd22c78d4ef23de4d2175407|Ankita is user's girlfriend associated with ankita]]
+- [[Generated Memory Graph/Edges/c623dcce7fde97105ece69af106f8180402700f6|Ankita is your girlfriend associated with ankita]]
+- [[Generated Memory Graph/Edges/75aceebfdeda03a4284366b0af2f05a57b9fcd3a|haryana associated with ankita]]
+- [[Generated Memory Graph/Edges/0712644d2395da4eaf8f91556fae5ed87f6b0849|Krish lives in an unspecified location]]
+- [[Generated Memory Graph/Edges/cd1eea7f37100bfb3d0fa6faf2ec255ed17c0433|Krish has a crush on Ankita associated with ankita]]
+- [[Generated Memory Graph/Edges/b17bac812cef344a5dad13337bb359fee9a80047|Krish has a crush on Ankita associated with Krish]]
+- [[Generated Memory Graph/Edges/6a73672f4a2cc56267897871f526f6fa43a82dc8|Krish Verma associated with Krish]]
+- [[Generated Memory Graph/Edges/49e018ff3715108af6f4ef6d305f295ee8f3df40|Krish Verma is the user's name associated with Krish]]
+- [[Generated Memory Graph/Edges/2249216a9a2800c0559febc673f6d6c9b2f5abf4|Krish Verma is the user's name associated with Krish Verma]]
+- [[Generated Memory Graph/Edges/d491e952a7fedb9d04126299f8f3043f9ca5b483|short hair associated with ankita]]
+- [[Generated Memory Graph/Edges/d8992bdfae9770275a985a203890428e840dcc15|User crush ankita]]
+- [[Generated Memory Graph/Edges/f24b03027026b5e206dcb412ac4b22a52a420481|User name Krish Verma]]
+- [[Generated Memory Graph/Edges/5fe5ae91cacd357d4102e4011759d96307693057|User remembers Ankita has short hair]]
+- [[Generated Memory Graph/Edges/9570fc3e40f7af272e66909f4db029d855c71fe6|User remembers Ankita is Krish's girlfriend]]
+- [[Generated Memory Graph/Edges/b4d20668fef1216e16def8a3c6c026109a04675a|User remembers Ankita is user's girlfriend]]
+- [[Generated Memory Graph/Edges/e51eafb40922f35589e16dfe7f900c5125c2bfdf|User remembers Ankita is your girlfriend]]
+- [[Generated Memory Graph/Edges/274aab0a459129761653981dcb5434c29f5d12a2|User remembers Krish has a crush on Ankita]]
+- [[Generated Memory Graph/Edges/04eb7564e202ff825587cd17434971945f3cbf0c|User remembers Krish Verma is the user's name]]
+- [[Generated Memory Graph/Edges/bf5850dd06a69b93eaae4b2ae0f1be6165ed096e|User remembers User has a crush on Ankita]]
+- [[Generated Memory Graph/Edges/3493885c0d74a7d79fc215f101c49e568f433436|User remembers User has a girlfriend named Ankita]]
+- [[Generated Memory Graph/Edges/0d0ca02b6eb33d0c0a16e1cd339b5481d38a383e|User remembers User has JEE backlog]]
+- [[Generated Memory Graph/Edges/2681a7b739493d5c6dea9c1308ce6ef49680d25e|User remembers User has recovered from previous situation]]
+- [[Generated Memory Graph/Edges/35caff4bb4f24936d39de8e8432d432571fc937a|User remembers User is in a stressful situation]]
+- [[Generated Memory Graph/Edges/0a35422c7c81d786a8e1750d0b497a7222b35908|User remembers User is preparing for JEE]]
+- [[Generated Memory Graph/Edges/2f65f76223aae9e08de3b59119b70096ece35277|User remembers User's crush is Ankita]]
+- [[Generated Memory Graph/Edges/965f2a98ff44e335256d971dc9551a628c45398e|User remembers User's username is anime]]
+- [[Generated Memory Graph/Edges/1ac6580ba630a8ec039ae7bedbb15995faeea08b|User remembers You have a crush on Ankita]]
+- [[Generated Memory Graph/Edges/77c4ff1aa8889d86ecba8213767cf0047c71c87e|User has a crush on Ankita associated with ankita]]
+- [[Generated Memory Graph/Edges/82cbfbe85d846bd1cd79c6587219306ac345c151|User has a girlfriend named Ankita associated with ankita]]
+- [[Generated Memory Graph/Edges/131c51656bb206ac7c433b59ec4c1632552f8769|User has recovered from previous situation associated with recovered]]
+- [[Generated Memory Graph/Edges/f3544aba6f46b38b2750dd5c77a3b453beb1c781|User's crush is Ankita associated with ankita]]
+- [[Generated Memory Graph/Edges/6cc815d84cce943932e6a1fff7565d5da9f3b831|User's username is anime associated with anime]]
+- [[Generated Memory Graph/Edges/f797efeec7f133a41397dae29274355ffb5fe2a7|You have a crush on Ankita associated with ankita]]

@@ -23,6 +23,7 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 - `verification_pipeline.py` - markdown-driven verification pipeline for bounded local checks and ship or hold evidence.
 - `web.py` - web search or page retrieval capability.
 - `youtube.py` - YouTube-related capability.
+- `scheduler_tool.py` - schedule registry actions for later, list, cancel, run-due, and trigger the daily maintenance routine. Reads `tools/SCHEDULER_CONFIG.md` and `tools/MAINTENANCE_DAILY.md`.
 
 The runtime registry remains the source of truth for callable schemas. This manifest must not be used as a keyword table, intent shortcut, or replacement for the registry.
 
@@ -43,6 +44,8 @@ The runtime registry remains the source of truth for callable schemas. This mani
 - `TELEGRAM_WATCHER_CONFIG.md` - editable Telegram watcher daemon config for bot token source, authorized user ids, allowed zones, blocked file policy, natural action semantics, push mode, and Folder Watcher integration.
 - `FILE_PATH_ALIASES.md` - editable natural path aliases consumed by file tools after they are selected.
 - `COMPOSIO_GATEWAY.md` - editable Composio gateway policy for enabled toolkits, allowed tool slugs, risk gates, runtime settings, and test prompts.
+- `MAINTENANCE_DAILY.md` - editable daily maintenance routine: cutoff time, enabled steps, action whitelist, retention windows. Consumed by `python -m maintenance.daily`, the folder watcher and telegram watcher in-process schedulers, and the `daily_maintenance` registry tool.
+- `SCHEDULER_CONFIG.md` - editable scheduler runtime config: action whitelist, notes/memory/folder linkage, retry policy. Consumed by `python -m scheduler.cli` and the `scheduler_*` registry tools.
 
 ## Runtime Tool: camera_vision
 
@@ -330,7 +333,7 @@ deep-dive, WebSocket, and webhook surfaces.
 ### Purpose
 
 `telegram_watcher_service` is KING's Telegram-facing filesystem courier. It lets
-an authorized Telegram user ask naturally for allowed-zone files, recent
+an authorized Telegram user or chat ask naturally for allowed-zone files, recent
 arrivals, status, metadata, and push notifications without requiring slash
 commands for every turn.
 
@@ -341,16 +344,31 @@ commands for every turn.
 - Config file: `tools/TELEGRAM_WATCHER_CONFIG.md`.
 - Telegram bot token source: markdown names an environment variable; credentials
   are not stored in markdown.
+- Authorization sources: markdown names environment variables for numeric user
+  ids and numeric chat ids, so private chats and chat-scoped deployments both
+  work without code edits.
+- Runtime verification: `verify` calls Telegram `getMe` and reports bot fields
+  without printing the token.
+- Endpoint service: normal `run` mode exposes local HTTP endpoints on the
+  markdown-configured host and port while the Telegram polling loop runs in the
+  same service process.
+- Main CLI bridge: normal `python main.py` mode auto-starts this endpoint
+  service when enabled in markdown and token/auth env values are present.
 - Folder intelligence source: Folder Watcher HTTP service first, bounded local
   scan fallback second.
+- Startup notice: optional markdown-controlled online message to authorized
+  chat ids when the daemon starts.
 - Natural action selection: semantic scores over markdown action semantics,
   with slash commands as optional explicit aliases.
 
 ### Inputs
 
-- Telegram Bot API updates from authorized numeric Telegram user ids.
+- Telegram Bot API updates from authorized numeric Telegram user ids or chat
+  ids.
 - Natural text, optional slash commands, and numeric replies to the active
   per-chat pick list.
+- Natural KING CLI text and unknown slash commands through `/cli/message` when
+  the semantic planner selects a markdown-listed CLI forward action.
 - Folder Watcher file records or allowed-zone local files.
 
 ### Outputs
@@ -363,12 +381,18 @@ commands for every turn.
   paths.
 - Optional proactive notifications for new Folder Watcher events after watch
   mode is enabled.
+- HTTP status, health, verify, push-check, and CLI-message responses for the
+  local KING process. This service is not registered as a normal registry tool.
 
 ### Error Handling
 
-- Unauthorized Telegram user ids are silently ignored.
+- Unauthorized Telegram user ids and chat ids are silently ignored.
+- Unauthorized updates record only the latest chat/user/update ids for setup
+  discovery; unauthorized message text is not stored.
 - Missing token or authorized ids blocks daemon run mode instead of pretending
   Telegram is active.
+- CLI forwarding handles only actions listed in `CLI Forward Actions`; broad
+  natural chat stays with the main KING agent.
 - Files outside allowed zones are not listed, sent, or acknowledged.
 - Files blocked by policy are reported as blocked when they are otherwise a
   deliverable in-scope match.
@@ -379,6 +403,10 @@ commands for every turn.
 ### Verification Method
 
 - Run `python -m unittest tests.test_telegram_watcher`.
+- Probe the endpoint service with `/health` or `/cli/message` after normal CLI
+  autostart changes.
+- Run `python telegram_watcher_service.py verify` when token connectivity must
+  be proven.
 - Run `python -m compileall telegram_watcher telegram_watcher_service.py`.
 - Run the repository verification pipeline after runtime changes.
 
@@ -1278,3 +1306,58 @@ It exists so KING can recover from transient failures without hanging, looping i
 - 2026-05-19T08:26Z - Added `structured_error_envelope` as a markdown tool contract for safe, scoped, non-silent failure reporting.
 - 2026-05-19T08:18Z - Added `permission_risk_gate` as a markdown tool contract for scoped allow, confirm, dry-run-first, and block decisions before sensitive tool execution.
 - 2026-05-19T08:08Z - Added `verification_gauntlet` as a markdown tool contract so future toolchain changes have a reusable ship, hold, or document-only evidence path.
+
+## Runtime Tool: scheduler
+
+### Purpose
+
+`scheduler_schedule`, `scheduler_list`, `scheduler_cancel`, `scheduler_run_due`,
+and `daily_maintenance` are KING's first-class scheduler surface. They let KING
+schedule any whitelisted registry action for later, audit pending and past
+items, and run the same daily maintenance routine that the folder watcher and
+telegram watcher fire in-process at the configured cutoff time.
+
+### Runtime
+
+- Entrypoint: `tools/scheduler_tool.py`.
+- Engine: `scheduler/engine.py` with markdown config at `tools/SCHEDULER_CONFIG.md`.
+- Maintenance routine: `maintenance/engine.py` with markdown config at `tools/MAINTENANCE_DAILY.md`.
+- Storage: `KING_SCHEDULER_STORE_PATH`, `KING_SCHEDULER_LOG_PATH`,
+  `KING_MAINTENANCE_STATE_PATH`, `KING_MAINTENANCE_LOG_PATH`.
+
+### Inputs
+
+- `scheduler_schedule`: title, action (must be on the whitelist in
+  `SCHEDULER_CONFIG.md`), `scheduled_for` ISO datetime, optional JSON arguments,
+  optional comma-separated tags.
+- `scheduler_list`: optional status filter.
+- `scheduler_cancel`: numeric item id.
+- `scheduler_run_due`: optional `horizon_minutes` look-ahead window.
+- `daily_maintenance`: optional `force` and `dry_run` toggles.
+
+### Outputs
+
+- Structured records with id, title, action, arguments, scheduled_for, status,
+  retry_count, related note title, related memory id, tags, last_result.
+- `daily_maintenance` returns the structured `MaintenanceResult` payload with
+  step-by-step status (`ok`, `skipped`, `failed`, `dry_run`).
+
+### Error Handling
+
+- `scheduler_schedule` rejects empty title, empty action, malformed
+  `scheduled_for`, non-whitelisted action, or invalid arguments JSON with typed
+  errors. It does not auto-add actions to the whitelist.
+- `scheduler_run_due` skips items whose action is not whitelisted and records
+  them as `skipped`, not `failed`.
+- The maintenance engine refuses to fire twice in the same local day unless
+  `force=true`, and refuses to fire inside `min_run_interval_minutes` of the
+  previous run unless forced.
+
+### Verification
+
+- `python -m unittest tests.test_scheduler`
+- `python -m unittest tests.test_daily_maintenance`
+- `python -m maintenance.daily --status`
+- `python -m maintenance.daily --dry-run`
+- `python -m scheduler.cli list`
+- `tool_manifest_audit` must show manifest/file alignment.

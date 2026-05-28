@@ -11,6 +11,7 @@ import numpy as np
 
 from agent.embedder import embed
 from config import settings
+from memory.obsidian_sync import sync_memory_graph
 from memory.vector_store import VectorStore
 
 MEMORY_DIR = Path(settings.memory_dir)
@@ -473,6 +474,7 @@ class Brain:
         self._graph = self._empty_graph()
         self._graph_rules = _load_graph_relation_rules()
         self._auto_relation = _load_auto_relation_settings()
+        self._obsidian_sync_result = {"enabled": False, "status": "not_run"}
         self._query_cache = {}
         self._query_cache_order = []
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -489,6 +491,7 @@ class Brain:
         self._load_or_build_index()
         if self._vector_store.size() == 0 and self._embeddings is not None and self._embeddings.size > 0:
             self._sync_vector_store_from_embeddings()
+        self._sync_obsidian_graph()
 
     def _sync_vector_store_from_embeddings(self):
         if getattr(self, "_vector_store", None) is None:
@@ -547,6 +550,20 @@ class Brain:
     def _persist_graph(self):
         self._graph["generated_at"] = datetime.now().isoformat(timespec="seconds")
         self._atomic_write_json(self._graph_path(), self._graph)
+        self._sync_obsidian_graph()
+
+    def _sync_obsidian_graph(self):
+        try:
+            self._obsidian_sync_result = sync_memory_graph(self._graph, self.memories)
+        except Exception as exc:
+            self._obsidian_sync_result = {
+                "enabled": bool(settings.memory_obsidian_sync_enabled),
+                "status": "failed",
+                "reason": str(exc),
+            }
+
+    def obsidian_graph_status(self) -> dict:
+        return dict(getattr(self, "_obsidian_sync_result", {"enabled": False, "status": "not_run"}))
 
     def _memory_files(self) -> list[Path]:
         files = []
@@ -899,6 +916,7 @@ class Brain:
             self._rebuild_index()
         else:
             self._persist_index()
+        self._sync_obsidian_graph()
 
     def _append_embedding(self, text: str, insert_idx: int | None = None):
         try:
@@ -1607,6 +1625,7 @@ class Brain:
             "stored": stored,
             "text": normalized,
             "entry_count": len(self.memories),
+            "obsidian_graph": self.obsidian_graph_status(),
         }
 
     def list_memories(self, limit: int = 25) -> list[dict]:
@@ -1644,7 +1663,7 @@ class Brain:
             removed = [self.memories[idx]["text"] for idx in exact_indices]
             dirty_dates = self._remove_indices(exact_indices, reason=reason)
             self._persist_changes(dirty_dates)
-            return {"status": "removed", "reason": "text_match", "removed": removed}
+            return {"status": "removed", "reason": "text_match", "removed": removed, "obsidian_graph": self.obsidian_graph_status()}
 
         if not self.memories:
             return {"status": "not_found", "reason": "empty_memory", "removed": []}
@@ -1687,7 +1706,7 @@ class Brain:
         removed = [self.memories[best_idx]["text"]]
         dirty_dates = self._remove_indices([best_idx], reason=reason)
         self._persist_changes(dirty_dates)
-        return {"status": "removed", "reason": "semantic_match", "removed": removed}
+        return {"status": "removed", "reason": "semantic_match", "removed": removed, "obsidian_graph": self.obsidian_graph_status()}
 
     def _edge_to_text(self, edge: dict) -> str:
         nodes = self._graph.get("nodes", {})
@@ -2049,6 +2068,32 @@ class Brain:
             "avg_ms": round((elapsed * 1000.0) / runs, 3),
             "result_count": 0 if not last_result else len(last_result.split(" | ")),
             "indexed_count": int(getattr(self._embeddings, "shape", (0,))[0]) if self._embeddings is not None else 0,
+        }
+
+    def daily_maintenance(self, label: str = "daily") -> dict:
+        clean_label = str(label or "daily").strip() or "daily"
+        before_assessment = self.system_assessment()
+        maintain_result = self.maintain(rebuild=True, backup=True)
+        reflection = self.reflect(clean_label)
+        self._sync_obsidian_graph()
+        after_assessment = self.system_assessment()
+        return {
+            "label": clean_label,
+            "completed_at": datetime.now().isoformat(timespec="seconds"),
+            "maintain": maintain_result,
+            "reflection": reflection,
+            "obsidian": self.obsidian_graph_status(),
+            "before": {
+                "entry_count": before_assessment.get("entry_count"),
+                "tier": before_assessment.get("tier"),
+                "indexed_count": before_assessment.get("indexed_count"),
+            },
+            "after": {
+                "entry_count": after_assessment.get("entry_count"),
+                "tier": after_assessment.get("tier"),
+                "indexed_count": after_assessment.get("indexed_count"),
+                "graph": after_assessment.get("graph"),
+            },
         }
 
     def _memory_confidence(self, similarity: float, importance: float, overlap: float) -> float:

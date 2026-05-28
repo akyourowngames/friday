@@ -108,6 +108,9 @@ class Settings:
     memory_graph_fallback_relation: str = _env("KING_MEMORY_GRAPH_FALLBACK_RELATION", "remembers")
     memory_graph_fallback_tier: str = _env("KING_MEMORY_GRAPH_FALLBACK_TIER", "semantic")
     memory_auto_relations_enabled: bool = _env_bool("KING_MEMORY_AUTO_RELATIONS_ENABLED", True)
+    memory_obsidian_sync_enabled: bool = _env_bool("KING_MEMORY_OBSIDIAN_SYNC_ENABLED", True)
+    memory_obsidian_vault_dir: str = _env("KING_MEMORY_OBSIDIAN_VAULT_DIR", "obsidian/King")
+    memory_obsidian_graph_dir: str = _env("KING_MEMORY_OBSIDIAN_GRAPH_DIR", "Generated Memory Graph")
     memory_store_enabled: bool = _env_bool("KING_MEMORY_STORE_ENABLED", True)
     memory_store_notify: bool = _env_bool("KING_MEMORY_STORE_NOTIFY", False)
     memory_extraction_context_messages: int = _env_int("KING_MEMORY_EXTRACTION_CONTEXT_MESSAGES", 8)
@@ -180,7 +183,18 @@ class Settings:
     folder_watcher_base_url: str = _env("KING_FOLDER_WATCHER_BASE_URL", "")
     folder_watcher_auth_token: str = _env("KING_FOLDER_WATCHER_AUTH_TOKEN", "")
     folder_watcher_timeout_ms: int = _env_int("KING_FOLDER_WATCHER_TIMEOUT_MS", 0)
+    telegram_watcher_config_file: str = _env("KING_TELEGRAM_CONFIG_FILE", "tools/TELEGRAM_WATCHER_CONFIG.md")
     browser_user_agent: str = _env("KING_BROWSER_USER_AGENT", "Mozilla/5.0 KING Browser Extractor")
+
+    # Daily maintenance + scheduler
+    maintenance_config_file: str = _env("KING_MAINTENANCE_CONFIG_FILE", "tools/MAINTENANCE_DAILY.md")
+    maintenance_state_path: str = _env("KING_MAINTENANCE_STATE_PATH", "storage/maintenance_state.json")
+    maintenance_log_path: str = _env("KING_MAINTENANCE_LOG_PATH", "storage/maintenance_log.jsonl")
+    maintenance_log_max_runs: int = _env_int("KING_MAINTENANCE_LOG_MAX_RUNS", 90)
+    scheduler_config_file: str = _env("KING_SCHEDULER_CONFIG_FILE", "tools/SCHEDULER_CONFIG.md")
+    scheduler_store_path: str = _env("KING_SCHEDULER_STORE_PATH", "storage/scheduler_store.json")
+    scheduler_log_path: str = _env("KING_SCHEDULER_LOG_PATH", "storage/scheduler_log.jsonl")
+    scheduler_check_interval_seconds: int = _env_int("KING_SCHEDULER_CHECK_INTERVAL_SECONDS", 30)
 
 
 settings = Settings()

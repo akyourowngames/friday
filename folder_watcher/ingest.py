@@ -80,6 +80,43 @@ class IngestPipeline:
                     scanned += 1
         return {"scanned": scanned, "skipped": skipped, "watch_path": str(self.config.watch_path)}
 
+    def reconcile_deletions(self) -> dict:
+        from datetime import datetime as _dt
+
+        removed: list[str] = []
+        with self.index._lock:
+            rows = self.index._conn.execute(
+                "SELECT id, path FROM files WHERE status = ?", ("active",)
+            ).fetchall()
+        for row in rows:
+            stored_path = Path(row["path"])
+            if self.config.should_ignore(stored_path):
+                continue
+            if not stored_path.exists():
+                self.index.mark_deleted(stored_path)
+                removed.append(str(stored_path))
+        return {
+            "removed_count": len(removed),
+            "removed_paths": removed[:50],
+            "reconciled_at": _dt.now().isoformat(timespec="seconds"),
+        }
+
+    def daily_maintenance(self) -> dict:
+        from datetime import datetime as _dt
+
+        scan_result = self.scan_once()
+        reconcile_result = self.reconcile_deletions()
+        playlist_result = self.index.write_playlist(self.config.playlist_path)
+        stats_after = self.index.stats()
+        return {
+            "completed_at": _dt.now().isoformat(timespec="seconds"),
+            "watch_path": str(self.config.watch_path),
+            "scan": scan_result,
+            "reconcile": reconcile_result,
+            "playlist": playlist_result,
+            "stats_after": stats_after,
+        }
+
 
 def _sha256(path: Path, chunk_size: int) -> str:
     digest = hashlib.sha256()

@@ -40,6 +40,9 @@ def isolated_memory(fake_embed=_ones_embed, max_entries=2000, importance_min=0.0
         "memory_archive_file": brain_mod.settings.memory_archive_file,
         "memory_graph_file": brain_mod.settings.memory_graph_file,
         "memory_graph_relations_file": brain_mod.settings.memory_graph_relations_file,
+        "memory_obsidian_sync_enabled": brain_mod.settings.memory_obsidian_sync_enabled,
+        "memory_obsidian_vault_dir": brain_mod.settings.memory_obsidian_vault_dir,
+        "memory_obsidian_graph_dir": brain_mod.settings.memory_obsidian_graph_dir,
         "vector_store_index_path": brain_mod.settings.vector_store_index_path,
         "vector_store_metadata_path": brain_mod.settings.vector_store_metadata_path,
         "memory_max_entries": brain_mod.settings.memory_max_entries,
@@ -60,6 +63,9 @@ def isolated_memory(fake_embed=_ones_embed, max_entries=2000, importance_min=0.0
         brain_mod.settings.memory_archive_file = "memory_archive.jsonl"
         brain_mod.settings.memory_graph_file = "memory_graph.json"
         brain_mod.settings.memory_graph_relations_file = original["memory_graph_relations_file"]
+        brain_mod.settings.memory_obsidian_sync_enabled = True
+        brain_mod.settings.memory_obsidian_vault_dir = str(Path(tmp) / "obsidian" / "King")
+        brain_mod.settings.memory_obsidian_graph_dir = "Generated Memory Graph"
         brain_mod.settings.vector_store_index_path = str(memory_dir / "vector_index.faiss")
         brain_mod.settings.vector_store_metadata_path = str(memory_dir / "vector_metadata.json")
         brain_mod.settings.memory_max_entries = max_entries
@@ -79,6 +85,9 @@ def isolated_memory(fake_embed=_ones_embed, max_entries=2000, importance_min=0.0
             brain_mod.settings.memory_archive_file = original["memory_archive_file"]
             brain_mod.settings.memory_graph_file = original["memory_graph_file"]
             brain_mod.settings.memory_graph_relations_file = original["memory_graph_relations_file"]
+            brain_mod.settings.memory_obsidian_sync_enabled = original["memory_obsidian_sync_enabled"]
+            brain_mod.settings.memory_obsidian_vault_dir = original["memory_obsidian_vault_dir"]
+            brain_mod.settings.memory_obsidian_graph_dir = original["memory_obsidian_graph_dir"]
             brain_mod.settings.vector_store_index_path = original["vector_store_index_path"]
             brain_mod.settings.vector_store_metadata_path = original["vector_store_metadata_path"]
             brain_mod.settings.memory_max_entries = original["memory_max_entries"]

@@ -34,7 +34,7 @@ frontend changes through visible checks instead of hidden success claims.
   required: true
   reason: runs the broader Python suite, including isolated verification
     pipeline coverage.
-- command: `python -m compileall folder_watcher tools agent memory voice gesture main.py config.py folder_watcher_service.py`
+- command: `python -m compileall folder_watcher telegram_watcher tools agent memory voice gesture main.py config.py folder_watcher_service.py telegram_watcher_service.py`
   required: true
   reason: proves Python source compiles after tool or runtime edits.
 - command: `npm run typecheck`

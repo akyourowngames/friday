@@ -305,6 +305,11 @@ def _build_system_prompt(
     if memory_facts:
         lines.append("")
         lines.append(_load_chat_polish_section("Memory Presentation Rules", "State known facts naturally."))
+        lines.append("")
+        lines.append(_load_chat_polish_section(
+            "Proactive Engagement Rules",
+            "When facts are listed, weave at most one relevant ongoing fact into casual replies.",
+        ))
         lines.append("Known facts for this turn:")
         lines.append(memory_facts)
     if conversational_turn:

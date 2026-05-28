@@ -19,5 +19,6 @@ from . import navigator
 from . import memory_ops
 from . import system_control
 from . import keyboard
+from . import scheduler_tool
 
 __all__ = ["tool", "get_tool", "get_tools", "get_tool_schemas", "execute_tool"]
