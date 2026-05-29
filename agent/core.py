@@ -1813,7 +1813,7 @@ class Agent:
                             _chunk_count += 1
                             if _chunk_count % 3 == 0:
                                 frame = _spinner_frames[_spinner_idx % len(_spinner_frames)]
-                                print(f"\r[dim]{frame} Working...[/dim]  ", end="", flush=True)
+                                print(f"\r  {frame} Working...  ", end="", flush=True)
                                 _spinner_idx += 1
                             continue
                         if not started:
@@ -2160,7 +2160,7 @@ class Agent:
                 if emit_chunk:
                     emit_chunk("\n\n" + proactive_note)
                 else:
-                    console.print(f"\n[dim]{proactive_note}[/dim]")
+                    console.print(f"\n{proactive_note}")
 
         self._maybe_summarize()
 
