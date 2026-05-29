@@ -26,6 +26,68 @@ TOOL_POLICY_PATH = Path(__file__).resolve().parent.parent / "tool_policy.md"
 ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.md"
 
 
+# ─── Pre-computed routing text embeddings ────────────────────────────────────
+# All the routing policy texts that get compared against q_emb are embedded
+# once in a single batch on first access. This eliminates repeated ONNX
+# inference calls that were the main source of the gap before "Thinking...".
+
+class _RouteEmbeddings:
+    """Lazy singleton that pre-embeds all routing policy texts in one batch."""
+    _instance = None
+    _vectors: dict[str, np.ndarray] = {}
+
+    @classmethod
+    def get(cls) -> "_RouteEmbeddings":
+        if cls._instance is None:
+            cls._instance = cls()
+            cls._instance._build()
+        return cls._instance
+
+    def _build(self):
+        from .router import _load_routing_section, ROUTING_POLICY_PATH as RP
+        texts = {
+            "banter": _load_routing_policy_section_raw("Conversational Banter Text", "The user is reacting, joking, or continuing casual chat."),
+            "actionable": _load_routing_policy_section_raw("Actionable Request Text", "The user wants something done."),
+            "memory_recall": _load_routing_policy_section_raw("Memory Recall Text", "The user asks what the assistant remembers about them."),
+            "no_memory_small_talk": _load_routing_policy_section_raw("No Memory Small Talk Text", "The user is greeting or chatting casually."),
+            "broad_recall": _load_routing_policy_section_raw("Broad Memory Recall Text", "The user asks for a broad overview of remembered facts."),
+            "specific_recall": _load_routing_policy_section_raw("Specific Memory Recall Text", "The user asks for one particular remembered fact."),
+            "followup": _load_routing_policy_section_raw("Context Follow-Up Text", "The user is asking to continue the previous result."),
+            "new_topic": _load_routing_policy_section_raw("New Topic Text", "The user is giving a fresh standalone topic."),
+            "system_control": _load_routing_policy_section_raw("Local System Control Text", "The user wants to change volume, brightness, or media."),
+            "incomplete": _load_routing_policy_section_raw("Incomplete Utterance Text", "The user trailed off or left the object unstated."),
+            "correction": _load_routing_policy_section_raw("Action Correction Text", "The user says the previous action was wrong."),
+        }
+        # Batch embed all texts in one ONNX call.
+        keys = list(texts.keys())
+        values = [texts[k] for k in keys]
+        embeddings = embed(values)
+        if embeddings.ndim == 1:
+            embeddings = embeddings.reshape(1, -1)
+        for i, key in enumerate(keys):
+            self._vectors[key] = embeddings[i]
+
+    def v(self, name: str) -> np.ndarray:
+        return self._vectors[name]
+
+
+def _load_routing_policy_section_raw(heading: str, fallback: str) -> str:
+    """Load a section from routing_policy.md (no caching wrapper needed here)."""
+    if not ROUTING_POLICY_PATH.exists():
+        return fallback
+    targets = {f"# {heading}".casefold(), f"## {heading}".casefold()}
+    lines = []
+    in_section = False
+    for raw_line in ROUTING_POLICY_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("# ") or line.startswith("## "):
+            in_section = line.casefold() in targets
+            continue
+        if in_section and line:
+            lines.append(line)
+    return " ".join(lines).strip() or fallback
+
+
 def _debug_safe(text) -> str:
     return str(text).encode("ascii", errors="backslashreplace").decode("ascii")
 
@@ -520,14 +582,11 @@ def _looks_like_context_followup(text: str, q_emb=None) -> bool:
     text = str(text or "").strip()
     if not text:
         return False
-    followup_text, new_topic_text = _context_followup_texts()
     try:
         text_emb = q_emb if q_emb is not None else embed(text)
-        compare_embs = embed([followup_text, new_topic_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        followup_score = float(np.dot(compare_embs[0], text_emb))
-        new_topic_score = float(np.dot(compare_embs[1], text_emb))
+        re = _RouteEmbeddings.get()
+        followup_score = float(np.dot(re.v("followup"), text_emb))
+        new_topic_score = float(np.dot(re.v("new_topic"), text_emb))
     except Exception:
         return False
     return followup_score >= new_topic_score
@@ -536,13 +595,10 @@ def _looks_like_context_followup(text: str, q_emb=None) -> bool:
 def _should_use_memory_context(user_input: str, q_emb, selected_tools: list) -> bool:
     if q_emb is None:
         return False
-    memory_text, small_talk_text = _memory_context_texts()
     try:
-        compare_embs = embed([memory_text, small_talk_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        memory_score = float(np.dot(compare_embs[0], q_emb))
-        small_talk_score = float(np.dot(compare_embs[1], q_emb))
+        re = _RouteEmbeddings.get()
+        memory_score = float(np.dot(re.v("memory_recall"), q_emb))
+        small_talk_score = float(np.dot(re.v("no_memory_small_talk"), q_emb))
     except Exception:
         return False
     if memory_score <= small_talk_score:
@@ -560,13 +616,10 @@ def _should_use_profile_context(user_input: str, q_emb, last_profile_context: bo
         return False
     if last_profile_context and _looks_like_context_followup(user_input):
         return True
-    broad_text, specific_text = _memory_scope_texts()
     try:
-        compare_embs = embed([broad_text, specific_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        broad_score = float(np.dot(compare_embs[0], q_emb))
-        specific_score = float(np.dot(compare_embs[1], q_emb))
+        re = _RouteEmbeddings.get()
+        broad_score = float(np.dot(re.v("broad_recall"), q_emb))
+        specific_score = float(np.dot(re.v("specific_recall"), q_emb))
     except Exception:
         return False
     return broad_score >= specific_score
@@ -1031,14 +1084,11 @@ def _looks_like_conversational_banter(user_input: str, q_emb) -> bool:
         return False
     if _looks_like_local_system_control(text, q_emb) or _looks_like_action_correction(text, []):
         return False
-    small_talk_text = _memory_context_texts()[1]
     try:
-        compare_embs = embed([_conversational_banter_text(), _actionable_request_text(), small_talk_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        banter_score = float(np.dot(compare_embs[0], q_emb))
-        action_score = float(np.dot(compare_embs[1], q_emb))
-        chat_score = float(np.dot(compare_embs[2], q_emb))
+        re = _RouteEmbeddings.get()
+        banter_score = float(np.dot(re.v("banter"), q_emb))
+        action_score = float(np.dot(re.v("actionable"), q_emb))
+        chat_score = float(np.dot(re.v("no_memory_small_talk"), q_emb))
     except Exception:
         return False
     conversational_score = max(banter_score, chat_score)
@@ -1065,16 +1115,10 @@ def _looks_like_incomplete_utterance(user_input: str, q_emb) -> bool:
     if q_emb is None:
         return False
     try:
-        compare_embs = embed([
-            _incomplete_utterance_text(),
-            _context_followup_texts()[1],
-            _actionable_request_text(),
-        ])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        incomplete_score = float(np.dot(compare_embs[0], q_emb))
-        new_topic_score = float(np.dot(compare_embs[1], q_emb))
-        action_score = float(np.dot(compare_embs[2], q_emb))
+        re = _RouteEmbeddings.get()
+        incomplete_score = float(np.dot(re.v("incomplete"), q_emb))
+        new_topic_score = float(np.dot(re.v("new_topic"), q_emb))
+        action_score = float(np.dot(re.v("actionable"), q_emb))
         return (
             incomplete_score >= settings.tool_similarity_threshold
             and incomplete_score >= new_topic_score
@@ -1210,21 +1254,12 @@ def _looks_like_local_system_control(user_input: str, q_emb) -> bool:
     text = str(user_input or "").strip()
     if not text or q_emb is None:
         return False
-    system_text = _local_system_control_text()
-    small_talk_text = _memory_context_texts()[1]
-    memory_text = _memory_context_texts()[0]
-    action_text = _load_routing_policy_section(
-        "Actionable Request Text",
-        "The user wants something done.",
-    )
     try:
-        compare_embs = embed([system_text, small_talk_text, memory_text, action_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        system_score = float(np.dot(compare_embs[0], q_emb))
-        chat_score = float(np.dot(compare_embs[1], q_emb))
-        memory_score = float(np.dot(compare_embs[2], q_emb))
-        action_score = float(np.dot(compare_embs[3], q_emb))
+        re = _RouteEmbeddings.get()
+        system_score = float(np.dot(re.v("system_control"), q_emb))
+        chat_score = float(np.dot(re.v("no_memory_small_talk"), q_emb))
+        memory_score = float(np.dot(re.v("memory_recall"), q_emb))
+        action_score = float(np.dot(re.v("actionable"), q_emb))
     except Exception:
         return False
     if action_score < settings.local_system_action_min_score:
@@ -1782,7 +1817,6 @@ class Agent:
                 tool_calls[0] = forced_contextual_call
                 forced_contextual_call = None
             else:
-                console.print("[dim]Thinking...[/dim]", end="\r")
                 stream_attempts = max(1, settings.llm_stream_attempts)
                 for attempt in range(stream_attempts):
                     try:
