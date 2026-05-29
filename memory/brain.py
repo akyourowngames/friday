@@ -1836,6 +1836,25 @@ class Brain:
         relation = str(edge.get("relation", "")).replace("_", " ")
         return f"{source} {relation} {target}".strip()
 
+    def memory_relations(self, memory: dict) -> set[str]:
+        """Active graph relation names attached to a memory.
+
+        Used by consolidation to tell identity facts (backed by a real relation
+        rule like name/lives_in/crush) from generic remembered facts (only the
+        fallback relation). Returns lowercased relation names.
+        """
+        memory_id = str(memory.get("id") or _memory_id(memory))
+        edge_ids = {str(eid) for eid in (memory.get("graph_edges") or [])}
+        relations: set[str] = set()
+        for edge in self._graph.get("edges", []):
+            if not edge.get("active", True):
+                continue
+            if str(edge.get("id", "")) in edge_ids or str(edge.get("memory_id", "")) == memory_id:
+                relation = str(edge.get("relation", "")).strip().casefold()
+                if relation:
+                    relations.add(relation)
+        return relations
+
     def _graph_edge_rank(self, edge: dict, query_terms: set[str]) -> dict | None:
         text = self._edge_to_text(edge)
         overlap_count, overlap_ratio = _term_overlap(query_terms, text)

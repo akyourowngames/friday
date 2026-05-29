@@ -140,6 +140,22 @@ class Settings:
     proactive_memory_context_enabled: bool = _env_bool("KING_PROACTIVE_MEMORY_CONTEXT_ENABLED", True)
     proactive_memory_context_margin: float = _env_float("KING_PROACTIVE_MEMORY_CONTEXT_MARGIN", 0.0)
 
+    # Memory consolidation worker (nightly "god tier" maintenance)
+    memory_consolidation_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_ENABLED", True)
+    memory_consolidation_policy_file: str = _env("KING_MEMORY_CONSOLIDATION_POLICY_FILE", "memory/MEMORY_CONSOLIDATION.md")
+    memory_consolidation_dedup_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_DEDUP_ENABLED", True)
+    memory_consolidation_dedup_similarity: float = _env_float("KING_MEMORY_CONSOLIDATION_DEDUP_SIMILARITY", 0.86)
+    memory_consolidation_dedup_max_pairs: int = _env_int("KING_MEMORY_CONSOLIDATION_DEDUP_MAX_PAIRS", 20)
+    memory_consolidation_insights_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_INSIGHTS_ENABLED", True)
+    memory_consolidation_insight_min_cluster: int = _env_int("KING_MEMORY_CONSOLIDATION_INSIGHT_MIN_CLUSTER", 3)
+    memory_consolidation_insight_max: int = _env_int("KING_MEMORY_CONSOLIDATION_INSIGHT_MAX", 5)
+    memory_consolidation_insight_importance: float = _env_float("KING_MEMORY_CONSOLIDATION_INSIGHT_IMPORTANCE", 0.75)
+    memory_consolidation_decay_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_DECAY_ENABLED", True)
+    memory_consolidation_decay_after_days: int = _env_int("KING_MEMORY_CONSOLIDATION_DECAY_AFTER_DAYS", 45)
+    memory_consolidation_decay_rate: float = _env_float("KING_MEMORY_CONSOLIDATION_DECAY_RATE", 0.05)
+    memory_consolidation_decay_floor: float = _env_float("KING_MEMORY_CONSOLIDATION_DECAY_FLOOR", 0.1)
+    memory_consolidation_max_tokens: int = _env_int("KING_MEMORY_CONSOLIDATION_MAX_TOKENS", 600)
+
     # Vector store (FAISS) settings
     vector_store_index_path: str = _env("KING_VECTOR_STORE_INDEX_PATH", "storage/memories/vector_index.faiss")
     vector_store_metadata_path: str = _env("KING_VECTOR_STORE_METADATA_PATH", "storage/memories/vector_metadata.json")

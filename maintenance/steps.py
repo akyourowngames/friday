@@ -92,6 +92,18 @@ def project_audit_step(step: StepConfig, context: dict[str, Any]) -> dict:
     return manager.audit()
 
 
+def memory_consolidate_step(step: StepConfig, context: dict[str, Any]) -> dict:
+    brain = context.get("brain")
+    if brain is None:
+        from memory.brain import Brain
+
+        brain = Brain()
+        context["brain"] = brain
+    from memory.consolidation import consolidate
+
+    return consolidate(brain)
+
+
 def _compose_default_summary(context: dict[str, Any], step: StepConfig) -> str:
     parts: list[str] = ["KING daily maintenance ran."]
     if step.options.get("include_stats"):
@@ -113,3 +125,4 @@ def register_default_steps(engine: MaintenanceEngine) -> None:
     engine.register("telegram_summary", telegram_summary_step)
     engine.register("scheduler_due", scheduler_due_step)
     engine.register("project_audit", project_audit_step)
+    engine.register("memory_consolidate", memory_consolidate_step)
