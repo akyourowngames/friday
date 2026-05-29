@@ -42,7 +42,7 @@ def _configure_output_encoding():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             try:
-                stream.reconfigure(errors="replace")
+                stream.reconfigure(encoding="utf-8", errors="replace")
             except Exception:
                 pass
 
@@ -65,7 +65,8 @@ def print_welcome():
 
 def _parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="KING CLI, API client, or local API server.")
-    parser.add_argument("message", nargs="*", help="Optional one-shot message for --api mode.")
+    parser.add_argument("message", nargs="*", help="Optional one-shot message for local or --api mode.")
+    parser.add_argument("--message", dest="message_text", default="", help="Run one local or --api message and exit.")
     parser.add_argument(
         "--api",
         nargs="?",
@@ -77,6 +78,13 @@ def _parse_args(argv: list[str] | None = None):
     parser.add_argument("--host", default="127.0.0.1", help="API server host for --server mode.")
     parser.add_argument("--port", type=int, default=8000, help="API server port for --server mode.")
     return parser.parse_args(argv)
+
+
+def _message_from_args(args) -> str:
+    explicit = str(getattr(args, "message_text", "") or "").strip()
+    if explicit:
+        return explicit
+    return " ".join(getattr(args, "message", []) or []).strip()
 
 
 def _normalize_api_base(base_url: str) -> str:
@@ -474,11 +482,17 @@ def main(argv: list[str] | None = None):
     if args.server:
         run_api_server(args.host, args.port)
         return
+    initial_message = _message_from_args(args)
     if args.api:
-        base_url, initial_message = _resolve_api_cli_inputs(args.api, args.message)
+        base_url, initial_message = _resolve_api_cli_inputs(args.api, [initial_message] if initial_message else [])
         run_api_client(base_url, initial_message)
         return
     _enable_rich_console()
+    if initial_message:
+        from agent.core import Agent
+
+        Agent().process(initial_message)
+        return
 
     telegram_watcher_config = _start_telegram_watcher_for_normal_cli()
     print_welcome()

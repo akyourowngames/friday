@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,7 +30,7 @@ ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.m
 # ─── Pre-computed routing text embeddings ────────────────────────────────────
 # All the routing policy texts that get compared against q_emb are embedded
 # once in a single batch on first access. This eliminates repeated ONNX
-# inference calls that were the main source of the gap before "Thinking...".
+# inference calls that were the main source of the pre-answer gap.
 
 class _RouteEmbeddings:
     """Lazy singleton that pre-embeds all routing policy texts in one batch."""
@@ -52,6 +53,7 @@ class _RouteEmbeddings:
             "no_memory_small_talk": _load_routing_policy_section_raw("No Memory Small Talk Text", "The user is greeting or chatting casually."),
             "broad_recall": _load_routing_policy_section_raw("Broad Memory Recall Text", "The user asks for a broad overview of remembered facts."),
             "specific_recall": _load_routing_policy_section_raw("Specific Memory Recall Text", "The user asks for one particular remembered fact."),
+            "proactive_memory": _load_routing_policy_section_raw("Proactive Memory Context Text", "The user is casually checking in or continuing personal context where one relevant remembered fact would help."),
             "followup": _load_routing_policy_section_raw("Context Follow-Up Text", "The user is asking to continue the previous result."),
             "new_topic": _load_routing_policy_section_raw("New Topic Text", "The user is giving a fresh standalone topic."),
             "system_control": _load_routing_policy_section_raw("Local System Control Text", "The user wants to change volume, brightness, or media."),
@@ -488,6 +490,15 @@ def _build_system_prompt(
                 "Fragment Follow-Up Rules",
                 "Short reactions refer to your previous answer; clarify instead of refusing.",
             ))
+    if memory_facts:
+        lines.append("")
+        lines.append(
+            "Memory answer priority: if the Known facts for this turn answer the user's question, "
+            "answer from those facts and do not replace them with general-world knowledge. "
+            "For names, relationships, preferences, places, or ongoing situations, the matching known fact is the answer."
+        )
+        lines.append("Known facts for this turn:")
+        lines.append(memory_facts)
     return "\n".join(lines)
 
 
@@ -604,11 +615,38 @@ def _should_use_memory_context(user_input: str, q_emb, selected_tools: list) -> 
     if memory_score <= small_talk_score:
         return False
     if selected_tools:
-        memory_tools = {"memory_recall", "memory_assess", "memory_remember", "memory_forget"}
-        selected_names = {tool.get("name", "") for tool in selected_tools}
-        if selected_names and not selected_names <= memory_tools:
+        if not _selected_tools_allow_memory_context(selected_tools):
             return False
     return True
+
+
+def _selected_tools_allow_memory_context(selected_tools: list) -> bool:
+    memory_tools = {"memory_recall", "memory_assess", "memory_remember", "memory_forget"}
+    selected_names = {tool.get("name", "") for tool in selected_tools}
+    return not selected_names or selected_names <= memory_tools
+
+
+def _selected_tools_are_memory_recall_only(selected_tools: list) -> bool:
+    selected_names = {tool.get("name", "") for tool in selected_tools}
+    return bool(selected_names) and selected_names <= {"memory_recall"}
+
+
+def _should_use_proactive_memory_context(user_input: str, q_emb, selected_tools: list) -> bool:
+    if not settings.proactive_memory_context_enabled or q_emb is None:
+        return False
+    if not _selected_tools_allow_memory_context(selected_tools):
+        return False
+    try:
+        route_embeddings = _RouteEmbeddings.get()
+        proactive_score = float(np.dot(route_embeddings.v("proactive_memory"), q_emb))
+        small_talk_score = float(np.dot(route_embeddings.v("no_memory_small_talk"), q_emb))
+        actionable_score = float(np.dot(route_embeddings.v("actionable"), q_emb))
+    except Exception:
+        return False
+    if actionable_score > proactive_score:
+        return False
+    margin = max(0.0, float(settings.proactive_memory_context_margin))
+    return proactive_score + margin >= small_talk_score
 
 
 def _should_use_profile_context(user_input: str, q_emb, last_profile_context: bool = False) -> bool:
@@ -884,10 +922,13 @@ def _should_keep_memory_context(
     q_emb,
     selected_tools: list,
     router_decision: dict,
+    proactive_context_requested: bool = False,
 ) -> bool:
     if not context:
         return False
     if _memory_context_has_graph(context):
+        return True
+    if proactive_context_requested:
         return True
     if _should_suppress_memory_context(router_decision):
         return _should_use_memory_context(user_input, q_emb, selected_tools)
@@ -1093,6 +1134,24 @@ def _looks_like_conversational_banter(user_input: str, q_emb) -> bool:
         return False
     conversational_score = max(banter_score, chat_score)
     return conversational_score >= action_score and conversational_score >= settings.tool_similarity_threshold
+
+
+def _looks_like_actionable_request(user_input: str, q_emb) -> bool:
+    text = str(user_input or "").strip()
+    if not text or q_emb is None:
+        return False
+    try:
+        route_embeddings = _RouteEmbeddings.get()
+        action_score = float(np.dot(route_embeddings.v("actionable"), q_emb))
+        banter_score = float(np.dot(route_embeddings.v("banter"), q_emb))
+        chat_score = float(np.dot(route_embeddings.v("no_memory_small_talk"), q_emb))
+        memory_score = float(np.dot(route_embeddings.v("memory_recall"), q_emb))
+    except Exception:
+        return False
+    return (
+        action_score >= settings.tool_similarity_threshold
+        and action_score >= max(banter_score, chat_score, memory_score)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -1544,7 +1603,6 @@ class Agent:
         self.validator = ToolValidator()
         self.verifier = Verifier()
         self.brain = Brain()
-        self._executor = ThreadPoolExecutor(max_workers=3)
         self._memory_extraction_messages = []
         self._last_memory_profile_context = False
 
@@ -1612,6 +1670,11 @@ class Agent:
         except Exception:
             pass
 
+    def _submit_background(self, func, *args):
+        thread = threading.Thread(target=func, args=args, daemon=True)
+        thread.start()
+        return thread
+
     def _maybe_summarize(self):
         if count_messages_tokens(self.messages) < MAX_CONTEXT_TOKENS:
             return
@@ -1674,7 +1737,6 @@ class Agent:
             self._memory_extraction_messages = self._memory_extraction_messages[-limit:]
 
     def process(self, user_input: str, emit_chunk=None):
-        print("Thinking...", end="", flush=True)
         recent_action_context = _recent_action_context(self.messages)
         q_emb, routing_input = _embedding_query(user_input, self.messages)
         need_context = q_emb is not None
@@ -1692,8 +1754,20 @@ class Agent:
 
         memory_profile_context = False
         memory_context_requested = False
+        proactive_context_requested = False
+        conversational_context_requested = False
         if need_context:
             memory_context_requested = _should_use_memory_context(user_input, q_emb, selected_tools)
+            proactive_context_requested = (
+                not memory_context_requested
+                and _should_use_proactive_memory_context(user_input, q_emb, selected_tools)
+            )
+            conversational_context_requested = (
+                not selected_tools
+                and not memory_context_requested
+                and not proactive_context_requested
+                and not _looks_like_actionable_request(user_input, q_emb)
+            )
             memory_profile_context = _should_use_profile_context(
                 user_input,
                 q_emb,
@@ -1710,14 +1784,24 @@ class Agent:
 
         if context and memory_profile_context:
             pass
-        elif not memory_context_requested or not _should_keep_memory_context(
+        elif not (
+            memory_context_requested
+            or proactive_context_requested
+            or conversational_context_requested
+        ) or not _should_keep_memory_context(
             context,
             user_input,
             q_emb,
             selected_tools,
             self.router.last_decision(),
+            proactive_context_requested=proactive_context_requested or conversational_context_requested,
         ):
             context = None
+
+        if context and not _looks_like_actionable_request(user_input, q_emb):
+            selected_tools = []
+        elif context and _selected_tools_are_memory_recall_only(selected_tools):
+            selected_tools = []
 
         selected_tools = _filter_tools_for_conversation(user_input, q_emb, selected_tools)
         selected_tools = _prefer_folder_watcher_for_folder_context(user_input, q_emb, selected_tools)
@@ -1735,7 +1819,11 @@ class Agent:
         router_decision = self.router.last_decision()
         disclosure_names = (
             _progressive_disclosure_tool_names()
-            if _should_expose_progressive_disclosure(selected_tools, router_decision)
+            if (
+                not memory_facts
+                and _should_expose_progressive_disclosure(selected_tools, router_decision)
+                and _looks_like_actionable_request(user_input, q_emb)
+            )
             else []
         )
         loaded_tool_names: set[str] = set()
@@ -1831,8 +1919,6 @@ class Agent:
                 if stream is None:
                     break
 
-                _showed_thinking = True  # We already printed "Thinking..." before stream
-                _chunk_count = 0
                 for chunk in stream:
                     if not chunk.choices:
                         continue
@@ -1844,9 +1930,9 @@ class Agent:
                             continue
                         if not started:
                             started = True
-                            # Clear the "Thinking..." line.
-                            print("\r            \r", end="", flush=True)
                         print(delta.content, end="", flush=True)
+                        if emit_chunk:
+                            emit_chunk(delta.content)
 
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
@@ -1871,8 +1957,7 @@ class Agent:
                 content = ""
                 started = False
             elif tool_calls and not content:
-                # Clear the spinner line
-                print("\r                    \r", end="", flush=True)
+                pass
 
             if not tool_calls and content and tool_schemas:
                 json_tc, err = _try_parse_json_tool_call(content, tool_schemas)
@@ -2168,7 +2253,7 @@ class Agent:
 
         extraction_context = self._memory_extraction_context()
         if content and _should_extract_memory(user_input, q_emb):
-            self._executor.submit(self._extract_and_store, user_input, content, extraction_context)
+            self._submit_background(self._extract_and_store, user_input, content, extraction_context)
 
         if content:
             self._remember_plain_turn(user_input, content)
@@ -2177,7 +2262,7 @@ class Agent:
         # Proactive injection: run in background so it doesn't block the prompt.
         # If a proactive note is ready, it prints after the response.
         if content:
-            self._executor.submit(self._run_proactive, content, emit_chunk)
+            self._submit_background(self._run_proactive, content, emit_chunk)
 
         self._maybe_summarize()
 

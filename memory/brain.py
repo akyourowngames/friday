@@ -493,7 +493,10 @@ class Brain:
         self._load_or_build_index()
         if self._vector_store.size() == 0 and self._embeddings is not None and self._embeddings.size > 0:
             self._sync_vector_store_from_embeddings()
-        self._sync_obsidian_graph()
+        if settings.memory_obsidian_sync_on_startup:
+            self._sync_obsidian_graph()
+        elif settings.memory_obsidian_sync_enabled:
+            self._obsidian_sync_result = {"enabled": True, "status": "deferred_startup"}
 
     def _sync_vector_store_from_embeddings(self):
         if getattr(self, "_vector_store", None) is None:

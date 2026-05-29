@@ -19,7 +19,7 @@ from agent.core import (
 )
 from agent.router import ToolRouter
 from api_server import _chunk_text, _panel_payload, _run_agent
-from main import _iter_sse_events, _normalize_api_base, _resolve_api_cli_inputs
+from main import _iter_sse_events, _message_from_args, _normalize_api_base, _parse_args, _resolve_api_cli_inputs
 from tools.registry import get_tool_schemas
 
 
@@ -67,6 +67,11 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
 
         self.assertEqual(base_url, "http://127.0.0.1:8011")
         self.assertEqual(message, "how many python files are there?")
+
+    def test_message_flag_builds_one_shot_text(self):
+        args = _parse_args(["--message", "who is rai"])
+
+        self.assertEqual(_message_from_args(args), "who is rai")
 
     def test_sse_event_parser_reads_json_data_lines(self):
         response = FakeSseResponse(

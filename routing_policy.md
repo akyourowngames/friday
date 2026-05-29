@@ -16,6 +16,10 @@ The user is giving a fresh standalone search topic, a new named target, a differ
 
 The user asks who they are, what the assistant knows about them, what has been remembered, their saved preferences, personal facts, location, name, project context, prior conversation facts, current situation, current preparation, ongoing studies, ongoing relationships, recent struggles, recent recovery, mood check-ins about their own life, or any open thread from earlier conversations.
 
+## Proactive Memory Context Text
+
+The user is casually checking in, venting, trailing from an ongoing personal situation, asking a soft status question about their own life, or giving a short conversational follow-up where one relevant remembered fact would make the reply more continuous. The answer should still be brief and natural, not a broad memory dump or operational briefing.
+
 ## Broad Memory Recall Text
 
 The user asks for a broad overview of remembered personal facts, asks what else is known, asks anything else after a memory answer, or asks for a profile-style summary of known identity, relationships, preferences, projects, and related people.
