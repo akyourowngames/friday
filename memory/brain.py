@@ -475,6 +475,8 @@ class Brain:
         self._graph_rules = _load_graph_relation_rules()
         self._auto_relation = _load_auto_relation_settings()
         self._obsidian_sync_result = {"enabled": False, "status": "not_run"}
+        self._obsidian_sync_deferred = False
+        self._obsidian_sync_pending = False
         self._query_cache = {}
         self._query_cache_order = []
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -553,6 +555,13 @@ class Brain:
         self._sync_obsidian_graph()
 
     def _sync_obsidian_graph(self):
+        if getattr(self, "_obsidian_sync_deferred", False):
+            self._obsidian_sync_pending = True
+            self._obsidian_sync_result = {
+                "enabled": bool(settings.memory_obsidian_sync_enabled),
+                "status": "deferred",
+            }
+            return
         try:
             self._obsidian_sync_result = sync_memory_graph(self._graph, self.memories)
         except Exception as exc:
@@ -627,33 +636,44 @@ class Brain:
         self.memories.sort(key=_timestamp_key)
 
     def _backfill_graph_from_memories(self):
+        previous_deferred = self._obsidian_sync_deferred
+        self._obsidian_sync_deferred = True
         migrate_dates = set()
-        for item in self.memories:
-            before_edges = list(item.get("graph_edges") or [])
-            before_nodes = list(item.get("graph_nodes") or [])
-            before_tier = item.get("tier")
-            before_storage = item.get("storage")
-            graph_changed = self._ingest_graph_memory(item)
-            if not self._has_active_memory_edges(item):
-                graph_changed = self._ingest_graph_fallback_memory(item) or graph_changed
-            auto_changed = self._auto_relate_entities(item)
-            self._sync_memory_graph_refs(item)
-            if item.get("graph_edges"):
-                item["tier"] = "graph"
-                item["storage"] = "graph"
-            if (
-                graph_changed
-                or auto_changed
-                or before_edges != list(item.get("graph_edges") or [])
-                or before_nodes != list(item.get("graph_nodes") or [])
-                or before_tier != item.get("tier")
-                or before_storage != item.get("storage")
-            ):
-                migrate_dates.add(item.get("_date", date.today().isoformat()))
-        if migrate_dates:
-            self._persist_changes(migrate_dates)
-        elif self._graph.get("memory_links"):
-            self._persist_graph()
+        try:
+            for item in self.memories:
+                before_edges = list(item.get("graph_edges") or [])
+                before_nodes = list(item.get("graph_nodes") or [])
+                before_tier = item.get("tier")
+                before_storage = item.get("storage")
+                graph_changed = False
+                auto_changed = False
+                if not self._has_active_memory_edges(item):
+                    graph_changed = self._ingest_graph_memory(item)
+                    if not self._has_active_memory_edges(item):
+                        graph_changed = self._ingest_graph_fallback_memory(item) or graph_changed
+                    auto_changed = self._auto_relate_entities(item)
+                self._sync_memory_graph_refs(item)
+                if item.get("graph_edges"):
+                    item["tier"] = "graph"
+                    item["storage"] = "graph"
+                if (
+                    graph_changed
+                    or auto_changed
+                    or before_edges != list(item.get("graph_edges") or [])
+                    or before_nodes != list(item.get("graph_nodes") or [])
+                    or before_tier != item.get("tier")
+                    or before_storage != item.get("storage")
+                ):
+                    migrate_dates.add(item.get("_date", date.today().isoformat()))
+            if migrate_dates:
+                self._persist_changes(migrate_dates)
+            elif self._graph.get("memory_links") and self._obsidian_sync_pending:
+                self._persist_graph()
+        finally:
+            self._obsidian_sync_deferred = previous_deferred
+        if not self._obsidian_sync_deferred and self._obsidian_sync_pending:
+            self._obsidian_sync_pending = False
+            self._sync_obsidian_graph()
 
     def _today_path(self):
         return MEMORY_DIR / f"memory_{date.today().isoformat()}.json"
@@ -952,10 +972,16 @@ class Brain:
         nodes = self._graph.setdefault("nodes", {})
         existing = nodes.get(node_id)
         if existing:
-            existing["updated_at"] = now
-            existing["importance"] = max(_safe_float(existing.get("importance"), 0.5), _normalize_importance(importance))
+            changed = False
+            target_importance = max(_safe_float(existing.get("importance"), 0.5), _normalize_importance(importance))
+            if _safe_float(existing.get("importance"), 0.5) != target_importance:
+                existing["importance"] = target_importance
+                changed = True
             if name and name not in existing.get("aliases", []) and existing.get("name", "") != name:
                 existing.setdefault("aliases", []).append(name)
+                changed = True
+            if changed:
+                existing["updated_at"] = now
             return node_id
 
         nodes[node_id] = {

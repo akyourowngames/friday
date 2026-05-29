@@ -10,6 +10,7 @@ from agent.core import (
     _build_system_prompt,
     _expand_conversational_input,
     _is_conversational_turn,
+    _merge_context_facts,
     _should_extract_memory,
     _strip_memory_prefix,
 )
@@ -25,6 +26,21 @@ class ChatPolishTests(unittest.TestCase):
         self.assertIn("Known facts for this turn:", prompt)
         self.assertIn("User name is Krish", prompt)
         self.assertNotIn("PERMANENT MEMORY FACTS", prompt)
+
+    def test_merge_keeps_specific_recall_ahead_of_profile(self):
+        specific = "User has JEE backlog | User is preparing for JEE"
+        profile = "User name is Krish Verma | ankita lives in haryana"
+        merged = _merge_context_facts(specific, profile, limit=8)
+        self.assertTrue(merged.startswith("User has JEE backlog"))
+        self.assertIn("User name is Krish Verma", merged)
+
+    def test_merge_dedupes_facts_ignoring_via_suffix(self):
+        primary = "Ankita is in class 11th (via ankita in class 11th)"
+        secondary = "Ankita is in class 11th | User name is Krish Verma"
+        merged = _merge_context_facts(primary, secondary, limit=8)
+        self.assertEqual(merged.count("Ankita is in class 11th"), 1)
+        self.assertIn("User name is Krish Verma", merged)
+
 
     def test_expand_incomplete_follow_up(self):
         messages = [

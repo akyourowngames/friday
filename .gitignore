@@ -27,3 +27,12 @@ storage/folder_watcher_inbox/
 storage/gesture_data/
 storage/gesture_model.pkl
 storage/gesture_scaler.pkl
+storage/tool_owners.json
+storage/cognition_state.json
+storage/maintenance_state.json
+storage/maintenance_log.jsonl
+storage/scheduler_store.json
+storage/scheduler_log.jsonl
+storage/notes.json
+storage/playlist.json
+storage/summaries.json

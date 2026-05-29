@@ -17,6 +17,21 @@ def memory_daily_step(step: StepConfig, context: dict[str, Any]) -> dict:
     return brain.daily_maintenance(label=label)
 
 
+def cognition_scan_step(step: StepConfig, context: dict[str, Any]) -> dict:
+    brain = context.get("brain")
+    if brain is None:
+        from memory.brain import Brain
+
+        brain = Brain()
+        context["brain"] = brain
+    from cognition.orchestrator import run_cognition_pass
+
+    embed_fn = context.get("embed_fn")
+    if embed_fn is None and step.options.get("use_embeddings", True):
+        from agent.embedder import embed as embed_fn
+    return run_cognition_pass(brain, embed_fn=embed_fn)
+
+
 def folder_scan_step(step: StepConfig, context: dict[str, Any]) -> dict:
     pipeline = context.get("folder_pipeline")
     if pipeline is None:
@@ -83,6 +98,7 @@ def _compose_default_summary(context: dict[str, Any], step: StepConfig) -> str:
 
 def register_default_steps(engine: MaintenanceEngine) -> None:
     engine.register("memory_daily", memory_daily_step)
+    engine.register("cognition_scan", cognition_scan_step)
     engine.register("folder_scan", folder_scan_step)
     engine.register("telegram_summary", telegram_summary_step)
     engine.register("scheduler_due", scheduler_due_step)

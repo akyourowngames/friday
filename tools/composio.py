@@ -1154,22 +1154,42 @@ def _legacy_summary(result: dict[str, Any]) -> str:
 @tool(
     name=_TOOL_NAME,
     description=(
-        "Gateway to approved Composio external app toolkits. Use for Composio status, "
-        "browsing Composio toolkits and tools, installing exact tool slugs into "
-        "the markdown policy, creating limited Composio sessions, generating "
-        "Composio auth links, checking session auth status, searching approved Composio session tools, "
-        "inspecting approved tool schemas, and executing only markdown-enabled "
-        "Composio tool slugs."
+        "Gateway to approved Composio external app toolkits (Gmail, Google Calendar, "
+        "Google Drive, Google Docs, Google Sheets, Google Tasks, Google Meet, Google "
+        "Slides, Notion, Slack, GitHub). Use this to read or send email, check or create "
+        "calendar events and meetings, find files and documents, read or update docs, "
+        "sheets, slides, tasks, search Notion, send Slack messages, and manage GitHub "
+        "repositories, issues, and pull requests. Also handles Composio status, sessions, "
+        "auth links, schemas, and executing enabled tool slugs."
     ),
     examples=[
         "composio status",
         "create a composio session",
         "connect github through composio",
-        "list composio github tools",
-        "install these composio github tools",
         "check composio auth status",
-        "search approved composio tools for listing repository issues",
-        "use composio to get repo details for this repo",
+        "what's on my calendar tomorrow",
+        "show my calendar events for this week",
+        "find free slots in my calendar",
+        "create a calendar event",
+        "check my latest emails",
+        "search my gmail for invoices",
+        "send an email",
+        "create an email draft",
+        "find my recent google drive files",
+        "create a google doc",
+        "read this google doc",
+        "create a google sheet",
+        "read values from my spreadsheet",
+        "list my google tasks",
+        "add a task to my list",
+        "create a google meet",
+        "make a slides presentation",
+        "search my notion pages",
+        "add a page to notion",
+        "send a slack message",
+        "search slack for updates",
+        "get repo details for this repo",
+        "list issues for this repository",
         "use composio tool GITHUB_LIST_STARGAZERS with owner and repo",
     ],
     param_descriptions={

@@ -1104,12 +1104,6 @@ def score_action_semantics(user_input: str, candidates: list[tuple[str, str]]) -
             (action, float(scores[index]))
             for index, (action, _) in enumerate(candidates)
         ]
-        term_scores = dict(_score_action_terms(user_input, candidates))
-        if term_scores:
-            scored = [
-                (action, max(score, term_scores.get(action, 0.0)))
-                for action, score in scored
-            ]
         rounded_scores = {round(score, 6) for _, score in scored}
         if len(rounded_scores) > 1:
             return scored

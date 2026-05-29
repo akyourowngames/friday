@@ -32,8 +32,6 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - googletasks
 - notion
 - slack
-
-- googlecontacts
 - googlemeet
 - googleslides
 ## Enabled Tools
@@ -133,13 +131,6 @@ This file is the markdown control surface for KING's Composio bridge. It keeps e
 - GITHUB_LIST_PULL_REQUESTS_FILES | toolkit: github | risk: read | enabled: true | note: list files changed in a GitHub pull request
 - GITHUB_LIST_REVIEWS_FOR_A_PULL_REQUEST | toolkit: github | risk: read | enabled: true | note: list GitHub pull request reviews
 - GITHUB_LIST_REVIEW_COMMENTS_ON_A_PULL_REQUEST | toolkit: github | risk: read | enabled: true | note: list GitHub pull request review comments
-- GOOGLECONTACTS_CREATE_CONTACT | toolkit: googlecontacts | risk: write | enabled: true | note: create Google Contacts entries with confirmation
-- GOOGLECONTACTS_CREATE_CONTACT_GROUP | toolkit: googlecontacts | risk: write | enabled: true | note: create Google Contacts groups with confirmation
-- GOOGLECONTACTS_GET_CONTACT_GROUP | toolkit: googlecontacts | risk: read | enabled: true | note: read a Google Contacts group
-- GOOGLECONTACTS_LIST_CONNECTIONS | toolkit: googlecontacts | risk: read | enabled: true | note: list Google Contacts connections
-- GOOGLECONTACTS_LIST_CONTACT_GROUPS | toolkit: googlecontacts | risk: read | enabled: true | note: list Google Contacts groups
-- GOOGLECONTACTS_MODIFY_CONTACT_GROUP_MEMBERS | toolkit: googlecontacts | risk: write | enabled: true | note: modify Google Contacts group members with confirmation
-- GOOGLECONTACTS_SEARCH_CONTACTS | toolkit: googlecontacts | risk: read | enabled: true | note: search Google Contacts by name email phone or organization
 - GOOGLEMEET_CREATE_MEET | toolkit: googlemeet | risk: write | enabled: true | note: create Google Meet spaces with confirmation
 - GOOGLEMEET_GET_MEET | toolkit: googlemeet | risk: read | enabled: true | note: get Google Meet space details
 - GOOGLEMEET_GET_RECORDINGS_BY_CONFERENCE_RECORD_ID | toolkit: googlemeet | risk: read | enabled: true | note: get Google Meet recordings by conference record

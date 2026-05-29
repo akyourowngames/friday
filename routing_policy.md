@@ -55,3 +55,17 @@ The user asks for raw filesystem directory entries, filenames, or paths for a sp
 ## Incomplete Utterance Text
 
 The user started a question but trailed off, used ellipsis, left the object unstated, or continued a prior topic without repeating it. This applies to short fragments that cannot stand alone. It does not apply when the current message already has an action and a named source, target, or topic.
+
+## Tool Routing Stage
+
+Tool routing compares the user query against a markdown-owned bank of example
+user phrasings (utterances) per tool. The per-tool score is the max similarity
+of any of that tool's utterances against the query. If the best score is below
+a single confidence threshold, no tool is selected (it's just chat). Otherwise
+the top-k tools above threshold are selected.
+
+The utterance bank lives in `tools/TOOL_UTTERANCES.md`. Each `## tool_name`
+heading opens a section; bullet points beneath are example phrasings. Fixing a
+routing collision means editing utterances for the affected tool: no code
+change, no ranking layers, no secondary scoring passes. A tool with no section
+falls back to its registry description plus examples.

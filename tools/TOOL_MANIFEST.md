@@ -24,12 +24,23 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 - `web.py` - web search or page retrieval capability.
 - `youtube.py` - YouTube-related capability.
 - `scheduler_tool.py` - schedule registry actions for later, list, cancel, run-due, and trigger the daily maintenance routine. Reads `tools/SCHEDULER_CONFIG.md` and `tools/MAINTENANCE_DAILY.md`.
+- `reminder.py` - set reminders with natural relative time ("in 5 min") or ISO datetime via the scheduler engine; fires a desktop notification and memory record when due (v1.0.0).
+- `clipboard.py` - read or write the system clipboard text (v1.0.0).
+- `screenshot.py` - capture the current screen to the KING images directory (v1.0.0).
+- `system_pulse.py` - live machine vitals: CPU, memory, battery, disk, uptime, and top processes (v1.0.0).
+- `weather.py` - current weather and short forecast via free open data (Nominatim geocode + Open-Meteo), no API key (v1.0.0).
+- `calc.py` - safe AST-based arithmetic evaluator with whitelisted functions and constants (v1.0.0).
+- `process_control.py` - find running processes by name and optionally terminate confirmed matches (v1.0.0).
+- `life_timeline.py` - recall memories as time-ordered narrative episodes via the cognition episode stitcher (v1.0.0).
+- `proactive_check.py` - surface the single best earned proactive observation from the cognition queue, or stay quiet (v1.0.0).
+- `discovery.py` - progressive tool disclosure: find_tools searches the full catalog and Composio capability index, load_tool makes a discovered tool callable for the turn (v1.0.0).
 
 The runtime registry remains the source of truth for callable schemas. This manifest must not be used as a keyword table, intent shortcut, or replacement for the registry.
 
 ## Markdown Control Files
 
 - `TOOL_MANIFEST.md` - active executable tool inventory and markdown contracts.
+- `TOOL_UTTERANCES.md` - per-tool example user phrasings (utterance bank) consumed by the router for like-to-like semantic tool selection. Edit utterances here to fix routing collisions without code changes.
 - `TOOL_VERIFICATION_PIPELINE.md` - default checks consumed by `tool_verification_pipeline`.
 - `TOOL_EVIDENCE_LEDGER.md` - evidence standards and current capability claim status.
 - `TOOL_PROVIDER_FAILURE_PLAYBOOK.md` - provider, fallback, timeout, partial, and empty-result reporting rules.

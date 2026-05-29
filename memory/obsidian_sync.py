@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import tempfile
@@ -5,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 
 from config import settings
+
+_SYNC_SCHEMA_VERSION = 2
 
 
 def _project_path(path_text: str) -> Path:
@@ -382,6 +385,65 @@ def _build_removed_page(graph: dict, memories: list[dict], generated_at: str) ->
     return "\n".join(lines)
 
 
+def _graph_signature(graph: dict, memories: list[dict]) -> str:
+    graph_payload = {
+        "schema_version": graph.get("schema_version"),
+        "nodes": graph.get("nodes", {}),
+        "edges": graph.get("edges", []),
+        "memory_links": graph.get("memory_links", {}),
+        "memories": [
+            {
+                "id": item.get("id", ""),
+                "text": item.get("text", ""),
+                "importance": item.get("importance", 0.5),
+                "date": item.get("_date", ""),
+                "time": item.get("ts", ""),
+                "graph_edges": item.get("graph_edges", []),
+                "graph_nodes": item.get("graph_nodes", []),
+            }
+            for item in memories
+        ],
+        "sync_schema_version": _SYNC_SCHEMA_VERSION,
+    }
+    text = json.dumps(graph_payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _planned_files(root: Path, graph: dict, memories: list[dict]) -> tuple[list[str], set[str], list[dict], dict]:
+    active_edges = _active_edges(graph)
+    memory_by_id = _memory_lookup(memories)
+    node_ids = set()
+    memory_edges = {}
+    paths = {
+        root / "Index.md",
+        root / "README.md",
+        root / "Nodes.md",
+        root / "Edges.md",
+        root / "Memories.md",
+        root / "Schema.md",
+        root / "Removed Memory.md",
+    }
+    for edge in active_edges:
+        source_id = edge.get("source", "")
+        target_id = edge.get("target", "")
+        if source_id:
+            node_ids.add(source_id)
+        if target_id:
+            node_ids.add(target_id)
+        edge_id = str(edge.get("id") or "").strip()
+        if edge_id:
+            paths.add(_edge_page_path(root, edge_id))
+        memory_id = str(edge.get("memory_id") or "").strip()
+        if memory_id:
+            memory_edges.setdefault(memory_id, []).append(edge)
+    for node_id in node_ids:
+        paths.add(_node_page_path(root, node_id))
+    for memory_id in memory_edges:
+        if memory_id in memory_by_id:
+            paths.add(_memory_page_path(root, memory_id))
+    return sorted(_rel_no_ext(path, root) + ".md" for path in paths), node_ids, active_edges, memory_edges
+
+
 def sync_memory_graph(graph: dict, memories: list[dict]) -> dict:
     if not settings.memory_obsidian_sync_enabled:
         return {"enabled": False, "status": "skipped", "reason": "disabled"}
@@ -395,7 +457,33 @@ def sync_memory_graph(graph: dict, memories: list[dict]) -> dict:
         return {"enabled": True, "status": "skipped", "reason": "graph_dir_outside_vault"}
 
     generated_at = datetime.now().isoformat(timespec="seconds")
-    active_edges = _active_edges(graph)
+    signature = _graph_signature(graph, memories)
+    current_rel, planned_node_ids, active_edges, planned_memory_edges = _planned_files(root, graph, memories)
+    manifest_path = root / ".sync_manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        manifest_files = manifest.get("files") if isinstance(manifest, dict) else []
+        if (
+            isinstance(manifest, dict)
+            and manifest.get("signature") == signature
+            and manifest.get("sync_schema_version") == _SYNC_SCHEMA_VERSION
+            and manifest_files == current_rel
+            and all((root / rel_text).exists() for rel_text in current_rel)
+        ):
+            return {
+                "enabled": True,
+                "status": "current",
+                "vault_root": str(vault_root),
+                "generated_root": str(root),
+                "node_count": len(planned_node_ids),
+                "edge_count": len(active_edges),
+                "memory_count": len(planned_memory_edges),
+                "file_count": len(current_rel),
+            }
+
     memory_by_id = _memory_lookup(memories)
     pages = {
         root / "Index.md": _build_index_page(root, vault_root, graph, memories, generated_at),
@@ -435,7 +523,6 @@ def sync_memory_graph(graph: dict, memories: list[dict]) -> dict:
         if item:
             pages[_memory_page_path(root, memory_id)] = _build_memory_page(root, vault_root, graph, item, edges, generated_at)
 
-    manifest_path = root / ".sync_manifest.json"
     previous_files = []
     if manifest_path.exists():
         try:
@@ -464,6 +551,8 @@ def sync_memory_graph(graph: dict, memories: list[dict]) -> dict:
             "vault_root": str(vault_root),
             "generated_root": str(root),
             "files": current_rel,
+            "signature": signature,
+            "sync_schema_version": _SYNC_SCHEMA_VERSION,
             "node_count": len(node_ids),
             "edge_count": len(active_edges),
             "memory_count": len(memory_edges),

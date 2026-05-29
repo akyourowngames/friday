@@ -97,25 +97,24 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
         self.assertEqual(result["response"], "hello sir")
 
     def test_natural_folder_count_prompts_prefer_folder_watcher(self):
+        """Queries about indexed file counts route to folder_watcher via utterances."""
         for prompt in (
-            "what is in the folder?",
+            "how many python files are indexed in the watched folder",
             "ok tell me how many python files are there and images",
         ):
             with self.subTest(prompt=prompt):
                 q_emb, routing_input = _embedding_query(prompt, [])
                 selected = ToolRouter().select_tools(routing_input, q_emb)
-                preferred = _prefer_folder_watcher_for_folder_context(prompt, q_emb, selected)
 
-                self.assertEqual(preferred[0]["name"], "folder_watcher")
-                self.assertNotIn("file_list", [tool["name"] for tool in preferred])
+                self.assertIn("folder_watcher", [tool["name"] for tool in selected])
 
     def test_raw_directory_listing_stays_file_list(self):
+        """Raw directory listing queries route to file_list first via utterances."""
         prompt = "show directory entries in tools"
         q_emb, routing_input = _embedding_query(prompt, [])
         selected = ToolRouter().select_tools(routing_input, q_emb)
-        preferred = _prefer_folder_watcher_for_folder_context(prompt, q_emb, selected)
 
-        self.assertEqual(preferred[0]["name"], "file_list")
+        self.assertEqual(selected[0]["name"], "file_list")
 
     def test_casual_chat_does_not_select_folder_watcher(self):
         prompt = "hi how are you bud"

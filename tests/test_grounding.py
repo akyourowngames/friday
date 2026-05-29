@@ -318,11 +318,9 @@ class RouterSelectionTests(unittest.TestCase):
         self.assertIn("Routing Contrast Text", contrast)
         self.assertNotIn("how are you", contrast.lower())
 
-    def test_relative_floor_removes_weak_tail_candidates(self):
+    def test_threshold_removes_weak_tail_candidates(self):
         router = ToolRouter(top_k=3)
-        router.threshold = 0.1
-        router.winner_margin = 0.0
-        router._small_talk_emb = np.array([0.0, 0.0], dtype=np.float32)
+        router.threshold = 0.2
         router._tool_names = ["strong", "near", "weak"]
         router._tool_embeddings = np.array(
             [
@@ -335,16 +333,13 @@ class RouterSelectionTests(unittest.TestCase):
 
         original_tools = router_mod.get_tools
         original_get_tool = router_mod.get_tool
-        original_floor = router_mod.settings.tool_relative_floor
         try:
             router_mod.get_tools = lambda: [{"name": name} for name in router._tool_names]
             router_mod.get_tool = lambda name: {"name": name}
-            router_mod.settings.tool_relative_floor = 0.72
             selected = router.select_tools("long query", np.array([1.0, 0.0], dtype=np.float32))
         finally:
             router_mod.get_tools = original_tools
             router_mod.get_tool = original_get_tool
-            router_mod.settings.tool_relative_floor = original_floor
 
         self.assertEqual([tool["name"] for tool in selected], ["strong", "near"])
 

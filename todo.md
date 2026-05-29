@@ -1,75 +1,179 @@
-# LLM Wiki
+# KING Cognition Roadmap
 
-A pattern for building personal knowledge bases using LLMs.
+Build plan for turning KING from a smart memory-backed assistant into a system
+that models the user over time, notices patterns, and earns the right to speak.
 
-This is an idea file, it is designed to be copy pasted to your own LLM Agent (e.g. OpenAI Codex, Claude Code, OpenCode / Pi, or etc.). Its goal is to communicate the high level idea, but your agent will build out the specifics in collaboration with you.
+Hard constraints (from `AGENTS.md`): no regex, no keyword routing, no hardcoded
+phrases/paths, config/markdown-driven, local-first, verified by structured
+results. `agent/core.py` and core routing/execution are off-limits unless the
+user grants that scope explicitly.
 
-## The core idea
+Legend: `[x]` shipped + tested · `[~]` partial · `[ ]` pending · `[blocked]`
+needs explicit authority before touching protected code.
 
-Most people's experience with LLMs and documents looks like RAG: you upload a collection of files, the LLM retrieves relevant chunks at query time, and generates an answer. This works, but the LLM is rediscovering knowledge from scratch on every question. There's no accumulation. Ask a subtle question that requires synthesizing five documents, and the LLM has to find and piece together the relevant fragments every time. Nothing is built up. NotebookLM, ChatGPT file uploads, and most RAG systems work this way.
+---
 
-The idea here is different. Instead of just retrieving from raw documents at query time, the LLM **incrementally builds and maintains a persistent wiki** — a structured, interlinked collection of markdown files that sits between you and the raw sources. When you add a new source, the LLM doesn't just index it for later retrieval. It reads it, extracts the key information, and integrates it into the existing wiki — updating entity pages, revising topic summaries, noting where new data contradicts old claims, strengthening or challenging the evolving synthesis. The knowledge is compiled once and then *kept current*, not re-derived on every query.
+## Phase 0 — Substrate (SHIPPED)
 
-This is the key difference: **the wiki is a persistent, compounding artifact.** The cross-references are already there. The contradictions have already been flagged. The synthesis already reflects everything you've read. The wiki keeps getting richer with every source you add and every question you ask.
+The highest intelligence-per-line work. All additive, all read-only against the
+Brain, all wired through the existing maintenance engine.
 
-You never (or rarely) write the wiki yourself — the LLM writes and maintains all of it. You're in charge of sourcing, exploration, and asking the right questions. The LLM does all the grunt work — the summarizing, cross-referencing, filing, and bookkeeping that makes a knowledge base actually useful over time. In practice, I have the LLM agent open on one side and Obsidian open on the other. The LLM makes edits based on our conversation, and I browse the results in real time — following links, checking the graph view, reading the updated pages. Obsidian is the IDE; the LLM is the programmer; the wiki is the codebase.
+- [x] `cognition/` package skeleton + markdown control surface
+      (`cognition/COGNITION_CONFIG.md`). Every threshold/weight lives here.
+- [x] `cognition/config.py` — markdown section loader (mirrors maintenance/
+      memory policy parsing). Typed values, forward compatible.
+- [x] `cognition/util.py` — clamp, decay, cosine, ISO time helpers (pure math).
+- [x] Episode Stitching (`cognition/episodes.py`) — single-link clustering over
+      time gaps + embedding similarity. Optional LLM `titler` hook, never
+      hardcoded phrasing. Verified on live data: 21 memories -> 5 episodes.
+- [x] Life Cadence Engine (`cognition/cadence.py`) — per-node 24x7 histogram +
+      EMA interval + deviation scoring (`missing_expected` / `unexpected_active`).
+- [x] Situational Awareness (`cognition/situation.py`) — fuses event/turn
+      timestamps into `cognitive_load` + `availability`; `can_interrupt()` gate.
+- [x] Proactive Engine (`cognition/proactive.py`) — candidate scoring, adaptive
+      threshold (rises after speaking, decays back), daily budget, novelty
+      dedup, per-source annoyance penalty from dismissals.
+- [x] State persistence (`cognition/state.py`) — atomic JSON at
+      `KING_COGNITION_STATE_PATH`.
+- [x] Orchestrator (`cognition/orchestrator.py`) — one read-only pass: rebuild
+      cadence from memory activity, stitch episodes, enqueue candidates from
+      actionable deviations, persist.
+- [x] Maintenance wiring — `cognition_scan` step in `maintenance/steps.py`,
+      registered in `tools/MAINTENANCE_DAILY.md`. Dry-run + status verified.
+- [x] Config knobs — `cognition_config_file`, `cognition_state_path` in
+      `config.py`.
+- [x] Tests — `tests/test_cognition.py` (19 tests). Full memory/maintenance/
+      config suites still green (no regressions).
 
-This can apply to a lot of different contexts. A few examples:
+Verify:
+```
+python -m unittest tests.test_cognition tests.test_daily_maintenance
+python -m maintenance.daily --dry-run
+```
 
-- **Personal**: tracking your own goals, health, psychology, self-improvement — filing journal entries, articles, podcast notes, and building up a structured picture of yourself over time.
-- **Research**: going deep on a topic over weeks or months — reading papers, articles, reports, and incrementally building a comprehensive wiki with an evolving thesis.
-- **Reading a book**: filing each chapter as you go, building out pages for characters, themes, plot threads, and how they connect. By the end you have a rich companion wiki. Think of fan wikis like [Tolkien Gateway](https://tolkiengateway.net/wiki/Main_Page) — thousands of interlinked pages covering characters, places, events, languages, built by a community of volunteers over years. You could build something like that personally as you read, with the LLM doing all the cross-referencing and maintenance.
-- **Business/team**: an internal wiki maintained by LLMs, fed by Slack threads, meeting transcripts, project documents, customer calls. Possibly with humans in the loop reviewing updates. The wiki stays current because the LLM does the maintenance that no one on the team wants to do.
-- **Competitive analysis, due diligence, trip planning, course notes, hobby deep-dives** — anything where you're accumulating knowledge over time and want it organized rather than scattered.
+---
 
-## Architecture
+## Progressive Tool Disclosure (SHIPPED 2026-05-29)
 
-There are three layers:
+Adopted the production pattern validated by GitHub's MCP server and Anthropic's
+"Code Execution with MCP" (progressive disclosure), addressing the core scaling
+limit of pure ranking: the model now discovers and loads tools on demand instead
+of relying on all schemas being injected or correctly pre-ranked.
 
-**Raw sources** — your curated collection of source documents. Articles, papers, images, data files. These are immutable — the LLM reads from them but never modifies them. This is your source of truth.
+- [x] `tools/discovery.py` — two meta-tools:
+      - `find_tools(query)`: semantic search over the full tool catalog AND the
+        Composio capability index (the embedding ranking now lives here as a
+        search backend, not an up-front injection). Returns ranked candidates
+        with backing tool + resolved tool_slug.
+      - `load_tool(names)`: validates names, resolves capability display names
+        like `composio:GMAIL_FETCH_EMAILS` to the backing tool + slug, and signals
+        core to expand the active schema set for the turn.
+- [x] `agent/core.py` — meta-tools always available; after load_tool runs, the
+      loaded tool schemas are added mid-loop and the model gets another round to
+      call them (with the resolved slug carried into the guidance). Discovery
+      calls bypass grounding and use structured output. Pure chat is unaffected
+      (meta-tools excluded from conversational-turn detection).
+- [x] Config: `KING_PROGRESSIVE_DISCLOSURE_ENABLED` (default true),
+      `KING_PROGRESSIVE_DISCLOSURE_TOOLS` (find_tools,load_tool).
+- [x] Verified live: with the capability layer disabled, "check my latest emails"
+      drove find_tools -> load_tool -> composio(GMAIL_FETCH_EMAILS) -> real email.
+      With normal config, confident routing stays instant and pure chat calls no
+      tools. Both paths coexist (fast path + discovery fallback).
+- [x] Tests: `tests/test_discovery.py` (12 tests). 173 tests green, manifest
+      audit aligned.
 
-**The wiki** — a directory of LLM-generated markdown files. Summaries, entity pages, concept pages, comparisons, an overview, a synthesis. The LLM owns this layer entirely. It creates pages, updates them when new sources arrive, maintains cross-references, and keeps everything consistent. You read it; the LLM writes it.
+## Composio Capability Routing (SHIPPED 2026-05-29)
 
-**The schema** — a document (e.g. CLAUDE.md for Claude Code or AGENTS.md for Codex) that tells the LLM how the wiki is structured, what the conventions are, and what workflows to follow when ingesting sources, answering questions, or maintaining the wiki. This is the key configuration file — it's what makes the LLM a disciplined wiki maintainer rather than a generic chatbot. You and the LLM co-evolve this over time as you figure out what works for your domain.
+Fixed the false-negative where natural app requests ("what's on my calendar
+tomorrow") never reached the Composio gateway because one tool embedding cannot
+represent 100+ capabilities.
 
-## Operations
+- [x] `tools/CAPABILITY_ROUTING.md` — markdown control surface mapping natural
+      capability phrases to backing tools (semantic, not a keyword table).
+- [x] Router capability layer (`agent/router.py`) — embeds each capability phrase
+      as its own probe; injects the backing tool when the phrase clears a
+      dedicated capability threshold and beats small talk. Config-driven via
+      `KING_CAPABILITY_SIMILARITY_THRESHOLD` (0.4) and
+      `KING_CAPABILITY_SMALL_TALK_MARGIN` (0.18).
+- [x] Enriched the `composio` tool description + examples with real capabilities.
+- [x] Removed `googlecontacts` from the gateway (no auth config; it was blocking
+      every session creation, which broke all Composio calls).
+- [x] Verified live: calendar query routes to composio and returns real events.
+      Real read-only calls pass for Gmail, Calendar, GitHub, Google Tasks.
+- [x] Tests: `tests/test_capability_routing.py` (10 tests). 106 routing/composio
+      tests green, no regressions.
 
-**Ingest.** You drop a new source into the raw collection and tell the LLM to process it. An example flow: the LLM reads the source, discusses key takeaways with you, writes a summary page in the wiki, updates the index, updates relevant entity and concept pages across the wiki, and appends an entry to the log. A single source might touch 10-15 wiki pages. Personally I prefer to ingest sources one at a time and stay involved — I read the summaries, check the updates, and guide the LLM on what to emphasize. But you could also batch-ingest many sources at once with less supervision. It's up to you to develop the workflow that fits your style and document it in the schema for future sessions.
+Connected toolkits: gmail, github, googlecalendar, googledocs, googletasks,
+googlemeet, googleslides. Pending user auth: notion, googlesheets, slack,
+googledrive (links generated in chat).
 
-**Query.** You ask questions against the wiki. The LLM searches for relevant pages, reads them, and synthesizes an answer with citations. Answers can take different forms depending on the question — a markdown page, a comparison table, a slide deck (Marp), a chart (matplotlib), a canvas. The important insight: **good answers can be filed back into the wiki as new pages.** A comparison you asked for, an analysis, a connection you discovered — these are valuable and shouldn't disappear into chat history. This way your explorations compound in the knowledge base just like ingested sources do.
+## Phase 1 — Surfacing (NEXT, needs authority for the last mile)
 
-**Lint.** Periodically, ask the LLM to health-check the wiki. Look for: contradictions between pages, stale claims that newer sources have superseded, orphan pages with no inbound links, important concepts mentioned but lacking their own page, missing cross-references, data gaps that could be filled with a web search. The LLM is good at suggesting new questions to investigate and new sources to look for. This keeps the wiki healthy as it grows.
+The engine produces ranked, gated candidates and persists them. What is missing
+is delivering the winning candidate into a conversation and phrasing it via the
+LLM (never a canned string).
 
-## Indexing and logging
+- [x] `proactive_check` tool — surfaces the single best earned candidate from the
+      cognition queue to the chat, or stays quiet. The chat can now consume the
+      queue without core changes. (`tools/proactive_check.py`)
+- [ ] Live signal feeds into `SituationModel`: subscribe to `folder_watcher`
+      bus events and conversation turns so load/availability reflect reality.
+- [ ] Auto-call `proactive_check` at session start / after silence so KING raises
+      thoughts unprompted (currently surfaces when asked, e.g. "anything on your
+      mind"). Needs a natural-boundary trigger in the turn flow.
 
-Two special files help the LLM (and you) navigate the wiki as it grows. They serve different purposes:
+## New Tools (SHIPPED 2026-05-29)
 
-**index.md** is content-oriented. It's a catalog of everything in the wiki — each page listed with a link, a one-line summary, and optionally metadata like date or source count. Organized by category (entities, concepts, sources, etc.). The LLM updates it on every ingest. When answering a query, the LLM reads the index first to find relevant pages, then drills into them. This works surprisingly well at moderate scale (~100 sources, ~hundreds of pages) and avoids the need for embedding-based RAG infrastructure.
+Ten new callable tools, all registered, manifest-documented, structured-output,
+graceful-degrading, and tested (`tests/test_new_tools.py`, 22 tests):
 
-**log.md** is chronological. It's an append-only record of what happened and when — ingests, queries, lint passes. A useful tip: if each entry starts with a consistent prefix (e.g. `## [2026-04-02] ingest | Article Title`), the log becomes parseable with simple unix tools — `grep "^## \[" log.md | tail -5` gives you the last 5 entries. The log gives you a timeline of the wiki's evolution and helps the LLM understand what's been done recently.
-
-## Optional: CLI tools
-
-At some point you may want to build small tools that help the LLM operate on the wiki more efficiently. A search engine over the wiki pages is the most obvious one — at small scale the index file is enough, but as the wiki grows you want proper search. [qmd](https://github.com/tobi/qmd) is a good option: it's a local search engine for markdown files with hybrid BM25/vector search and LLM re-ranking, all on-device. It has both a CLI (so the LLM can shell out to it) and an MCP server (so the LLM can use it as a native tool). You could also build something simpler yourself — the LLM can help you vibe-code a naive search script as the need arises.
-
-## Tips and tricks
-
-- **Obsidian Web Clipper** is a browser extension that converts web articles to markdown. Very useful for quickly getting sources into your raw collection.
-- **Download images locally.** In Obsidian Settings → Files and links, set "Attachment folder path" to a fixed directory (e.g. `raw/assets/`). Then in Settings → Hotkeys, search for "Download" to find "Download attachments for current file" and bind it to a hotkey (e.g. Ctrl+Shift+D). After clipping an article, hit the hotkey and all images get downloaded to local disk. This is optional but useful — it lets the LLM view and reference images directly instead of relying on URLs that may break. Note that LLMs can't natively read markdown with inline images in one pass — the workaround is to have the LLM read the text first, then view some or all of the referenced images separately to gain additional context. It's a bit clunky but works well enough.
-- **Obsidian's graph view** is the best way to see the shape of your wiki — what's connected to what, which pages are hubs, which are orphans.
-- **Marp** is a markdown-based slide deck format. Obsidian has a plugin for it. Useful for generating presentations directly from wiki content.
-- **Dataview** is an Obsidian plugin that runs queries over page frontmatter. If your LLM adds YAML frontmatter to wiki pages (tags, dates, source counts), Dataview can generate dynamic tables and lists.
-- The wiki is just a git repo of markdown files. You get version history, branching, and collaboration for free.
-
-## Why this works
-
-The tedious part of maintaining a knowledge base is not the reading or the thinking — it's the bookkeeping. Updating cross-references, keeping summaries current, noting when new data contradicts old claims, maintaining consistency across dozens of pages. Humans abandon wikis because the maintenance burden grows faster than the value. LLMs don't get bored, don't forget to update a cross-reference, and can touch 15 files in one pass. The wiki stays maintained because the cost of maintenance is near zero.
-
-The human's job is to curate sources, direct the analysis, ask good questions, and think about what it all means. The LLM's job is everything else.
-
-The idea is related in spirit to Vannevar Bush's Memex (1945) — a personal, curated knowledge store with associative trails between documents. Bush's vision was closer to this than to what the web became: private, actively curated, with the connections between documents as valuable as the documents themselves. The part he couldn't solve was who does the maintenance. The LLM handles that.
+- [x] `reminder` + `reminder_fire` — natural relative time ("in 5 min") via the
+      scheduler. Fixes the reminder false-negative. Verified live.
+- [x] `clipboard` — read/write system clipboard (pyperclip).
+- [x] `screenshot` — capture screen to images dir (Pillow ImageGrab).
+- [x] `system_pulse` — live CPU/RAM/battery/disk/uptime/top processes (psutil).
+- [x] `weather` — current weather + forecast via Open-Meteo, no API key.
+- [x] `calc` — safe AST arithmetic (no eval, no regex).
+- [x] `process_control` — find/terminate processes by name (psutil).
+- [x] `life_timeline` — narrative episodes from the cognition stitcher.
+- [x] `proactive_check` — surface the best earned proactive thought.
+- [x] `tools/timeparse.py` — shared relative/absolute time parser (no regex).
 
 
-## Note
 
-This document is intentionally abstract. It describes the idea, not a specific implementation. The exact directory structure, the schema conventions, the page formats, the tooling — all of that will depend on your domain, your preferences, and your LLM of choice. Everything mentioned above is optional and modular — pick what's useful, ignore what isn't. For example: your sources might be text-only, so you don't need image handling at all. Your wiki might be small enough that the index file is all you need, no search engine required. You might not care about slide decks and just want markdown pages. You might want a completely different set of output formats. The right way to use this is to share it with your LLM agent and work together to instantiate a version that fits your needs. The document's only job is to communicate the pattern. Your LLM can figure out the rest.
+---
+
+## Phase 2 — Depth (PENDING)
+
+- [ ] Belief Revision Ledger (§2): on temporal supersede in `brain.py`, append a
+      revision record instead of dropping the old edge; cluster revisions to
+      detect drift direction. (Touches `brain.py` only, additive.)
+- [ ] Affective tier (§9): valence/arousal floats per memory at ingest, used as
+      a recall signal. Backfill via a maintenance step.
+- [ ] Self-Reflection loop (§6): populate the already-allocated graph
+      `reflections`/`procedures` lists from detected corrections; inject near
+      matches at prompt-build time. (Injection point is in core -> needs
+      authority.)
+- [ ] Memory resurrection (§7): low-weight pass over the archive index during
+      recall; resurrect an archived memory that strongly out-scores peers.
+- [ ] Decision Journal + trust calibration (§10): log recommendations, detect
+      outcomes during maintenance, modulate an assertiveness scalar.
+
+---
+
+## Open questions for the user
+
+1. Grant code-edit authority for `agent/core.py` to wire proactive delivery and
+   reflection injection? Without it, Phase 1's last mile and parts of Phase 2
+   stay queued behind an external surfacer.
+2. Daily proactive budget default is 3 (in `COGNITION_CONFIG.md`). Keep, or go
+   more conservative (1) until trust is established?
+
+---
+
+## Design notes (full architecture)
+
+The complete JARVIS-level design write-up (vision, 10 god-tier features,
+proactive system, relationship engine, cognitive architecture, memory-beyond-RAG,
+20 surprise ideas, build order, weakness audit) lives in
+`docs/COGNITION_DESIGN.md`.

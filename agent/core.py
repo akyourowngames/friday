@@ -33,15 +33,9 @@ def _debug_safe(text) -> str:
 def _print_assistant_content(content: str, emit_chunk=None) -> None:
     if not content:
         return
-    console.print("          ", end="\r")
-    for char in content:
-        print(char, end="", flush=True)
-        if emit_chunk:
-            emit_chunk(char)
-        if char not in ("\n", "\r"):
-            time.sleep(TYPING_SPEED)
-    print()
+    print(content, flush=True)
     if emit_chunk:
+        emit_chunk(content)
         emit_chunk("\n")
 
 
@@ -136,7 +130,7 @@ def _system_header() -> str:
 
 MAX_CONTEXT_TOKENS = 6000
 MAX_TOOL_RESULT_CHARS = settings.tool_result_max_chars
-TYPING_SPEED = 0.008
+TYPING_SPEED = max(0.0, settings.typing_speed_seconds)
 
 def _find_json(text: str) -> str | None:
     """Extract the outermost JSON object from text using brace-depth tracking."""
@@ -291,12 +285,62 @@ def _has_backtick_tool_call(text: str, schemas: list) -> bool:
     return False
 
 
+def _progressive_disclosure_tool_names() -> list[str]:
+    if not settings.progressive_disclosure_enabled:
+        return []
+    return [
+        name.strip()
+        for name in settings.progressive_disclosure_tools.split(",")
+        if name.strip()
+    ]
+
+
+def _should_expose_progressive_disclosure(selected_tools: list, router_decision: dict) -> bool:
+    if not settings.progressive_disclosure_enabled:
+        return False
+    if selected_tools:
+        return False
+    return router_decision.get("reason") == "below_tool_threshold"
+
+
+def _loaded_tools_from_result(result) -> list[dict]:
+    """Extract loaded tool entries (name + optional tool_slug) from a load_tool
+    result (structured or legacy JSON)."""
+    text = result if isinstance(result, str) else _tool_result_content(result)
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    payload = parsed.get("result", parsed)
+    if not isinstance(payload, dict):
+        return []
+    loaded = payload.get("loaded")
+    entries = []
+    if isinstance(loaded, list):
+        for item in loaded:
+            if isinstance(item, dict) and item.get("name"):
+                entry = {"name": str(item["name"])}
+                if item.get("tool_slug"):
+                    entry["tool_slug"] = str(item["tool_slug"])
+                entries.append(entry)
+    if entries:
+        return entries
+    names = payload.get("loaded_names")
+    if isinstance(names, list):
+        return [{"name": str(n)} for n in names if str(n).strip()]
+    return []
+
+
 def _build_system_prompt(
     selected_tools,
     recent_action_context: str = "",
     memory_facts: str = "",
     summary_context: str = "",
     conversational_turn: bool = False,
+    broad_recall: bool = False,
+    capability_hint: dict | None = None,
 ):
     lines = [_system_header(), "", _load_tool_policy()]
     if summary_context:
@@ -306,10 +350,17 @@ def _build_system_prompt(
         lines.append("")
         lines.append(_load_chat_polish_section("Memory Presentation Rules", "State known facts naturally."))
         lines.append("")
-        lines.append(_load_chat_polish_section(
-            "Proactive Engagement Rules",
-            "When facts are listed, weave at most one relevant ongoing fact into casual replies.",
-        ))
+        if broad_recall:
+            lines.append(_load_chat_polish_section(
+                "Broad Recall Rules",
+                "When the user asks for everything you know about them, list every fact provided "
+                "for this turn, grouped naturally. Do not omit, summarize away, or cap the facts.",
+            ))
+        else:
+            lines.append(_load_chat_polish_section(
+                "Proactive Engagement Rules",
+                "When facts are listed, weave at most one relevant ongoing fact into casual replies.",
+            ))
         lines.append("Known facts for this turn:")
         lines.append(memory_facts)
     if conversational_turn:
@@ -345,6 +396,24 @@ def _build_system_prompt(
             lines.append(
                 "For volume or brightness on this PC, call system_control with action volume_up, "
                 "volume_down, brightness_up, or brightness_down. Omit config_path."
+            )
+        if capability_hint and capability_hint.get("tool") and capability_hint.get("args"):
+            hint_tool = capability_hint["tool"]
+            hint_args = capability_hint["args"]
+            slug = hint_args.get("tool_slug", "")
+            if any(t.get("name") == hint_tool for t in selected_tools) and slug:
+                lines.append(
+                    f"For this request, the resolved {hint_tool} action is `{slug}`. "
+                    f"Call {hint_tool} with action=\"execute\" and tool_slug=\"{slug}\", "
+                    "adding only the arguments that the user actually specified. "
+                    "Do not invent or guess a different tool_slug."
+                )
+        if any(t.get("name") == "find_tools" for t in selected_tools):
+            lines.append(
+                "If none of the available tools can do what the user asked, call find_tools "
+                "with a short description of the capability you need, then call load_tool with "
+                "the returned tool name to make it callable, then call that tool. Do not claim "
+                "you cannot do something before searching with find_tools."
             )
     else:
         lines.append("")
@@ -447,13 +516,13 @@ def _memory_scope_texts() -> tuple[str, str]:
     )
 
 
-def _looks_like_context_followup(text: str) -> bool:
+def _looks_like_context_followup(text: str, q_emb=None) -> bool:
     text = str(text or "").strip()
     if not text:
         return False
     followup_text, new_topic_text = _context_followup_texts()
     try:
-        text_emb = embed(text)
+        text_emb = q_emb if q_emb is not None else embed(text)
         compare_embs = embed([followup_text, new_topic_text])
         if getattr(compare_embs, "ndim", 1) == 1:
             compare_embs = compare_embs.reshape(1, -1)
@@ -718,7 +787,34 @@ def _forced_folder_watcher_call(user_input: str, tool_schemas: list, messages: l
 
 
 def _should_suppress_memory_context(router_decision: dict) -> bool:
-    return router_decision.get("reason") == "small_talk_contrast_won"
+    return router_decision.get("reason") == "below_tool_threshold"
+
+
+def _merge_context_facts(primary: str, secondary: str, limit: int = 8) -> str:
+    """Combine two ' | '-joined fact strings, keeping order and dropping
+    duplicates. The primary (query-specific) facts come first so a precise
+    recall is never lost when broad profile facts are added for breadth.
+    Dedupe is based on the bare fact, ignoring any '(via ...)' evidence
+    suffix so the same fact is not listed twice in different forms."""
+    def _base(fact: str) -> str:
+        head = fact.split(" (via ", 1)[0]
+        return head.strip().casefold()
+
+    merged = []
+    seen = set()
+    for source in (primary, secondary):
+        for part in str(source or "").split(" | "):
+            fact = part.strip()
+            if not fact:
+                continue
+            key = _base(fact)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(fact)
+            if len(merged) >= max(1, limit):
+                return " | ".join(merged)
+    return " | ".join(merged)
 
 
 def _memory_context_has_graph(context: str | None) -> bool:
@@ -1005,8 +1101,14 @@ def _expand_conversational_input(user_input: str, messages: list) -> str:
     topic = _recent_conversation_topic(messages)
     if not topic or topic == text:
         return text
+    trimmed = text.rstrip()
+    explicit_incomplete = trimmed.endswith("...") or trimmed.endswith("…")
+    if not settings.context_followup_expansion_enabled and not explicit_incomplete:
+        return text
     utterance_emb = embed(text)
-    if _looks_like_context_followup(text) or _looks_like_incomplete_utterance(text, utterance_emb):
+    if _looks_like_conversational_banter(text, utterance_emb):
+        return text
+    if explicit_incomplete or _looks_like_context_followup(text, utterance_emb) or _looks_like_incomplete_utterance(text, utterance_emb):
         return f"Earlier: {topic}\nNow: {text}"
     return text
 
@@ -1065,32 +1167,12 @@ def _folder_watcher_route_texts() -> tuple[str, str]:
 
 
 def _prefer_folder_watcher_for_folder_context(user_input: str, q_emb, selected_tools: list) -> list:
-    if not selected_tools or q_emb is None:
-        return selected_tools
-    names = [tool.get("name", "") for tool in selected_tools]
-    if "folder_watcher" not in names:
-        return selected_tools
-    overlapping = {"file_list", "file_read", "gallery"}
-    if not any(name in overlapping for name in names):
-        return selected_tools
-    watcher_text, raw_listing_text = _folder_watcher_route_texts()
-    try:
-        compare_embs = embed([watcher_text, raw_listing_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        watcher_score = float(np.dot(compare_embs[0], q_emb))
-        raw_listing_score = float(np.dot(compare_embs[1], q_emb))
-    except Exception:
-        return selected_tools
-    if watcher_score < raw_listing_score:
-        return selected_tools
-    folder_tool = next(tool for tool in selected_tools if tool.get("name") == "folder_watcher")
-    remaining = [
-        tool
-        for tool in selected_tools
-        if tool.get("name") != "folder_watcher" and tool.get("name") not in overlapping
-    ]
-    return [folder_tool] + remaining
+    """Trust the router's utterance-based ordering. If folder_watcher scored
+    higher than file_list/file_read/gallery, it stays first. Otherwise keep the
+    router's order. No secondary embedding comparison needed — the utterance
+    bank already encodes the distinction between semantic folder queries and raw
+    directory listings."""
+    return selected_tools
 
 
 def _selected_tool_has_user_terms(user_input: str, selected_tools: list) -> bool:
@@ -1451,7 +1533,59 @@ class Agent:
 
         console.print("[dim]Ready[/dim]")
 
+    def _check_proactive(self) -> str | None:
+        """Check the cognition proactive queue and return a natural observation
+        if one clears the gates, or None to stay quiet.
+
+        If the queue is empty, seeds it from cadence deviations on the fly so
+        proactive doesn't depend on daily maintenance having run first.
+        """
+        try:
+            from cognition.proactive import ProactiveEngine
+            from cognition.state import load_state, save_state
+        except Exception:
+            return None
+        try:
+            state = load_state()
+            engine = ProactiveEngine.from_dict(state.get("proactive") or {})
+            now = datetime.now()
+            if engine.budget_remaining(now) <= 0:
+                return None
+
+            # If queue is empty, try to seed from cadence deviations.
+            if engine.queue_size() == 0:
+                try:
+                    from cognition.orchestrator import run_cognition_pass
+                    result = run_cognition_pass(self.brain, embed_fn=embed, now=now, persist=True)
+                    # Reload state after the pass populated the queue.
+                    state = load_state()
+                    engine = ProactiveEngine.from_dict(state.get("proactive") or {})
+                except Exception:
+                    pass
+
+            if engine.queue_size() == 0:
+                return None
+
+            candidate = engine.select(situational_fit=0.7, now=now)
+            if candidate is None:
+                return None
+            # Mark delivered and persist.
+            engine.mark_delivered(candidate, now=now)
+            state["proactive"] = engine.to_dict()
+            save_state(state)
+            # Return the structured content for the agent to phrase naturally.
+            node = candidate.node or "something"
+            kind = candidate.source.replace("cadence_", "")
+            return f"By the way — I noticed something about {node} ({kind}). Want me to tell you more?"
+        except Exception:
+            return None
+
     def _maybe_summarize(self):
+        if count_messages_tokens(self.messages) < MAX_CONTEXT_TOKENS:
+            return
+        self._do_summarize()
+
+    def _do_summarize(self):
         if count_messages_tokens(self.messages) < MAX_CONTEXT_TOKENS:
             return
 
@@ -1462,7 +1596,13 @@ class Agent:
         if not older:
             return
 
-        summary = self.llm.extract_summary(older)
+        summary = self.llm.extract_summary(
+            older,
+            instruction=_load_chat_polish_section(
+                "Session Summary Rules",
+                "",
+            ),
+        )
         if summary:
             console.print(f"[dim]Summarized {len(older)} messages[/dim]")
             self.messages = keep + [
@@ -1508,7 +1648,11 @@ class Agent:
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             router_future = pool.submit(self.router.select_tools, routing_input, q_emb)
-            brain_future = pool.submit(self.brain.recall_context, routing_input, 5, q_emb) if need_context else None
+            brain_future = (
+                pool.submit(self.brain.recall_context, routing_input, settings.memory_recall_k, q_emb)
+                if need_context
+                else None
+            )
 
             selected_tools = router_future.result()
             context = brain_future.result() if brain_future else None
@@ -1523,9 +1667,13 @@ class Agent:
                 self._last_memory_profile_context,
             )
             if memory_profile_context:
-                profile_context = self.brain.profile_context(limit=8)
+                broad_limit = max(settings.memory_profile_limit, settings.memory_broad_recall_limit)
+                profile_context = self.brain.profile_context(limit=broad_limit)
                 if profile_context:
-                    context = profile_context
+                    # Broad recall ("what do you know about me", "dump everything"):
+                    # keep the query-specific recall first so a precise fact is
+                    # never dropped, then add the full profile breadth behind it.
+                    context = _merge_context_facts(context or "", profile_context, limit=broad_limit)
 
         if context and memory_profile_context:
             pass
@@ -1545,6 +1693,34 @@ class Agent:
 
         conversational_turn = _is_conversational_turn(selected_tools, user_input, q_emb)
         memory_facts = context if context else ""
+        broad_recall = bool(memory_profile_context and memory_facts)
+
+        # Progressive disclosure: expose discovery meta-tools only for a true
+        # semantic miss. Keeping them out of normal chat and direct-tool turns
+        # avoids bloating every model call while preserving the false-negative
+        # escape hatch.
+        router_decision = self.router.last_decision()
+        disclosure_names = (
+            _progressive_disclosure_tool_names()
+            if _should_expose_progressive_disclosure(selected_tools, router_decision)
+            else []
+        )
+        loaded_tool_names: set[str] = set()
+        if disclosure_names:
+            existing = {t.get("name") for t in selected_tools}
+            for meta_name in disclosure_names:
+                if meta_name not in existing:
+                    meta_tool = get_tool(meta_name)
+                    if meta_tool:
+                        selected_tools.append(meta_tool)
+
+        capability_hint = None
+        selected_names = {t.get("name") for t in selected_tools}
+        for hint_tool in selected_names:
+            hint = self.router.capability_hint(hint_tool)
+            if hint.get("args", {}).get("tool_slug"):
+                capability_hint = {"tool": hint_tool, "args": hint["args"]}
+                break
 
         self.messages.append({"role": "user", "content": user_input})
 
@@ -1556,6 +1732,8 @@ class Agent:
                 memory_facts=memory_facts,
                 summary_context=self._summary_context,
                 conversational_turn=conversational_turn,
+                broad_recall=broad_recall,
+                capability_hint=capability_hint,
             ),
         }
 
@@ -1598,7 +1776,7 @@ class Agent:
             content = ""
             tool_calls = {}
             started = False
-            buffer_tool_text = True
+            buffer_tool_text = bool(tool_schemas) and not tools_called_this_input
 
             if forced_contextual_call:
                 tool_calls[0] = forced_contextual_call
@@ -1621,6 +1799,9 @@ class Agent:
                 if stream is None:
                     break
 
+                _spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                _spinner_idx = 0
+                _chunk_count = 0
                 for chunk in stream:
                     if not chunk.choices:
                         continue
@@ -1629,14 +1810,16 @@ class Agent:
                     if delta.content:
                         content += delta.content
                         if buffer_tool_text:
+                            _chunk_count += 1
+                            if _chunk_count % 3 == 0:
+                                frame = _spinner_frames[_spinner_idx % len(_spinner_frames)]
+                                print(f"\r[dim]{frame} Working...[/dim]  ", end="", flush=True)
+                                _spinner_idx += 1
                             continue
                         if not started:
                             started = True
                             console.print("          ", end="\r")
-                        for char in delta.content:
-                            print(char, end="", flush=True)
-                            if char not in ('\n', '\r'):
-                                time.sleep(TYPING_SPEED)
+                        print(delta.content, end="", flush=True)
 
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
@@ -1657,9 +1840,12 @@ class Agent:
             if tool_calls and content:
                 lines_up = max(content.count("\n") + 1, 1)
                 clear = "\033[A\033[K" * lines_up
-                print(f"\r{clear}\r", end="")
+                print(f"\r{clear}\r", end="", flush=True)
                 content = ""
                 started = False
+            elif tool_calls and not content:
+                # Clear the spinner line
+                print("\r                    \r", end="", flush=True)
 
             if not tool_calls and content and tool_schemas:
                 json_tc, err = _try_parse_json_tool_call(content, tool_schemas)
@@ -1779,11 +1965,16 @@ class Agent:
                     if not valid:
                         results[fc["id"]] = error
                         continue
-                    if not _tool_call_grounded(user_input, args, self.messages, name):
+                    is_discovery = name in disclosure_names
+                    if not is_discovery and not _tool_call_grounded(user_input, args, self.messages, name):
                         results[fc["id"]] = "Error: Tool call rejected because its arguments were not grounded in the user request or recent tool results. Ask for the missing target instead of guessing."
                         grounding_rejected = True
                         continue
-                    future = pool.submit(execute_tool, name, **args)
+                    if is_discovery:
+                        disc_args = {k: v for k, v in args.items() if k not in ("response_format", "trace_enabled")}
+                        future = pool.submit(execute_tool, name, response_format="structured", **disc_args)
+                    else:
+                        future = pool.submit(execute_tool, name, **args)
                     futures[future] = fc
                     executed_tool_count += 1
 
@@ -1809,6 +2000,7 @@ class Agent:
                             memory_facts=memory_facts,
                             summary_context=self._summary_context,
                             conversational_turn=True,
+                            broad_recall=broad_recall,
                         ),
                     }
                     self.messages.append({
@@ -1843,6 +2035,47 @@ class Agent:
 
             tools_called_this_input = True
 
+            # Progressive disclosure: if load_tool ran, expand the active schema
+            # set with the newly loaded tools so the model can call them next
+            # round. This is the core of the discovery escape hatch.
+            disclosure_active = bool(disclosure_names)
+            newly_loaded = []
+            loaded_slug_notes = []
+            if disclosure_active:
+                for fc in formatted_calls:
+                    if fc["function"]["name"] != "load_tool":
+                        continue
+                    loaded_entries = _loaded_tools_from_result(results.get(fc["id"], ""))
+                    for entry in loaded_entries:
+                        loaded_name = entry.get("name", "")
+                        if not loaded_name or loaded_name in loaded_tool_names:
+                            continue
+                        schema = schema_by_name.get(loaded_name)
+                        if schema and schema not in tool_schemas:
+                            tool_schemas.append(schema)
+                            loaded_tool_names.add(loaded_name)
+                            newly_loaded.append(loaded_name)
+                            if entry.get("tool_slug"):
+                                loaded_slug_notes.append(
+                                    f"{loaded_name} with action=\"execute\" tool_slug=\"{entry['tool_slug']}\""
+                                )
+            # When the only calls this round were discovery meta-tools, give the
+            # model another round to act on what it found instead of finalizing.
+            only_discovery = disclosure_active and all(
+                fc["function"]["name"] in disclosure_names for fc in formatted_calls
+            )
+            if only_discovery:
+                if newly_loaded:
+                    guidance = (
+                        "These tools are now callable: "
+                        + ", ".join(newly_loaded)
+                        + ". Call the right one with its parameters to fulfill the request."
+                    )
+                    if loaded_slug_notes:
+                        guidance += " Use " + "; ".join(loaded_slug_notes) + "."
+                    self.messages.append({"role": "system", "content": guidance})
+                continue
+
             if len(formatted_calls) == 1:
                 fc = formatted_calls[0]
                 direct_answer = _direct_answer_from_tool_result(
@@ -1855,7 +2088,18 @@ class Agent:
                     self.messages.append({"role": "assistant", "content": direct_answer})
                     break
 
+            if settings.direct_single_tool_result and len(formatted_calls) == 1:
+                direct_result = results.get(formatted_calls[0]["id"], "")
+                if direct_result and not direct_result.startswith("Error"):
+                    if len(direct_result) > MAX_TOOL_RESULT_CHARS:
+                        direct_result = direct_result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
+                    _print_assistant_content(direct_result, emit_chunk=emit_chunk)
+                    content = direct_result
+                    self.messages.append({"role": "assistant", "content": direct_result})
+                    break
+
             if tools_called_this_input and settings.finalize_tool_results_with_llm:
+                tool_schemas = []
                 self.messages.append({
                     "role": "system",
                     "content": _build_tool_answer_instruction(
@@ -1864,19 +2108,6 @@ class Agent:
                     ),
                 })
                 continue
-
-            if settings.direct_single_tool_result and len(formatted_calls) == 1:
-                direct_result = results.get(formatted_calls[0]["id"], "")
-                if direct_result and not direct_result.startswith("Error"):
-                    if len(direct_result) > MAX_TOOL_RESULT_CHARS:
-                        direct_result = direct_result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
-                    print(direct_result)
-                    if emit_chunk:
-                        emit_chunk(direct_result)
-                        emit_chunk("\n")
-                    content = direct_result
-                    self.messages.append({"role": "assistant", "content": direct_result})
-                    break
 
         if (
             tool_schemas
@@ -1915,6 +2146,21 @@ class Agent:
         if content:
             self._remember_plain_turn(user_input, content)
             self._last_memory_profile_context = bool(memory_profile_context and context)
+
+        # Proactive injection: after every turn, check if the cognition queue
+        # has something worth raising. If so, append it to the response so KING
+        # surfaces observations naturally without the user having to ask.
+        if content:
+            proactive_note = self._check_proactive()
+            if proactive_note:
+                content = content + "\n\n" + proactive_note
+                # Update the last assistant message with the proactive addition.
+                if self.messages and self.messages[-1].get("role") == "assistant":
+                    self.messages[-1]["content"] = content
+                if emit_chunk:
+                    emit_chunk("\n\n" + proactive_note)
+                else:
+                    console.print(f"\n[dim]{proactive_note}[/dim]")
 
         self._maybe_summarize()
 
