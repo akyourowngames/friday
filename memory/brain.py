@@ -555,21 +555,29 @@ class Brain:
         self._sync_obsidian_graph()
 
     def _sync_obsidian_graph(self):
-        if getattr(self, "_obsidian_sync_deferred", False):
-            self._obsidian_sync_pending = True
-            self._obsidian_sync_result = {
-                "enabled": bool(settings.memory_obsidian_sync_enabled),
-                "status": "deferred",
-            }
+        """Sync the memory vault via the new memory worker."""
+        if not settings.memory_obsidian_sync_enabled:
+            self._obsidian_sync_result = {"enabled": False, "status": "skipped"}
             return
         try:
-            self._obsidian_sync_result = sync_memory_graph(self._graph, self.memories)
+            from memory.worker import sync_vault
+            self._obsidian_sync_result = sync_vault(self.memories, self._graph)
         except Exception as exc:
             self._obsidian_sync_result = {
-                "enabled": bool(settings.memory_obsidian_sync_enabled),
+                "enabled": True,
                 "status": "failed",
                 "reason": str(exc),
             }
+
+    def _trigger_memory_worker(self, item: dict):
+        """Trigger the memory worker to update the Obsidian vault."""
+        if not settings.memory_obsidian_sync_enabled:
+            return
+        try:
+            from memory.worker import on_memory_stored
+            on_memory_stored(item, self.memories, self._graph)
+        except Exception:
+            pass
 
     def obsidian_graph_status(self) -> dict:
         return dict(getattr(self, "_obsidian_sync_result", {"enabled": False, "status": "not_run"}))
@@ -1639,6 +1647,8 @@ class Brain:
         self._append_embedding(item["text"], insert_idx=insert_idx)
         dirty_dates.update(self._trim_capacity())
         self._persist_changes(dirty_dates)
+        # Trigger memory worker to update Obsidian vault in background.
+        self._trigger_memory_worker(item)
         return True
 
     def remember(self, text: str, importance: float = 0.8) -> dict:
