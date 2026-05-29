@@ -46,11 +46,13 @@ class NIMClient:
         except APIError as e:
             raise RuntimeError(f"NVIDIA NIM API error: {e}")
 
-    def extract_summary(self, messages: list) -> str:
-        prompt = (
+    def extract_summary(self, messages: list, instruction: str = "") -> str:
+        prompt = instruction.strip() or (
             "Summarize the key information from this conversation concisely "
-            "(2-3 sentences). Focus on: user identity, facts discussed, "
-            "tasks completed, decisions made. Omit greetings and pleasantries."
+            "(2-3 sentences). Focus on the user: their identity, what they asked for, "
+            "what they were working on, and any decisions or unresolved threads. "
+            "Record concrete outcomes when actions actually happened. Do not record the "
+            "assistant's refusals or capability disclaimers. Omit greetings and pleasantries."
         )
         try:
             resp = self.client.chat.completions.create(

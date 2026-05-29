@@ -62,10 +62,14 @@ class Settings:
     debug: bool = _env_bool("KING_DEBUG", False)
     tool_top_k: int = _env_int("KING_TOOL_TOP_K", 3)
     tool_similarity_threshold: float = _env_float("KING_TOOL_SIMILARITY_THRESHOLD", 0.23)
-    tool_winner_margin: float = _env_float("KING_TOOL_WINNER_MARGIN", 0.15)
-    tool_relative_floor: float = _env_float("KING_TOOL_RELATIVE_FLOOR", 0.72)
+    # Utterance-based tool routing. Each tool's similarity is the max over a
+    # bank of example user phrasings (utterances) instead of a single
+    # description vector. The bank is markdown-owned so collisions are fixed by
+    # editing utterances, not code.
+    tool_utterances_file: str = _env("KING_TOOL_UTTERANCES_FILE", "tools/TOOL_UTTERANCES.md")
     max_tool_rounds: int = _env_int("KING_MAX_TOOL_ROUNDS", 6)
     llm_stream_attempts: int = _env_int("KING_LLM_STREAM_ATTEMPTS", 2)
+    typing_speed_seconds: float = _env_float("KING_TYPING_SPEED_SECONDS", 0.0)
     tool_call_retries: int = _env_int("KING_TOOL_CALL_RETRIES", 1)
     tool_argument_grounding_threshold: float = _env_float("KING_TOOL_ARGUMENT_GROUNDING_THRESHOLD", 0.35)
     backtick_tool_similarity_threshold: float = _env_float("KING_BACKTICK_TOOL_SIMILARITY_THRESHOLD", 0.65)
@@ -76,6 +80,9 @@ class Settings:
     external_retry_delay: float = _env_float("KING_EXTERNAL_RETRY_DELAY", 0.25)
     embedding_model: str = _env("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embed-v1")
     embedding_min_chars: int = _env_int("KING_EMBEDDING_MIN_CHARS", 7)
+    query_embedding_cache_size: int = _env_int("KING_QUERY_EMBEDDING_CACHE_SIZE", 512)
+    query_embedding_cache_file: str = _env("KING_QUERY_EMBEDDING_CACHE_FILE", "storage/query_embeddings.npy")
+    query_embedding_texts_file: str = _env("KING_QUERY_EMBEDDING_TEXTS_FILE", "storage/query_texts.json")
 
     notes_file: str = _env("KING_NOTES_FILE", "storage/notes.json")
     storage_dir: str = _env("KING_STORAGE_DIR", "storage")
@@ -96,6 +103,9 @@ class Settings:
     memory_tier_min_coverage: float = _env_float("KING_MEMORY_TIER_MIN_COVERAGE", 1.0)
     memory_query_cache_size: int = _env_int("KING_MEMORY_QUERY_CACHE_SIZE", 32)
     memory_rebuild_batch_size: int = _env_int("KING_MEMORY_REBUILD_BATCH_SIZE", 64)
+    memory_recall_k: int = _env_int("KING_MEMORY_RECALL_K", 5)
+    memory_profile_limit: int = _env_int("KING_MEMORY_PROFILE_LIMIT", 8)
+    memory_broad_recall_limit: int = _env_int("KING_MEMORY_BROAD_RECALL_LIMIT", 50)
     memory_rank_semantic_weight: float = _env_float("KING_MEMORY_RANK_SEMANTIC_WEIGHT", 0.7)
     memory_rank_importance_weight: float = _env_float("KING_MEMORY_RANK_IMPORTANCE_WEIGHT", 0.2)
     memory_rank_overlap_weight: float = _env_float("KING_MEMORY_RANK_OVERLAP_WEIGHT", 0.1)
@@ -132,6 +142,10 @@ class Settings:
     chat_polish_policy_file: str = _env("KING_CHAT_POLISH_POLICY_FILE", "memory/CHAT_POLISH_POLICY.md")
     tool_grounding_policy_file: str = _env("KING_TOOL_GROUNDING_POLICY_FILE", "tools/TOOL_GROUNDING_POLICY.md")
     context_followup_tools: str = _env("KING_CONTEXT_FOLLOWUP_TOOLS", "web_search,web_fetch,hackernews,reddit")
+    context_followup_expansion_enabled: bool = _env_bool("KING_CONTEXT_FOLLOWUP_EXPANSION_ENABLED", False)
+    capability_routing_file: str = _env("KING_CAPABILITY_ROUTING_FILE", "tools/CAPABILITY_ROUTING.md")
+    progressive_disclosure_enabled: bool = _env_bool("KING_PROGRESSIVE_DISCLOSURE_ENABLED", True)
+    progressive_disclosure_tools: str = _env("KING_PROGRESSIVE_DISCLOSURE_TOOLS", "find_tools,load_tool")
     tool_result_max_chars: int = _env_int("KING_TOOL_RESULT_MAX_CHARS", 8000)
     grounding_retry_without_tools: bool = _env_bool("KING_GROUNDING_RETRY_WITHOUT_TOOLS", True)
     local_system_action_min_score: float = _env_float("KING_LOCAL_SYSTEM_ACTION_MIN_SCORE", 0.05)
@@ -195,6 +209,10 @@ class Settings:
     scheduler_store_path: str = _env("KING_SCHEDULER_STORE_PATH", "storage/scheduler_store.json")
     scheduler_log_path: str = _env("KING_SCHEDULER_LOG_PATH", "storage/scheduler_log.jsonl")
     scheduler_check_interval_seconds: int = _env_int("KING_SCHEDULER_CHECK_INTERVAL_SECONDS", 30)
+
+    # Cognition substrate (situation, cadence, episodes, proactive)
+    cognition_config_file: str = _env("KING_COGNITION_CONFIG_FILE", "cognition/COGNITION_CONFIG.md")
+    cognition_state_path: str = _env("KING_COGNITION_STATE_PATH", "storage/cognition_state.json")
 
 
 settings = Settings()

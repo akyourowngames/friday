@@ -23,6 +23,7 @@ because the engine writes a "last run" stamp into
 ## Steps
 
 - memory_daily: enabled=true label=daily
+- cognition_scan: enabled=true use_embeddings=true
 - folder_scan: enabled=true include_summarize_pending=false
 - telegram_summary: enabled=true include_stats=true
 - scheduler_due: enabled=true horizon_minutes=1440
@@ -31,6 +32,11 @@ because the engine writes a "last run" stamp into
 
 - `memory_daily` calls `Brain.daily_maintenance(label)` which runs backup,
   rebuild, reflect, and Obsidian sync without touching agent core.
+- `cognition_scan` calls `cognition.orchestrator.run_cognition_pass(brain)` which
+  rebuilds the life-cadence model from memory activity, stitches episodes, and
+  enqueues proactive candidates from actionable cadence deviations. It only reads
+  the brain and writes `KING_COGNITION_STATE_PATH`; it never touches agent core
+  or routing. Tunables live in `cognition/COGNITION_CONFIG.md`.
 - `folder_scan` calls `IngestPipeline.daily_maintenance()` which scans the
   watched root, reconciles deleted paths, refreshes the audio playlist, and
   records the latest stats.

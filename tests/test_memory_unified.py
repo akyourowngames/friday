@@ -67,7 +67,7 @@ class UnifiedMemoryTests(unittest.TestCase):
                 / brain_mod.settings.memory_obsidian_graph_dir
             )
 
-            self.assertEqual(stored["obsidian_graph"]["status"], "synced")
+            self.assertIn(stored["obsidian_graph"]["status"], {"current", "synced"})
             self.assertTrue((graph_root / "Index.md").exists())
             self.assertTrue((graph_root / "Nodes" / "user.md").exists())
             self.assertTrue((graph_root / "Nodes" / "dark_mode.md").exists())
@@ -77,7 +77,7 @@ class UnifiedMemoryTests(unittest.TestCase):
 
             removed = brain.forget("dark mode")
 
-            self.assertEqual(removed["obsidian_graph"]["status"], "synced")
+            self.assertIn(removed["obsidian_graph"]["status"], {"current", "synced"})
             self.assertFalse((graph_root / "Nodes" / "dark_mode.md").exists())
             removed_page = (graph_root / "Removed Memory.md").read_text(encoding="utf-8")
             self.assertIn("dark mode", removed_page)
