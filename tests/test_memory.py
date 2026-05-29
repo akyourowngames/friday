@@ -64,7 +64,7 @@ def isolated_memory(fake_embed=_ones_embed, max_entries=2000, importance_min=0.0
         brain_mod.settings.memory_graph_file = "memory_graph.json"
         brain_mod.settings.memory_graph_relations_file = original["memory_graph_relations_file"]
         brain_mod.settings.memory_obsidian_sync_enabled = True
-        brain_mod.settings.memory_obsidian_vault_dir = str(Path(tmp) / "obsidian" / "King")
+        brain_mod.settings.memory_obsidian_vault_dir = str(Path(tmp) / "vault")
         brain_mod.settings.memory_obsidian_graph_dir = "Generated Memory Graph"
         brain_mod.settings.vector_store_index_path = str(memory_dir / "vector_index.faiss")
         brain_mod.settings.vector_store_metadata_path = str(memory_dir / "vector_metadata.json")

@@ -63,13 +63,12 @@ class UnifiedMemoryTests(unittest.TestCase):
             brain = brain_mod.Brain()
             stored = brain.remember("User prefers dark mode")
 
-            # The new memory worker writes to Memory/ with People/ and Facts/
+            # The memory worker writes directly to the vault root
             vault_root = Path(brain_mod.settings.memory_obsidian_vault_dir)
-            memory_vault = vault_root / "Memory"
 
             self.assertIn(stored["obsidian_graph"]["status"], {"current", "synced"})
-            self.assertTrue(memory_vault.exists())
-            self.assertTrue((memory_vault / "Index.md").exists())
+            self.assertTrue(vault_root.exists())
+            self.assertTrue((vault_root / "Index.md").exists())
 
 
 if __name__ == "__main__":

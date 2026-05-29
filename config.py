@@ -119,7 +119,7 @@ class Settings:
     memory_graph_fallback_tier: str = _env("KING_MEMORY_GRAPH_FALLBACK_TIER", "semantic")
     memory_auto_relations_enabled: bool = _env_bool("KING_MEMORY_AUTO_RELATIONS_ENABLED", True)
     memory_obsidian_sync_enabled: bool = _env_bool("KING_MEMORY_OBSIDIAN_SYNC_ENABLED", True)
-    memory_obsidian_vault_dir: str = _env("KING_MEMORY_OBSIDIAN_VAULT_DIR", "obsidian/King")
+    memory_obsidian_vault_dir: str = _env("KING_MEMORY_OBSIDIAN_VAULT_DIR", "C:/Users/anime/Documents/King Memory")
     memory_obsidian_graph_dir: str = _env("KING_MEMORY_OBSIDIAN_GRAPH_DIR", "Generated Memory Graph")
     memory_store_enabled: bool = _env_bool("KING_MEMORY_STORE_ENABLED", True)
     memory_store_notify: bool = _env_bool("KING_MEMORY_STORE_NOTIFY", False)

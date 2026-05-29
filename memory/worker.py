@@ -32,7 +32,9 @@ def _vault_root() -> Path:
 
 
 def _memory_vault() -> Path:
-    return _vault_root() / "Memory"
+    """The vault IS the memory vault — no subfolder. This way Obsidian's graph
+    view shows only memory nodes, not project/system clutter."""
+    return _vault_root()
 
 
 def _atomic_write(path: Path, content: str):
