@@ -1,12 +1,11 @@
-"""Memory Worker — LLM-powered Obsidian memory vault builder.
+"""Memory Worker — Obsidian memory vault builder.
 
-Triggered when KING stores a new memory. Uses the LLM with a dedicated system
-prompt to write rich, detailed, human-readable Obsidian notes from raw memory
-facts. The LLM organizes, infers context, and formats each person/fact page
-as a proper knowledge note — not a raw dump.
+Triggered when KING stores a new memory. Builds human-readable Obsidian notes
+from raw memory facts and graph edges. Optional LLM enrichment is config-gated
+so the default vault stays grounded in stored evidence.
 
 Vault structure:
-    People/         LLM-written person profiles with all known context
+    People/         Person profiles built from graph facts and relationships
     Facts/          Standalone facts with connections and context
     Timeline/       Date-grouped memory entries for chronological browsing
     Index.md        Dashboard with people, stats, and recent memories
@@ -37,6 +36,7 @@ Rules:
 - Include a "Last updated" line at the bottom
 - Keep it concise but complete — every fact should appear somewhere
 - Do NOT invent facts. Only use what is provided.
+- When Other known people is not "none", reference only supported relationships and never say no other people are known.
 - Do NOT add disclaimers or meta-commentary about the note itself.
 - Use Obsidian frontmatter (---) with type, name, and updated fields.
 - End with a link back to [[Index]]
@@ -101,9 +101,18 @@ def _wiki_link(text: str, folder: str = "") -> str:
     return f"[[{name}]]"
 
 
+def _strip_markdown_fence(content: str) -> str:
+    lines = str(content or "").strip().splitlines()
+    if len(lines) >= 2 and lines[0].strip().startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return str(content or "").strip()
+
+
 def _llm_call(system: str, user_content: str, max_tokens: int = 800) -> str | None:
     """Make a one-shot LLM call. Returns None on failure (graceful degradation).
     Skips entirely if no API key is configured or vault is in a temp directory."""
+    if not settings.memory_obsidian_llm_pages_enabled:
+        return None
     if not settings.nim_api_key or not settings.nim_api_key.strip():
         return None
     # Skip LLM in test environments (temp vault paths)
@@ -128,7 +137,7 @@ def _llm_call(system: str, user_content: str, max_tokens: int = 800) -> str | No
             temperature=0.2,
             max_tokens=max_tokens,
         )
-        return resp.choices[0].message.content.strip()
+        return _strip_markdown_fence(resp.choices[0].message.content)
     except Exception:
         return None
 
@@ -174,6 +183,7 @@ Raw facts:
 def _build_person_page_fallback(name: str, facts: list[dict], graph: dict) -> str:
     """Fallback person page when LLM is unavailable."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    nodes = graph.get("nodes", {})
     lines = [
         "---",
         f"type: person",
@@ -183,9 +193,13 @@ def _build_person_page_fallback(name: str, facts: list[dict], graph: dict) -> st
         "",
         f"# {name}",
         "",
+        "## Facts",
+        "",
     ]
     seen = set()
     dates = set()
+    relationship_lines = []
+    relationship_seen = set()
     for fact in facts:
         text = fact.get("text", "").strip()
         if not text or text in seen:
@@ -198,6 +212,27 @@ def _build_person_page_fallback(name: str, facts: list[dict], graph: dict) -> st
         if date:
             entry += f" *({date})*"
         lines.append(entry)
+        for edge in fact.get("_resolved_edges", []):
+            source = nodes.get(edge.get("source", ""), {})
+            target = nodes.get(edge.get("target", ""), {})
+            source_name = source.get("name", "")
+            target_name = target.get("name", "")
+            relation = str(edge.get("relation", "related_to")).replace("_", " ").strip() or "related to"
+            if source_name == name and target_name:
+                other = _wiki_link(target_name, "People") if target.get("type") == "person" else target_name
+                relation_line = f"- {relation}: {other}"
+            elif target_name == name and source_name:
+                other = _wiki_link(source_name, "People") if source.get("type") == "person" else source_name
+                relation_line = f"- {other}: {relation}"
+            else:
+                continue
+            if relation_line not in relationship_seen:
+                relationship_seen.add(relation_line)
+                relationship_lines.append(relation_line)
+
+    if relationship_lines:
+        lines.extend(["", "## Relationships", ""])
+        lines.extend(relationship_lines)
 
     if dates:
         lines.extend(["", "## Timeline", ""])

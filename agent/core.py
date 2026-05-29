@@ -270,11 +270,37 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
         msg = f"'{func_name}' is not an available tool. Available: {available}. Use one of them."
         return None, msg
 
+    func_args = _repair_schema_argument_names(actual, func_args)
     return {
         "id": f"call_{int(time.time() * 1000)}",
         "name": actual,
         "arguments": json.dumps(func_args),
     }, None
+
+
+def _repair_schema_argument_names(tool_name: str, args: dict) -> dict:
+    if not isinstance(args, dict):
+        return {}
+    registered = get_tool(tool_name)
+    if not registered:
+        return args
+    parameters = registered.get("parameters", {})
+    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+    if not isinstance(properties, dict) or not properties:
+        return args
+    accepted = set(properties.keys())
+    unknown = [key for key in args.keys() if key not in accepted]
+    required = parameters.get("required", []) if isinstance(parameters, dict) else []
+    missing_required = [
+        key
+        for key in required
+        if key in accepted and key not in args
+    ]
+    if len(unknown) == 1 and len(missing_required) == 1:
+        repaired = dict(args)
+        repaired[missing_required[0]] = repaired.pop(unknown[0])
+        return repaired
+    return args
 
 
 def _json_tool_leak_message(text: str, schemas: list) -> str | None:
@@ -395,6 +421,37 @@ def _loaded_tools_from_result(result) -> list[dict]:
     if isinstance(names, list):
         return [{"name": str(n)} for n in names if str(n).strip()]
     return []
+
+
+def _discovered_tools_from_result(result, limit: int = 1) -> list[dict]:
+    text = result if isinstance(result, str) else _tool_result_content(result)
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    payload = parsed.get("result", parsed)
+    if not isinstance(payload, dict):
+        return []
+    matches = payload.get("matches")
+    if not isinstance(matches, list):
+        return []
+    entries = []
+    for item in matches:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("backing_tool") or item.get("name") or "").strip()
+        if not name:
+            continue
+        entry = {"name": name}
+        slug = str(item.get("tool_slug") or "").strip()
+        if slug:
+            entry["tool_slug"] = slug
+        entries.append(entry)
+        if len(entries) >= max(1, limit):
+            break
+    return entries
 
 
 def _build_system_prompt(
@@ -1798,7 +1855,12 @@ class Agent:
         ):
             context = None
 
-        if context and not _looks_like_actionable_request(user_input, q_emb):
+        if (
+            context
+            and selected_tools
+            and _selected_tools_allow_memory_context(selected_tools)
+            and not _looks_like_actionable_request(user_input, q_emb)
+        ):
             selected_tools = []
         elif context and _selected_tools_are_memory_recall_only(selected_tools):
             selected_tools = []
@@ -1817,15 +1879,17 @@ class Agent:
         # avoids bloating every model call while preserving the false-negative
         # escape hatch.
         router_decision = self.router.last_decision()
-        disclosure_names = (
-            _progressive_disclosure_tool_names()
-            if (
-                not memory_facts
-                and _should_expose_progressive_disclosure(selected_tools, router_decision)
-                and _looks_like_actionable_request(user_input, q_emb)
-            )
-            else []
-        )
+        progressive_names = _progressive_disclosure_tool_names()
+        selected_tool_names = {t.get("name") for t in selected_tools}
+        disclosure_names = []
+        if selected_tool_names & set(progressive_names):
+            disclosure_names = progressive_names
+        elif (
+            not memory_facts
+            and _should_expose_progressive_disclosure(selected_tools, router_decision)
+            and _looks_like_actionable_request(user_input, q_emb)
+        ):
+            disclosure_names = progressive_names
         loaded_tool_names: set[str] = set()
         if disclosure_names:
             existing = {t.get("name") for t in selected_tools}
@@ -2068,7 +2132,9 @@ class Agent:
                     except json.JSONDecodeError as e:
                         results[fc["id"]] = f"Error: {e}"
                         continue
+                    args = _repair_schema_argument_names(name, args)
                     name, args = _repair_contextual_tool_call(name, args, user_input, self.messages[:-1])
+                    args = _repair_schema_argument_names(name, args)
                     fc["function"]["name"] = name
                     fc["function"]["arguments"] = json.dumps(args, ensure_ascii=False)
                     args = _prepare_tool_args_for_answer(name, args)
@@ -2155,9 +2221,12 @@ class Agent:
             loaded_slug_notes = []
             if disclosure_active:
                 for fc in formatted_calls:
-                    if fc["function"]["name"] != "load_tool":
+                    if fc["function"]["name"] == "load_tool":
+                        loaded_entries = _loaded_tools_from_result(results.get(fc["id"], ""))
+                    elif fc["function"]["name"] == "find_tools":
+                        loaded_entries = _discovered_tools_from_result(results.get(fc["id"], ""))
+                    else:
                         continue
-                    loaded_entries = _loaded_tools_from_result(results.get(fc["id"], ""))
                     for entry in loaded_entries:
                         loaded_name = entry.get("name", "")
                         if not loaded_name or loaded_name in loaded_tool_names:

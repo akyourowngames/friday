@@ -70,6 +70,63 @@ class UnifiedMemoryTests(unittest.TestCase):
             self.assertTrue(vault_root.exists())
             self.assertTrue((vault_root / "Index.md").exists())
 
+    @patch.object(brain_mod, "embed", _ones_embed)
+    def test_relationship_facts_create_person_pages(self):
+        with isolated_memory():
+            brain = brain_mod.Brain()
+            self.assertTrue(brain.commit("Ankita is my girlfriend"))
+            self.assertTrue(brain.commit("User has a friend named Rai Bud"))
+            self.assertTrue(
+                brain.commit("Ankita does not know that Rai is my friend, but Rai knows about Ankita")
+            )
+
+            nodes = brain._graph.get("nodes", {})
+            self.assertEqual(nodes.get("ankita", {}).get("type"), "person")
+            self.assertEqual(nodes.get("rai_bud", {}).get("type"), "person")
+            self.assertEqual(nodes.get("rai", {}).get("type"), "person")
+
+            vault_root = Path(brain_mod.settings.memory_obsidian_vault_dir)
+            ankita_page = (vault_root / "People" / "Ankita.md").read_text(encoding="utf-8")
+            rai_bud_page = (vault_root / "People" / "Rai Bud.md").read_text(encoding="utf-8")
+            self.assertTrue(ankita_page.startswith("---"))
+            self.assertTrue(rai_bud_page.startswith("---"))
+            self.assertNotIn("```", ankita_page)
+            self.assertNotIn("```", rai_bud_page)
+            self.assertIn("- User has a friend named Rai Bud", rai_bud_page)
+            timeline = (vault_root / "Timeline" / f"{brain.memories[-1].get('_date')}.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("[[People/Ankita|Ankita]]", timeline)
+            self.assertIn("[[People/Rai Bud|Rai Bud]]", timeline)
+
+    @patch.object(brain_mod, "embed", _ones_embed)
+    def test_graph_rebuild_replaces_relationship_fallback_edges(self):
+        with isolated_memory():
+            brain = brain_mod.Brain()
+            self.assertTrue(brain.commit("Ankita is my girlfriend"))
+            memory = brain.memories[-1]
+            old_target = brain._ensure_graph_node(memory["text"], "memory", memory.get("importance", 0.5))
+            old_edge = brain._edge_id("user", "remembers", old_target)
+            brain._graph["edges"] = [
+                {
+                    "id": old_edge,
+                    "source": "user",
+                    "target": old_target,
+                    "relation": "remembers",
+                    "memory_id": memory["id"],
+                    "active": True,
+                }
+            ]
+            brain._graph["memory_links"] = {memory["id"]: [old_edge]}
+            memory["graph_edges"] = [old_edge]
+            memory["graph_nodes"] = ["user", old_target]
+
+            report = brain.maintain(rebuild=True, backup=False)
+
+            self.assertTrue(report.get("graph_rebuilt"))
+            self.assertEqual(brain._graph.get("nodes", {}).get("ankita", {}).get("type"), "person")
+            self.assertNotIn(old_target, memory.get("graph_nodes", []))
+
 
 if __name__ == "__main__":
     unittest.main()

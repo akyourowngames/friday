@@ -16,8 +16,28 @@ Modes:
 - `temporal`: a newer edge supersedes older active edges with the same source
   and relation when the target changes.
 
+## Person Relations
+
+- friend
+- girlfriend
+- boyfriend
+- partner
+- crush
+- knows_about
+
 ## Rules
 
+- User has a friend named {object} => User|friend|{object}|semantic|multi
+- User has friend named {object} => User|friend|{object}|semantic|multi
+- My friend is {object} => User|friend|{object}|semantic|multi
+- {subject} is my friend => User|friend|{subject}|semantic|multi
+- My girlfriend is {object} => User|girlfriend|{object}|semantic|temporal
+- {subject} is my girlfriend => User|girlfriend|{subject}|semantic|temporal
+- My boyfriend is {object} => User|boyfriend|{object}|semantic|temporal
+- {subject} is my boyfriend => User|boyfriend|{subject}|semantic|temporal
+- My partner is {object} => User|partner|{object}|semantic|temporal
+- {subject} is my partner => User|partner|{subject}|semantic|temporal
+- {subject} does not know that {object} is my friend, but {object} knows about {subject} => {object}|knows_about|{subject}|semantic|multi
 - User likes {object} => User|likes|{object}|preference|multi
 - User prefers {object} => User|prefers|{object}|preference|multi
 - User dislikes {object} => User|dislikes|{object}|preference|multi

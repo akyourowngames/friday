@@ -16,6 +16,7 @@ from agent.core import (
     _has_backtick_tool_call,
     _json_tool_leak_message,
     _load_tool_policy,
+    _repair_schema_argument_names,
     _tool_call_grounded,
     _try_parse_json_tool_call,
 )
@@ -137,6 +138,25 @@ class GroundingTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(call["name"], "reddit")
         self.assertEqual(json.loads(call["arguments"])["action"], "front")
+
+    def test_json_tool_call_repairs_single_required_parameter_from_schema(self):
+        schemas = [self._schema("load_tool")]
+        call, error = _try_parse_json_tool_call(
+            '{"name":"load_tool","parameters":{"tool_name":"playlist"}}',
+            schemas,
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(call["name"], "load_tool")
+        self.assertEqual(json.loads(call["arguments"])["names"], "playlist")
+
+    def test_schema_argument_repair_is_not_fuzzy_tool_mapping(self):
+        repaired = _repair_schema_argument_names(
+            "terminal",
+            {"command": "echo ok", "surprise": "no"},
+        )
+
+        self.assertEqual(repaired, {"command": "echo ok", "surprise": "no"})
 
     def test_unregistered_json_tool_shape_is_not_printed_raw(self):
         message = _json_tool_leak_message(
