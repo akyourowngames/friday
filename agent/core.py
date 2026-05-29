@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +25,69 @@ console = Console()
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona.md"
 TOOL_POLICY_PATH = Path(__file__).resolve().parent.parent / "tool_policy.md"
 ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.md"
+
+
+# ─── Pre-computed routing text embeddings ────────────────────────────────────
+# All the routing policy texts that get compared against q_emb are embedded
+# once in a single batch on first access. This eliminates repeated ONNX
+# inference calls that were the main source of the pre-answer gap.
+
+class _RouteEmbeddings:
+    """Lazy singleton that pre-embeds all routing policy texts in one batch."""
+    _instance = None
+    _vectors: dict[str, np.ndarray] = {}
+
+    @classmethod
+    def get(cls) -> "_RouteEmbeddings":
+        if cls._instance is None:
+            cls._instance = cls()
+            cls._instance._build()
+        return cls._instance
+
+    def _build(self):
+        from .router import _load_routing_section, ROUTING_POLICY_PATH as RP
+        texts = {
+            "banter": _load_routing_policy_section_raw("Conversational Banter Text", "The user is reacting, joking, or continuing casual chat."),
+            "actionable": _load_routing_policy_section_raw("Actionable Request Text", "The user wants something done."),
+            "memory_recall": _load_routing_policy_section_raw("Memory Recall Text", "The user asks what the assistant remembers about them."),
+            "no_memory_small_talk": _load_routing_policy_section_raw("No Memory Small Talk Text", "The user is greeting or chatting casually."),
+            "broad_recall": _load_routing_policy_section_raw("Broad Memory Recall Text", "The user asks for a broad overview of remembered facts."),
+            "specific_recall": _load_routing_policy_section_raw("Specific Memory Recall Text", "The user asks for one particular remembered fact."),
+            "proactive_memory": _load_routing_policy_section_raw("Proactive Memory Context Text", "The user is casually checking in or continuing personal context where one relevant remembered fact would help."),
+            "followup": _load_routing_policy_section_raw("Context Follow-Up Text", "The user is asking to continue the previous result."),
+            "new_topic": _load_routing_policy_section_raw("New Topic Text", "The user is giving a fresh standalone topic."),
+            "system_control": _load_routing_policy_section_raw("Local System Control Text", "The user wants to change volume, brightness, or media."),
+            "incomplete": _load_routing_policy_section_raw("Incomplete Utterance Text", "The user trailed off or left the object unstated."),
+            "correction": _load_routing_policy_section_raw("Action Correction Text", "The user says the previous action was wrong."),
+        }
+        # Batch embed all texts in one ONNX call.
+        keys = list(texts.keys())
+        values = [texts[k] for k in keys]
+        embeddings = embed(values)
+        if embeddings.ndim == 1:
+            embeddings = embeddings.reshape(1, -1)
+        for i, key in enumerate(keys):
+            self._vectors[key] = embeddings[i]
+
+    def v(self, name: str) -> np.ndarray:
+        return self._vectors[name]
+
+
+def _load_routing_policy_section_raw(heading: str, fallback: str) -> str:
+    """Load a section from routing_policy.md (no caching wrapper needed here)."""
+    if not ROUTING_POLICY_PATH.exists():
+        return fallback
+    targets = {f"# {heading}".casefold(), f"## {heading}".casefold()}
+    lines = []
+    in_section = False
+    for raw_line in ROUTING_POLICY_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("# ") or line.startswith("## "):
+            in_section = line.casefold() in targets
+            continue
+        if in_section and line:
+            lines.append(line)
+    return " ".join(lines).strip() or fallback
 
 
 def _debug_safe(text) -> str:
@@ -206,11 +270,37 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
         msg = f"'{func_name}' is not an available tool. Available: {available}. Use one of them."
         return None, msg
 
+    func_args = _repair_schema_argument_names(actual, func_args)
     return {
         "id": f"call_{int(time.time() * 1000)}",
         "name": actual,
         "arguments": json.dumps(func_args),
     }, None
+
+
+def _repair_schema_argument_names(tool_name: str, args: dict) -> dict:
+    if not isinstance(args, dict):
+        return {}
+    registered = get_tool(tool_name)
+    if not registered:
+        return args
+    parameters = registered.get("parameters", {})
+    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+    if not isinstance(properties, dict) or not properties:
+        return args
+    accepted = set(properties.keys())
+    unknown = [key for key in args.keys() if key not in accepted]
+    required = parameters.get("required", []) if isinstance(parameters, dict) else []
+    missing_required = [
+        key
+        for key in required
+        if key in accepted and key not in args
+    ]
+    if len(unknown) == 1 and len(missing_required) == 1:
+        repaired = dict(args)
+        repaired[missing_required[0]] = repaired.pop(unknown[0])
+        return repaired
+    return args
 
 
 def _json_tool_leak_message(text: str, schemas: list) -> str | None:
@@ -333,6 +423,37 @@ def _loaded_tools_from_result(result) -> list[dict]:
     return []
 
 
+def _discovered_tools_from_result(result, limit: int = 1) -> list[dict]:
+    text = result if isinstance(result, str) else _tool_result_content(result)
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    payload = parsed.get("result", parsed)
+    if not isinstance(payload, dict):
+        return []
+    matches = payload.get("matches")
+    if not isinstance(matches, list):
+        return []
+    entries = []
+    for item in matches:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("backing_tool") or item.get("name") or "").strip()
+        if not name:
+            continue
+        entry = {"name": name}
+        slug = str(item.get("tool_slug") or "").strip()
+        if slug:
+            entry["tool_slug"] = slug
+        entries.append(entry)
+        if len(entries) >= max(1, limit):
+            break
+    return entries
+
+
 def _build_system_prompt(
     selected_tools,
     recent_action_context: str = "",
@@ -426,6 +547,15 @@ def _build_system_prompt(
                 "Fragment Follow-Up Rules",
                 "Short reactions refer to your previous answer; clarify instead of refusing.",
             ))
+    if memory_facts:
+        lines.append("")
+        lines.append(
+            "Memory answer priority: if the Known facts for this turn answer the user's question, "
+            "answer from those facts and do not replace them with general-world knowledge. "
+            "For names, relationships, preferences, places, or ongoing situations, the matching known fact is the answer."
+        )
+        lines.append("Known facts for this turn:")
+        lines.append(memory_facts)
     return "\n".join(lines)
 
 
@@ -520,14 +650,11 @@ def _looks_like_context_followup(text: str, q_emb=None) -> bool:
     text = str(text or "").strip()
     if not text:
         return False
-    followup_text, new_topic_text = _context_followup_texts()
     try:
         text_emb = q_emb if q_emb is not None else embed(text)
-        compare_embs = embed([followup_text, new_topic_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        followup_score = float(np.dot(compare_embs[0], text_emb))
-        new_topic_score = float(np.dot(compare_embs[1], text_emb))
+        re = _RouteEmbeddings.get()
+        followup_score = float(np.dot(re.v("followup"), text_emb))
+        new_topic_score = float(np.dot(re.v("new_topic"), text_emb))
     except Exception:
         return False
     return followup_score >= new_topic_score
@@ -536,23 +663,47 @@ def _looks_like_context_followup(text: str, q_emb=None) -> bool:
 def _should_use_memory_context(user_input: str, q_emb, selected_tools: list) -> bool:
     if q_emb is None:
         return False
-    memory_text, small_talk_text = _memory_context_texts()
     try:
-        compare_embs = embed([memory_text, small_talk_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        memory_score = float(np.dot(compare_embs[0], q_emb))
-        small_talk_score = float(np.dot(compare_embs[1], q_emb))
+        re = _RouteEmbeddings.get()
+        memory_score = float(np.dot(re.v("memory_recall"), q_emb))
+        small_talk_score = float(np.dot(re.v("no_memory_small_talk"), q_emb))
     except Exception:
         return False
     if memory_score <= small_talk_score:
         return False
     if selected_tools:
-        memory_tools = {"memory_recall", "memory_assess", "memory_remember", "memory_forget"}
-        selected_names = {tool.get("name", "") for tool in selected_tools}
-        if selected_names and not selected_names <= memory_tools:
+        if not _selected_tools_allow_memory_context(selected_tools):
             return False
     return True
+
+
+def _selected_tools_allow_memory_context(selected_tools: list) -> bool:
+    memory_tools = {"memory_recall", "memory_assess", "memory_remember", "memory_forget"}
+    selected_names = {tool.get("name", "") for tool in selected_tools}
+    return not selected_names or selected_names <= memory_tools
+
+
+def _selected_tools_are_memory_recall_only(selected_tools: list) -> bool:
+    selected_names = {tool.get("name", "") for tool in selected_tools}
+    return bool(selected_names) and selected_names <= {"memory_recall"}
+
+
+def _should_use_proactive_memory_context(user_input: str, q_emb, selected_tools: list) -> bool:
+    if not settings.proactive_memory_context_enabled or q_emb is None:
+        return False
+    if not _selected_tools_allow_memory_context(selected_tools):
+        return False
+    try:
+        route_embeddings = _RouteEmbeddings.get()
+        proactive_score = float(np.dot(route_embeddings.v("proactive_memory"), q_emb))
+        small_talk_score = float(np.dot(route_embeddings.v("no_memory_small_talk"), q_emb))
+        actionable_score = float(np.dot(route_embeddings.v("actionable"), q_emb))
+    except Exception:
+        return False
+    if actionable_score > proactive_score:
+        return False
+    margin = max(0.0, float(settings.proactive_memory_context_margin))
+    return proactive_score + margin >= small_talk_score
 
 
 def _should_use_profile_context(user_input: str, q_emb, last_profile_context: bool = False) -> bool:
@@ -560,13 +711,10 @@ def _should_use_profile_context(user_input: str, q_emb, last_profile_context: bo
         return False
     if last_profile_context and _looks_like_context_followup(user_input):
         return True
-    broad_text, specific_text = _memory_scope_texts()
     try:
-        compare_embs = embed([broad_text, specific_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        broad_score = float(np.dot(compare_embs[0], q_emb))
-        specific_score = float(np.dot(compare_embs[1], q_emb))
+        re = _RouteEmbeddings.get()
+        broad_score = float(np.dot(re.v("broad_recall"), q_emb))
+        specific_score = float(np.dot(re.v("specific_recall"), q_emb))
     except Exception:
         return False
     return broad_score >= specific_score
@@ -759,6 +907,23 @@ def _forced_contextual_tool_call(user_input: str, tool_schemas: list, messages: 
     }
 
 
+def _forced_hint_tool_call(capability_hint: dict | None, tool_schemas: list) -> dict | None:
+    if not capability_hint or not capability_hint.get("direct"):
+        return None
+    tool_name = str(capability_hint.get("tool") or "").strip()
+    args = capability_hint.get("args")
+    if not tool_name or not isinstance(args, dict):
+        return None
+    available = {schema["function"]["name"] for schema in tool_schemas}
+    if tool_name not in available:
+        return None
+    return {
+        "id": f"call_{tool_name}_hint",
+        "name": tool_name,
+        "arguments": json.dumps(args, ensure_ascii=False),
+    }
+
+
 def _forced_folder_watcher_call(user_input: str, tool_schemas: list, messages: list | None = None) -> dict | None:
     if len(tool_schemas) != 1:
         return None
@@ -831,10 +996,13 @@ def _should_keep_memory_context(
     q_emb,
     selected_tools: list,
     router_decision: dict,
+    proactive_context_requested: bool = False,
 ) -> bool:
     if not context:
         return False
     if _memory_context_has_graph(context):
+        return True
+    if proactive_context_requested:
         return True
     if _should_suppress_memory_context(router_decision):
         return _should_use_memory_context(user_input, q_emb, selected_tools)
@@ -952,8 +1120,6 @@ def _build_tool_answer_instruction(user_input: str, tool_names: list[str]) -> st
 
 
 def _direct_answer_from_tool_result(tool_name: str, result_content: str) -> str:
-    if tool_name != "folder_watcher":
-        return ""
     try:
         parsed = json.loads(result_content or "{}")
     except (TypeError, json.JSONDecodeError):
@@ -963,7 +1129,7 @@ def _direct_answer_from_tool_result(tool_name: str, result_content: str) -> str:
     result = parsed.get("result")
     if not isinstance(result, dict):
         return ""
-    answer = str(result.get("answer") or "").strip()
+    answer = str(result.get("answer") or result.get("text") or "").strip()
     data = result.get("data") if isinstance(result.get("data"), dict) else {}
     if not answer:
         answer = str(data.get("answer") or "").strip()
@@ -1031,18 +1197,33 @@ def _looks_like_conversational_banter(user_input: str, q_emb) -> bool:
         return False
     if _looks_like_local_system_control(text, q_emb) or _looks_like_action_correction(text, []):
         return False
-    small_talk_text = _memory_context_texts()[1]
     try:
-        compare_embs = embed([_conversational_banter_text(), _actionable_request_text(), small_talk_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        banter_score = float(np.dot(compare_embs[0], q_emb))
-        action_score = float(np.dot(compare_embs[1], q_emb))
-        chat_score = float(np.dot(compare_embs[2], q_emb))
+        re = _RouteEmbeddings.get()
+        banter_score = float(np.dot(re.v("banter"), q_emb))
+        action_score = float(np.dot(re.v("actionable"), q_emb))
+        chat_score = float(np.dot(re.v("no_memory_small_talk"), q_emb))
     except Exception:
         return False
     conversational_score = max(banter_score, chat_score)
     return conversational_score >= action_score and conversational_score >= settings.tool_similarity_threshold
+
+
+def _looks_like_actionable_request(user_input: str, q_emb) -> bool:
+    text = str(user_input or "").strip()
+    if not text or q_emb is None:
+        return False
+    try:
+        route_embeddings = _RouteEmbeddings.get()
+        action_score = float(np.dot(route_embeddings.v("actionable"), q_emb))
+        banter_score = float(np.dot(route_embeddings.v("banter"), q_emb))
+        chat_score = float(np.dot(route_embeddings.v("no_memory_small_talk"), q_emb))
+        memory_score = float(np.dot(route_embeddings.v("memory_recall"), q_emb))
+    except Exception:
+        return False
+    return (
+        action_score >= settings.tool_similarity_threshold
+        and action_score >= max(banter_score, chat_score, memory_score)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -1065,16 +1246,10 @@ def _looks_like_incomplete_utterance(user_input: str, q_emb) -> bool:
     if q_emb is None:
         return False
     try:
-        compare_embs = embed([
-            _incomplete_utterance_text(),
-            _context_followup_texts()[1],
-            _actionable_request_text(),
-        ])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        incomplete_score = float(np.dot(compare_embs[0], q_emb))
-        new_topic_score = float(np.dot(compare_embs[1], q_emb))
-        action_score = float(np.dot(compare_embs[2], q_emb))
+        re = _RouteEmbeddings.get()
+        incomplete_score = float(np.dot(re.v("incomplete"), q_emb))
+        new_topic_score = float(np.dot(re.v("new_topic"), q_emb))
+        action_score = float(np.dot(re.v("actionable"), q_emb))
         return (
             incomplete_score >= settings.tool_similarity_threshold
             and incomplete_score >= new_topic_score
@@ -1210,21 +1385,12 @@ def _looks_like_local_system_control(user_input: str, q_emb) -> bool:
     text = str(user_input or "").strip()
     if not text or q_emb is None:
         return False
-    system_text = _local_system_control_text()
-    small_talk_text = _memory_context_texts()[1]
-    memory_text = _memory_context_texts()[0]
-    action_text = _load_routing_policy_section(
-        "Actionable Request Text",
-        "The user wants something done.",
-    )
     try:
-        compare_embs = embed([system_text, small_talk_text, memory_text, action_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        system_score = float(np.dot(compare_embs[0], q_emb))
-        chat_score = float(np.dot(compare_embs[1], q_emb))
-        memory_score = float(np.dot(compare_embs[2], q_emb))
-        action_score = float(np.dot(compare_embs[3], q_emb))
+        re = _RouteEmbeddings.get()
+        system_score = float(np.dot(re.v("system_control"), q_emb))
+        chat_score = float(np.dot(re.v("no_memory_small_talk"), q_emb))
+        memory_score = float(np.dot(re.v("memory_recall"), q_emb))
+        action_score = float(np.dot(re.v("actionable"), q_emb))
     except Exception:
         return False
     if action_score < settings.local_system_action_min_score:
@@ -1263,15 +1429,15 @@ def _looks_like_action_correction(user_input: str, messages: list) -> bool:
     text = str(user_input or "").strip()
     if not text:
         return False
-    correction_text = _action_correction_text()
-    new_topic_text = _context_followup_texts()[1]
+    # Short negatives are corrections when they follow an action
+    lower = text.lower().strip("!?. ")
+    if lower in ("no", "nope", "nah", "wrong", "not working", "still wrong", "try again", "didnt work"):
+        return True
     try:
+        re = _RouteEmbeddings.get()
         text_emb = embed(text)
-        compare_embs = embed([correction_text, new_topic_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        correction_score = float(np.dot(compare_embs[0], text_emb))
-        new_topic_score = float(np.dot(compare_embs[1], text_emb))
+        correction_score = float(np.dot(re.v("correction"), text_emb))
+        new_topic_score = float(np.dot(re.v("new_topic"), text_emb))
     except Exception:
         return False
     text_terms = _query_terms(text)
@@ -1279,22 +1445,7 @@ def _looks_like_action_correction(user_input: str, messages: list) -> bool:
         return False
     if correction_score >= settings.tool_similarity_threshold:
         return True
-    if len(text_terms) > 2:
-        return False
-
-    context = text
-    for msg in reversed(messages):
-        if msg.get("role") == "assistant":
-            prior = str(msg.get("content") or "").strip()
-            if prior:
-                context = f"{text}\n{prior[:300]}"
-                break
-    try:
-        correction_emb = embed(correction_text)
-        sample_emb = embed(context)
-        return float(np.dot(correction_emb, sample_emb)) >= settings.tool_similarity_threshold
-    except Exception:
-        return False
+    return False
 
 
 def _strip_memory_prefix(content: str) -> str:
@@ -1524,7 +1675,6 @@ class Agent:
         self.validator = ToolValidator()
         self.verifier = Verifier()
         self.brain = Brain()
-        self._executor = ThreadPoolExecutor(max_workers=3)
         self._memory_extraction_messages = []
         self._last_memory_profile_context = False
 
@@ -1579,6 +1729,23 @@ class Agent:
             return f"By the way — I noticed something about {node} ({kind}). Want me to tell you more?"
         except Exception:
             return None
+
+    def _run_proactive(self, content: str, emit_chunk=None):
+        """Run proactive check in background thread."""
+        try:
+            note = self._check_proactive()
+            if note:
+                if emit_chunk:
+                    emit_chunk("\n\n" + note)
+                else:
+                    print(f"\n{note}", flush=True)
+        except Exception:
+            pass
+
+    def _submit_background(self, func, *args):
+        thread = threading.Thread(target=func, args=args, daemon=True)
+        thread.start()
+        return thread
 
     def _maybe_summarize(self):
         if count_messages_tokens(self.messages) < MAX_CONTEXT_TOKENS:
@@ -1659,8 +1826,20 @@ class Agent:
 
         memory_profile_context = False
         memory_context_requested = False
+        proactive_context_requested = False
+        conversational_context_requested = False
         if need_context:
             memory_context_requested = _should_use_memory_context(user_input, q_emb, selected_tools)
+            proactive_context_requested = (
+                not memory_context_requested
+                and _should_use_proactive_memory_context(user_input, q_emb, selected_tools)
+            )
+            conversational_context_requested = (
+                not selected_tools
+                and not memory_context_requested
+                and not proactive_context_requested
+                and not _looks_like_actionable_request(user_input, q_emb)
+            )
             memory_profile_context = _should_use_profile_context(
                 user_input,
                 q_emb,
@@ -1677,14 +1856,29 @@ class Agent:
 
         if context and memory_profile_context:
             pass
-        elif not memory_context_requested or not _should_keep_memory_context(
+        elif not (
+            memory_context_requested
+            or proactive_context_requested
+            or conversational_context_requested
+        ) or not _should_keep_memory_context(
             context,
             user_input,
             q_emb,
             selected_tools,
             self.router.last_decision(),
+            proactive_context_requested=proactive_context_requested or conversational_context_requested,
         ):
             context = None
+
+        if (
+            context
+            and selected_tools
+            and _selected_tools_allow_memory_context(selected_tools)
+            and not _looks_like_actionable_request(user_input, q_emb)
+        ):
+            selected_tools = []
+        elif context and _selected_tools_are_memory_recall_only(selected_tools):
+            selected_tools = []
 
         selected_tools = _filter_tools_for_conversation(user_input, q_emb, selected_tools)
         selected_tools = _prefer_folder_watcher_for_folder_context(user_input, q_emb, selected_tools)
@@ -1700,11 +1894,17 @@ class Agent:
         # avoids bloating every model call while preserving the false-negative
         # escape hatch.
         router_decision = self.router.last_decision()
-        disclosure_names = (
-            _progressive_disclosure_tool_names()
-            if _should_expose_progressive_disclosure(selected_tools, router_decision)
-            else []
-        )
+        progressive_names = _progressive_disclosure_tool_names()
+        selected_tool_names = {t.get("name") for t in selected_tools}
+        disclosure_names = []
+        if selected_tool_names & set(progressive_names):
+            disclosure_names = progressive_names
+        elif (
+            not memory_facts
+            and _should_expose_progressive_disclosure(selected_tools, router_decision)
+            and _looks_like_actionable_request(user_input, q_emb)
+        ):
+            disclosure_names = progressive_names
         loaded_tool_names: set[str] = set()
         if disclosure_names:
             existing = {t.get("name") for t in selected_tools}
@@ -1718,8 +1918,12 @@ class Agent:
         selected_names = {t.get("name") for t in selected_tools}
         for hint_tool in selected_names:
             hint = self.router.capability_hint(hint_tool)
-            if hint.get("args", {}).get("tool_slug"):
-                capability_hint = {"tool": hint_tool, "args": hint["args"]}
+            if hint.get("args"):
+                capability_hint = {
+                    "tool": hint_tool,
+                    "args": hint["args"],
+                    "direct": bool(hint.get("direct")),
+                }
                 break
 
         self.messages.append({"role": "user", "content": user_input})
@@ -1759,7 +1963,9 @@ class Agent:
         grounding_rejected = False
         grounding_retry_pending = False
         content = ""
-        forced_contextual_call = _forced_contextual_tool_call(user_input, tool_schemas, self.messages)
+        forced_contextual_call = _forced_hint_tool_call(capability_hint, tool_schemas)
+        if not forced_contextual_call:
+            forced_contextual_call = _forced_contextual_tool_call(user_input, tool_schemas, self.messages)
         if not forced_contextual_call:
             forced_contextual_call = _forced_local_system_control_call(
                 user_input,
@@ -1782,7 +1988,6 @@ class Agent:
                 tool_calls[0] = forced_contextual_call
                 forced_contextual_call = None
             else:
-                console.print("[dim]Thinking...[/dim]", end="\r")
                 stream_attempts = max(1, settings.llm_stream_attempts)
                 for attempt in range(stream_attempts):
                     try:
@@ -1799,9 +2004,6 @@ class Agent:
                 if stream is None:
                     break
 
-                _spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-                _spinner_idx = 0
-                _chunk_count = 0
                 for chunk in stream:
                     if not chunk.choices:
                         continue
@@ -1810,16 +2012,12 @@ class Agent:
                     if delta.content:
                         content += delta.content
                         if buffer_tool_text:
-                            _chunk_count += 1
-                            if _chunk_count % 3 == 0:
-                                frame = _spinner_frames[_spinner_idx % len(_spinner_frames)]
-                                print(f"\r[dim]{frame} Working...[/dim]  ", end="", flush=True)
-                                _spinner_idx += 1
                             continue
                         if not started:
                             started = True
-                            console.print("          ", end="\r")
                         print(delta.content, end="", flush=True)
+                        if emit_chunk:
+                            emit_chunk(delta.content)
 
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
@@ -1844,8 +2042,7 @@ class Agent:
                 content = ""
                 started = False
             elif tool_calls and not content:
-                # Clear the spinner line
-                print("\r                    \r", end="", flush=True)
+                pass
 
             if not tool_calls and content and tool_schemas:
                 json_tc, err = _try_parse_json_tool_call(content, tool_schemas)
@@ -1956,7 +2153,9 @@ class Agent:
                     except json.JSONDecodeError as e:
                         results[fc["id"]] = f"Error: {e}"
                         continue
+                    args = _repair_schema_argument_names(name, args)
                     name, args = _repair_contextual_tool_call(name, args, user_input, self.messages[:-1])
+                    args = _repair_schema_argument_names(name, args)
                     fc["function"]["name"] = name
                     fc["function"]["arguments"] = json.dumps(args, ensure_ascii=False)
                     args = _prepare_tool_args_for_answer(name, args)
@@ -2043,9 +2242,12 @@ class Agent:
             loaded_slug_notes = []
             if disclosure_active:
                 for fc in formatted_calls:
-                    if fc["function"]["name"] != "load_tool":
+                    if fc["function"]["name"] == "load_tool":
+                        loaded_entries = _loaded_tools_from_result(results.get(fc["id"], ""))
+                    elif fc["function"]["name"] == "find_tools":
+                        loaded_entries = _discovered_tools_from_result(results.get(fc["id"], ""))
+                    else:
                         continue
-                    loaded_entries = _loaded_tools_from_result(results.get(fc["id"], ""))
                     for entry in loaded_entries:
                         loaded_name = entry.get("name", "")
                         if not loaded_name or loaded_name in loaded_tool_names:
@@ -2141,26 +2343,16 @@ class Agent:
 
         extraction_context = self._memory_extraction_context()
         if content and _should_extract_memory(user_input, q_emb):
-            self._executor.submit(self._extract_and_store, user_input, content, extraction_context)
+            self._submit_background(self._extract_and_store, user_input, content, extraction_context)
 
         if content:
             self._remember_plain_turn(user_input, content)
             self._last_memory_profile_context = bool(memory_profile_context and context)
 
-        # Proactive injection: after every turn, check if the cognition queue
-        # has something worth raising. If so, append it to the response so KING
-        # surfaces observations naturally without the user having to ask.
+        # Proactive injection: run in background so it doesn't block the prompt.
+        # If a proactive note is ready, it prints after the response.
         if content:
-            proactive_note = self._check_proactive()
-            if proactive_note:
-                content = content + "\n\n" + proactive_note
-                # Update the last assistant message with the proactive addition.
-                if self.messages and self.messages[-1].get("role") == "assistant":
-                    self.messages[-1]["content"] = content
-                if emit_chunk:
-                    emit_chunk("\n\n" + proactive_note)
-                else:
-                    console.print(f"\n[dim]{proactive_note}[/dim]")
+            self._submit_background(self._run_proactive, content, emit_chunk)
 
         self._maybe_summarize()
 

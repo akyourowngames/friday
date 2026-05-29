@@ -16,6 +16,10 @@ The user is giving a fresh standalone search topic, a new named target, a differ
 
 The user asks who they are, what the assistant knows about them, what has been remembered, their saved preferences, personal facts, location, name, project context, prior conversation facts, current situation, current preparation, ongoing studies, ongoing relationships, recent struggles, recent recovery, mood check-ins about their own life, or any open thread from earlier conversations.
 
+## Proactive Memory Context Text
+
+The user is casually checking in, venting, trailing from an ongoing personal situation, asking a soft status question about their own life, or giving a short conversational follow-up where one relevant remembered fact would make the reply more continuous. The answer should still be brief and natural, not a broad memory dump or operational briefing.
+
 ## Broad Memory Recall Text
 
 The user asks for a broad overview of remembered personal facts, asks what else is known, asks anything else after a memory answer, or asks for a profile-style summary of known identity, relationships, preferences, projects, and related people.
@@ -58,14 +62,14 @@ The user started a question but trailed off, used ellipsis, left the object unst
 
 ## Tool Routing Stage
 
-Tool routing compares the user query against a markdown-owned bank of example
-user phrasings (utterances) per tool. The per-tool score is the max similarity
-of any of that tool's utterances against the query. If the best score is below
-a single confidence threshold, no tool is selected (it's just chat). Otherwise
-the top-k tools above threshold are selected.
+Tool routing first compares the user query against markdown-owned categories in
+`tools/TOOL_ROUTING_CATEGORIES.md`. After one category is selected, KING
+compares the query only against tool utterances inside that category. This keeps
+folder, Telegram, memory, Reddit, browser, and device-control requests from all
+competing in one large pool.
 
-The utterance bank lives in `tools/TOOL_UTTERANCES.md`. Each `## tool_name`
-heading opens a section; bullet points beneath are example phrasings. Fixing a
-routing collision means editing utterances for the affected tool: no code
-change, no ranking layers, no secondary scoring passes. A tool with no section
-falls back to its registry description plus examples.
+The exact-tool utterance bank lives in `tools/TOOL_UTTERANCES.md`. Each
+`## tool_name` heading opens a section; bullet points beneath are example
+phrasings. Fixing a routing collision means editing the category membership or
+the affected tool utterances: no keyword rescue tables, no phrase shortcuts, and
+no full-registry ranking pass.

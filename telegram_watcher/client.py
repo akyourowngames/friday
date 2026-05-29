@@ -60,6 +60,34 @@ def ensure_service_for_cli(config_path: str | None = None) -> tuple[TelegramWatc
     return config, started
 
 
+def ensure_service_for_tool(config_path: str | None = None) -> tuple[TelegramWatcherConfig, dict[str, Any]]:
+    config = load_cli_config(config_path)
+    if not config.cli_bridge_enabled:
+        return config, {"status": "disabled", "reason": "cli_bridge_disabled"}
+    if not config.token:
+        return config, {"status": "disabled", "reason": "missing_token"}
+    if not config.authorized_user_ids and not config.authorized_chat_ids:
+        return config, {"status": "disabled", "reason": "missing_authorized_ids"}
+
+    health = service_health(config)
+    if health.get("ok"):
+        return config, {"status": "running", "health": health}
+
+    started = _start_background_service(config)
+    if started.get("status") != "started":
+        return config, started
+
+    deadline = time.time() + max(0.5, config.api_startup_wait_ms / 1000)
+    while time.time() < deadline:
+        health = service_health(config)
+        if health.get("ok"):
+            started["health"] = health
+            return config, started
+        time.sleep(0.2)
+    started["health"] = {"ok": False, "status": "startup_timeout"}
+    return config, started
+
+
 def send_cli_message(config: TelegramWatcherConfig, message: str, session_id: str = "main_cli") -> dict[str, Any]:
     payload = json.dumps({"message": message, "session_id": session_id}).encode("utf-8")
     request = urllib.request.Request(

@@ -19,7 +19,7 @@ from agent.core import (
 )
 from agent.router import ToolRouter
 from api_server import _chunk_text, _panel_payload, _run_agent
-from main import _iter_sse_events, _normalize_api_base, _resolve_api_cli_inputs
+from main import cmd_memory, _iter_sse_events, _message_from_args, _normalize_api_base, _parse_args, _resolve_api_cli_inputs
 from tools.registry import get_tool_schemas
 
 
@@ -42,6 +42,44 @@ class FakeStreamingAgent:
         self.messages.append({"role": "user", "content": message})
         self.messages.append({"role": "assistant", "content": "hello sir"})
         return "hello sir"
+
+
+class FakeConsole:
+    def __init__(self):
+        self.messages = []
+
+    def print(self, *values, **_kwargs):
+        self.messages.append(" ".join(str(value) for value in values))
+
+
+class FakeMemoryBrain:
+    def __init__(self):
+        self.maintained = False
+        self.synced = False
+
+    def recall_unified(self, query, k=10):
+        return [{"text": f"memory for {query}", "score": 0.9}]
+
+    def maintain(self, rebuild=False, backup=False):
+        self.maintained = bool(rebuild and backup)
+        return {"after": {"tier": "gd"}, "graph_rebuilt": True}
+
+    def _sync_obsidian_graph(self):
+        self.synced = True
+
+    def obsidian_graph_status(self):
+        return {"status": "synced"}
+
+    def list_memories(self, limit):
+        return []
+
+    def system_assessment(self):
+        return {"entry_count": 0, "indexed_count": 0, "index_state": "warm", "graph": {"active_edge_count": 0}}
+
+
+class FakeMemoryAgent:
+    def __init__(self):
+        self.brain = FakeMemoryBrain()
 
 
 class CliApiAndFolderRoutingTests(unittest.TestCase):
@@ -67,6 +105,27 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
 
         self.assertEqual(base_url, "http://127.0.0.1:8011")
         self.assertEqual(message, "how many python files are there?")
+
+    def test_message_flag_builds_one_shot_text(self):
+        args = _parse_args(["--message", "who is rai"])
+
+        self.assertEqual(_message_from_args(args), "who is rai")
+
+    def test_memory_cli_recall_extract_and_sync_paths(self):
+        fake_agent = FakeMemoryAgent()
+        fake_console = FakeConsole()
+        with patch("main.console", fake_console):
+            with patch("main._print_table") as print_table:
+                cmd_memory(fake_agent, "recall Rai")
+                print_table.assert_called()
+            with patch("memory.worker.ingest_user_files", return_value={"status": "ok", "user_files_found": 1, "facts_ingested": 2}):
+                cmd_memory(fake_agent, "extract")
+            cmd_memory(fake_agent, "sync")
+
+        self.assertTrue(fake_agent.brain.maintained)
+        self.assertTrue(fake_agent.brain.synced)
+        self.assertTrue(any("Memory extract:" in message for message in fake_console.messages))
+        self.assertTrue(any("Memory sync:" in message for message in fake_console.messages))
 
     def test_sse_event_parser_reads_json_data_lines(self):
         response = FakeSseResponse(
@@ -107,6 +166,26 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
                 selected = ToolRouter().select_tools(routing_input, q_emb)
 
                 self.assertIn("folder_watcher", [tool["name"] for tool in selected])
+
+    def test_reddit_request_stays_in_external_category(self):
+        q_emb, routing_input = _embedding_query("fetch me latest reddit threads", [])
+        router = ToolRouter()
+        selected = router.select_tools(routing_input, q_emb)
+        decision = router.last_decision()
+
+        self.assertEqual(decision.get("category"), "external_retrieval")
+        self.assertEqual([tool["name"] for tool in selected], ["reddit"])
+        self.assertEqual(router.capability_hint("reddit").get("args", {}).get("action"), "new")
+        self.assertTrue(router.capability_hint("reddit").get("direct"))
+
+    def test_telegram_delivery_is_explicit_tool_category(self):
+        q_emb, routing_input = _embedding_query("send a file through telegram", [])
+        router = ToolRouter()
+        selected = router.select_tools(routing_input, q_emb)
+        decision = router.last_decision()
+
+        self.assertEqual(decision.get("category"), "telegram_delivery")
+        self.assertEqual([tool["name"] for tool in selected], ["telegram_watcher"])
 
     def test_raw_directory_listing_stays_file_list(self):
         """Raw directory listing queries route to file_list first via utterances."""
@@ -226,6 +305,13 @@ class CliApiAndFolderRoutingTests(unittest.TestCase):
         answer = _direct_answer_from_tool_result("folder_watcher", json.dumps(payload))
 
         self.assertEqual(answer, "There are 26 Python files.")
+
+    def test_structured_tool_text_can_skip_second_llm_rewrite(self):
+        payload = {"result": {"text": "Reddit fallback text."}, "meta": {"tool": "reddit"}}
+
+        answer = _direct_answer_from_tool_result("reddit", json.dumps(payload))
+
+        self.assertEqual(answer, "Reddit fallback text.")
 
 
 if __name__ == "__main__":

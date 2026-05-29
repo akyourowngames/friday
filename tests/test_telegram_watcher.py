@@ -13,6 +13,9 @@ from fastapi.testclient import TestClient
 from telegram_watcher.api import create_app
 from telegram_watcher.configuration import load_config
 from telegram_watcher.service import TelegramWatcherService, _score_action_terms
+import tools  # noqa: F401
+from tools.registry import get_tool
+from tools.telegram_watcher import telegram_watcher
 
 
 class FakeTelegram:
@@ -215,6 +218,38 @@ class TelegramWatcherTests(unittest.TestCase):
         self.assertIn(".env", self.config.blocked_suffixes)
         self.assertEqual(self.config.command_aliases["send"], "send")
         self.assertIn("deliver the requested", self.config.action_semantics["send"])
+
+    def test_project_config_keeps_normal_cli_out_of_telegram_forwarding(self):
+        config = load_config(Path(__file__).resolve().parent.parent)
+
+        self.assertFalse(config.main_cli_autostart)
+        self.assertTrue(config.cli_bridge_enabled)
+        self.assertIsNotNone(get_tool("telegram_watcher"))
+
+    def test_telegram_watcher_tool_reports_missing_token_without_cli_intercept(self):
+        path = self.root / "tool_telegram.md"
+        path.write_text(
+            "\n".join(
+                [
+                    "# Tool Telegram",
+                    "## Runtime",
+                    "- token_env: TEST_MISSING_TELEGRAM_TOKEN",
+                    "- authorized_user_ids_env: TEST_TELEGRAM_USERS",
+                    "- authorized_chat_ids_env: TEST_TELEGRAM_CHATS",
+                    "- service_base_url: http://127.0.0.1:7499",
+                    "- main_cli_autostart: false",
+                    "- cli_bridge_enabled: true",
+                    "## CLI Forward Actions",
+                    "- status",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = telegram_watcher(config_path=str(path), response_format="structured")
+
+        self.assertEqual(result["result"]["status"], "disabled")
+        self.assertEqual(result["result"]["reason"], "missing_token")
 
     def test_folder_watcher_base_url_can_follow_client_active_target(self):
         tools_dir = self.root / "tools"

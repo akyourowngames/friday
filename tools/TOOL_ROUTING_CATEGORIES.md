@@ -1,0 +1,96 @@
+# Tool Routing Categories
+
+This is the first routing gate before exact tool selection. KING embeds these
+category examples, picks one category, then compares the user request only
+against tools listed in that category's `tools:` line. This keeps unrelated
+tools out of the decision instead of dropping every request into the full
+registry.
+
+Format:
+
+```text
+### category_name
+- tools: tool_a, tool_b
+- example user phrasing
+```
+
+Use broad intent families, not narrow phrase tables. Add or move tools here
+when a request family is going to the wrong part of the system.
+
+## Categories
+
+### external_retrieval
+- tools: web_search, web_fetch, reddit, hackernews, weather, datetime_info, browser_read_page, browser_extract, navigator
+- fetch latest reddit threads
+- show me current posts from reddit
+- get live news or web results
+- read a page or extract details from a website
+- check weather, time, distance, or route information
+- what is the weather in a city
+- what time is it in a city
+
+### local_file_intelligence
+- tools: folder_watcher, file_read, file_write, file_list, note_save, note_read, note_update, note_delete, note_list, note_search, gallery
+- inspect the watched folder
+- count indexed files or file types
+- find files in local folders
+- read, write, list, update, or search local files and notes
+- show saved generated images
+
+### telegram_delivery
+- tools: telegram_watcher
+- send a file through telegram
+- check telegram watcher status
+- find allowed-zone files for telegram delivery
+- turn telegram file watch notifications on or off
+- use the telegram courier service
+
+### personal_memory
+- tools: memory_recall, memory_remember, memory_forget, memory_assess, memory_extract, life_timeline, proactive_check
+- remember this fact
+- recall what you know about me
+- forget a stored memory
+- assess memory health or sync the Obsidian memory vault
+- extract memories from Obsidian user files
+- summarize recent life context
+
+### media_generation
+- tools: youtube_play, playlist, imagine, camera_vision, screenshot
+- play music or manage playlist
+- generate an image
+- inspect camera or screenshot
+- show visual media
+
+### local_device_control
+- tools: system_control, keyboard_press, keyboard_shortcut, terminal, process_control, clipboard, system_pulse, calc
+- control volume brightness media keys or keyboard shortcuts
+- run a local command or open an app
+- inspect or stop processes
+- read or write clipboard
+- check system vitals or calculate a value
+
+### scheduling
+- tools: reminder, reminder_fire, scheduler_schedule, scheduler_list, scheduler_cancel, scheduler_run_due, daily_maintenance
+- set a reminder
+- schedule something for later
+- list or cancel queued tasks
+- run due scheduled work
+- run maintenance
+
+### connected_integrations
+- tools: composio, browser_login_session
+- check calendar email drive tasks slack notion or github through connected accounts
+- what's on my calendar tomorrow
+- check my latest emails
+- find my recent google drive files
+- search my notion for meeting notes
+- send a slack message
+- start a browser login session
+- use an external account integration
+
+### tool_admin
+- tools: find_tools, load_tool, tool_manifest_audit, tool_verification_pipeline
+- find a tool capability
+- load a tool for this turn
+- audit tool manifest and registry alignment
+- run tool verification checks

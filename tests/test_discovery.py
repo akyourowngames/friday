@@ -85,6 +85,13 @@ class CoreHelperTests(unittest.TestCase):
         self.assertEqual(core._loaded_tools_from_result("not json"), [])
         self.assertEqual(core._loaded_tools_from_result(""), [])
 
+    def test_find_tools_result_can_make_top_match_callable(self):
+        result = execute_tool("find_tools", query="check current playlist", limit=5, response_format="structured")
+
+        entries = core._discovered_tools_from_result(result)
+
+        self.assertEqual(entries[0]["name"], "playlist")
+
 
 if __name__ == "__main__":
     unittest.main()

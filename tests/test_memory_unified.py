@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import memory.brain as brain_mod
 from tests.test_memory import isolated_memory, _ones_embed
+from tools.memory_ops import memory_extract
 
 
 class UnifiedMemoryTests(unittest.TestCase):
@@ -62,25 +63,81 @@ class UnifiedMemoryTests(unittest.TestCase):
         with isolated_memory():
             brain = brain_mod.Brain()
             stored = brain.remember("User prefers dark mode")
-            graph_root = (
-                Path(brain_mod.settings.memory_obsidian_vault_dir)
-                / brain_mod.settings.memory_obsidian_graph_dir
-            )
+
+            # The memory worker writes directly to the vault root
+            vault_root = Path(brain_mod.settings.memory_obsidian_vault_dir)
 
             self.assertIn(stored["obsidian_graph"]["status"], {"current", "synced"})
-            self.assertTrue((graph_root / "Index.md").exists())
-            self.assertTrue((graph_root / "Nodes" / "user.md").exists())
-            self.assertTrue((graph_root / "Nodes" / "dark_mode.md").exists())
-            self.assertTrue(list((graph_root / "Memories").glob("*.md")))
-            user_page = (graph_root / "Nodes" / "user.md").read_text(encoding="utf-8")
-            self.assertIn("[[Generated Memory Graph/Nodes/dark_mode|dark mode]]", user_page)
+            self.assertTrue(vault_root.exists())
+            self.assertTrue((vault_root / "Index.md").exists())
 
-            removed = brain.forget("dark mode")
+    @patch.object(brain_mod, "embed", _ones_embed)
+    def test_relationship_facts_create_person_pages(self):
+        with isolated_memory():
+            brain = brain_mod.Brain()
+            self.assertTrue(brain.commit("Ankita is my girlfriend"))
+            self.assertTrue(brain.commit("User has a friend named Rai Bud"))
+            self.assertTrue(
+                brain.commit("Ankita does not know that Rai is my friend, but Rai knows about Ankita")
+            )
 
-            self.assertIn(removed["obsidian_graph"]["status"], {"current", "synced"})
-            self.assertFalse((graph_root / "Nodes" / "dark_mode.md").exists())
-            removed_page = (graph_root / "Removed Memory.md").read_text(encoding="utf-8")
-            self.assertIn("dark mode", removed_page)
+            nodes = brain._graph.get("nodes", {})
+            self.assertEqual(nodes.get("ankita", {}).get("type"), "person")
+            self.assertEqual(nodes.get("rai_bud", {}).get("type"), "person")
+            self.assertEqual(nodes.get("rai", {}).get("type"), "person")
+
+            vault_root = Path(brain_mod.settings.memory_obsidian_vault_dir)
+            ankita_page = (vault_root / "People" / "Ankita.md").read_text(encoding="utf-8")
+            rai_bud_page = (vault_root / "People" / "Rai Bud.md").read_text(encoding="utf-8")
+            self.assertTrue(ankita_page.startswith("---"))
+            self.assertTrue(rai_bud_page.startswith("---"))
+            self.assertNotIn("```", ankita_page)
+            self.assertNotIn("```", rai_bud_page)
+            self.assertIn("- User has a friend named Rai Bud", rai_bud_page)
+            timeline = (vault_root / "Timeline" / f"{brain.memories[-1].get('_date')}.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("[[People/Ankita|Ankita]]", timeline)
+            self.assertIn("[[People/Rai Bud|Rai Bud]]", timeline)
+            graph_page = (vault_root / "Graph.md").read_text(encoding="utf-8")
+            self.assertIn("# Memory Graph", graph_page)
+            self.assertIn("[[People/Rai Bud|Rai Bud]]", graph_page)
+
+    @patch.object(brain_mod, "embed", _ones_embed)
+    def test_graph_rebuild_replaces_relationship_fallback_edges(self):
+        with isolated_memory():
+            brain = brain_mod.Brain()
+            self.assertTrue(brain.commit("Ankita is my girlfriend"))
+            memory = brain.memories[-1]
+            old_target = brain._ensure_graph_node(memory["text"], "memory", memory.get("importance", 0.5))
+            old_edge = brain._edge_id("user", "remembers", old_target)
+            brain._graph["edges"] = [
+                {
+                    "id": old_edge,
+                    "source": "user",
+                    "target": old_target,
+                    "relation": "remembers",
+                    "memory_id": memory["id"],
+                    "active": True,
+                }
+            ]
+            brain._graph["memory_links"] = {memory["id"]: [old_edge]}
+            memory["graph_edges"] = [old_edge]
+            memory["graph_nodes"] = ["user", old_target]
+
+            report = brain.maintain(rebuild=True, backup=False)
+
+            self.assertTrue(report.get("graph_rebuilt"))
+            self.assertEqual(brain._graph.get("nodes", {}).get("ankita", {}).get("type"), "person")
+            self.assertNotIn(old_target, memory.get("graph_nodes", []))
+
+    @patch.object(brain_mod, "embed", _ones_embed)
+    def test_memory_extract_tool_reports_empty_vault(self):
+        with isolated_memory():
+            result = memory_extract(response_format="structured")
+
+            self.assertEqual(result["result"]["extraction"]["status"], "no_user_files")
+            self.assertTrue(result["result"]["sync"].get("graph_rebuilt"))
 
 
 if __name__ == "__main__":

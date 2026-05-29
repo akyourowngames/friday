@@ -1,15 +1,13 @@
-"""Utterance-based tool router.
+"""Markdown-gated tool router.
 
-The entire routing decision is:
-1. Embed every utterance from `tools/TOOL_UTTERANCES.md` (one row per phrase).
-2. Embed the user query.
-3. Per-tool score = max similarity across that tool's utterances.
-4. If the best score is below a single confidence threshold → no tool (chat).
-5. Otherwise pick the top-k tools above threshold.
+The routing decision is:
+1. Embed category examples from `tools/TOOL_ROUTING_CATEGORIES.md`.
+2. Pick one markdown-owned category.
+3. Embed utterances from `tools/TOOL_UTTERANCES.md`.
+4. Pick one exact tool inside the chosen category.
 
-No ranking layers, no winner margins, no relative floors, no small-talk
-contrast embedding, no capability routing layers. Collisions are fixed by
-editing utterances in the markdown file, not by adding code.
+No keyword shortcuts and no full-registry fishing expedition. Collisions are
+fixed by editing the markdown category or utterance files, not by adding code.
 """
 
 import json
@@ -25,8 +23,12 @@ _CACHE_DIR = Path(settings.storage_dir)
 _TOOL_CACHE = _CACHE_DIR / "tool_embeddings.npy"
 _TOOL_TEXTS_CACHE = _CACHE_DIR / "tool_texts.json"
 _TOOL_OWNERS_CACHE = _CACHE_DIR / "tool_owners.json"
+_CATEGORY_CACHE = _CACHE_DIR / "tool_category_embeddings.npy"
+_CATEGORY_TEXTS_CACHE = _CACHE_DIR / "tool_category_texts.json"
+_CATEGORY_OWNERS_CACHE = _CACHE_DIR / "tool_category_owners.json"
 ROUTING_POLICY_PATH = Path(__file__).resolve().parent.parent / "routing_policy.md"
 _UTTERANCES_PATH = Path(__file__).resolve().parent.parent / settings.tool_utterances_file
+_CATEGORIES_PATH = Path(__file__).resolve().parent.parent / settings.tool_routing_categories_file
 
 
 # ─── Exported helpers (consumed by core.py and tests) ───────────────────────
@@ -104,19 +106,83 @@ def _load_tool_utterances() -> tuple[dict[str, list[str]], dict[str, dict]]:
             phrase = stripped[2:].strip()
             if not phrase:
                 continue
-            # Check for slug annotation: `- phrase [slug:GOOGLECALENDAR_EVENTS_LIST]`
-            slug_tag_start = phrase.find("[slug:")
-            if slug_tag_start >= 0:
-                slug_tag_end = phrase.find("]", slug_tag_start)
-                if slug_tag_end > slug_tag_start:
-                    slug = phrase[slug_tag_start + 6:slug_tag_end].strip()
-                    clean_phrase = (phrase[:slug_tag_start] + phrase[slug_tag_end + 1:]).strip()
-                    if slug and clean_phrase:
-                        slug_hints[clean_phrase] = {"tool_slug": slug}
-                        phrase = clean_phrase
+            phrase, hint = _clean_utterance_annotations(phrase)
+            if hint and phrase:
+                slug_hints[phrase] = hint
             if phrase:
                 utterances.setdefault(current, []).append(phrase)
     return utterances, slug_hints
+
+
+def _clean_utterance_annotations(phrase: str) -> tuple[str, dict]:
+    hint: dict = {}
+    clean = str(phrase or "").strip()
+    while True:
+        start = clean.find("[")
+        if start < 0:
+            break
+        end = clean.find("]", start + 1)
+        if end < 0:
+            break
+        tag = clean[start + 1:end].strip()
+        before = clean[:start].strip()
+        after = clean[end + 1:].strip()
+        if tag.startswith("slug:"):
+            slug = tag[5:].strip()
+            if slug:
+                hint["tool_slug"] = slug
+            clean = f"{before} {after}".strip()
+            continue
+        if tag.startswith("args:"):
+            raw_args = tag[5:].strip()
+            args = dict(hint.get("args") or {})
+            for part in raw_args.split(","):
+                key, found, value = part.partition("=")
+                if found and key.strip() and value.strip():
+                    args[key.strip()] = value.strip()
+            if args:
+                hint["args"] = args
+            clean = f"{before} {after}".strip()
+            continue
+        if tag.casefold() == "direct":
+            hint["direct"] = True
+            clean = f"{before} {after}".strip()
+            continue
+        break
+    return clean, hint
+
+
+def _load_tool_categories() -> list[dict]:
+    if not _CATEGORIES_PATH.exists():
+        return []
+
+    categories = []
+    current: dict | None = None
+    in_categories = False
+    for raw_line in _CATEGORIES_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            in_categories = line[3:].strip().casefold() == "categories"
+            current = None
+            continue
+        if not in_categories:
+            continue
+        if line.startswith("### "):
+            name = line[4:].strip()
+            current = {"name": name, "tools": [], "texts": []}
+            if name:
+                categories.append(current)
+            continue
+        if current is None or not line.startswith("- "):
+            continue
+        item = line[2:].strip()
+        key, found, value = item.partition(":")
+        if found and key.strip().casefold() == "tools":
+            current["tools"] = [part.strip() for part in value.split(",") if part.strip()]
+            continue
+        if item:
+            current["texts"].append(item)
+    return categories
 
 
 # ─── Router ─────────────────────────────────────────────────────────────────
@@ -132,11 +198,17 @@ class ToolRouter:
         self._tool_texts: list[str] = []
         self._row_owner_idx: list[int] = []
         self._slug_hints: dict[str, dict] = {}
+        self._categories: list[dict] = []
+        self._category_names: list[str] = []
+        self._category_texts: list[str] = []
+        self._category_owner_idx: list[int] = []
+        self._category_embeddings = None
         self._small_talk_emb = None
         self._last_capability_hint: dict[str, dict] = {}
         self._last_generated_file = None
         self._last_decision: dict = {
             "query": "",
+            "category": "",
             "selected": [],
             "scores": [],
             "reason": "not_run",
@@ -207,6 +279,63 @@ class ToolRouter:
             json.dumps(owner_names, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
+    def _embed_categories(self):
+        """Build the category embedding index from the MD file."""
+        self._categories = _load_tool_categories()
+        self._category_names = [item["name"] for item in self._categories]
+        if not self._category_names:
+            self._category_texts = []
+            self._category_owner_idx = []
+            self._category_embeddings = np.array([])
+            return
+
+        row_texts = []
+        row_owners = []
+        for owner_idx, category in enumerate(self._categories):
+            texts = list(category.get("texts") or [])
+            if not texts:
+                texts = [category.get("name", "")]
+            for text in texts:
+                clean = str(text or "").strip()
+                if clean:
+                    row_texts.append(clean)
+                    row_owners.append(owner_idx)
+
+        self._category_texts = row_texts
+        self._category_owner_idx = row_owners
+        owner_names = [self._category_names[i] for i in row_owners]
+
+        cached_texts = None
+        if _CATEGORY_TEXTS_CACHE.exists():
+            try:
+                cached_texts = json.loads(_CATEGORY_TEXTS_CACHE.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cached_texts = None
+        cached_owners = None
+        if _CATEGORY_OWNERS_CACHE.exists():
+            try:
+                cached_owners = json.loads(_CATEGORY_OWNERS_CACHE.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cached_owners = None
+
+        if (
+            cached_texts == row_texts
+            and cached_owners == owner_names
+            and _CATEGORY_CACHE.exists()
+        ):
+            self._category_embeddings = np.load(_CATEGORY_CACHE)
+            return
+
+        self._category_embeddings = embed(row_texts) if row_texts else np.array([])
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        np.save(_CATEGORY_CACHE, self._category_embeddings)
+        _CATEGORY_TEXTS_CACHE.write_text(
+            json.dumps(row_texts, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        _CATEGORY_OWNERS_CACHE.write_text(
+            json.dumps(owner_names, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
     def _per_tool_scores(self, row_similarities: np.ndarray) -> tuple[np.ndarray, list[int]]:
         """Max-pool row similarities to per-tool scores.
 
@@ -227,13 +356,59 @@ class ToolRouter:
                 per_tool_row[owner] = row_idx
         return per_tool, per_tool_row
 
+    def _per_category_scores(self, row_similarities: np.ndarray) -> tuple[np.ndarray, list[int]]:
+        owners = self._category_owner_idx
+        if not owners:
+            return row_similarities, list(range(len(row_similarities)))
+        n_categories = len(self._category_names)
+        per_category = np.full(n_categories, -np.inf, dtype=row_similarities.dtype)
+        per_category_row = [-1] * n_categories
+        for row_idx, owner in enumerate(owners):
+            score = float(row_similarities[row_idx])
+            if score > per_category[owner]:
+                per_category[owner] = score
+                per_category_row[owner] = row_idx
+        return per_category, per_category_row
+
+    def _selected_category(self, q_emb) -> tuple[dict | None, list[dict], str]:
+        if self._category_embeddings is None:
+            self._embed_categories()
+        if not self._category_names or self._category_embeddings is None or len(self._category_embeddings) == 0:
+            return None, [], "no_category_index"
+        category_embeddings = np.asarray(self._category_embeddings)
+        query_embedding = np.asarray(q_emb)
+        if (
+            category_embeddings.ndim != 2
+            or query_embedding.ndim != 1
+            or category_embeddings.shape[1] != query_embedding.shape[0]
+        ):
+            return None, [], "embedding_dimension_mismatch"
+
+        row_sims = np.dot(category_embeddings, query_embedding)
+        per_category_sims, per_category_rows = self._per_category_scores(row_sims)
+        best_idx = int(np.argmax(per_category_sims))
+        best_score = float(per_category_sims[best_idx])
+        scores = [
+            {"category": self._category_names[int(idx)], "score": round(float(per_category_sims[int(idx)]), 4)}
+            for idx in np.argsort(per_category_sims)[::-1][: min(5, len(per_category_sims))]
+        ]
+        if best_score < settings.tool_category_threshold:
+            return None, scores, "below_category_threshold"
+        category = dict(self._categories[best_idx])
+        best_row = per_category_rows[best_idx]
+        if 0 <= best_row < len(self._category_texts):
+            category["matched_text"] = self._category_texts[best_row]
+        category["score"] = round(best_score, 4)
+        return category, scores, "selected"
+
     def select_tools(self, query, q_emb=None):
-        """Select tools by utterance similarity. Simple argmax above threshold."""
+        """Select one exact tool through markdown category then utterance gates."""
         self._last_capability_hint = {}
 
         if len(query.strip()) < settings.embedding_min_chars:
             self._last_decision = {
                 "query": query,
+                "category": "",
                 "selected": [],
                 "scores": [],
                 "reason": "below_embedding_min_chars",
@@ -246,6 +421,7 @@ class ToolRouter:
         if not self._tool_names:
             self._last_decision = {
                 "query": query,
+                "category": "",
                 "selected": [],
                 "scores": [],
                 "reason": "no_registered_tools",
@@ -255,53 +431,107 @@ class ToolRouter:
         if q_emb is None:
             q_emb = embed(query)
 
-        # Score every row, then collapse to per-tool max.
-        row_sims = np.dot(self._tool_embeddings, q_emb)
+        category, category_scores, category_reason = self._selected_category(q_emb)
+        if category is None:
+            self._last_decision = {
+                "query": query,
+                "category": "",
+                "selected": [],
+                "scores": [],
+                "category_scores": category_scores,
+                "reason": category_reason,
+            }
+            return []
+
+        allowed_names = {
+            name
+            for name in category.get("tools", [])
+            if name in self._tool_names
+        }
+        if not allowed_names:
+            self._last_decision = {
+                "query": query,
+                "category": category.get("name", ""),
+                "selected": [],
+                "scores": [],
+                "category_scores": category_scores,
+                "reason": "category_has_no_registered_tools",
+            }
+            return []
+
+        # Score utterance rows, then collapse to per-tool max inside the chosen category.
+        tool_embeddings = np.asarray(self._tool_embeddings)
+        query_embedding = np.asarray(q_emb)
+        if (
+            tool_embeddings.ndim != 2
+            or query_embedding.ndim != 1
+            or tool_embeddings.shape[1] != query_embedding.shape[0]
+        ):
+            self._last_decision = {
+                "query": query,
+                "category": category.get("name", ""),
+                "selected": [],
+                "scores": [],
+                "category_scores": category_scores,
+                "reason": "embedding_dimension_mismatch",
+            }
+            return []
+        row_sims = np.dot(tool_embeddings, query_embedding)
         per_tool_sims, per_tool_best_row = self._per_tool_scores(row_sims)
 
-        # Rank tools by score.
-        ranked = np.argsort(per_tool_sims)[::-1]
-        best_score = float(per_tool_sims[ranked[0]])
+        best_idx = None
+        best_score = -float("inf")
+        category_tool_scores = []
+        for idx, tool_name in enumerate(self._tool_names):
+            if tool_name not in allowed_names:
+                continue
+            score = float(per_tool_sims[idx])
+            category_tool_scores.append({"tool": tool_name, "score": round(score, 4)})
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        category_tool_scores.sort(key=lambda item: item["score"], reverse=True)
+        scores = category_tool_scores[: min(5, len(category_tool_scores))]
 
-        scores = [
-            {"tool": self._tool_names[int(idx)], "score": round(float(per_tool_sims[int(idx)]), 4)}
-            for idx in ranked[: min(5, len(ranked))]
-        ]
-
-        # Single gate: if best score is below threshold, it's just chat.
         if best_score < self.threshold:
             self._last_decision = {
                 "query": query,
+                "category": category.get("name", ""),
                 "selected": [],
                 "scores": scores,
+                "category_scores": category_scores,
                 "reason": "below_tool_threshold",
             }
             return []
 
-        # Pick top-k tools above threshold.
         selected = []
-        for idx in ranked[: self.top_k]:
-            if per_tool_sims[idx] < self.threshold:
-                break
-            tool_name = self._tool_names[int(idx)]
+        if best_idx is not None:
+            tool_name = self._tool_names[int(best_idx)]
             tool_obj = get_tool(tool_name)
             if tool_obj:
                 selected.append(tool_obj)
-                # Check if the winning utterance carries a slug hint.
-                best_row = per_tool_best_row[int(idx)]
+                best_row = per_tool_best_row[int(best_idx)]
                 if 0 <= best_row < len(self._tool_texts):
                     phrase = self._tool_texts[best_row]
                     hint = self._slug_hints.get(phrase)
                     if hint:
+                        args = dict(hint.get("args") or {})
+                        if hint.get("tool_slug"):
+                            args["action"] = "execute"
+                            args["tool_slug"] = hint["tool_slug"]
                         self._last_capability_hint[tool_name] = {
-                            "args": {"action": "execute", "tool_slug": hint["tool_slug"]},
-                            "score": round(float(per_tool_sims[idx]), 4),
+                            "args": args,
+                            "direct": bool(hint.get("direct")),
+                            "score": round(float(per_tool_sims[best_idx]), 4),
                         }
 
         self._last_decision = {
             "query": query,
+            "category": category.get("name", ""),
+            "category_match": category.get("matched_text", ""),
             "selected": [t["name"] for t in selected],
             "scores": scores,
+            "category_scores": category_scores,
             "reason": "selected" if selected else "below_tool_threshold",
         }
         return selected

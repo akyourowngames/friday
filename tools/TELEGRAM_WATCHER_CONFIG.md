@@ -17,7 +17,7 @@ shortcuts, user ids, folder paths, or credentials in code.
 - api_host: 127.0.0.1
 - api_port: 7480
 - service_base_url: http://127.0.0.1:7480
-- main_cli_autostart: true
+- main_cli_autostart: false
 - cli_bridge_enabled: true
 - api_startup_wait_ms: 3000
 - local_cli_chat_id: -9001
@@ -167,12 +167,12 @@ shortcuts, user ids, folder paths, or credentials in code.
   falls back to folder watcher chat and then file search.
 - `/sendfile <path>` sends any file from the PC by exact path, bypassing zone
   restrictions. Blocked suffixes still apply.
-- Normal `python main.py` CLI mode starts this watcher endpoint service when
-  `main_cli_autostart` is enabled and token/auth environment values are present.
-- The Telegram watcher remains a separate service. KING CLI talks to
-  `service_base_url` endpoints; it is not registered as a normal tool.
-- CLI messages are forwarded only when the semantic planner selects an action
-  listed in `CLI Forward Actions`; broad `ask` chat remains with the main KING
+- Normal `python main.py` CLI mode does not forward arbitrary messages to
+  Telegram watcher. The foreground chat stays with KING.
+- The Telegram watcher remains a separate background service and is exposed to
+  KING through the `telegram_watcher` registry tool.
+- Local requests reach Telegram only when KING explicitly calls the
+  `telegram_watcher` tool; broad `ask` chat remains with the main KING
   assistant.
 - Folder inventory questions such as counts, type breakdowns, and broad folder
   intelligence stay with KING's normal Folder Watcher path instead of the

@@ -89,6 +89,44 @@ def memory_assess(maintain: bool = False, response_format: str = "legacy", trace
 
 
 @tool(
+    name="memory_extract",
+    description="Scan user-created Obsidian memory vault markdown files, extract concrete facts, store them, and resync the vault graph",
+    examples=[
+        "extract memories from Obsidian files",
+        "ingest user markdown files into memory",
+        "scan the memory vault for new facts",
+    ],
+    param_descriptions={
+        "sync_after": "When true, rebuild index and Obsidian graph after extraction",
+        "response_format": "legacy or structured",
+        "trace_enabled": "Emit machine-readable trace when true",
+    },
+)
+def memory_extract(sync_after: bool = True, response_format: str = "legacy", trace_enabled: bool = False):
+    started = time.perf_counter()
+    started_at = utc_now_iso()
+    inputs_received = 3
+    response_format = normalize_response_format(response_format)
+    trace_enabled = coerce_bool(trace_enabled)
+    sync_after = coerce_bool(sync_after)
+    brain = _brain()
+    from memory.worker import ingest_user_files
+
+    extraction = ingest_user_files(brain)
+    sync = {}
+    if sync_after:
+        sync = brain.maintain(rebuild=True, backup=True)
+    result = {"action": "extract", "extraction": extraction, "sync": sync}
+    found = extraction.get("user_files_found", 0)
+    ingested = extraction.get("facts_ingested", extraction.get("ingested", 0))
+    legacy = f"Memory extract: files={found} facts_ingested={ingested}"
+    if sync:
+        legacy += f" graph_rebuilt={sync.get('graph_rebuilt')}"
+    status = "SUCCESS" if extraction.get("status") in {"ingested", "no_user_files"} else "PARTIAL"
+    return _memory_success("memory_extract", result, response_format, trace_enabled, started, started_at, inputs_received, legacy, "extract", status)
+
+
+@tool(
     name="memory_recall",
     description="Unified recall over text embeddings and the memory graph with automatic relation expansion",
     examples=[

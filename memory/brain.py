@@ -124,6 +124,26 @@ def _load_graph_relation_rules(path: Path | None = None) -> list[dict]:
         )
     return rules
 
+
+def _load_person_relation_names(path: Path | None = None) -> set[str]:
+    rule_path = _resolve_project_path(path or MEMORY_GRAPH_RELATIONS_PATH)
+    if not rule_path.exists():
+        return set()
+
+    names = set()
+    in_section = False
+    for raw_line in rule_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            in_section = line[3:].strip().casefold() == "person relations"
+            continue
+        if not in_section or not line.startswith("- "):
+            continue
+        relation = _clean_graph_value(line[2:].strip()).casefold()
+        if relation:
+            names.add(relation)
+    return names
+
 _CONTRADICTION_CATEGORIES = {
     "name": ["name is", "name :", "full name", "called "],
     "location": ["lives in", "live in", "lives at", "is from", "living in"],
@@ -301,8 +321,11 @@ def _node_type(name: str, relation: str = "") -> str:
     node = _node_id(name)
     if node == "user":
         return "person"
-    if relation in {"building", "working_on"}:
+    relation_name = _clean_graph_value(relation).casefold()
+    if relation_name in {"building", "working_on"}:
         return "project"
+    if relation_name in _load_person_relation_names():
+        return "person"
     return "concept"
 
 
@@ -493,7 +516,10 @@ class Brain:
         self._load_or_build_index()
         if self._vector_store.size() == 0 and self._embeddings is not None and self._embeddings.size > 0:
             self._sync_vector_store_from_embeddings()
-        self._sync_obsidian_graph()
+        if settings.memory_obsidian_sync_on_startup:
+            self._sync_obsidian_graph()
+        elif settings.memory_obsidian_sync_enabled:
+            self._obsidian_sync_result = {"enabled": True, "status": "deferred_startup"}
 
     def _sync_vector_store_from_embeddings(self):
         if getattr(self, "_vector_store", None) is None:
@@ -552,24 +578,39 @@ class Brain:
     def _persist_graph(self):
         self._graph["generated_at"] = datetime.now().isoformat(timespec="seconds")
         self._atomic_write_json(self._graph_path(), self._graph)
+        if getattr(self, "_obsidian_sync_deferred", False):
+            if settings.memory_obsidian_sync_enabled:
+                self._obsidian_sync_pending = True
+                self._obsidian_sync_result = {"enabled": True, "status": "deferred"}
+            else:
+                self._obsidian_sync_result = {"enabled": False, "status": "skipped"}
+            return
         self._sync_obsidian_graph()
 
     def _sync_obsidian_graph(self):
-        if getattr(self, "_obsidian_sync_deferred", False):
-            self._obsidian_sync_pending = True
-            self._obsidian_sync_result = {
-                "enabled": bool(settings.memory_obsidian_sync_enabled),
-                "status": "deferred",
-            }
+        """Sync the memory vault via the new memory worker."""
+        if not settings.memory_obsidian_sync_enabled:
+            self._obsidian_sync_result = {"enabled": False, "status": "skipped"}
             return
         try:
-            self._obsidian_sync_result = sync_memory_graph(self._graph, self.memories)
+            from memory.worker import sync_vault
+            self._obsidian_sync_result = sync_vault(self.memories, self._graph)
         except Exception as exc:
             self._obsidian_sync_result = {
-                "enabled": bool(settings.memory_obsidian_sync_enabled),
+                "enabled": True,
                 "status": "failed",
                 "reason": str(exc),
             }
+
+    def _trigger_memory_worker(self, item: dict):
+        """Trigger the memory worker to update the Obsidian vault."""
+        if not settings.memory_obsidian_sync_enabled:
+            return
+        try:
+            from memory.worker import on_memory_stored
+            on_memory_stored(item, self.memories, self._graph)
+        except Exception:
+            pass
 
     def obsidian_graph_status(self) -> dict:
         return dict(getattr(self, "_obsidian_sync_result", {"enabled": False, "status": "not_run"}))
@@ -674,6 +715,46 @@ class Brain:
         if not self._obsidian_sync_deferred and self._obsidian_sync_pending:
             self._obsidian_sync_pending = False
             self._sync_obsidian_graph()
+
+    def _rebuild_graph_from_memories(self) -> set[str]:
+        previous_deferred = self._obsidian_sync_deferred
+        self._obsidian_sync_deferred = True
+        dirty_dates = set()
+        self._graph = self._empty_graph()
+        self._ensure_graph_node("User", "person", 0.8)
+        try:
+            for item in self.memories:
+                before_edges = list(item.get("graph_edges") or [])
+                before_nodes = list(item.get("graph_nodes") or [])
+                before_tier = item.get("tier")
+                before_storage = item.get("storage")
+                item["graph_edges"] = []
+                item["graph_nodes"] = []
+                graph_changed = self._ingest_graph_memory(item)
+                if not self._has_active_memory_edges(item):
+                    graph_changed = self._ingest_graph_fallback_memory(item) or graph_changed
+                auto_changed = self._auto_relate_entities(item)
+                self._sync_memory_graph_refs(item)
+                if item.get("graph_edges"):
+                    item["tier"] = "graph"
+                    item["storage"] = "graph"
+                if (
+                    graph_changed
+                    or auto_changed
+                    or before_edges != list(item.get("graph_edges") or [])
+                    or before_nodes != list(item.get("graph_nodes") or [])
+                    or before_tier != item.get("tier")
+                    or before_storage != item.get("storage")
+                ):
+                    dirty_dates.add(item.get("_date", date.today().isoformat()))
+            self._save_dates(dirty_dates)
+            self._persist_graph()
+        finally:
+            self._obsidian_sync_deferred = previous_deferred
+        if not self._obsidian_sync_deferred and self._obsidian_sync_pending:
+            self._obsidian_sync_pending = False
+            self._sync_obsidian_graph()
+        return dirty_dates
 
     def _today_path(self):
         return MEMORY_DIR / f"memory_{date.today().isoformat()}.json"
@@ -936,6 +1017,13 @@ class Brain:
             self._rebuild_index()
         else:
             self._persist_index()
+        if getattr(self, "_obsidian_sync_deferred", False):
+            if settings.memory_obsidian_sync_enabled:
+                self._obsidian_sync_pending = True
+                self._obsidian_sync_result = {"enabled": True, "status": "deferred"}
+            else:
+                self._obsidian_sync_result = {"enabled": False, "status": "skipped"}
+            return
         self._sync_obsidian_graph()
 
     def _append_embedding(self, text: str, insert_idx: int | None = None):
@@ -977,6 +1065,11 @@ class Brain:
             if _safe_float(existing.get("importance"), 0.5) != target_importance:
                 existing["importance"] = target_importance
                 changed = True
+            current_type = str(existing.get("type") or "concept")
+            if node_type and current_type != node_type:
+                if current_type in {"concept", "memory"} and node_type in {"person", "project"}:
+                    existing["type"] = node_type
+                    changed = True
             if name and name not in existing.get("aliases", []) and existing.get("name", "") != name:
                 existing.setdefault("aliases", []).append(name)
                 changed = True
@@ -1042,7 +1135,7 @@ class Brain:
                 continue
             source_id = self._ensure_graph_node(
                 edge_info["source_name"],
-                _node_type(edge_info["source_name"]),
+                _node_type(edge_info["source_name"], edge_info["relation"]),
                 importance,
             )
             target_id = self._ensure_graph_node(
@@ -1639,6 +1732,8 @@ class Brain:
         self._append_embedding(item["text"], insert_idx=insert_idx)
         dirty_dates.update(self._trim_capacity())
         self._persist_changes(dirty_dates)
+        # Trigger memory worker to update Obsidian vault in background.
+        self._trigger_memory_worker(item)
         return True
 
     def remember(self, text: str, importance: float = 0.8) -> dict:
@@ -2033,6 +2128,10 @@ class Brain:
         if backup and self._memory_files():
             backup_path = self.create_backup("maintain")
         integrity = self.verify_integrity()
+        graph_rebuilt = False
+        if rebuild:
+            self._rebuild_graph_from_memories()
+            graph_rebuilt = True
         if rebuild or not integrity.get("ok"):
             if self._memory_files() and not backup_path and backup:
                 backup_path = self.create_backup("maintain-rebuild")
@@ -2042,6 +2141,7 @@ class Brain:
             "status": "ok" if after.get("tier") == "gd" else "partial",
             "backup_path": backup_path,
             "rebuilt": rebuild or not integrity.get("ok"),
+            "graph_rebuilt": graph_rebuilt,
             "before": before,
             "after": after,
             "integrity": integrity,
