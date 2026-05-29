@@ -22,6 +22,7 @@ KING tool registry so behavior matches an interactive call.
 - memory_remember
 - daily_maintenance
 - reminder_fire
+- project_brief_fire
 
 ## Memory Linkage
 

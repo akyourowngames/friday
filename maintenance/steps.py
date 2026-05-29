@@ -82,6 +82,16 @@ def scheduler_due_step(step: StepConfig, context: dict[str, Any]) -> dict:
     return scheduler.run_due(horizon_minutes=horizon_minutes)
 
 
+def project_audit_step(step: StepConfig, context: dict[str, Any]) -> dict:
+    manager = context.get("project_manager")
+    if manager is None:
+        from project_manager.manager import ProjectManager
+
+        manager = ProjectManager()
+        context["project_manager"] = manager
+    return manager.audit()
+
+
 def _compose_default_summary(context: dict[str, Any], step: StepConfig) -> str:
     parts: list[str] = ["KING daily maintenance ran."]
     if step.options.get("include_stats"):
@@ -102,3 +112,4 @@ def register_default_steps(engine: MaintenanceEngine) -> None:
     engine.register("folder_scan", folder_scan_step)
     engine.register("telegram_summary", telegram_summary_step)
     engine.register("scheduler_due", scheduler_due_step)
+    engine.register("project_audit", project_audit_step)

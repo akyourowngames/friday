@@ -77,6 +77,21 @@ when a request family is going to the wrong part of the system.
 - run due scheduled work
 - run maintenance
 
+### project_management
+- tools: project_track, project_status, project_focus, project_detail, project_alerts, project_decisions, project_archive, project_resurrect, project_brief_schedule
+- track a new project or give an update on one
+- king track this and keep an eye on it
+- track this: launch something by a deadline
+- track this project: build a thing by end of month
+- i am starting a project to build something, track it for me
+- tell the manager I finished a task or got blocked on something
+- ask how my projects are doing or what to focus on
+- king status across all my projects
+- deep dive on a single project's status and health
+- ask what we decided about something or replay decisions
+- archive a finished project or revive a cold one
+- turn on a daily morning project briefing
+
 ### connected_integrations
 - tools: composio, browser_login_session
 - check calendar email drive tasks slack notion or github through connected accounts
