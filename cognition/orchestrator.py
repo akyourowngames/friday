@@ -75,8 +75,12 @@ def _deviation_candidates(cadence: CadenceModel, embed_fn, now: datetime) -> lis
     return candidates
 
 
-def run_cognition_pass(brain, embed_fn=None, now: datetime | None = None, persist: bool = True) -> dict:
+def run_cognition_pass(brain, embed_fn=None, now: datetime | None = None, persist: bool = True, deep: bool = False) -> dict:
     """Execute one cognition pass over the brain's current memories.
+
+    When ``deep`` is True (nightly maintenance / explicit deep scan), the pass also
+    runs the LLM-backed memory commitment extraction. Interactive callers leave it
+    False so seeding the proactive queue on a user turn stays cheap and offline.
 
     Returns a structured evidence dict (suitable as a maintenance step result).
     """
@@ -93,6 +97,19 @@ def run_cognition_pass(brain, embed_fn=None, now: datetime | None = None, persis
     for candidate in new_candidates:
         engine.add_candidate(candidate)
 
+    # Memory-driven signals: high-importance recall, unresolved commitments, and
+    # live project-manager alerts. This makes proactivity grounded in what KING
+    # knows, not just activity cadence. Config-gated; degrades to [] on failure.
+    memory_candidates = []
+    try:
+        from .memory_signals import collect as collect_memory_signals
+
+        memory_candidates = collect_memory_signals(memories, now=now, embed_fn=embed_fn, deep=deep)
+        for candidate in memory_candidates:
+            engine.add_candidate(candidate)
+    except Exception:
+        memory_candidates = []
+
     payload = {
         "updated_at": now.isoformat(timespec="seconds"),
         "cadence": cadence.to_dict(),
@@ -108,6 +125,7 @@ def run_cognition_pass(brain, embed_fn=None, now: datetime | None = None, persis
         "cadence_nodes": len(cadence.nodes),
         "episodes": len(episodes),
         "actionable_deviations": len(new_candidates),
+        "memory_signals": len(memory_candidates),
         "queue_size": engine.queue_size(),
         "budget_remaining": engine.budget_remaining(now),
         "config_loaded": bool(config),

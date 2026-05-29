@@ -85,8 +85,8 @@ def run_cognition() -> dict:
         from cognition.orchestrator import run_cognition_pass
 
         brain = Brain()
-        result = run_cognition_pass(brain, embed_fn=embed, persist=True)
-        _log(f"  Cognition: {result.get('cadence_nodes', 0)} cadence nodes, {result.get('episodes', 0)} episodes, {result.get('actionable_deviations', 0)} deviations")
+        result = run_cognition_pass(brain, embed_fn=embed, persist=True, deep=True)
+        _log(f"  Cognition: {result.get('cadence_nodes', 0)} cadence nodes, {result.get('episodes', 0)} episodes, {result.get('actionable_deviations', 0)} deviations, {result.get('memory_signals', 0)} memory signals")
         return result
     except Exception as e:
         _log(f"  Cognition failed: {e}")

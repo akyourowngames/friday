@@ -60,6 +60,19 @@ The design rules this file enforces:
 - annoyance_penalty_per_dismissal: 0.15
 - max_queue_size: 50
 
+## Memory Signals
+
+- enabled: true
+- importance_floor: 0.7
+- recent_days: 14
+- max_candidates: 5
+- commitment_extraction_enabled: true
+- commitment_max_tokens: 500
+- commitment_lookback: 40
+- project_alerts_enabled: true
+- project_alert_severity_floor: 0.4
+- project_alert_max: 5
+
 ## Verification
 
 - `python -m unittest tests.test_cognition`

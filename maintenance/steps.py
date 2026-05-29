@@ -29,7 +29,7 @@ def cognition_scan_step(step: StepConfig, context: dict[str, Any]) -> dict:
     embed_fn = context.get("embed_fn")
     if embed_fn is None and step.options.get("use_embeddings", True):
         from agent.embedder import embed as embed_fn
-    return run_cognition_pass(brain, embed_fn=embed_fn)
+    return run_cognition_pass(brain, embed_fn=embed_fn, deep=bool(step.options.get("deep", True)))
 
 
 def folder_scan_step(step: StepConfig, context: dict[str, Any]) -> dict:
