@@ -47,11 +47,11 @@ The design rules this file enforces:
 
 ## Proactive
 
-- base_confidence_threshold: 0.55
-- threshold_rise_after_speak: 0.25
-- threshold_decay_half_life_seconds: 3600
-- daily_budget: 3
-- novelty_suppression_similarity: 0.8
+- base_confidence_threshold: 0.35
+- threshold_rise_after_speak: 0.20
+- threshold_decay_half_life_seconds: 1800
+- daily_budget: 8
+- novelty_suppression_similarity: 0.85
 - relevance_weight: 0.4
 - freshness_weight: 0.2
 - importance_weight: 0.2

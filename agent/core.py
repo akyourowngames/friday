@@ -33,12 +33,9 @@ def _debug_safe(text) -> str:
 def _print_assistant_content(content: str, emit_chunk=None) -> None:
     if not content:
         return
-    console.print("          ", end="\r")
-    print(content, end="", flush=True)
+    print(content, flush=True)
     if emit_chunk:
         emit_chunk(content)
-    print()
-    if emit_chunk:
         emit_chunk("\n")
 
 
@@ -1536,10 +1533,56 @@ class Agent:
 
         console.print("[dim]Ready[/dim]")
 
+    def _check_proactive(self) -> str | None:
+        """Check the cognition proactive queue and return a natural observation
+        if one clears the gates, or None to stay quiet.
+
+        If the queue is empty, seeds it from cadence deviations on the fly so
+        proactive doesn't depend on daily maintenance having run first.
+        """
+        try:
+            from cognition.proactive import ProactiveEngine
+            from cognition.state import load_state, save_state
+        except Exception:
+            return None
+        try:
+            state = load_state()
+            engine = ProactiveEngine.from_dict(state.get("proactive") or {})
+            now = datetime.now()
+            if engine.budget_remaining(now) <= 0:
+                return None
+
+            # If queue is empty, try to seed from cadence deviations.
+            if engine.queue_size() == 0:
+                try:
+                    from cognition.orchestrator import run_cognition_pass
+                    result = run_cognition_pass(self.brain, embed_fn=embed, now=now, persist=True)
+                    # Reload state after the pass populated the queue.
+                    state = load_state()
+                    engine = ProactiveEngine.from_dict(state.get("proactive") or {})
+                except Exception:
+                    pass
+
+            if engine.queue_size() == 0:
+                return None
+
+            candidate = engine.select(situational_fit=0.7, now=now)
+            if candidate is None:
+                return None
+            # Mark delivered and persist.
+            engine.mark_delivered(candidate, now=now)
+            state["proactive"] = engine.to_dict()
+            save_state(state)
+            # Return the structured content for the agent to phrase naturally.
+            node = candidate.node or "something"
+            kind = candidate.source.replace("cadence_", "")
+            return f"By the way — I noticed something about {node} ({kind}). Want me to tell you more?"
+        except Exception:
+            return None
+
     def _maybe_summarize(self):
         if count_messages_tokens(self.messages) < MAX_CONTEXT_TOKENS:
             return
-        console.print("[dim]Compressing earlier context...[/dim]", end="\r")
         self._do_summarize()
 
     def _do_summarize(self):
@@ -2103,6 +2146,21 @@ class Agent:
         if content:
             self._remember_plain_turn(user_input, content)
             self._last_memory_profile_context = bool(memory_profile_context and context)
+
+        # Proactive injection: after every turn, check if the cognition queue
+        # has something worth raising. If so, append it to the response so KING
+        # surfaces observations naturally without the user having to ask.
+        if content:
+            proactive_note = self._check_proactive()
+            if proactive_note:
+                content = content + "\n\n" + proactive_note
+                # Update the last assistant message with the proactive addition.
+                if self.messages and self.messages[-1].get("role") == "assistant":
+                    self.messages[-1]["content"] = content
+                if emit_chunk:
+                    emit_chunk("\n\n" + proactive_note)
+                else:
+                    console.print(f"\n[dim]{proactive_note}[/dim]")
 
         self._maybe_summarize()
 
