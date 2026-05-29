@@ -1817,6 +1817,7 @@ class Agent:
                 tool_calls[0] = forced_contextual_call
                 forced_contextual_call = None
             else:
+                print("Thinking...", end="", flush=True)
                 stream_attempts = max(1, settings.llm_stream_attempts)
                 for attempt in range(stream_attempts):
                     try:
@@ -1833,8 +1834,7 @@ class Agent:
                 if stream is None:
                     break
 
-                _spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-                _spinner_idx = 0
+                _showed_thinking = True  # We already printed "Thinking..." before stream
                 _chunk_count = 0
                 for chunk in stream:
                     if not chunk.choices:
@@ -1844,15 +1844,11 @@ class Agent:
                     if delta.content:
                         content += delta.content
                         if buffer_tool_text:
-                            _chunk_count += 1
-                            if _chunk_count % 3 == 0:
-                                frame = _spinner_frames[_spinner_idx % len(_spinner_frames)]
-                                print(f"\r  {frame} Working...  ", end="", flush=True)
-                                _spinner_idx += 1
                             continue
                         if not started:
                             started = True
-                            console.print("          ", end="\r")
+                            # Clear the "Thinking..." line.
+                            print("\r            \r", end="", flush=True)
                         print(delta.content, end="", flush=True)
 
                     if delta.tool_calls:
