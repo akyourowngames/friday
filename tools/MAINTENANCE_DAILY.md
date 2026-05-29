@@ -27,6 +27,7 @@ because the engine writes a "last run" stamp into
 - folder_scan: enabled=true include_summarize_pending=false
 - telegram_summary: enabled=true include_stats=true
 - scheduler_due: enabled=true horizon_minutes=1440
+- project_audit: enabled=true
 
 ## Step Notes
 
@@ -46,6 +47,13 @@ because the engine writes a "last run" stamp into
 - `scheduler_due` asks the scheduler engine for due items inside the horizon and
   runs only items whose action is in `Action Whitelist` below. New scheduler
   entries default to inert until their action is whitelisted.
+- `project_audit` runs the autonomous project manager's night audit: it
+  recomputes health, momentum, status, and ETA for every active project, records
+  a health-history point, and refreshes the drift alerts (inactivity, velocity
+  collapse, deadline slip, aging blockers, health drop, scope creep, sentiment
+  decline, ghosts) plus cross-project deadline conflicts. It only reads and
+  writes the project store (`KING_PROJECT_STORE_PATH`); it never touches agent
+  core or routing. Thresholds live in `tools/PROJECT_MANAGER_CONFIG.md`.
 
 ## Action Whitelist
 

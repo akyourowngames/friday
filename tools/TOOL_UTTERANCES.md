@@ -246,6 +246,85 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - anything proactive for me
 - what should i know
 
+## project_track
+- track this {description}
+- king track this and keep tabs on it
+- start tracking a project to {goal}
+- king track this new project
+- add this to my projects and track it
+- i need to build {goal}, track it
+- update on {project}: {what happened}
+- here is where {project} stands today
+- i finished the {task}
+- i finished the {task} but {other} is still blocked
+- i wrapped up {task} today
+- {project} is blocked on {thing}
+- we are stuck on {thing}
+- we are cutting {feature} for now
+- dropping {feature} from the plan
+- i decided to {decision}
+- worked on {project} today but nothing is done yet
+
+## project_status
+- king status
+- status
+- project status
+- give me the project brief
+- how are my projects doing
+- morning brief
+- brief me on everything
+- where do all my projects stand
+- run me through everything
+
+## project_focus
+- what should i focus on today
+- which project needs me most
+- rank my projects by urgency
+- what is the most important thing right now
+- where should my attention go
+
+## project_detail
+- status on the {project} project
+- deep dive on {project}
+- where is {project} at
+- how is {project} doing
+- give me the full picture on {project}
+
+## project_alerts
+- any project warnings
+- what is the project manager worried about
+- show project alerts
+- anything drifting on my projects
+- what is going off track
+
+## project_decisions
+- what did we decide about {topic}
+- why did we cut {feature}
+- show the decision log
+- what was the call on {topic}
+- remind me what we chose for {topic}
+
+## project_archive
+- archive the {project} project
+- close out {project}
+- we are done with {project}
+- wrap up and post-mortem {project}
+- finish and file away {project}
+
+## project_resurrect
+- what was that {project} project again
+- help me pick {project} back up
+- resurrect {project}
+- bring back the {project} project
+- i want to restart {project}
+
+## project_brief_schedule
+- send me a project brief every morning at {time}
+- turn on the daily morning brief at {time}
+- wake me with a project briefing at {time}
+- give me a war room brief each morning
+- start daily project briefings
+
 ## life_timeline
 - summarize what was going on for me recently
 - give me a timeline of recent life events

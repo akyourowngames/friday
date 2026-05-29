@@ -229,5 +229,10 @@ class Settings:
     cognition_config_file: str = _env("KING_COGNITION_CONFIG_FILE", "cognition/COGNITION_CONFIG.md")
     cognition_state_path: str = _env("KING_COGNITION_STATE_PATH", "storage/cognition_state.json")
 
+    # Autonomous project manager
+    project_manager_config_file: str = _env("KING_PROJECT_MANAGER_CONFIG_FILE", "tools/PROJECT_MANAGER_CONFIG.md")
+    project_store_path: str = _env("KING_PROJECT_STORE_PATH", "storage/projects.json")
+    project_log_path: str = _env("KING_PROJECT_LOG_PATH", "storage/project_log.jsonl")
+
 
 settings = Settings()
