@@ -9,6 +9,7 @@ from . import image
 from . import camera
 from . import composio
 from . import folder_watcher
+from . import telegram_watcher
 from . import hackernews
 from . import reddit
 from . import terminal

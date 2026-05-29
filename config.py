@@ -71,11 +71,13 @@ class Settings:
     debug: bool = _env_bool("KING_DEBUG", False)
     tool_top_k: int = _env_int("KING_TOOL_TOP_K", 3)
     tool_similarity_threshold: float = _env_float("KING_TOOL_SIMILARITY_THRESHOLD", 0.23)
+    tool_category_threshold: float = _env_float("KING_TOOL_CATEGORY_THRESHOLD", 0.30)
     # Utterance-based tool routing. Each tool's similarity is the max over a
     # bank of example user phrasings (utterances) instead of a single
     # description vector. The bank is markdown-owned so collisions are fixed by
     # editing utterances, not code.
     tool_utterances_file: str = _env("KING_TOOL_UTTERANCES_FILE", "tools/TOOL_UTTERANCES.md")
+    tool_routing_categories_file: str = _env("KING_TOOL_ROUTING_CATEGORIES_FILE", "tools/TOOL_ROUTING_CATEGORIES.md")
     max_tool_rounds: int = _env_int("KING_MAX_TOOL_ROUNDS", 6)
     llm_stream_attempts: int = _env_int("KING_LLM_STREAM_ATTEMPTS", 2)
     typing_speed_seconds: float = _env_float("KING_TYPING_SPEED_SECONDS", 0.0)

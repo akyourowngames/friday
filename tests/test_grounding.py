@@ -16,6 +16,7 @@ from agent.core import (
     _has_backtick_tool_call,
     _json_tool_leak_message,
     _load_tool_policy,
+    _forced_hint_tool_call,
     _repair_schema_argument_names,
     _tool_call_grounded,
     _try_parse_json_tool_call,
@@ -157,6 +158,16 @@ class GroundingTests(unittest.TestCase):
         )
 
         self.assertEqual(repaired, {"command": "echo ok", "surprise": "no"})
+
+    def test_direct_markdown_hint_builds_forced_tool_call(self):
+        schemas = [self._schema("reddit")]
+        call = _forced_hint_tool_call(
+            {"tool": "reddit", "args": {"action": "new"}, "direct": True},
+            schemas,
+        )
+
+        self.assertEqual(call["name"], "reddit")
+        self.assertEqual(json.loads(call["arguments"])["action"], "new")
 
     def test_unregistered_json_tool_shape_is_not_printed_raw(self):
         message = _json_tool_leak_message(
@@ -338,7 +349,7 @@ class RouterSelectionTests(unittest.TestCase):
         self.assertIn("Routing Contrast Text", contrast)
         self.assertNotIn("how are you", contrast.lower())
 
-    def test_threshold_removes_weak_tail_candidates(self):
+    def test_category_gate_selects_single_exact_tool(self):
         router = ToolRouter(top_k=3)
         router.threshold = 0.2
         router._tool_names = ["strong", "near", "weak"]
@@ -350,6 +361,11 @@ class RouterSelectionTests(unittest.TestCase):
             ],
             dtype=np.float32,
         )
+        router._categories = [{"name": "demo", "tools": ["strong", "near", "weak"], "texts": ["demo"]}]
+        router._category_names = ["demo"]
+        router._category_texts = ["demo"]
+        router._category_owner_idx = [0]
+        router._category_embeddings = np.array([[1.0, 0.0]], dtype=np.float32)
 
         original_tools = router_mod.get_tools
         original_get_tool = router_mod.get_tool
@@ -361,7 +377,7 @@ class RouterSelectionTests(unittest.TestCase):
             router_mod.get_tools = original_tools
             router_mod.get_tool = original_get_tool
 
-        self.assertEqual([tool["name"] for tool in selected], ["strong", "near"])
+        self.assertEqual([tool["name"] for tool in selected], ["strong"])
 
 
 class FileToolTests(unittest.TestCase):

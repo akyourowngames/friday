@@ -50,7 +50,7 @@ def _configure_output_encoding():
 def print_welcome():
     if not Panel:
         console.print("KING - your AI assistant")
-        console.print("  /debug  /tools  /model <name>  /memory  /remember <fact>  /forget <fact>  /voice  /new  /exit")
+        console.print("  /debug  /tools  /model <name>  /memory [recall|extract|sync]  /remember <fact>  /forget <fact>  /voice  /new  /exit")
         console.print()
         return
     title = Panel.fit(
@@ -59,7 +59,7 @@ def print_welcome():
         padding=(1, 4),
     )
     console.print(title)
-    console.print("  [dim]/debug[/dim]  [dim]/tools[/dim]  [dim]/model <name>[/dim]  [dim]/memory[/dim]  [dim]/remember <fact>[/dim]  [dim]/forget <fact>[/dim]  [dim]/voice[/dim]  [dim]/new[/dim]  [dim]/exit[/dim]")
+    console.print("  [dim]/debug[/dim]  [dim]/tools[/dim]  [dim]/model <name>[/dim]  [dim]/memory [recall|extract|sync][/dim]  [dim]/remember <fact>[/dim]  [dim]/forget <fact>[/dim]  [dim]/voice[/dim]  [dim]/new[/dim]  [dim]/exit[/dim]")
     console.print()
 
 
@@ -323,49 +323,6 @@ def run_api_server(host: str, port: int):
     uvicorn.run("api_server:app", host=host, port=port)
 
 
-def _start_telegram_watcher_for_normal_cli():
-    try:
-        from telegram_watcher.client import ensure_service_for_cli
-    except Exception as exc:
-        console.print("Telegram watcher bridge unavailable: " + exc.__class__.__name__)
-        return None
-    try:
-        config, status = ensure_service_for_cli()
-    except Exception as exc:
-        console.print("Telegram watcher bridge startup failed: " + exc.__class__.__name__)
-        return None
-    state = str(status.get("status") or "")
-    if state in ("running", "started"):
-        console.print("[dim]Telegram watcher bridge: " + state + " at " + config.service_base_url + "[/dim]")
-        return config
-    reason = str(status.get("reason") or state or "unavailable")
-    console.print("[dim]Telegram watcher bridge not started: " + reason + "[/dim]")
-    return None
-
-
-def _try_telegram_watcher_cli(raw: str, config) -> bool:
-    if config is None:
-        return False
-    try:
-        from telegram_watcher.client import ensure_service_for_cli, send_cli_message
-
-        result = send_cli_message(config, raw)
-        if result.get("status") == "unavailable":
-            config, _status = ensure_service_for_cli()
-            result = send_cli_message(config, raw)
-    except Exception as exc:
-        console.print("[dim]Telegram watcher bridge error: " + exc.__class__.__name__ + "[/dim]")
-        return False
-    if not isinstance(result, dict) or not result.get("handled"):
-        return False
-    text = str(result.get("text") or "").strip()
-    if text:
-        console.print(text)
-    else:
-        console.print("[dim]Telegram watcher handled " + str(result.get("action") or "request") + ".[/dim]")
-    return True
-
-
 def cmd_debug():
     from config import settings
 
@@ -395,8 +352,45 @@ def cmd_model(args):
 
 
 def cmd_memory(agent, args: str = ""):
+    text = str(args or "").strip()
+    command, _, rest = text.partition(" ")
+    command = command.casefold()
+    if command in {"recall", "search"}:
+        query = rest.strip()
+        if not query:
+            console.print("[yellow]Usage: /memory recall <query>[/yellow]")
+            return
+        hits = agent.brain.recall_unified(query, k=10)
+        if not hits:
+            console.print("[yellow]No matching memories.[/yellow]")
+            return
+        rows = []
+        for idx, item in enumerate(hits, 1):
+            rows.append([str(idx), item.get("text", ""), str(item.get("score", ""))])
+        _print_table(["#", "Fact", "Score"], rows, right_aligned={0, 2})
+        return
+    if command in {"extract", "ingest"}:
+        from memory.worker import ingest_user_files
+
+        result = ingest_user_files(agent.brain)
+        console.print(
+            "[cyan]Memory extract:[/cyan] "
+            + f"status={result.get('status')} files={result.get('user_files_found', 0)} "
+            + f"facts={result.get('facts_ingested', result.get('ingested', 0))}"
+        )
+        return
+    if command in {"sync", "graph"}:
+        report = agent.brain.maintain(rebuild=True, backup=True)
+        agent.brain._sync_obsidian_graph()
+        status = agent.brain.obsidian_graph_status()
+        console.print(
+            "[cyan]Memory sync:[/cyan] "
+            + f"tier={report.get('after', {}).get('tier')} graph_rebuilt={report.get('graph_rebuilt')} "
+            + f"vault={status.get('status')}"
+        )
+        return
     try:
-        limit = int(args.strip()) if args.strip() else 25
+        limit = int(text) if text else 25
     except ValueError:
         limit = 25
     memories = agent.brain.list_memories(limit)
@@ -494,7 +488,6 @@ def main(argv: list[str] | None = None):
         Agent().process(initial_message)
         return
 
-    telegram_watcher_config = _start_telegram_watcher_for_normal_cli()
     print_welcome()
     agent = None
 
@@ -606,15 +599,11 @@ def main(argv: list[str] | None = None):
                 else:
                     console.print(f"[red]Unknown gesture subcommand: {sub}. Try /gesture[/red]")
             elif base == "help":
-                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /memory [limit]  /remember <fact>  /forget <fact>  /voice  /gesture  /playlist  /new  /help  /exit")
+                console.print("[bold]Commands:[/bold] /debug  /tools  /model <name>  /memory [limit|recall <query>|extract|sync]  /remember <fact>  /forget <fact>  /voice  /gesture  /playlist  /new  /help  /exit")
             else:
-                if _try_telegram_watcher_cli(raw, telegram_watcher_config):
-                    continue
                 console.print(f"[red]Unknown command: /{base}. Try /help[/red]")
             continue
 
-        if _try_telegram_watcher_cli(raw, telegram_watcher_config):
-            continue
         ensure_agent().process(raw)
 
 

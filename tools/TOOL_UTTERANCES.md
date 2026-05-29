@@ -161,6 +161,9 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - remember that {fact}
 - save this fact about me: {fact}
 - store {fact} in long-term memory
+- remember that my {detail} is {value}
+- remember that my name is Alex
+- remember that Alex is my friend
 
 ## memory_forget
 - forget what i said about {topic}
@@ -170,6 +173,8 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - check memory health
 - audit the memory index
 - run a memory integrity check
+- sync the obsidian memory vault
+- rebuild the memory graph
 
 ## weather
 - what is the weather in {city}
@@ -246,6 +251,12 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - give me a timeline of recent life events
 - recall my recent life as a story
 
+## memory_extract
+- extract memories from obsidian files
+- ingest user markdown files into memory
+- read memory vault files and remember facts
+- scan obsidian for new personal facts
+
 ## find_tools
 - can you find a tool that {capability}
 - search the tool catalog for {capability}
@@ -273,7 +284,9 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - show comments for hn story {id}
 
 ## reddit
-- show me reddit front page
+- show me reddit front page [args:action=front] [direct]
+- fetch latest reddit threads [args:action=new] [direct]
+- latest reddit threads [args:action=new] [direct]
 - top posts on r/{subreddit}
 - search reddit for {query}
 - get reddit comments on {post}
@@ -318,6 +331,14 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - search the indexed folder for {query}
 - what types of files are in the watched folder
 - summarize the indexed folder contents
+
+## telegram_watcher
+- check telegram watcher status
+- send a file through telegram
+- find allowed telegram files about {topic}
+- show latest telegram watcher files
+- turn telegram file watch on
+- turn telegram file watch off
 
 ## tool_manifest_audit
 - audit the tool manifest

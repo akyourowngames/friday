@@ -8,6 +8,7 @@ Vault structure:
     People/         Person profiles built from graph facts and relationships
     Facts/          Standalone facts with connections and context
     Timeline/       Date-grouped memory entries for chronological browsing
+    Graph.md        Deterministic active relationship graph
     Index.md        Dashboard with people, stats, and recent memories
 """
 
@@ -111,8 +112,6 @@ def _strip_markdown_fence(content: str) -> str:
 def _llm_call(system: str, user_content: str, max_tokens: int = 800) -> str | None:
     """Make a one-shot LLM call. Returns None on failure (graceful degradation).
     Skips entirely if no API key is configured or vault is in a temp directory."""
-    if not settings.memory_obsidian_llm_pages_enabled:
-        return None
     if not settings.nim_api_key or not settings.nim_api_key.strip():
         return None
     # Skip LLM in test environments (temp vault paths)
@@ -147,6 +146,8 @@ def _llm_call(system: str, user_content: str, max_tokens: int = 800) -> str | No
 
 def _build_person_page_llm(name: str, facts: list[dict], graph: dict, all_people: set) -> str:
     """Use the LLM to write a rich person page from raw facts."""
+    if not settings.memory_obsidian_llm_pages_enabled:
+        return _build_person_page_fallback(name, facts, graph)
     # Build the fact list for the LLM
     fact_lines = []
     seen = set()
@@ -245,6 +246,8 @@ def _build_person_page_fallback(name: str, facts: list[dict], graph: dict) -> st
 
 def _build_fact_page_llm(memory: dict, graph: dict) -> str:
     """Use the LLM to write a fact page."""
+    if not settings.memory_obsidian_llm_pages_enabled:
+        return _build_fact_page_fallback(memory, graph)
     text = memory.get("text", "")
     date = memory.get("_date", "")
     importance = memory.get("importance", 0.5)
@@ -358,6 +361,12 @@ def _build_index(memories: list[dict], graph: dict, person_count: int, fact_coun
             lines.append(f"- {_wiki_link(name, 'People')}")
         lines.append("")
 
+    active_edges = [edge for edge in graph.get("edges", []) if edge.get("active", True)]
+    if active_edges:
+        lines.extend(["## Graph", ""])
+        lines.append(f"- [[Graph|Relationship graph]] ({len(active_edges)} active edges)")
+        lines.append("")
+
     recent = sorted(memories, key=lambda m: (m.get("_date", ""), m.get("ts", "")), reverse=True)[:15]
     if recent:
         lines.extend(["## Recent Memories", ""])
@@ -393,6 +402,47 @@ def _build_index(memories: list[dict], graph: dict, person_count: int, fact_coun
     return "\n".join(lines)
 
 
+def _build_graph_page(graph: dict) -> str:
+    """Build a deterministic relationship graph page for Obsidian."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    nodes = graph.get("nodes", {})
+    active_edges = [edge for edge in graph.get("edges", []) if edge.get("active", True)]
+    lines = [
+        "---",
+        "type: graph",
+        f"updated: \"{now}\"",
+        f"nodes: {len(nodes)}",
+        f"active_edges: {len(active_edges)}",
+        "---",
+        "",
+        "# Memory Graph",
+        "",
+    ]
+
+    if not active_edges:
+        lines.extend(["No active graph relationships.", "", "---", "[[Index]]", ""])
+        return "\n".join(lines)
+
+    grouped: dict[str, list[str]] = {}
+    for edge in active_edges:
+        source = nodes.get(edge.get("source", ""), {})
+        target = nodes.get(edge.get("target", ""), {})
+        source_name = source.get("name") or edge.get("source", "")
+        target_name = target.get("name") or edge.get("target", "")
+        relation = str(edge.get("relation", "related_to")).replace("_", " ").strip() or "related to"
+        source_text = _wiki_link(source_name, "People") if source.get("type") == "person" else source_name
+        target_text = _wiki_link(target_name, "People") if target.get("type") == "person" else target_name
+        grouped.setdefault(source_name, []).append(f"- {source_text} -> **{relation}** -> {target_text}")
+
+    for source_name in sorted(grouped):
+        lines.extend([f"## {source_name}", ""])
+        lines.extend(sorted(grouped[source_name]))
+        lines.append("")
+
+    lines.extend(["---", "[[Index]]", ""])
+    return "\n".join(lines)
+
+
 # ─── Sync engine ────────────────────────────────────────────────────────────
 
 
@@ -408,7 +458,7 @@ def _cleanup_stale_files(vault: Path, expected_files: set[Path]):
 
 
 def sync_vault(memories: list[dict], graph: dict) -> dict:
-    """Rebuild the Obsidian memory vault using the LLM for rich page content.
+    """Rebuild the Obsidian memory vault from graph-backed memory facts.
 
     Idempotent: same input produces same output. Stale files are cleaned up.
     Falls back to structured templates when the LLM is unavailable.
@@ -518,6 +568,11 @@ def sync_vault(memories: list[dict], graph: dict) -> dict:
         expected_files.add(path)
         written += 1
 
+    graph_path = vault / "Graph.md"
+    _atomic_write(graph_path, _build_graph_page(graph))
+    expected_files.add(graph_path)
+    written += 1
+
     # Write index
     index_path = vault / "Index.md"
     _atomic_write(index_path, _build_index(memories, graph, len(person_facts), len(standalone_facts)))
@@ -547,7 +602,7 @@ def on_memory_stored(memory: dict, all_memories: list[dict], graph: dict):
 # ─── User file ingestion ────────────────────────────────────────────────────
 
 _MANAGED_DIRS = {"People", "Facts", "Timeline", ".obsidian"}
-_MANAGED_FILES = {"Index.md"}
+_MANAGED_FILES = {"Index.md", "Graph.md"}
 
 
 def _is_user_file(path: Path, vault: Path) -> bool:

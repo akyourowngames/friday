@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import memory.brain as brain_mod
 from tests.test_memory import isolated_memory, _ones_embed
+from tools.memory_ops import memory_extract
 
 
 class UnifiedMemoryTests(unittest.TestCase):
@@ -98,6 +99,9 @@ class UnifiedMemoryTests(unittest.TestCase):
             )
             self.assertIn("[[People/Ankita|Ankita]]", timeline)
             self.assertIn("[[People/Rai Bud|Rai Bud]]", timeline)
+            graph_page = (vault_root / "Graph.md").read_text(encoding="utf-8")
+            self.assertIn("# Memory Graph", graph_page)
+            self.assertIn("[[People/Rai Bud|Rai Bud]]", graph_page)
 
     @patch.object(brain_mod, "embed", _ones_embed)
     def test_graph_rebuild_replaces_relationship_fallback_edges(self):
@@ -126,6 +130,14 @@ class UnifiedMemoryTests(unittest.TestCase):
             self.assertTrue(report.get("graph_rebuilt"))
             self.assertEqual(brain._graph.get("nodes", {}).get("ankita", {}).get("type"), "person")
             self.assertNotIn(old_target, memory.get("graph_nodes", []))
+
+    @patch.object(brain_mod, "embed", _ones_embed)
+    def test_memory_extract_tool_reports_empty_vault(self):
+        with isolated_memory():
+            result = memory_extract(response_format="structured")
+
+            self.assertEqual(result["result"]["extraction"]["status"], "no_user_files")
+            self.assertTrue(result["result"]["sync"].get("graph_rebuilt"))
 
 
 if __name__ == "__main__":

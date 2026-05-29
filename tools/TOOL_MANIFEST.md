@@ -12,10 +12,11 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 - `datetime_tool.py` - timezone-aware date and time with human or ISO output, structured errors, and optional traces (v2.0.0).
 - `files.py` - file read, write, and list capability with path and mode validation.
 - `folder_watcher.py` - read-only KING bridge to the folder watcher HTTP service for chat, query, stats, details, search, latest, content, deep-dive, and status actions.
+- `telegram_watcher.py` - KING tool bridge to the background Telegram watcher service for allowed-zone file courier actions, status, health, latest, search, and watch controls.
 - `hackernews.py` - Hacker News retrieval capability.
 - `image.py` - image generation and gallery management with structured output and provider status (v2.0.0).
 - `manifest_audit.py` - read-only manifest audit with structured output and traces (v2.0.0).
-- `memory_ops.py` - memory assess, recall, remember, and forget with structured output and GD tier reporting.
+- `memory_ops.py` - memory assess, extract, recall, remember, and forget with structured output, Obsidian ingestion, and GD tier reporting.
 - `navigator.py` - open-provider route distance, straight-line distance, travel estimate, and place detail capability.
 - `notes.py` - note save, read, update, delete, list, and search with structured output, typed errors, and optional traces (v2.0.0).
 - `reddit.py` - Reddit retrieval capability.
@@ -41,6 +42,7 @@ The runtime registry remains the source of truth for callable schemas. This mani
 
 - `TOOL_MANIFEST.md` - active executable tool inventory and markdown contracts.
 - `TOOL_UTTERANCES.md` - per-tool example user phrasings (utterance bank) consumed by the router for like-to-like semantic tool selection. Edit utterances here to fix routing collisions without code changes.
+- `TOOL_ROUTING_CATEGORIES.md` - first-stage route categories consumed before exact tool selection so unrelated tools do not compete in one pool.
 - `TOOL_VERIFICATION_PIPELINE.md` - default checks consumed by `tool_verification_pipeline`.
 - `TOOL_EVIDENCE_LEDGER.md` - evidence standards and current capability claim status.
 - `TOOL_PROVIDER_FAILURE_PLAYBOOK.md` - provider, fallback, timeout, partial, and empty-result reporting rules.
@@ -363,8 +365,8 @@ commands for every turn.
 - Endpoint service: normal `run` mode exposes local HTTP endpoints on the
   markdown-configured host and port while the Telegram polling loop runs in the
   same service process.
-- Main CLI bridge: normal `python main.py` mode auto-starts this endpoint
-  service when enabled in markdown and token/auth env values are present.
+- Main CLI bridge: normal `python main.py` mode does not forward arbitrary text
+  to this service. KING reaches Telegram through the registry tool below.
 - Folder intelligence source: Folder Watcher HTTP service first, bounded local
   scan fallback second.
 - Startup notice: optional markdown-controlled online message to authorized
@@ -378,8 +380,8 @@ commands for every turn.
   ids.
 - Natural text, optional slash commands, and numeric replies to the active
   per-chat pick list.
-- Natural KING CLI text and unknown slash commands through `/cli/message` when
-  the semantic planner selects a markdown-listed CLI forward action.
+- Local tool requests through `/cli/message` when KING explicitly calls the
+  `telegram_watcher` registry tool.
 - Folder Watcher file records or allowed-zone local files.
 
 ### Outputs
@@ -393,7 +395,7 @@ commands for every turn.
 - Optional proactive notifications for new Folder Watcher events after watch
   mode is enabled.
 - HTTP status, health, verify, push-check, and CLI-message responses for the
-  local KING process. This service is not registered as a normal registry tool.
+  local KING process.
 
 ### Error Handling
 
@@ -402,7 +404,7 @@ commands for every turn.
   discovery; unauthorized message text is not stored.
 - Missing token or authorized ids blocks daemon run mode instead of pretending
   Telegram is active.
-- CLI forwarding handles only actions listed in `CLI Forward Actions`; broad
+- Local forwarding handles only actions listed in `CLI Forward Actions`; broad
   natural chat stays with the main KING agent.
 - Files outside allowed zones are not listed, sent, or acknowledged.
 - Files blocked by policy are reported as blocked when they are otherwise a
@@ -420,6 +422,42 @@ commands for every turn.
   be proven.
 - Run `python -m compileall telegram_watcher telegram_watcher_service.py`.
 - Run the repository verification pipeline after runtime changes.
+
+## Runtime Tool: telegram_watcher
+
+### Purpose
+
+`telegram_watcher` is KING's first-class bridge to the background Telegram
+watcher service. It exposes Telegram file courier actions as a normal registry
+tool instead of letting the main CLI intercept unrelated chat turns.
+
+### Runtime
+
+- Entrypoint: `tools/telegram_watcher.py`.
+- Service package: `telegram_watcher/`.
+- Config file: `tools/TELEGRAM_WATCHER_CONFIG.md`.
+- Route category: `telegram_delivery` in `tools/TOOL_ROUTING_CATEGORIES.md`.
+- The tool starts or reuses the background service when token and authorization
+  environment variables are configured.
+
+### Inputs
+
+- `action`: `status`, `health`, `latest`, `find`, `search`, `send`,
+  `sendfile`, `info`, `new`, `list`, `watch_on`, `watch_off`, or `message`.
+- `message`: natural target text for the action.
+- `config_path`: optional markdown config override.
+- `response_format`: `legacy` or `structured`.
+
+### Outputs
+
+- Legacy text from the Telegram watcher local endpoint by default.
+- Structured service status, handled flag, returned text, and document metadata
+  when `response_format=structured`.
+
+### Verification Method
+
+- Run `python -m unittest tests.test_telegram_watcher`.
+- Run `python -m compileall tools/telegram_watcher.py telegram_watcher/client.py`.
 
 ## Runtime Tool: folder_watcher
 

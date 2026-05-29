@@ -907,6 +907,23 @@ def _forced_contextual_tool_call(user_input: str, tool_schemas: list, messages: 
     }
 
 
+def _forced_hint_tool_call(capability_hint: dict | None, tool_schemas: list) -> dict | None:
+    if not capability_hint or not capability_hint.get("direct"):
+        return None
+    tool_name = str(capability_hint.get("tool") or "").strip()
+    args = capability_hint.get("args")
+    if not tool_name or not isinstance(args, dict):
+        return None
+    available = {schema["function"]["name"] for schema in tool_schemas}
+    if tool_name not in available:
+        return None
+    return {
+        "id": f"call_{tool_name}_hint",
+        "name": tool_name,
+        "arguments": json.dumps(args, ensure_ascii=False),
+    }
+
+
 def _forced_folder_watcher_call(user_input: str, tool_schemas: list, messages: list | None = None) -> dict | None:
     if len(tool_schemas) != 1:
         return None
@@ -1103,8 +1120,6 @@ def _build_tool_answer_instruction(user_input: str, tool_names: list[str]) -> st
 
 
 def _direct_answer_from_tool_result(tool_name: str, result_content: str) -> str:
-    if tool_name != "folder_watcher":
-        return ""
     try:
         parsed = json.loads(result_content or "{}")
     except (TypeError, json.JSONDecodeError):
@@ -1114,7 +1129,7 @@ def _direct_answer_from_tool_result(tool_name: str, result_content: str) -> str:
     result = parsed.get("result")
     if not isinstance(result, dict):
         return ""
-    answer = str(result.get("answer") or "").strip()
+    answer = str(result.get("answer") or result.get("text") or "").strip()
     data = result.get("data") if isinstance(result.get("data"), dict) else {}
     if not answer:
         answer = str(data.get("answer") or "").strip()
@@ -1903,8 +1918,12 @@ class Agent:
         selected_names = {t.get("name") for t in selected_tools}
         for hint_tool in selected_names:
             hint = self.router.capability_hint(hint_tool)
-            if hint.get("args", {}).get("tool_slug"):
-                capability_hint = {"tool": hint_tool, "args": hint["args"]}
+            if hint.get("args"):
+                capability_hint = {
+                    "tool": hint_tool,
+                    "args": hint["args"],
+                    "direct": bool(hint.get("direct")),
+                }
                 break
 
         self.messages.append({"role": "user", "content": user_input})
@@ -1944,7 +1963,9 @@ class Agent:
         grounding_rejected = False
         grounding_retry_pending = False
         content = ""
-        forced_contextual_call = _forced_contextual_tool_call(user_input, tool_schemas, self.messages)
+        forced_contextual_call = _forced_hint_tool_call(capability_hint, tool_schemas)
+        if not forced_contextual_call:
+            forced_contextual_call = _forced_contextual_tool_call(user_input, tool_schemas, self.messages)
         if not forced_contextual_call:
             forced_contextual_call = _forced_local_system_control_call(
                 user_input,
