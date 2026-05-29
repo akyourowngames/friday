@@ -31,12 +31,15 @@ Rules:
 - Organize facts into clear sections with ## headings
 - Use bullet points for lists of facts
 - Add brief contextual notes where relationships between facts are obvious
-- Use [[wiki links]] when referencing other people: [[People/Name|Name]]
+- Use [[People/Name|Name]] when referencing other people
+- Use [[Timeline/DATE|DATE]] when referencing dates (format: YYYY-MM-DD)
+- Include a Timeline section at the bottom linking to dates when facts were stored
 - Include a "Last updated" line at the bottom
 - Keep it concise but complete — every fact should appear somewhere
 - Do NOT invent facts. Only use what is provided.
 - Do NOT add disclaimers or meta-commentary about the note itself.
 - Use Obsidian frontmatter (---) with type, name, and updated fields.
+- End with a link back to [[Index]]
 
 Output ONLY the markdown note content. No explanation before or after."""
 
@@ -182,16 +185,25 @@ def _build_person_page_fallback(name: str, facts: list[dict], graph: dict) -> st
         "",
     ]
     seen = set()
+    dates = set()
     for fact in facts:
         text = fact.get("text", "").strip()
         if not text or text in seen:
             continue
         seen.add(text)
         date = fact.get("_date", "")
+        if date:
+            dates.add(date)
         entry = f"- {text}"
         if date:
             entry += f" *({date})*"
         lines.append(entry)
+
+    if dates:
+        lines.extend(["", "## Timeline", ""])
+        for d in sorted(dates, reverse=True):
+            lines.append(f"- [[Timeline/{_safe_filename(d)}|{d}]]")
+
     lines.extend(["", "---", "[[Index]]", ""])
     return "\n".join(lines)
 
@@ -248,8 +260,9 @@ def _build_fact_page_fallback(memory: dict, graph: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_timeline_page(date_str: str, day_memories: list[dict]) -> str:
-    """Build a daily timeline page."""
+def _build_timeline_page(date_str: str, day_memories: list[dict], graph: dict) -> str:
+    """Build a daily timeline page with cross-links to people."""
+    nodes = graph.get("nodes", {})
     lines = [
         "---",
         f"type: timeline",
@@ -260,12 +273,24 @@ def _build_timeline_page(date_str: str, day_memories: list[dict]) -> str:
         f"# {date_str}",
         "",
     ]
+    people_mentioned = set()
     sorted_mems = sorted(day_memories, key=lambda m: m.get("ts", ""))
     for m in sorted_mems:
         text = m.get("text", "")
         time_str = m.get("ts", "")
         prefix = f"**{time_str}** " if time_str else ""
         lines.append(f"- {prefix}{text}")
+        # Collect people for cross-links
+        for node_id in m.get("graph_nodes", []):
+            node = nodes.get(node_id, {})
+            if node.get("type") == "person" and node.get("name"):
+                people_mentioned.add(node["name"])
+
+    if people_mentioned:
+        lines.extend(["", "## People mentioned", ""])
+        for name in sorted(people_mentioned):
+            lines.append(f"- [[People/{_safe_filename(name)}|{name}]]")
+
     lines.extend(["", "---", "[[Index]]", ""])
     return "\n".join(lines)
 
@@ -452,7 +477,7 @@ def sync_vault(memories: list[dict], graph: dict) -> dict:
     timeline_dir = vault / "Timeline"
     timeline_dir.mkdir(parents=True, exist_ok=True)
     for date_str, day_mems in by_date.items():
-        content = _build_timeline_page(date_str, day_mems)
+        content = _build_timeline_page(date_str, day_mems, graph)
         path = timeline_dir / f"{_safe_filename(date_str)}.md"
         _atomic_write(path, content)
         expected_files.add(path)

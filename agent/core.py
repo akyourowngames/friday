@@ -1298,15 +1298,15 @@ def _looks_like_action_correction(user_input: str, messages: list) -> bool:
     text = str(user_input or "").strip()
     if not text:
         return False
-    correction_text = _action_correction_text()
-    new_topic_text = _context_followup_texts()[1]
+    # Short negatives are corrections when they follow an action
+    lower = text.lower().strip("!?. ")
+    if lower in ("no", "nope", "nah", "wrong", "not working", "still wrong", "try again", "didnt work"):
+        return True
     try:
+        re = _RouteEmbeddings.get()
         text_emb = embed(text)
-        compare_embs = embed([correction_text, new_topic_text])
-        if getattr(compare_embs, "ndim", 1) == 1:
-            compare_embs = compare_embs.reshape(1, -1)
-        correction_score = float(np.dot(compare_embs[0], text_emb))
-        new_topic_score = float(np.dot(compare_embs[1], text_emb))
+        correction_score = float(np.dot(re.v("correction"), text_emb))
+        new_topic_score = float(np.dot(re.v("new_topic"), text_emb))
     except Exception:
         return False
     text_terms = _query_terms(text)
@@ -1314,22 +1314,7 @@ def _looks_like_action_correction(user_input: str, messages: list) -> bool:
         return False
     if correction_score >= settings.tool_similarity_threshold:
         return True
-    if len(text_terms) > 2:
-        return False
-
-    context = text
-    for msg in reversed(messages):
-        if msg.get("role") == "assistant":
-            prior = str(msg.get("content") or "").strip()
-            if prior:
-                context = f"{text}\n{prior[:300]}"
-                break
-    try:
-        correction_emb = embed(correction_text)
-        sample_emb = embed(context)
-        return float(np.dot(correction_emb, sample_emb)) >= settings.tool_similarity_threshold
-    except Exception:
-        return False
+    return False
 
 
 def _strip_memory_prefix(content: str) -> str:
@@ -1615,6 +1600,18 @@ class Agent:
         except Exception:
             return None
 
+    def _run_proactive(self, content: str, emit_chunk=None):
+        """Run proactive check in background thread."""
+        try:
+            note = self._check_proactive()
+            if note:
+                if emit_chunk:
+                    emit_chunk("\n\n" + note)
+                else:
+                    print(f"\n{note}", flush=True)
+        except Exception:
+            pass
+
     def _maybe_summarize(self):
         if count_messages_tokens(self.messages) < MAX_CONTEXT_TOKENS:
             return
@@ -1677,6 +1674,7 @@ class Agent:
             self._memory_extraction_messages = self._memory_extraction_messages[-limit:]
 
     def process(self, user_input: str, emit_chunk=None):
+        print("Thinking...", end="", flush=True)
         recent_action_context = _recent_action_context(self.messages)
         q_emb, routing_input = _embedding_query(user_input, self.messages)
         need_context = q_emb is not None
@@ -1817,7 +1815,6 @@ class Agent:
                 tool_calls[0] = forced_contextual_call
                 forced_contextual_call = None
             else:
-                print("Thinking...", end="", flush=True)
                 stream_attempts = max(1, settings.llm_stream_attempts)
                 for attempt in range(stream_attempts):
                     try:
@@ -2177,20 +2174,10 @@ class Agent:
             self._remember_plain_turn(user_input, content)
             self._last_memory_profile_context = bool(memory_profile_context and context)
 
-        # Proactive injection: after every turn, check if the cognition queue
-        # has something worth raising. If so, append it to the response so KING
-        # surfaces observations naturally without the user having to ask.
+        # Proactive injection: run in background so it doesn't block the prompt.
+        # If a proactive note is ready, it prints after the response.
         if content:
-            proactive_note = self._check_proactive()
-            if proactive_note:
-                content = content + "\n\n" + proactive_note
-                # Update the last assistant message with the proactive addition.
-                if self.messages and self.messages[-1].get("role") == "assistant":
-                    self.messages[-1]["content"] = content
-                if emit_chunk:
-                    emit_chunk("\n\n" + proactive_note)
-                else:
-                    console.print(f"\n{proactive_note}")
+            self._executor.submit(self._run_proactive, content, emit_chunk)
 
         self._maybe_summarize()
 
