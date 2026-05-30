@@ -174,6 +174,18 @@ class Settings:
     summaries_max_count: int = _env_int("KING_SUMMARIES_MAX_COUNT", 10)
     summaries_max_context: int = _env_int("KING_SUMMARIES_MAX_CONTEXT", 3)
 
+    # Session-based memory: full per-session transcripts + cross-session context
+    session_store_enabled: bool = _env_bool("KING_SESSION_STORE_ENABLED", True)
+    session_store_dir: str = _env("KING_SESSION_STORE_DIR", "storage/sessions")
+    session_index_file: str = _env("KING_SESSION_INDEX_FILE", "storage/sessions/index.json")
+    session_keep_count: int = _env_int("KING_SESSION_KEEP_COUNT", 200)
+    session_context_count: int = _env_int("KING_SESSION_CONTEXT_COUNT", 2)
+    session_context_max_chars: int = _env_int("KING_SESSION_CONTEXT_MAX_CHARS", 1800)
+    session_digest_enabled: bool = _env_bool("KING_SESSION_DIGEST_ENABLED", True)
+    session_digest_max_tokens: int = _env_int("KING_SESSION_DIGEST_MAX_TOKENS", 900)
+    session_digest_min_turns: int = _env_int("KING_SESSION_DIGEST_MIN_TURNS", 2)
+    session_digest_relations_file: str = _env("KING_SESSION_DIGEST_RELATIONS_FILE", "memory/MEMORY_SESSION_RELATIONS.md")
+
     sarvam_api_key: str = _env("SARVAM_API_KEY", "")
     tavily_api_key: str = _env("TAVILY_API_KEY", "")
     voice_enabled: bool = _env_bool("KING_VOICE_ENABLED", False)

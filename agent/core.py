@@ -1807,7 +1807,22 @@ class Agent:
         self.summary_store = SummaryStore(summary_path, max_summaries=settings.summaries_max_count)
         self.summary_store.load()
         self._summary_context = self.summary_store.context_string(n=settings.summaries_max_context)
-        initial_content = _build_system_prompt([], summary_context=self._summary_context)
+        self.session_store = None
+        self._session_context = ""
+        if settings.session_store_enabled:
+            try:
+                from memory.session_store import SessionStore
+
+                self.session_store = SessionStore()
+                self._session_context = self.session_store.context_string()
+                self.session_store.start_session()
+                if settings.session_digest_enabled:
+                    self._submit_background(self._digest_undigested_sessions)
+            except Exception:
+                self.session_store = None
+                self._session_context = ""
+        combined_context = "\n\n".join(part for part in (self._summary_context, self._session_context) if part)
+        initial_content = _build_system_prompt([], summary_context=combined_context)
         self.messages = [{"role": "system", "content": initial_content}]
         self.llm = NIMClient()
         self.router = ToolRouter()
@@ -1821,6 +1836,22 @@ class Agent:
             console.print("[red]NVIDIA_API_KEY not set![/red]")
 
         console.print("[dim]Ready[/dim]")
+
+    def _combined_context(self) -> str:
+        """Summary context + cross-session recap for system-prompt injection."""
+        return "\n\n".join(part for part in (self._summary_context, self._session_context) if part)
+
+    def _digest_undigested_sessions(self):
+        """Background: digest any prior sessions that haven't been processed yet."""
+        try:
+            from memory.session_digest import process_undigested
+            results = process_undigested(self.session_store, brain=self.brain)
+            if results:
+                digested = sum(1 for r in results if r.get("status") == "digested")
+                if digested and settings.debug:
+                    console.print(f"[dim]Digested {digested} prior session(s)[/dim]")
+        except Exception:
+            pass
 
     def _check_proactive(self) -> str | None:
         """Check the cognition proactive queue and return a natural observation
@@ -1946,6 +1977,13 @@ class Agent:
         limit = self._memory_extraction_limit()
         if limit > 0 and len(self._memory_extraction_messages) > limit:
             self._memory_extraction_messages = self._memory_extraction_messages[-limit:]
+        # Persist the full turn to the session transcript (JSONL) so it survives
+        # across sessions and can be digested into the memory graph later.
+        if self.session_store is not None:
+            try:
+                self.session_store.log_turn(user_input, assistant_response)
+            except Exception:
+                pass
 
     def process(self, user_input: str, emit_chunk=None):
         recent_action_context = _recent_action_context(self.messages)
@@ -2073,7 +2111,7 @@ class Agent:
                 selected_tools,
                 recent_action_context,
                 memory_facts=memory_facts,
-                summary_context=self._summary_context,
+                summary_context=self._combined_context(),
                 conversational_turn=conversational_turn,
                 broad_recall=broad_recall,
                 capability_hint=capability_hint,
@@ -2368,7 +2406,7 @@ class Agent:
                             [],
                             recent_action_context,
                             memory_facts=memory_facts,
-                            summary_context=self._summary_context,
+                            summary_context=self._combined_context(),
                             conversational_turn=True,
                             broad_recall=broad_recall,
                         ),

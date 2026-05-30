@@ -116,6 +116,23 @@ def memory_scheduler_bridge_step(step: StepConfig, context: dict[str, Any]) -> d
     return run_bridge(brain)
 
 
+def session_digest_step(step: StepConfig, context: dict[str, Any]) -> dict:
+    brain = context.get("brain")
+    if brain is None:
+        from memory.brain import Brain
+
+        brain = Brain()
+        context["brain"] = brain
+    from memory.session_store import SessionStore
+    from memory.session_digest import process_undigested
+
+    store = context.get("session_store")
+    if store is None:
+        store = SessionStore()
+        context["session_store"] = store
+    return process_undigested(store, brain=brain)
+
+
 def _compose_default_summary(context: dict[str, Any], step: StepConfig) -> str:
     parts: list[str] = ["KING daily maintenance ran."]
     if step.options.get("include_stats"):
@@ -139,3 +156,4 @@ def register_default_steps(engine: MaintenanceEngine) -> None:
     engine.register("project_audit", project_audit_step)
     engine.register("memory_consolidate", memory_consolidate_step)
     engine.register("memory_scheduler_bridge", memory_scheduler_bridge_step)
+    engine.register("session_digest", session_digest_step)

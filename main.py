@@ -531,6 +531,11 @@ def main(argv: list[str] | None = None):
             elif base == "new":
                 from agent.core import Agent
 
+                if agent is not None and getattr(agent, "session_store", None) is not None:
+                    try:
+                        agent.session_store.end_session()
+                    except Exception:
+                        pass
                 agent = Agent()
                 console.print("[green]New conversation started.[/green]")
             elif base == "voice":
