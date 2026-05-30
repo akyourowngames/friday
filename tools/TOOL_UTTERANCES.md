@@ -54,6 +54,9 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - open {path} and show what is inside
 - print the file at {path}
 - what does {path} contain
+- read {filename}.md
+- read the routing_policy.md file
+- open the local file {filename}
 
 ## file_write
 - save this to a file
@@ -387,6 +390,10 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - describe what you see
 - look through the camera and tell me
 - analyze this image
+- what is this jarvis
+- what am i looking at
+- what is this thing in front of me
+- can you see what this is
 
 ## browser_read_page
 - open the page {url} and read it

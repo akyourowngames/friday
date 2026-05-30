@@ -26,17 +26,20 @@ when a request family is going to the wrong part of the system.
 - show me reddit threads about a topic
 - find reddit discussion threads on something
 - get live news or web results
-- read a page or extract details from a website
+- read a web page at a url or extract details from a website
 - check weather, time, distance, or route information
 - what is the weather in a city
 - what time is it in a city
 
 ### local_file_intelligence
 - tools: folder_watcher, file_read, file_write, file_list, note_save, note_read, note_update, note_delete, note_list, note_search, gallery
+- read a local file like routing_policy.md or config.txt
+- open and show the contents of a file on disk
 - inspect the watched folder
 - count indexed files or file types
 - find files in local folders
 - read, write, list, update, or search local files and notes
+- read a local file by its name or path like a .md or .txt file
 - show saved generated images
 
 ### telegram_delivery
@@ -61,6 +64,8 @@ when a request family is going to the wrong part of the system.
 - play music or manage playlist
 - generate an image
 - inspect camera or screenshot
+- what is this, what am i looking at, describe what you see
+- look through the camera and tell me what this is
 - show visual media
 
 ### local_device_control
