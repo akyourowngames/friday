@@ -278,6 +278,63 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
     }, None
 
 
+def _sanitize_tool_arguments(raw: str) -> str:
+    """Return a JSON-valid arguments string from a (possibly corrupted) stream.
+
+    Streamed tool-call argument deltas can occasionally concatenate into invalid
+    JSON (duplicated or overlapping fragments), e.g.
+        {"a": "x, "b": false{"a": "x", "b": false}
+    A malformed string must never be stored in conversation history: the chat API
+    rejects the whole request with a 400 on every later turn, permanently breaking
+    the session. This repairs the common cases and falls back to "{}".
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "{}"
+    # Fast path: already valid.
+    try:
+        json.loads(text)
+        return text
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # The model often re-emits the full object after a corrupted partial. Try the
+    # last complete top-level {...} object in the string.
+    last = _find_last_json_object(text)
+    if last is not None:
+        try:
+            json.loads(last)
+            return last
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Try the first complete top-level object.
+    first = _find_json(text)
+    if first is not None:
+        try:
+            json.loads(first)
+            return first
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Unrecoverable: empty args keep history valid so the session survives.
+    return "{}"
+
+
+def _find_last_json_object(text: str) -> str | None:
+    """Return the last balanced top-level {...} object substring, or None."""
+    end = text.rfind("}")
+    while end != -1:
+        depth = 0
+        for i in range(end, -1, -1):
+            ch = text[i]
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                depth -= 1
+                if depth == 0:
+                    return text[i:end + 1]
+        end = text.rfind("}", 0, end)
+    return None
+
+
 def _repair_schema_argument_names(tool_name: str, args: dict) -> dict:
     if not isinstance(args, dict):
         return {}
@@ -953,6 +1010,26 @@ def _forced_folder_watcher_call(user_input: str, tool_schemas: list, messages: l
 
 def _should_suppress_memory_context(router_decision: dict) -> bool:
     return router_decision.get("reason") == "below_tool_threshold"
+
+
+def _structured_result_payload(text: str):
+    """If a tool result string is a structured-response envelope, return its dict.
+
+    Structured responses look like {"result": {...}, "meta": {...}} (or an
+    {"error": {...}, "meta": {...}} envelope). Returns the parsed dict when the
+    string is that shape, else None. Used to avoid dumping raw JSON to the user
+    on the single-tool direct path.
+    """
+    stripped = str(text or "").strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if isinstance(parsed, dict) and isinstance(parsed.get("meta"), dict) and ("result" in parsed or "error" in parsed):
+        return parsed
+    return None
 
 
 def _merge_context_facts(primary: str, secondary: str, limit: int = 8) -> str:
@@ -2122,10 +2199,14 @@ class Agent:
             formatted_calls = []
             for idx in sorted(tool_calls.keys()):
                 tc = tool_calls[idx]
+                # Sanitize streamed arguments before they enter history. A
+                # malformed arguments string poisons the conversation: the chat
+                # API 400s on every subsequent turn. Repair or fall back to "{}".
+                safe_arguments = _sanitize_tool_arguments(tc["arguments"])
                 formatted_calls.append({
                     "id": tc["id"],
                     "type": "function",
-                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                    "function": {"name": tc["name"], "arguments": safe_arguments},
                 })
 
             if settings.debug:
@@ -2292,7 +2373,14 @@ class Agent:
 
             if settings.direct_single_tool_result and len(formatted_calls) == 1:
                 direct_result = results.get(formatted_calls[0]["id"], "")
-                if direct_result and not direct_result.startswith("Error"):
+                # Never dump a raw structured-response envelope to the user. When
+                # the single tool returned structured JSON, fall through and let
+                # the model phrase it naturally instead of printing JSON.
+                if (
+                    direct_result
+                    and not direct_result.startswith("Error")
+                    and _structured_result_payload(direct_result) is None
+                ):
                     if len(direct_result) > MAX_TOOL_RESULT_CHARS:
                         direct_result = direct_result[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
                     _print_assistant_content(direct_result, emit_chunk=emit_chunk)

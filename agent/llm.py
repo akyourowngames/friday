@@ -29,6 +29,98 @@ def _check_api_key_cached(api_key: str) -> bool:
     return bool(api_key.strip())
 
 
+def _find_balanced_object(text: str, from_end: bool) -> str | None:
+    """Return a balanced top-level {...} object substring (last if from_end)."""
+    if from_end:
+        end = text.rfind("}")
+        while end != -1:
+            depth = 0
+            for i in range(end, -1, -1):
+                ch = text[i]
+                if ch == "}":
+                    depth += 1
+                elif ch == "{":
+                    depth -= 1
+                    if depth == 0:
+                        return text[i:end + 1]
+            end = text.rfind("}", 0, end)
+        return None
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _sanitize_arguments_string(raw: str) -> str:
+    """Repair a possibly-corrupted tool-call arguments string to valid JSON.
+
+    Streamed argument deltas can concatenate into invalid JSON (duplicated or
+    overlapping fragments). A malformed arguments string must never be sent to the
+    chat API: it 400s the entire request on every subsequent turn, permanently
+    breaking the session. Repairs the common cases, else falls back to "{}".
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "{}"
+    try:
+        json.loads(text)
+        return text
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    for candidate in (_find_balanced_object(text, True), _find_balanced_object(text, False)):
+        if candidate:
+            try:
+                json.loads(candidate)
+                return candidate
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+    return "{}"
+
+
+def _sanitize_message_tool_calls(messages):
+    """Return messages with every tool_call's arguments string made JSON-valid.
+
+    Boundary guard: protects against both freshly-corrupted streams and any
+    already-poisoned conversation history carried into this request. Only rebuilds
+    messages that actually need fixing, leaving valid ones untouched.
+    """
+    if not messages:
+        return messages
+    sanitized = None
+    for m_idx, message in enumerate(messages):
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not tool_calls:
+            continue
+        fixed_calls = None
+        for c_idx, call in enumerate(tool_calls):
+            function = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            args = function.get("arguments")
+            if not isinstance(args, str):
+                continue
+            repaired = _sanitize_arguments_string(args)
+            if repaired == args:
+                continue
+            if fixed_calls is None:
+                fixed_calls = [dict(c, function=dict(c.get("function", {}))) if isinstance(c, dict) else c for c in tool_calls]
+            fixed_calls[c_idx]["function"]["arguments"] = repaired
+        if fixed_calls is not None:
+            if sanitized is None:
+                sanitized = list(messages)
+            sanitized[m_idx] = dict(message, tool_calls=fixed_calls)
+    return sanitized if sanitized is not None else messages
+
+
 class NIMClient:
     def __init__(self):
         self.client = OpenAI(
@@ -211,6 +303,7 @@ class NIMClient:
         return iterator()
 
     def stream(self, messages, tools=None, tool_choice=None):
+        messages = _sanitize_message_tool_calls(messages)
         kwargs = {
             "messages": messages,
             "stream": settings.llm_streaming_enabled,
