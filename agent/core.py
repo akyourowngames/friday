@@ -258,9 +258,17 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
     Returns (tool_call_dict, None) on success,
     (None, error_message) if parsed but tool unknown,
     (None, None) if not a JSON tool call."""
-    func_name, func_args, is_tool_shape = _extract_json_tool_shape(text)
-    if not is_tool_shape or not func_name:
-        return None, None
+    # Some models leak their native tool-call token format as plain text, e.g.
+    #   [TOOL_CALLS]project_status{}
+    #   [TOOL_CALLS]reminder{"task": "x", "when": "5pm"}
+    # Recover that shape first, then fall back to JSON-object detection.
+    token_name, token_args, is_token = _extract_token_tool_shape(text)
+    if is_token and token_name:
+        func_name, func_args = token_name, token_args
+    else:
+        func_name, func_args, is_tool_shape = _extract_json_tool_shape(text)
+        if not is_tool_shape or not func_name:
+            return None, None
 
     known = {t["function"]["name"].lower(): t["function"]["name"] for t in schemas}
     actual = known.get(func_name.lower())
@@ -276,6 +284,60 @@ def _try_parse_json_tool_call(text: str, schemas: list) -> tuple:
         "name": actual,
         "arguments": json.dumps(func_args),
     }, None
+
+
+def _looks_like_tool_token_prefix(text: str) -> bool:
+    """True while streamed content could still become a `[TOOL_CALLS]` token.
+
+    Holds back emission of the leading characters so a leaked native tool-call
+    token is never shown to the user mid-stream. Conservative: only fires while
+    the content's start is a prefix of the marker, or the marker is present.
+    """
+    stripped = str(text or "").lstrip()
+    if not stripped:
+        return False
+    marker = "[TOOL_CALLS]"
+    head = stripped[: len(marker)]
+    return marker in stripped or marker.startswith(head)
+
+
+def _extract_token_tool_shape(text: str) -> tuple:
+    """Parse a leaked native tool-call token like `[TOOL_CALLS]name{...}`.
+
+    Returns (name, args_dict, True) when the text contains that token shape, else
+    (None, None, False). Handles missing or malformed argument objects by falling
+    back to an empty dict, so a bare `[TOOL_CALLS]project_status` still recovers.
+    """
+    stripped = str(text or "").strip()
+    marker = "[TOOL_CALLS]"
+    pos = stripped.find(marker)
+    if pos == -1:
+        return None, None, False
+    rest = stripped[pos + len(marker):].strip()
+    if not rest:
+        return None, None, False
+    # Tool name runs until the first '{', '(' or whitespace.
+    name_chars = []
+    for ch in rest:
+        if ch.isalnum() or ch in ("_", "-", "."):
+            name_chars.append(ch)
+        else:
+            break
+    name = "".join(name_chars).strip()
+    if not name:
+        return None, None, False
+    args: dict = {}
+    brace = rest.find("{")
+    if brace != -1:
+        obj = _find_json(rest[brace:])
+        if obj:
+            try:
+                parsed = json.loads(_sanitize_tool_arguments(obj))
+                if isinstance(parsed, dict):
+                    args = parsed
+            except (json.JSONDecodeError, TypeError, ValueError):
+                args = {}
+    return name, args, True
 
 
 def _sanitize_tool_arguments(raw: str) -> str:
@@ -2090,6 +2152,12 @@ class Agent:
                         content += delta.content
                         if buffer_tool_text:
                             continue
+                        # Never stream a leaked native tool-call token to the
+                        # user. If the accumulated content starts looking like a
+                        # `[TOOL_CALLS]...` leak, stop emitting and let the
+                        # post-stream recovery turn it into a real call.
+                        if "[TOOL_CALLS]" in content or _looks_like_tool_token_prefix(content):
+                            continue
                         if not started:
                             started = True
                         print(delta.content, end="", flush=True)
@@ -2120,6 +2188,23 @@ class Agent:
                 started = False
             elif tool_calls and not content:
                 pass
+
+            if not tool_calls and content and "[TOOL_CALLS]" in content and not tool_schemas:
+                # A native tool-call token leaked but no tools were active this
+                # turn (e.g. a follow-up round). Recover it against the full
+                # registry so the user never sees the raw token.
+                recovery_schemas = get_tool_schemas()
+                token_tc, _ = _try_parse_json_tool_call(content, recovery_schemas)
+                if token_tc:
+                    if started:
+                        lines_up = max(content.count("\n") + 1, 1)
+                        clear = "\033[A\033[K" * lines_up
+                        print(f"\r{clear}\r", end="")
+                    started = False
+                    tool_calls[0] = token_tc
+                    schema = schema_by_name.get(token_tc["name"])
+                    if schema and schema not in tool_schemas:
+                        tool_schemas.append(schema)
 
             if not tool_calls and content and tool_schemas:
                 json_tc, err = _try_parse_json_tool_call(content, tool_schemas)
@@ -2215,6 +2300,11 @@ class Agent:
                         f"[dim] Tool: {_debug_safe(fc['function']['name'])}"
                         f"({_debug_safe(fc['function']['arguments'])})[/dim]"
                     )
+
+            # If a tool call was recovered from leaked content, drop the raw
+            # token text so it never persists in history or reaches the user.
+            if formatted_calls and content and "[TOOL_CALLS]" in content:
+                content = ""
 
             self.messages.append({
                 "role": "assistant",
