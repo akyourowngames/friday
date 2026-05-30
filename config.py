@@ -156,6 +156,14 @@ class Settings:
     memory_consolidation_decay_floor: float = _env_float("KING_MEMORY_CONSOLIDATION_DECAY_FLOOR", 0.1)
     memory_consolidation_max_tokens: int = _env_int("KING_MEMORY_CONSOLIDATION_MAX_TOKENS", 600)
 
+    # Memory-driven scheduler bridge (nightly): surface time-bound intentions as nudges
+    memory_scheduler_bridge_enabled: bool = _env_bool("KING_MEMORY_SCHEDULER_BRIDGE_ENABLED", True)
+    memory_scheduler_bridge_lookback: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_LOOKBACK", 40)
+    memory_scheduler_bridge_recent_days: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_RECENT_DAYS", 21)
+    memory_scheduler_bridge_max_nudges: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_MAX_NUDGES", 5)
+    memory_scheduler_bridge_max_tokens: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_MAX_TOKENS", 600)
+    memory_scheduler_bridge_default_hour: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_DEFAULT_HOUR", 9)
+
     # Vector store (FAISS) settings
     vector_store_index_path: str = _env("KING_VECTOR_STORE_INDEX_PATH", "storage/memories/vector_index.faiss")
     vector_store_metadata_path: str = _env("KING_VECTOR_STORE_METADATA_PATH", "storage/memories/vector_metadata.json")
