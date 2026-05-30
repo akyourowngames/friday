@@ -77,6 +77,12 @@ _DEFAULTS: dict[str, dict] = {
         "github_correlation_enabled": False,
         "gmail_correlation_enabled": False,
     },
+    "obsidian_export": {
+        "enabled": True,
+        "subfolder": "Projects",
+        "include_archived": True,
+        "context_brief": True,
+    },
 }
 
 

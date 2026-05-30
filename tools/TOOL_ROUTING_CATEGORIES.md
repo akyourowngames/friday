@@ -85,7 +85,7 @@ when a request family is going to the wrong part of the system.
 - run maintenance
 
 ### project_management
-- tools: project_track, project_status, project_focus, project_detail, project_alerts, project_decisions, project_archive, project_resurrect, project_brief_schedule
+- tools: project_track, project_status, project_focus, project_detail, project_alerts, project_decisions, project_archive, project_resurrect, project_brief_schedule, project_export
 - track a new project or give an update on one
 - king track this and keep an eye on it
 - track this: launch something by a deadline
@@ -104,6 +104,7 @@ when a request family is going to the wrong part of the system.
 - ask what we decided about something or replay decisions
 - archive a finished project or revive a cold one
 - turn on a daily morning project briefing
+- export my projects to obsidian or get a context brief for another assistant
 
 ### connected_integrations
 - tools: composio, browser_login_session

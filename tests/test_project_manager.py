@@ -303,5 +303,63 @@ class ManagerIntegrationTests(unittest.TestCase):
         self.assertEqual(len(brief["next_moves"]), 3)
 
 
+class ObsidianExportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self._orig_vault = pm_config.settings.memory_obsidian_vault_dir
+        pm_config.settings.memory_obsidian_vault_dir = str(root / "vault")
+        self.addCleanup(lambda: setattr(pm_config.settings, "memory_obsidian_vault_dir", self._orig_vault))
+        self.store = ProjectStore(store_path=root / "projects.json", log_path=root / "log.jsonl")
+        self.mgr = ProjectManager(store=self.store)
+
+    def test_export_writes_pages_index_and_brief(self):
+        from project_manager.obsidian_export import export_all
+
+        self.mgr.apply_intent("track this", _intent(
+            "create_project", project_name="Budget App", goal="Ship a budget tracker",
+            new_tasks=["Design schema", "Build login"],
+        ))
+        result = export_all(store=self.store)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["written"], 1)
+        self.assertTrue(result["context_brief"])
+        directory = Path(result["directory"])
+        self.assertTrue((directory / "Budget App.md").exists())
+        self.assertTrue((directory / "Projects Index.md").exists())
+        self.assertTrue((directory / "Project Context Brief.md").exists())
+        page = (directory / "Budget App.md").read_text(encoding="utf-8")
+        self.assertIn("Ship a budget tracker", page)
+        self.assertIn("Design schema", page)
+
+    def test_export_is_idempotent_and_cleans_stale(self):
+        from project_manager.obsidian_export import export_all
+
+        created = self.mgr.apply_intent("track this", _intent(
+            "create_project", project_name="Temp Project", goal="g", new_tasks=["X"],
+        ))
+        export_all(store=self.store)
+        directory = Path(self.tmp.name) / "vault" / "Projects"
+        self.assertTrue((directory / "Temp Project.md").exists())
+        # Archive it, re-export: stale page should be removed.
+        self.mgr.archive(created["project"])
+        result = export_all(store=self.store)
+        self.assertFalse((directory / "Temp Project.md").exists())
+        self.assertGreaterEqual(result["stale_removed"], 1)
+
+    def test_context_brief_is_model_agnostic_prose(self):
+        from project_manager.obsidian_export import build_context_brief
+
+        self.mgr.apply_intent("track this", _intent(
+            "create_project", project_name="API Project", goal="Build the API",
+            new_tasks=["Auth", "Routes"],
+        ))
+        brief = build_context_brief(self.store.all_projects())
+        self.assertIn("API Project", brief)
+        self.assertIn("Build the API", brief)
+        self.assertIn("Still to do", brief)
+
+
 if __name__ == "__main__":
     unittest.main()

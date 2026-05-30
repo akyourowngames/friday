@@ -34,7 +34,7 @@ This manifest is the markdown control surface for KING tool behavior. It documen
 - `process_control.py` - find running processes by name and optionally terminate confirmed matches (v1.0.0).
 - `life_timeline.py` - recall memories as time-ordered narrative episodes via the cognition episode stitcher (v1.0.0).
 - `proactive_check.py` - surface the single best earned proactive observation from the cognition queue, or stay quiet (v1.0.0).
-- `project_manager.py` - autonomous project manager: natural-language intake, health/momentum/ETA scoring, drift trigger engine, war-room brief, focus ranking, decision log, autopsy on archive, and resurrection briefs. Reads `tools/PROJECT_MANAGER_CONFIG.md`; nightly audit runs via the `project_audit` maintenance step (v1.0.0).
+- `project_manager.py` - autonomous project manager: natural-language intake, health/momentum/ETA scoring, drift trigger engine, war-room brief, focus ranking, decision log, autopsy on archive, resurrection briefs, and Obsidian export (portable per-project pages + a paste-ready context brief for switching AI assistants). Reads `tools/PROJECT_MANAGER_CONFIG.md`; nightly audit runs via the `project_audit` maintenance step (v1.0.0).
 - `discovery.py` - progressive tool disclosure: find_tools searches the full catalog and Composio capability index, load_tool makes a discovered tool callable for the turn (v1.0.0).
 
 The runtime registry remains the source of truth for callable schemas. This manifest must not be used as a keyword table, intent shortcut, or replacement for the registry.

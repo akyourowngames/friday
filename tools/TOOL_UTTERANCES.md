@@ -336,6 +336,14 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - give me a war room brief each morning
 - start daily project briefings
 
+## project_export
+- export my projects to obsidian
+- save all my project memory to my vault
+- sync my projects to obsidian
+- give me a context brief to paste into another assistant
+- i am switching to another ai, give me the project context
+- dump project context so i dont have to re-explain
+
 ## life_timeline
 - summarize what was going on for me recently
 - give me a timeline of recent life events

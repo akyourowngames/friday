@@ -77,6 +77,13 @@ and is wired through the daily maintenance routine (`project_audit` step).
 - github_correlation_enabled: false
 - gmail_correlation_enabled: false
 
+## Obsidian Export
+
+- enabled: true
+- subfolder: Projects
+- include_archived: true
+- context_brief: true
+
 ## Verification
 
 - `python -m unittest tests.test_project_manager`
