@@ -23,6 +23,8 @@ when a request family is going to the wrong part of the system.
 - tools: web_search, web_fetch, reddit, hackernews, weather, datetime_info, browser_read_page, browser_extract, navigator
 - fetch latest reddit threads
 - show me current posts from reddit
+- show me reddit threads about a topic
+- find reddit discussion threads on something
 - get live news or web results
 - read a page or extract details from a website
 - check weather, time, distance, or route information
