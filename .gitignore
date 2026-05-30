@@ -37,3 +37,16 @@ storage/scheduler_log.jsonl
 storage/notes.json
 storage/playlist.json
 storage/summaries.json
+storage/projects.json
+storage/project_log.jsonl
+storage/sessions/
+storage/tool_embeddings.npy
+storage/tool_texts.json
+storage/tool_category_embeddings.npy
+storage/tool_category_texts.json
+storage/tool_category_owners.json
+storage/query_embeddings.npy
+storage/query_texts.json
+storage/vector_index.faiss
+storage/vector_metadata.json
+storage/project_manager/

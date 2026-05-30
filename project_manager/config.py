@@ -66,6 +66,7 @@ _DEFAULTS: dict[str, dict] = {
         "infer_tasks_min": 3,
         "infer_tasks_max": 5,
         "intake_max_tokens": 700,
+        "intake_retries": 1,
     },
     "brief": {
         "worry_health_below": 55,
@@ -75,6 +76,12 @@ _DEFAULTS: dict[str, dict] = {
     "integrations": {
         "github_correlation_enabled": False,
         "gmail_correlation_enabled": False,
+    },
+    "obsidian_export": {
+        "enabled": True,
+        "subfolder": "Projects",
+        "include_archived": True,
+        "context_brief": True,
     },
 }
 

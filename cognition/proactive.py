@@ -62,7 +62,20 @@ class Candidate:
             "relevance": self.relevance,
             "created_at": self.created_at,
             "node": self.node,
+            "embedding": self.embedding,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Candidate":
+        return cls(
+            content=str(data.get("content") or ""),
+            source=str(data.get("source") or ""),
+            importance=float(data.get("importance") or 0.5),
+            relevance=float(data.get("relevance") or 0.5),
+            created_at=str(data.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+            node=str(data.get("node") or ""),
+            embedding=data.get("embedding"),
+        )
 
 
 class ProactiveEngine:
@@ -78,12 +91,30 @@ class ProactiveEngine:
             self._delivered_date = str(state.get("delivered_date") or "")
             self._dismissals = {str(k): int(v) for k, v in (state.get("dismissals") or {}).items()}
             self._last_spoke_at = str(state.get("last_spoke_at") or "")
+            for raw in state.get("queue") or []:
+                if isinstance(raw, dict):
+                    restored = Candidate.from_dict(raw)
+                    if str(restored.content or "").strip():
+                        self._queue.append(restored)
 
     # --- queue management ---
+
+    def _signature(self, candidate: Candidate) -> str:
+        return f"{candidate.source}|{str(candidate.content).strip().casefold()}"
 
     def add_candidate(self, candidate: Candidate) -> None:
         if not str(candidate.content or "").strip():
             return
+        signature = self._signature(candidate)
+        # Skip a candidate identical to one already queued or already delivered
+        # today, so re-seeding from the same signals never piles up duplicates.
+        for existing in self._queue:
+            if self._signature(existing) == signature:
+                return
+        for delivered in self._delivered_today:
+            delivered_sig = f"{delivered.get('source', '')}|{str(delivered.get('content', '')).strip().casefold()}"
+            if delivered_sig == signature:
+                return
         self._queue.append(candidate)
         max_queue = int(self._cfg["max_queue_size"])
         if len(self._queue) > max_queue:
@@ -205,6 +236,7 @@ class ProactiveEngine:
 
     def to_dict(self) -> dict:
         return {
+            "queue": [candidate.to_dict() for candidate in self._queue],
             "delivered_today": self._delivered_today,
             "delivered_date": self._delivered_date,
             "dismissals": self._dismissals,

@@ -54,6 +54,9 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - open {path} and show what is inside
 - print the file at {path}
 - what does {path} contain
+- read {filename}.md
+- read the routing_policy.md file
+- open the local file {filename}
 
 ## file_write
 - save this to a file
@@ -255,14 +258,22 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - i need to build {goal}, track it
 - update on {project}: {what happened}
 - here is where {project} stands today
+- progress update on {project}
 - i finished the {task}
+- i just finished the {task}
+- i completed the {task}
 - i finished the {task} but {other} is still blocked
 - i wrapped up {task} today
+- done with the {task}
 - {project} is blocked on {thing}
+- the {task} is blocked on {thing}
 - we are stuck on {thing}
 - we are cutting {feature} for now
+- we are killing the {feature} feature
 - dropping {feature} from the plan
 - i decided to {decision}
+- we decided to {decision}
+- changing direction: {decision}
 - worked on {project} today but nothing is done yet
 
 ## project_status
@@ -324,6 +335,14 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - wake me with a project briefing at {time}
 - give me a war room brief each morning
 - start daily project briefings
+
+## project_export
+- export my projects to obsidian
+- save all my project memory to my vault
+- sync my projects to obsidian
+- give me a context brief to paste into another assistant
+- i am switching to another ai, give me the project context
+- dump project context so i dont have to re-explain
 
 ## life_timeline
 - summarize what was going on for me recently
@@ -387,6 +406,10 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - describe what you see
 - look through the camera and tell me
 - analyze this image
+- what is this jarvis
+- what am i looking at
+- what is this thing in front of me
+- can you see what this is
 
 ## browser_read_page
 - open the page {url} and read it

@@ -85,7 +85,7 @@ def _emit(name, started, started_at, trace_enabled, result=None, error=None, res
         "we're cutting the mobile version for now",
     ],
     param_descriptions={
-        "message": "The raw user message about a project, in their own words",
+        "message": "The user's COMPLETE, VERBATIM message about a project, copied word for word including every detail about finished work, blockers, and decisions. Do not summarize, paraphrase, or shorten it — the project manager parses the full text itself.",
         "response_format": "legacy or structured",
         "trace_enabled": "When true, emit a machine-readable trace entry",
     },
@@ -590,3 +590,44 @@ def project_brief_schedule(at_time: str = "08:00", response_format: str = "legac
     result = {"scheduled_for": record.get("scheduled_for"), "at_time": at_time, "item_id": record.get("id")}
     legacy = f"Morning brief armed for {record.get('scheduled_for')} and daily after."
     return _emit("project_brief_schedule", started, started_at, trace_enabled, result=result, response_format=response_format, legacy=legacy)
+
+
+@tool(
+    name="project_export",
+    description=(
+        "Export all projects to the Obsidian vault as portable markdown: one page per project "
+        "plus an index and a paste-ready 'Project Context Brief'. Use when the user wants their "
+        "project memory in Obsidian or wants context to hand another AI assistant when switching "
+        "models, so they don't have to re-explain what they are building."
+    ),
+    examples=[
+        "export my projects to obsidian",
+        "save all project memory to my vault",
+        "give me a context brief to paste into another assistant",
+        "sync my projects to obsidian",
+    ],
+    param_descriptions={
+        "response_format": "legacy or structured",
+        "trace_enabled": "When true, emit a machine-readable trace entry",
+    },
+)
+def project_export(response_format: str = "legacy", trace_enabled: bool = False):
+    started = time.perf_counter()
+    started_at = utc_now_iso()
+    response_format = normalize_response_format(response_format)
+    trace_enabled = coerce_bool(trace_enabled)
+    try:
+        from project_manager.obsidian_export import export_all
+
+        result = export_all()
+    except Exception as exc:  # noqa: BLE001
+        err = error_payload("EXPORT_FAILED", f"{type(exc).__name__}: {exc}", "obsidian_export", None, "writable vault", True, "Check the Obsidian vault path and permissions.")
+        return _emit("project_export", started, started_at, trace_enabled, error=err, response_format=response_format, legacy="Error: could not export projects", status="FAILED")
+
+    if result.get("status") == "disabled":
+        return _emit("project_export", started, started_at, trace_enabled, result=result, response_format=response_format, legacy="Obsidian export is disabled in PROJECT_MANAGER_CONFIG.md.")
+    legacy = (
+        f"Exported {result.get('written', 0)} project page(s) to {result.get('directory')}. "
+        + ("A paste-ready Project Context Brief is included." if result.get("context_brief") else "")
+    )
+    return _emit("project_export", started, started_at, trace_enabled, result=result, response_format=response_format, legacy=legacy)

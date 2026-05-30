@@ -3,17 +3,54 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from project_manager import config as pm_config
 from project_manager import model, triggers
+from project_manager import intake as pm_intake
 from project_manager.store import ProjectStore
 from project_manager.manager import ProjectManager
 
 
 def _future(days: int) -> str:
     return (datetime.now() + timedelta(days=days)).date().isoformat()
+
+
+def _scripted_llm(responses):
+    """Fake NIMClient yielding the given JSON strings in order, last repeats."""
+    state = {"i": 0}
+
+    class _Completions:
+        def create(self, **kwargs):
+            idx = min(state["i"], len(responses) - 1)
+            state["i"] += 1
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=responses[idx]))])
+
+    return SimpleNamespace(client=SimpleNamespace(chat=SimpleNamespace(completions=_Completions())))
+
+
+class IntakeRetryTests(unittest.TestCase):
+    def test_empty_detection(self):
+        empty = pm_intake._normalize({"action": "log_update"})
+        self.assertTrue(pm_intake._is_empty_intent(empty, "i finished the big thing today"))
+        populated = pm_intake._normalize({"action": "log_update", "completed_tasks": ["X"]})
+        self.assertFalse(pm_intake._is_empty_intent(populated, "i finished X"))
+
+    def test_read_only_actions_never_empty(self):
+        for action in ("status", "focus", "query_decisions", "none"):
+            intent = pm_intake._normalize({"action": action})
+            self.assertFalse(pm_intake._is_empty_intent(intent, "king status"))
+
+    def test_retry_recovers_from_empty_first_parse(self):
+        # First call returns an empty log_update, second returns a populated one.
+        empty = '{"action": "log_update"}'
+        good = '{"action": "log_update", "project": "p", "completed_tasks": ["Hero design"]}'
+        client = _scripted_llm([empty, good])
+        projects = [{"id": "p", "name": "P", "status": "active", "goal": "g"}]
+        intent = pm_intake.parse_message("finished the hero design", projects, llm_client=client)
+        self.assertEqual(intent["completed_tasks"], ["Hero design"])
 
 
 class ConfigTests(unittest.TestCase):
@@ -264,6 +301,64 @@ class ManagerIntegrationTests(unittest.TestCase):
         slug = created["project"]
         brief = self.mgr.resurrection_brief(slug)
         self.assertEqual(len(brief["next_moves"]), 3)
+
+
+class ObsidianExportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self._orig_vault = pm_config.settings.memory_obsidian_vault_dir
+        pm_config.settings.memory_obsidian_vault_dir = str(root / "vault")
+        self.addCleanup(lambda: setattr(pm_config.settings, "memory_obsidian_vault_dir", self._orig_vault))
+        self.store = ProjectStore(store_path=root / "projects.json", log_path=root / "log.jsonl")
+        self.mgr = ProjectManager(store=self.store)
+
+    def test_export_writes_pages_index_and_brief(self):
+        from project_manager.obsidian_export import export_all
+
+        self.mgr.apply_intent("track this", _intent(
+            "create_project", project_name="Budget App", goal="Ship a budget tracker",
+            new_tasks=["Design schema", "Build login"],
+        ))
+        result = export_all(store=self.store)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["written"], 1)
+        self.assertTrue(result["context_brief"])
+        directory = Path(result["directory"])
+        self.assertTrue((directory / "Budget App.md").exists())
+        self.assertTrue((directory / "Projects Index.md").exists())
+        self.assertTrue((directory / "Project Context Brief.md").exists())
+        page = (directory / "Budget App.md").read_text(encoding="utf-8")
+        self.assertIn("Ship a budget tracker", page)
+        self.assertIn("Design schema", page)
+
+    def test_export_is_idempotent_and_cleans_stale(self):
+        from project_manager.obsidian_export import export_all
+
+        created = self.mgr.apply_intent("track this", _intent(
+            "create_project", project_name="Temp Project", goal="g", new_tasks=["X"],
+        ))
+        export_all(store=self.store)
+        directory = Path(self.tmp.name) / "vault" / "Projects"
+        self.assertTrue((directory / "Temp Project.md").exists())
+        # Archive it, re-export: stale page should be removed.
+        self.mgr.archive(created["project"])
+        result = export_all(store=self.store)
+        self.assertFalse((directory / "Temp Project.md").exists())
+        self.assertGreaterEqual(result["stale_removed"], 1)
+
+    def test_context_brief_is_model_agnostic_prose(self):
+        from project_manager.obsidian_export import build_context_brief
+
+        self.mgr.apply_intent("track this", _intent(
+            "create_project", project_name="API Project", goal="Build the API",
+            new_tasks=["Auth", "Routes"],
+        ))
+        brief = build_context_brief(self.store.all_projects())
+        self.assertIn("API Project", brief)
+        self.assertIn("Build the API", brief)
+        self.assertIn("Still to do", brief)
 
 
 if __name__ == "__main__":

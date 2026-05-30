@@ -140,6 +140,30 @@ class Settings:
     proactive_memory_context_enabled: bool = _env_bool("KING_PROACTIVE_MEMORY_CONTEXT_ENABLED", True)
     proactive_memory_context_margin: float = _env_float("KING_PROACTIVE_MEMORY_CONTEXT_MARGIN", 0.0)
 
+    # Memory consolidation worker (nightly "god tier" maintenance)
+    memory_consolidation_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_ENABLED", True)
+    memory_consolidation_policy_file: str = _env("KING_MEMORY_CONSOLIDATION_POLICY_FILE", "memory/MEMORY_CONSOLIDATION.md")
+    memory_consolidation_dedup_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_DEDUP_ENABLED", True)
+    memory_consolidation_dedup_similarity: float = _env_float("KING_MEMORY_CONSOLIDATION_DEDUP_SIMILARITY", 0.86)
+    memory_consolidation_dedup_max_pairs: int = _env_int("KING_MEMORY_CONSOLIDATION_DEDUP_MAX_PAIRS", 20)
+    memory_consolidation_insights_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_INSIGHTS_ENABLED", True)
+    memory_consolidation_insight_min_cluster: int = _env_int("KING_MEMORY_CONSOLIDATION_INSIGHT_MIN_CLUSTER", 3)
+    memory_consolidation_insight_max: int = _env_int("KING_MEMORY_CONSOLIDATION_INSIGHT_MAX", 5)
+    memory_consolidation_insight_importance: float = _env_float("KING_MEMORY_CONSOLIDATION_INSIGHT_IMPORTANCE", 0.75)
+    memory_consolidation_decay_enabled: bool = _env_bool("KING_MEMORY_CONSOLIDATION_DECAY_ENABLED", True)
+    memory_consolidation_decay_after_days: int = _env_int("KING_MEMORY_CONSOLIDATION_DECAY_AFTER_DAYS", 45)
+    memory_consolidation_decay_rate: float = _env_float("KING_MEMORY_CONSOLIDATION_DECAY_RATE", 0.05)
+    memory_consolidation_decay_floor: float = _env_float("KING_MEMORY_CONSOLIDATION_DECAY_FLOOR", 0.1)
+    memory_consolidation_max_tokens: int = _env_int("KING_MEMORY_CONSOLIDATION_MAX_TOKENS", 600)
+
+    # Memory-driven scheduler bridge (nightly): surface time-bound intentions as nudges
+    memory_scheduler_bridge_enabled: bool = _env_bool("KING_MEMORY_SCHEDULER_BRIDGE_ENABLED", True)
+    memory_scheduler_bridge_lookback: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_LOOKBACK", 40)
+    memory_scheduler_bridge_recent_days: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_RECENT_DAYS", 21)
+    memory_scheduler_bridge_max_nudges: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_MAX_NUDGES", 5)
+    memory_scheduler_bridge_max_tokens: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_MAX_TOKENS", 600)
+    memory_scheduler_bridge_default_hour: int = _env_int("KING_MEMORY_SCHEDULER_BRIDGE_DEFAULT_HOUR", 9)
+
     # Vector store (FAISS) settings
     vector_store_index_path: str = _env("KING_VECTOR_STORE_INDEX_PATH", "storage/memories/vector_index.faiss")
     vector_store_metadata_path: str = _env("KING_VECTOR_STORE_METADATA_PATH", "storage/memories/vector_metadata.json")
@@ -149,6 +173,18 @@ class Settings:
     summaries_path: str = _env("KING_SUMMARIES_PATH", "storage/summaries.json")
     summaries_max_count: int = _env_int("KING_SUMMARIES_MAX_COUNT", 10)
     summaries_max_context: int = _env_int("KING_SUMMARIES_MAX_CONTEXT", 3)
+
+    # Session-based memory: full per-session transcripts + cross-session context
+    session_store_enabled: bool = _env_bool("KING_SESSION_STORE_ENABLED", True)
+    session_store_dir: str = _env("KING_SESSION_STORE_DIR", "storage/sessions")
+    session_index_file: str = _env("KING_SESSION_INDEX_FILE", "storage/sessions/index.json")
+    session_keep_count: int = _env_int("KING_SESSION_KEEP_COUNT", 200)
+    session_context_count: int = _env_int("KING_SESSION_CONTEXT_COUNT", 2)
+    session_context_max_chars: int = _env_int("KING_SESSION_CONTEXT_MAX_CHARS", 1800)
+    session_digest_enabled: bool = _env_bool("KING_SESSION_DIGEST_ENABLED", True)
+    session_digest_max_tokens: int = _env_int("KING_SESSION_DIGEST_MAX_TOKENS", 900)
+    session_digest_min_turns: int = _env_int("KING_SESSION_DIGEST_MIN_TURNS", 2)
+    session_digest_relations_file: str = _env("KING_SESSION_DIGEST_RELATIONS_FILE", "memory/MEMORY_SESSION_RELATIONS.md")
 
     sarvam_api_key: str = _env("SARVAM_API_KEY", "")
     tavily_api_key: str = _env("TAVILY_API_KEY", "")

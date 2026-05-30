@@ -23,18 +23,23 @@ when a request family is going to the wrong part of the system.
 - tools: web_search, web_fetch, reddit, hackernews, weather, datetime_info, browser_read_page, browser_extract, navigator
 - fetch latest reddit threads
 - show me current posts from reddit
+- show me reddit threads about a topic
+- find reddit discussion threads on something
 - get live news or web results
-- read a page or extract details from a website
+- read a web page at a url or extract details from a website
 - check weather, time, distance, or route information
 - what is the weather in a city
 - what time is it in a city
 
 ### local_file_intelligence
 - tools: folder_watcher, file_read, file_write, file_list, note_save, note_read, note_update, note_delete, note_list, note_search, gallery
+- read a local file like routing_policy.md or config.txt
+- open and show the contents of a file on disk
 - inspect the watched folder
 - count indexed files or file types
 - find files in local folders
 - read, write, list, update, or search local files and notes
+- read a local file by its name or path like a .md or .txt file
 - show saved generated images
 
 ### telegram_delivery
@@ -59,6 +64,8 @@ when a request family is going to the wrong part of the system.
 - play music or manage playlist
 - generate an image
 - inspect camera or screenshot
+- what is this, what am i looking at, describe what you see
+- look through the camera and tell me what this is
 - show visual media
 
 ### local_device_control
@@ -78,19 +85,26 @@ when a request family is going to the wrong part of the system.
 - run maintenance
 
 ### project_management
-- tools: project_track, project_status, project_focus, project_detail, project_alerts, project_decisions, project_archive, project_resurrect, project_brief_schedule
+- tools: project_track, project_status, project_focus, project_detail, project_alerts, project_decisions, project_archive, project_resurrect, project_brief_schedule, project_export
 - track a new project or give an update on one
 - king track this and keep an eye on it
 - track this: launch something by a deadline
 - track this project: build a thing by end of month
 - i am starting a project to build something, track it for me
-- tell the manager I finished a task or got blocked on something
+- update on my project: I finished a task and another is blocked
+- i finished the task, here is my progress update
+- i just completed a piece of the work
+- the work is blocked on something, log that blocker
+- we are cutting or dropping a feature from the project
+- i decided to change direction on the project
+- tell the manager I finished or got blocked on something
 - ask how my projects are doing or what to focus on
 - king status across all my projects
 - deep dive on a single project's status and health
 - ask what we decided about something or replay decisions
 - archive a finished project or revive a cold one
 - turn on a daily morning project briefing
+- export my projects to obsidian or get a context brief for another assistant
 
 ### connected_integrations
 - tools: composio, browser_login_session

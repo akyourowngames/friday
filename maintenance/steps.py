@@ -29,7 +29,7 @@ def cognition_scan_step(step: StepConfig, context: dict[str, Any]) -> dict:
     embed_fn = context.get("embed_fn")
     if embed_fn is None and step.options.get("use_embeddings", True):
         from agent.embedder import embed as embed_fn
-    return run_cognition_pass(brain, embed_fn=embed_fn)
+    return run_cognition_pass(brain, embed_fn=embed_fn, deep=bool(step.options.get("deep", True)))
 
 
 def folder_scan_step(step: StepConfig, context: dict[str, Any]) -> dict:
@@ -92,6 +92,47 @@ def project_audit_step(step: StepConfig, context: dict[str, Any]) -> dict:
     return manager.audit()
 
 
+def memory_consolidate_step(step: StepConfig, context: dict[str, Any]) -> dict:
+    brain = context.get("brain")
+    if brain is None:
+        from memory.brain import Brain
+
+        brain = Brain()
+        context["brain"] = brain
+    from memory.consolidation import consolidate
+
+    return consolidate(brain)
+
+
+def memory_scheduler_bridge_step(step: StepConfig, context: dict[str, Any]) -> dict:
+    brain = context.get("brain")
+    if brain is None:
+        from memory.brain import Brain
+
+        brain = Brain()
+        context["brain"] = brain
+    from memory.scheduler_bridge import run_bridge
+
+    return run_bridge(brain)
+
+
+def session_digest_step(step: StepConfig, context: dict[str, Any]) -> dict:
+    brain = context.get("brain")
+    if brain is None:
+        from memory.brain import Brain
+
+        brain = Brain()
+        context["brain"] = brain
+    from memory.session_store import SessionStore
+    from memory.session_digest import process_undigested
+
+    store = context.get("session_store")
+    if store is None:
+        store = SessionStore()
+        context["session_store"] = store
+    return process_undigested(store, brain=brain)
+
+
 def _compose_default_summary(context: dict[str, Any], step: StepConfig) -> str:
     parts: list[str] = ["KING daily maintenance ran."]
     if step.options.get("include_stats"):
@@ -113,3 +154,6 @@ def register_default_steps(engine: MaintenanceEngine) -> None:
     engine.register("telegram_summary", telegram_summary_step)
     engine.register("scheduler_due", scheduler_due_step)
     engine.register("project_audit", project_audit_step)
+    engine.register("memory_consolidate", memory_consolidate_step)
+    engine.register("memory_scheduler_bridge", memory_scheduler_bridge_step)
+    engine.register("session_digest", session_digest_step)

@@ -23,16 +23,26 @@ because the engine writes a "last run" stamp into
 ## Steps
 
 - memory_daily: enabled=true label=daily
+- memory_consolidate: enabled=true
 - cognition_scan: enabled=true use_embeddings=true
 - folder_scan: enabled=true include_summarize_pending=false
 - telegram_summary: enabled=true include_stats=true
 - scheduler_due: enabled=true horizon_minutes=1440
 - project_audit: enabled=true
+- memory_scheduler_bridge: enabled=true
 
 ## Step Notes
 
 - `memory_daily` calls `Brain.daily_maintenance(label)` which runs backup,
   rebuild, reflect, and Obsidian sync without touching agent core.
+- `memory_consolidate` calls `memory.consolidation.consolidate(brain)` — the
+  nightly "god tier" worker that merges near-duplicate memories, distills
+  clusters of related facts into higher-order insights, and gently decays stale
+  low-value memories. It mutates memory only through the brain's own
+  commit/forget/persist paths, so the graph, embeddings, vector store, and
+  Obsidian vault stay consistent. LLM-backed steps are skipped when no API key is
+  set or the vault path is a temp directory. Tunables live in
+  `memory/MEMORY_CONSOLIDATION.md`.
 - `cognition_scan` calls `cognition.orchestrator.run_cognition_pass(brain)` which
   rebuilds the life-cadence model from memory activity, stitches episodes, and
   enqueues proactive candidates from actionable cadence deviations. It only reads
@@ -54,6 +64,12 @@ because the engine writes a "last run" stamp into
   decline, ghosts) plus cross-project deadline conflicts. It only reads and
   writes the project store (`KING_PROJECT_STORE_PATH`); it never touches agent
   core or routing. Thresholds live in `tools/PROJECT_MANAGER_CONFIG.md`.
+- `memory_scheduler_bridge` scans recent memory for time-bound commitments the
+  user mentioned and schedules a gentle `reminder_fire` nudge for each, so things
+  buried in conversation resurface at the right time. Extraction is one LLM call
+  returning concrete dates; nudges are de-duplicated against existing pending
+  memory nudges so nightly runs stay idempotent. Requires `reminder_fire` in the
+  Action Whitelist below so `scheduler_due` can fire the nudges when due.
 
 ## Action Whitelist
 
@@ -61,6 +77,7 @@ because the engine writes a "last run" stamp into
 - note_update
 - memory_remember
 - daily_maintenance
+- reminder_fire
 
 ## Retention
 

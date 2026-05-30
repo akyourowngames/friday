@@ -18,6 +18,7 @@ MEMORY_DIR = Path(settings.memory_dir)
 BACKUP_DIR = Path(settings.memory_backup_dir)
 MEMORY_FILTER_POLICY_PATH = Path(settings.memory_filter_policy_file)
 MEMORY_GRAPH_RELATIONS_PATH = Path(settings.memory_graph_relations_file)
+MEMORY_SESSION_RELATIONS_PATH = Path(settings.session_digest_relations_file)
 _INDEX_SCHEMA_VERSION = 3
 _INDEX_SCHEMA_COMPAT = (2, 3)
 _GRAPH_SCHEMA_VERSION = 2
@@ -496,6 +497,7 @@ class Brain:
         self._last_backup = None
         self._graph = self._empty_graph()
         self._graph_rules = _load_graph_relation_rules()
+        self._graph_rules.extend(_load_graph_relation_rules(MEMORY_SESSION_RELATIONS_PATH))
         self._auto_relation = _load_auto_relation_settings()
         self._obsidian_sync_result = {"enabled": False, "status": "not_run"}
         self._obsidian_sync_deferred = False
@@ -1835,6 +1837,25 @@ class Brain:
         target = nodes.get(edge.get("target"), {}).get("name", edge.get("target", ""))
         relation = str(edge.get("relation", "")).replace("_", " ")
         return f"{source} {relation} {target}".strip()
+
+    def memory_relations(self, memory: dict) -> set[str]:
+        """Active graph relation names attached to a memory.
+
+        Used by consolidation to tell identity facts (backed by a real relation
+        rule like name/lives_in/crush) from generic remembered facts (only the
+        fallback relation). Returns lowercased relation names.
+        """
+        memory_id = str(memory.get("id") or _memory_id(memory))
+        edge_ids = {str(eid) for eid in (memory.get("graph_edges") or [])}
+        relations: set[str] = set()
+        for edge in self._graph.get("edges", []):
+            if not edge.get("active", True):
+                continue
+            if str(edge.get("id", "")) in edge_ids or str(edge.get("memory_id", "")) == memory_id:
+                relation = str(edge.get("relation", "")).strip().casefold()
+                if relation:
+                    relations.add(relation)
+        return relations
 
     def _graph_edge_rank(self, edge: dict, query_terms: set[str]) -> dict | None:
         text = self._edge_to_text(edge)

@@ -246,11 +246,19 @@ class ProjectManager:
             total_alerts += len(project.get("alerts", []))
             audited += 1
         conflicts = triggers.cross_project_conflict(self.store.all_projects(), now=now)
+        export_result = {}
+        try:
+            from .obsidian_export import export_all
+
+            export_result = export_all(store=self.store, now=now)
+        except Exception as exc:  # noqa: BLE001
+            export_result = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
         return {
             "audited": audited,
             "total_projects": len(projects),
             "alerts": total_alerts,
             "cross_project_conflicts": conflicts,
+            "obsidian_export": export_result,
             "audited_at": now.isoformat(timespec="seconds"),
         }
 
