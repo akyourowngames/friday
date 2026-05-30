@@ -64,6 +64,7 @@ and is wired through the daily maintenance routine (`project_audit` step).
 - infer_tasks_min: 3
 - infer_tasks_max: 5
 - intake_max_tokens: 700
+- intake_retries: 1
 
 ## Brief
 

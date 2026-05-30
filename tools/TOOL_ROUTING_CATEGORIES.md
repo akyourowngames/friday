@@ -91,7 +91,13 @@ when a request family is going to the wrong part of the system.
 - track this: launch something by a deadline
 - track this project: build a thing by end of month
 - i am starting a project to build something, track it for me
-- tell the manager I finished a task or got blocked on something
+- update on my project: I finished a task and another is blocked
+- i finished the task, here is my progress update
+- i just completed a piece of the work
+- the work is blocked on something, log that blocker
+- we are cutting or dropping a feature from the project
+- i decided to change direction on the project
+- tell the manager I finished or got blocked on something
 - ask how my projects are doing or what to focus on
 - king status across all my projects
 - deep dive on a single project's status and health

@@ -258,14 +258,22 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - i need to build {goal}, track it
 - update on {project}: {what happened}
 - here is where {project} stands today
+- progress update on {project}
 - i finished the {task}
+- i just finished the {task}
+- i completed the {task}
 - i finished the {task} but {other} is still blocked
 - i wrapped up {task} today
+- done with the {task}
 - {project} is blocked on {thing}
+- the {task} is blocked on {thing}
 - we are stuck on {thing}
 - we are cutting {feature} for now
+- we are killing the {feature} feature
 - dropping {feature} from the plan
 - i decided to {decision}
+- we decided to {decision}
+- changing direction: {decision}
 - worked on {project} today but nothing is done yet
 
 ## project_status

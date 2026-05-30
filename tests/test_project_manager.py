@@ -3,17 +3,54 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from project_manager import config as pm_config
 from project_manager import model, triggers
+from project_manager import intake as pm_intake
 from project_manager.store import ProjectStore
 from project_manager.manager import ProjectManager
 
 
 def _future(days: int) -> str:
     return (datetime.now() + timedelta(days=days)).date().isoformat()
+
+
+def _scripted_llm(responses):
+    """Fake NIMClient yielding the given JSON strings in order, last repeats."""
+    state = {"i": 0}
+
+    class _Completions:
+        def create(self, **kwargs):
+            idx = min(state["i"], len(responses) - 1)
+            state["i"] += 1
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=responses[idx]))])
+
+    return SimpleNamespace(client=SimpleNamespace(chat=SimpleNamespace(completions=_Completions())))
+
+
+class IntakeRetryTests(unittest.TestCase):
+    def test_empty_detection(self):
+        empty = pm_intake._normalize({"action": "log_update"})
+        self.assertTrue(pm_intake._is_empty_intent(empty, "i finished the big thing today"))
+        populated = pm_intake._normalize({"action": "log_update", "completed_tasks": ["X"]})
+        self.assertFalse(pm_intake._is_empty_intent(populated, "i finished X"))
+
+    def test_read_only_actions_never_empty(self):
+        for action in ("status", "focus", "query_decisions", "none"):
+            intent = pm_intake._normalize({"action": action})
+            self.assertFalse(pm_intake._is_empty_intent(intent, "king status"))
+
+    def test_retry_recovers_from_empty_first_parse(self):
+        # First call returns an empty log_update, second returns a populated one.
+        empty = '{"action": "log_update"}'
+        good = '{"action": "log_update", "project": "p", "completed_tasks": ["Hero design"]}'
+        client = _scripted_llm([empty, good])
+        projects = [{"id": "p", "name": "P", "status": "active", "goal": "g"}]
+        intent = pm_intake.parse_message("finished the hero design", projects, llm_client=client)
+        self.assertEqual(intent["completed_tasks"], ["Hero design"])
 
 
 class ConfigTests(unittest.TestCase):

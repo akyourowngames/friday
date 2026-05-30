@@ -85,7 +85,7 @@ def _emit(name, started, started_at, trace_enabled, result=None, error=None, res
         "we're cutting the mobile version for now",
     ],
     param_descriptions={
-        "message": "The raw user message about a project, in their own words",
+        "message": "The user's COMPLETE, VERBATIM message about a project, copied word for word including every detail about finished work, blockers, and decisions. Do not summarize, paraphrase, or shorten it — the project manager parses the full text itself.",
         "response_format": "legacy or structured",
         "trace_enabled": "When true, emit a machine-readable trace entry",
     },

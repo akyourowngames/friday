@@ -14,6 +14,7 @@ failure degrades to "log this as an update" rather than crashing.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from . import config as pm_config
 
@@ -230,6 +231,7 @@ def parse_message(message: str, projects: list[dict], llm_client=None) -> dict:
     min_tasks = int(intake_cfg.get("infer_tasks_min") or 3)
     max_tasks = int(intake_cfg.get("infer_tasks_max") or 5)
     max_tokens = int(intake_cfg.get("intake_max_tokens") or 700)
+    retries = int(intake_cfg.get("intake_retries") or 0)
 
     context_lines = []
     for project in projects:
@@ -251,9 +253,31 @@ def parse_message(message: str, projects: list[dict], llm_client=None) -> dict:
         {"role": "system", "content": _system_prompt(min_tasks, max_tasks)},
         {
             "role": "user",
-            "content": f"Tracked projects:\n{context}\n\nUser message:\n{message}",
+            "content": (
+                f"Today's date is {datetime.now().date().isoformat()}. "
+                "Resolve any relative deadline (e.g. 'by end of month', 'next Friday') against "
+                "this date and emit an absolute YYYY-MM-DD in the correct year.\n\n"
+                f"Tracked projects:\n{context}\n\nUser message:\n{message}"
+            ),
         },
     ]
+
+    # The small model occasionally returns a structurally valid but empty intent
+    # for a message that clearly carries content. Retry a bounded number of times
+    # until the parse captures something, then keep the best result. Deterministic
+    # at temperature 0 means a retry only helps when the first call genuinely
+    # missed; identical good parses are idempotent.
+    best = _normalize({})
+    attempts = max(1, retries + 1)
+    for _ in range(attempts):
+        intent = _single_parse(llm_client, messages, max_tokens)
+        if not _is_empty_intent(intent, message):
+            return intent
+        best = intent
+    return best
+
+
+def _single_parse(llm_client, messages: list, max_tokens: int) -> dict:
     try:
         from config import settings
 
@@ -267,6 +291,36 @@ def parse_message(message: str, projects: list[dict], llm_client=None) -> dict:
         return _normalize(json.loads(_strip_fence(text)))
     except Exception:
         return _normalize({})
+
+
+def _is_empty_intent(intent: dict, message: str) -> bool:
+    """True when the parse captured nothing actionable for a non-trivial message.
+
+    A read-only action (status/focus/query) is never "empty". For write actions,
+    emptiness means no project resolved and no change fields populated, even
+    though the user clearly said something — the signal to retry.
+    """
+    action = intent.get("action")
+    if action in ("status", "focus", "query_decisions", "none"):
+        return False
+    if action == "create_project" and (intent.get("project_name") or intent.get("goal")):
+        return False
+    if intent.get("project"):
+        return False
+    for field in (
+        "new_tasks",
+        "completed_tasks",
+        "dropped_tasks",
+        "blocked_tasks",
+        "blockers",
+        "resolved_blockers",
+        "decisions",
+        "inferred_tasks",
+    ):
+        if intent.get(field):
+            return False
+    # Nothing captured. Only treat as empty (retry-worthy) if the message had real content.
+    return len(str(message or "").split()) >= 3
 
 
 def _strip_fence(text: str) -> str:
