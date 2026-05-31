@@ -24,6 +24,7 @@ Modes:
 - partner
 - crush
 - knows_about
+- mentioned
 
 ## Rules
 
