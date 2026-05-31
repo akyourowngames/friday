@@ -30,22 +30,26 @@ LOG_PATH = PROJECT_ROOT / "storage" / "nightly.log"
 def _log(msg: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
-    print(line)
+    print(line, flush=True)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+        f.flush()
 
 
-def run_maintenance() -> dict:
+def run_maintenance(brain=None) -> dict:
     """Run the daily maintenance routine."""
     _log("Starting daily maintenance...")
     try:
         from maintenance.engine import build_engine
         from maintenance.steps import register_default_steps
 
-        engine = build_engine(".", None)
+        engine = build_engine(PROJECT_ROOT, None)
         register_default_steps(engine)
-        result = engine.run(triggered_by="nightly", force=True)
+        ctx = {}
+        if brain is not None:
+            ctx["brain"] = brain
+        result = engine.run(triggered_by="nightly", force=True, context=ctx)
         _log(f"  Maintenance done: {result.status}")
         return result.to_dict()
     except Exception as e:
@@ -53,14 +57,15 @@ def run_maintenance() -> dict:
         return {"status": "failed", "error": str(e)}
 
 
-def run_memory_worker() -> dict:
+def run_memory_worker(brain=None) -> dict:
     """Ingest user files + rebuild the Obsidian memory vault."""
     _log("Starting memory worker...")
     try:
-        from memory.brain import Brain
         from memory.worker import ingest_user_files, sync_vault
 
-        brain = Brain()
+        if brain is None:
+            from memory.brain import Brain
+            brain = Brain()
 
         # 1. Ingest any user-created files in the vault
         ingest_result = ingest_user_files(brain)
@@ -76,20 +81,43 @@ def run_memory_worker() -> dict:
         return {"status": "failed", "error": str(e)}
 
 
-def run_cognition() -> dict:
+def run_cognition(brain=None) -> dict:
     """Run a cognition pass (cadence, episodes, proactive candidates)."""
     _log("Starting cognition pass...")
     try:
-        from memory.brain import Brain
         from agent.embedder import embed
         from cognition.orchestrator import run_cognition_pass
 
-        brain = Brain()
+        if brain is None:
+            from memory.brain import Brain
+            brain = Brain()
+
         result = run_cognition_pass(brain, embed_fn=embed, persist=True, deep=True)
         _log(f"  Cognition: {result.get('cadence_nodes', 0)} cadence nodes, {result.get('episodes', 0)} episodes, {result.get('actionable_deviations', 0)} deviations, {result.get('memory_signals', 0)} memory signals")
         return result
     except Exception as e:
         _log(f"  Cognition failed: {e}")
+        return {"status": "failed", "error": str(e)}
+
+
+def run_session_digest(brain=None) -> dict:
+    """Digest any undigested session transcripts."""
+    _log("Starting session digest...")
+    try:
+        from memory.session_store import SessionStore
+        from memory.session_digest import process_undigested
+
+        store = SessionStore()
+        if brain is None:
+            from memory.brain import Brain
+            brain = Brain()
+        results = process_undigested(store, brain=brain)
+        digested = sum(1 for r in results if r.get("status") == "digested")
+        total_facts = sum(r.get("facts_stored", 0) for r in results)
+        _log(f"  Session digest: {digested} sessions, {total_facts} facts stored")
+        return {"sessions": len(results), "digested": digested, "facts": total_facts}
+    except Exception as e:
+        _log(f"  Session digest failed: {e}")
         return {"status": "failed", "error": str(e)}
 
 
@@ -141,10 +169,15 @@ def run_all():
     _log("=" * 50)
     start = time.perf_counter()
 
+    # Load Brain once — shared across all steps to avoid triple embedding load.
+    from memory.brain import Brain
+    brain = Brain()
+
     results = {
-        "maintenance": run_maintenance(),
-        "memory_worker": run_memory_worker(),
-        "cognition": run_cognition(),
+        "maintenance": run_maintenance(brain),
+        "memory_worker": run_memory_worker(brain),
+        "session_digest": run_session_digest(brain),
+        "cognition": run_cognition(brain),
         "folder_watcher": run_folder_watcher_reindex(),
     }
 
@@ -199,6 +232,11 @@ def uninstall_task():
 
 
 def main():
+    # Ensure working directory is the project root, not System32 or wherever
+    # Task Scheduler / cron launches the process.
+    import os
+    os.chdir(PROJECT_ROOT)
+
     parser = argparse.ArgumentParser(description="KING Nightly Automation")
     parser.add_argument("--install", action="store_true", help="Install Windows scheduled task for midnight")
     parser.add_argument("--uninstall", action="store_true", help="Remove the scheduled task")
@@ -209,7 +247,11 @@ def main():
     elif args.uninstall:
         uninstall_task()
     else:
-        run_all()
+        try:
+            run_all()
+        except Exception as e:
+            _log(f"FATAL: {type(e).__name__}: {e}")
+            raise
 
 
 if __name__ == "__main__":
