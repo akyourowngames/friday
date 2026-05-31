@@ -1,5 +1,6 @@
 import json
 import argparse
+import re
 import sys
 import threading
 import urllib.request
@@ -10,15 +11,31 @@ Panel = None
 Table = None
 
 
+def _render_markdown_terminal(text: str) -> str:
+    """Convert minimal markdown to ANSI escape codes for terminal display."""
+    text = str(text or "")
+    # Bold: **text** or __text__
+    text = re.sub(r"\*\*(.+?)\*\*", r"\033[1m\1\033[0m", text)
+    text = re.sub(r"__(.+?)__", r"\033[1m\1\033[0m", text)
+    # Italic: *text* or _text_ (but not inside bold)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\033[3m\1\033[0m", text)
+    # Inline code: `text`
+    text = re.sub(r"`([^`]+)`", r"\033[7m\1\033[0m", text)
+    # Strikethrough: ~~text~~
+    text = re.sub(r"~~(.+?)~~", r"\033[9m\1\033[0m", text)
+    return text
+
+
 class _PlainConsole:
     def print(self, *values, end="\n", **_kwargs):
-        print(" ".join(str(value) for value in values), end=end)
+        rendered = " ".join(_render_markdown_terminal(str(value)) for value in values)
+        print(rendered, end=end)
 
     def input(self, prompt: str = "") -> str:
         return input(prompt)
 
     def print_json(self, text: str):
-        print(text)
+        print(_render_markdown_terminal(text))
 
 
 console = _PlainConsole()
@@ -33,7 +50,17 @@ def _enable_rich_console():
     from rich.panel import Panel as RichPanel
     from rich.table import Table as RichTable
 
-    console = Console()
+    class _MarkdownConsole(Console):
+        """Rich console that renders minimal markdown to ANSI."""
+        def print(self, *args, **kwargs):
+            # Render markdown in the first positional argument (the main text)
+            if args:
+                rendered = [_render_markdown_terminal(str(args[0]))] + list(args[1:])
+                super().print(*rendered, **kwargs)
+            else:
+                super().print(*args, **kwargs)
+
+    console = _MarkdownConsole()
     Panel = RichPanel
     Table = RichTable
 

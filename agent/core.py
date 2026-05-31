@@ -1831,6 +1831,7 @@ class Agent:
         self.brain = Brain()
         self._memory_extraction_messages = []
         self._last_memory_profile_context = False
+        self._turn_count = 0
 
         if not self.llm.check_api_key():
             console.print("[red]NVIDIA_API_KEY not set![/red]")
@@ -1930,7 +1931,9 @@ class Agent:
             return None
 
     def _run_proactive(self, content: str, emit_chunk=None):
-        """Run proactive check in background thread."""
+        """Run proactive check in background thread. Skips first turn."""
+        if self._turn_count < 2:
+            return
         try:
             note = self._check_proactive()
             if note:
@@ -1999,6 +2002,7 @@ class Agent:
         return "\n".join(lines)
 
     def _remember_plain_turn(self, user_input: str, assistant_response: str):
+        self._turn_count += 1
         if user_input:
             self._memory_extraction_messages.append({"role": "user", "content": str(user_input)})
         if assistant_response:
