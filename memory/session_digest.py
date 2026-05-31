@@ -60,17 +60,18 @@ def _llm_call(system: str, user_content: str, max_tokens: int = 900) -> str | No
     """One-shot LLM call. Returns None on failure (graceful degradation)."""
     if not settings.nim_api_key or not settings.nim_api_key.strip():
         return None
+    use_model = settings.extraction_model or settings.model_name
     try:
         from openai import OpenAI
 
         client = OpenAI(
             base_url=settings.nim_base_url,
             api_key=settings.nim_api_key,
-            timeout=30,
-            max_retries=0,
+            timeout=60,
+            max_retries=1,
         )
         resp = client.chat.completions.create(
-            model=settings.model_name,
+            model=use_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},

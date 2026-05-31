@@ -51,10 +51,11 @@ def _load_policy() -> str:
     return ""
 
 
-def _llm_call(system: str, user_content: str, max_tokens: int = 2000) -> str | None:
+def _llm_call(system: str, user_content: str, max_tokens: int = 2000, model: str = "") -> str | None:
     """One-shot LLM call. Returns None on failure."""
     if not settings.nim_api_key or not settings.nim_api_key.strip():
         return None
+    use_model = model or settings.generation_model or settings.model_name
     try:
         from openai import OpenAI
 
@@ -65,7 +66,7 @@ def _llm_call(system: str, user_content: str, max_tokens: int = 2000) -> str | N
             max_retries=2,
         )
         resp = client.chat.completions.create(
-            model=settings.model_name,
+            model=use_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
