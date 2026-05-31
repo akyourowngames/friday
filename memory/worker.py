@@ -118,17 +118,18 @@ def _llm_call(system: str, user_content: str, max_tokens: int = 800) -> str | No
     vault_path = str(settings.memory_obsidian_vault_dir)
     if "tmp" in vault_path.lower() or "temp" in vault_path.lower():
         return None
+    use_model = settings.extraction_model or settings.model_name
     try:
         from openai import OpenAI
 
         client = OpenAI(
             base_url=settings.nim_base_url,
             api_key=settings.nim_api_key,
-            timeout=12,
-            max_retries=0,
+            timeout=60,
+            max_retries=1,
         )
         resp = client.chat.completions.create(
-            model=settings.model_name,
+            model=use_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},

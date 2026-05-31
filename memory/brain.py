@@ -767,10 +767,22 @@ class Brain:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(content)
-            os.replace(temp_path, path)
+            # Retry os.replace on Windows when destination is temporarily locked.
+            for attempt in range(3):
+                try:
+                    os.replace(temp_path, path)
+                    return
+                except OSError:
+                    if attempt < 2:
+                        time.sleep(0.1 * (attempt + 1))
+                    else:
+                        raise
         finally:
             if os.path.exists(temp_path):
-                os.unlink(temp_path)
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
 
     def _atomic_write_json(self, path: Path, payload):
         self._atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False))

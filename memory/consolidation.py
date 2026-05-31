@@ -24,27 +24,24 @@ from config import settings
 
 
 def _llm_json(system: str, user_content: str, max_tokens: int):
-    """One-shot LLM call returning parsed JSON, or None on any failure.
-
-    Skips when no API key is configured or the Obsidian vault path is a temp dir
-    (the same test guard the worker uses), so unit tests never hit the network.
-    """
+    """One-shot LLM call returning parsed JSON, or None on any failure."""
     if not settings.nim_api_key or not settings.nim_api_key.strip():
         return None
     vault_path = str(settings.memory_obsidian_vault_dir)
     if "tmp" in vault_path.lower() or "temp" in vault_path.lower():
         return None
+    use_model = settings.extraction_model or settings.model_name
     try:
         from openai import OpenAI
 
         client = OpenAI(
             base_url=settings.nim_base_url,
             api_key=settings.nim_api_key,
-            timeout=15,
-            max_retries=0,
+            timeout=60,
+            max_retries=1,
         )
         resp = client.chat.completions.create(
-            model=settings.model_name,
+            model=use_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
