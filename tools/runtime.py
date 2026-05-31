@@ -2,6 +2,9 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+
+_TRACE_LOG = Path(__file__).resolve().parent.parent / "storage" / "tool_traces.jsonl"
 
 
 RESPONSE_FORMAT_LEGACY = "legacy"
@@ -170,7 +173,12 @@ def make_trace(
 
 def emit_trace(trace: dict, enabled: bool) -> None:
     if enabled:
-        print(json.dumps(trace, sort_keys=True))
+        try:
+            _TRACE_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with _TRACE_LOG.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(trace, sort_keys=True) + "\n")
+        except Exception:
+            pass
 
 
 def structured_success(tool_name: str, version: str, result: dict, started: float, trace: dict | None = None) -> dict:

@@ -50,3 +50,4 @@ storage/query_texts.json
 storage/vector_index.faiss
 storage/vector_metadata.json
 storage/project_manager/
+storage/tool_traces.jsonl
