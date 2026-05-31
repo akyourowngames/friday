@@ -86,19 +86,23 @@ when a request family is going to the wrong part of the system.
 
 ### document_creation
 - tools: doc_write
-- draft a document about something
-- write a schema or spec or outline
-- create a config file or report
+- draft a written document about something
+- write a schema or spec or outline or report
+- create a config file or readme or documentation
 - write it and open it for me
-- generate a document for a project
-- put together a technical document
-- draft the database schema
-- write an API specification
-- create a project outline or plan
+- generate a written document for a project
+- put together a technical document or spec
+- draft the database schema as a file
+- write an API specification document
+- create a project outline or plan document
 
 ### project_management
 - tools: project_track, project_status, project_focus, project_detail, project_alerts, project_decisions, project_archive, project_resurrect, project_brief_schedule, project_export
 - track a new project or give an update on one
+- add this to my projects or create a new project
+- create a new project and track it
+- i want to build something, start a project
+- lets begin work on a new project
 - king track this and keep an eye on it
 - track this: launch something by a deadline
 - track this project: build a thing by end of month

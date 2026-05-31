@@ -255,7 +255,13 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - start tracking a project to {goal}
 - king track this new project
 - add this to my projects and track it
-- i need to build {goal}, track it
+- add this project to the list
+- add to projects
+- create a project called {name}
+- i want to build {goal}
+- lets start a project for {goal}
+- i will build {goal}
+- new project: {name}
 - update on {project}: {what happened}
 - here is where {project} stands today
 - progress update on {project}

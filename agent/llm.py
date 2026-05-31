@@ -388,7 +388,10 @@ class NIMClient:
             "Extract every personal fact the user states about themselves or people/things in their life. "
             "Return a JSON array of strings, each one fact. "
             "Include: names, relationships, locations, preferences, work, health, projects, goals. "
-            "Use the user's exact words. When they correct a fact, extract the new version."
+            "When the user introduces themselves (e.g. 'myself X', 'I am X', 'my name is X', 'call me X'), "
+            "extract 'User name is X'. "
+            "When they mention a relationship (e.g. 'X is my brother'), extract the full relationship. "
+            "Use clear, standalone fact statements."
         )
         messages = [
             {"role": "system", "content": body},
