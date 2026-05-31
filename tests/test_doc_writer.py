@@ -255,5 +255,39 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("=== test.md", result)
 
 
+class StripMarkdownFencesTests(unittest.TestCase):
+    def test_strips_bare_fences(self):
+        from tools.doc_writer import _strip_markdown_fences
+        ticks = chr(96) * 3
+        text = ticks + chr(10) + "# Hello" + chr(10) + ticks
+        self.assertEqual(_strip_markdown_fences(text), "# Hello")
+
+    def test_strips_lang_tagged_fences(self):
+        from tools.doc_writer import _strip_markdown_fences
+        ticks = chr(96) * 3
+        text = ticks + "sql" + chr(10) + "CREATE TABLE t;" + chr(10) + ticks
+        self.assertEqual(_strip_markdown_fences(text), "CREATE TABLE t;")
+
+    def test_strips_markdown_fence(self):
+        from tools.doc_writer import _strip_markdown_fences
+        ticks = chr(96) * 3
+        text = ticks + "markdown" + chr(10) + "# Title" + chr(10) + "Body" + chr(10) + ticks
+        self.assertEqual(_strip_markdown_fences(text), "# Title\nBody")
+
+    def test_no_fences_returns_unchanged(self):
+        from tools.doc_writer import _strip_markdown_fences
+        text = "# Just a heading" + chr(10) + "No fences here"
+        self.assertEqual(_strip_markdown_fences(text), text)
+
+    def test_empty_returns_empty(self):
+        from tools.doc_writer import _strip_markdown_fences
+        self.assertEqual(_strip_markdown_fences(""), "")
+        self.assertEqual(_strip_markdown_fences("  "), "")
+
+    def test_single_line_no_strip(self):
+        from tools.doc_writer import _strip_markdown_fences
+        self.assertEqual(_strip_markdown_fences("just one line"), "just one line")
+
+
 if __name__ == "__main__":
     unittest.main()

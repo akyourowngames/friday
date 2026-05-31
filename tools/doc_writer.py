@@ -61,8 +61,8 @@ def _llm_call(system: str, user_content: str, max_tokens: int = 2000) -> str | N
         client = OpenAI(
             base_url=settings.nim_base_url,
             api_key=settings.nim_api_key,
-            timeout=45,
-            max_retries=0,
+            timeout=90,
+            max_retries=2,
         )
         resp = client.chat.completions.create(
             model=settings.model_name,
@@ -74,12 +74,19 @@ def _llm_call(system: str, user_content: str, max_tokens: int = 2000) -> str | N
             max_tokens=max_tokens,
         )
         text = resp.choices[0].message.content or ""
-        # Strip markdown fences if present
+        # Strip markdown fences if present: ```lang ... ``` or bare ``` ... ```
         lines = text.strip().splitlines()
-        if len(lines) >= 2 and lines[0].strip().startswith("```") and lines[-1].strip() == "```":
-            return "\n".join(lines[1:-1]).strip()
+        if len(lines) >= 2:
+            first = lines[0].strip()
+            last = lines[-1].strip()
+            is_fence_open = first.startswith("```") and len(first) <= 20
+            is_fence_close = last == "```"
+            if is_fence_open and is_fence_close:
+                return "\n".join(lines[1:-1]).strip()
         return text.strip()
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"  [doc_write LLM error: {type(e).__name__}: {e}]", file=sys.stderr)
         return None
 
 
@@ -137,24 +144,18 @@ Rules:
 - Be specific about sections — they should form a complete outline
 - If the request is vague, pick the most likely document type from context"""
 
-_GENERATE_SYSTEM_PROMPT = """You are a technical document writer for a personal AI assistant called KING.
-Write a complete, well-structured document based on the plan below.
+_GENERATE_SYSTEM_PROMPT = """Write a complete document based on this plan.
 
-Document plan:
-{plan}
-
-Policy reference:
-{policy}
+Plan: {plan}
 
 Rules:
-- Write for a reader who will USE this document, not just glance at it
-- Be specific and grounded — no generic filler or placeholder text
-- For code: include proper syntax, imports, types, and comments where they add value
-- For schemas: use consistent naming (snake_case), include types, constraints, and comments
-- For specs: include concrete examples, not just abstract descriptions
-- For outlines: include concrete milestones and deliverables
-- Never invent project details not in the request or context
-- Output ONLY the document content, no meta-commentary or explanation"""
+- Write for a reader who will use this document
+- Be specific, no generic filler
+- For code: include syntax, imports, types
+- For schemas: snake_case, types, constraints, comments
+- For specs: concrete examples
+- Output ONLY the document content
+- Do NOT wrap in markdown code fences"""
 
 
 def _plan_document(request: str, project_context: str = "") -> dict | None:
@@ -176,15 +177,40 @@ def _plan_document(request: str, project_context: str = "") -> dict | None:
     return parsed
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """Strip wrapping markdown code fences from LLM output.
+    
+    Handles: ```lang ... ```, bare ``` ... ```, and nested fences.
+    """
+    text = text.strip()
+    lines = text.splitlines()
+    if len(lines) >= 2:
+        first = lines[0].strip()
+        last = lines[-1].strip()
+        # Match ``` or ```lang (e.g. ```sql, ```markdown, ```yaml)
+        # but only if the opening line is short (just the fence + optional lang tag)
+        is_fence_open = first.startswith("```") and len(first) <= 20
+        is_fence_close = last == "```"
+        if is_fence_open and is_fence_close:
+            return "\n".join(lines[1:-1]).strip()
+    return text
+
+
 def _generate_content(plan: dict, request: str, project_context: str = "") -> str | None:
     """Use LLM to generate the full document content."""
     plan_text = json.dumps(plan, indent=2, ensure_ascii=False)
-    user_content = f"Original request: {request}\n\nDocument plan:\n{plan_text}"
+    user_content = f"Request: {request}\n\nPlan:\n{plan_text}"
     if project_context:
         user_content += f"\n\nProject context:\n{project_context}"
-    policy = _load_policy()
-    system = _GENERATE_SYSTEM_PROMPT.format(plan=plan_text, policy=policy)
-    return _llm_call(system, user_content, max_tokens=settings.doc_writer_max_tokens)
+    system = _GENERATE_SYSTEM_PROMPT.format(plan=plan_text)
+    result = _llm_call(system, user_content, max_tokens=settings.doc_writer_max_tokens)
+    if not result:
+        return None
+    # Double-strip: LLM may nest fences (```markdown ... ```)
+    cleaned = _strip_markdown_fences(result)
+    if cleaned != result:
+        cleaned = _strip_markdown_fences(cleaned)
+    return cleaned
 
 
 def _get_project_context(project_name: str) -> str:
@@ -277,6 +303,8 @@ def _show_in_terminal(path: Path, content: str) -> str:
         truncated = True
     # Strip non-ASCII characters for Windows console compatibility
     display = display.encode("ascii", errors="replace").decode("ascii")
+    ext = path.suffix.lower()
+    lang_tag = ext.lstrip(".") if ext else ""
     header = f"=== {path.name} ({len(content)} chars) ===\n"
     footer = f"\n=== Saved to: {path} ==="
     if truncated:
