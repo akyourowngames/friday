@@ -218,7 +218,14 @@ def _start_existing_path(command: str) -> dict | None:
     if not target or not os.path.exists(target):
         return None
     try:
-        os.startfile(target)
+        # Detach the process so its stdout/stderr don't leak into KING's terminal.
+        import subprocess as _sp
+        _sp.Popen(
+            ["cmd", "/c", "start", "", target],
+            creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+        )
         return {
             "code": 0,
             "stdout": f"Opened: {target}",

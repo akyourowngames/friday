@@ -281,7 +281,14 @@ def _open_locally(path: Path) -> str:
         import sys
 
         if sys.platform == "win32":
-            os.startfile(str(path))
+            # Detach the process so its stdout/stderr don't leak into KING's terminal.
+            import subprocess
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", str(path)],
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         elif sys.platform == "darwin":
             import subprocess
 
