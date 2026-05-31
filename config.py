@@ -206,6 +206,8 @@ class Settings:
     file_generating_tools: str = _env("KING_FILE_GENERATING_TOOLS", "imagine,web_scrape,download,generate,create,gallery")
     
     images_dir: str = _env("KING_IMAGES_DIR", "storage/images")
+    docs_dir: str = _env("KING_DOCS_DIR", "storage/docs")
+    doc_writer_max_tokens: int = _env_int("KING_DOC_WRITER_MAX_TOKENS", 2000)
     browser_targets_file: str = _env("KING_BROWSER_TARGETS_FILE", "tools/BROWSER_TARGETS.md")
     browser_dom_policy_file: str = _env("KING_BROWSER_DOM_POLICY_FILE", "tools/BROWSER_DOM_POLICY.md")
     system_controls_file: str = _env("KING_SYSTEM_CONTROLS_FILE", "tools/SYSTEM_CONTROLS.md")

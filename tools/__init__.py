@@ -32,5 +32,6 @@ from . import life_timeline
 from . import proactive_check
 from . import project_manager
 from . import discovery
+from . import doc_writer
 
 __all__ = ["tool", "get_tool", "get_tools", "get_tool_schemas", "execute_tool"]
