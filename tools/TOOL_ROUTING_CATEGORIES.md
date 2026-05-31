@@ -84,6 +84,18 @@ when a request family is going to the wrong part of the system.
 - run due scheduled work
 - run maintenance
 
+### document_creation
+- tools: doc_write
+- draft a document about something
+- write a schema or spec or outline
+- create a config file or report
+- write it and open it for me
+- generate a document for a project
+- put together a technical document
+- draft the database schema
+- write an API specification
+- create a project outline or plan
+
 ### project_management
 - tools: project_track, project_status, project_focus, project_detail, project_alerts, project_decisions, project_archive, project_resurrect, project_brief_schedule, project_export
 - track a new project or give an update on one

@@ -1920,6 +1920,9 @@ class Agent:
                     content = parts[1] if len(parts) > 1 else parts[0]
                     break
             content = content.strip()
+            # Strip trailing dates like (2026-06-07T09:00:00) or (2026-06-07)
+            import re as _re
+            content = _re.sub(r"\s*\(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2})?\)\s*$", "", content).strip()
             if not content:
                 return None
             return f"By the way — {content}"

@@ -276,6 +276,23 @@ Keep utterances short, in the user's voice, and varied. Cover real phrasings
 - changing direction: {decision}
 - worked on {project} today but nothing is done yet
 
+## doc_write
+- draft a {type} for {topic}
+- write a {type} about {topic}
+- create a {type} for {topic}
+- write me a {type}
+- draft something about {topic}
+- create a document about {topic}
+- write it and open it for me
+- write the schema and open it
+- draft the schema
+- create an API spec for {topic}
+- write a project outline for {topic}
+- generate a config file for {topic}
+- write a report on {topic}
+- make me a {type} document
+- put together a {type} for {topic}
+
 ## project_status
 - king status
 - status
