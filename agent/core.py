@@ -1872,6 +1872,17 @@ class Agent:
             if engine.budget_remaining(now) <= 0:
                 return None
 
+            # Cooldown: don't fire again within 10 minutes of last delivery.
+            last_spoke = getattr(engine, "_last_spoke_at", "")
+            if last_spoke:
+                try:
+                    from cognition.util import parse_iso
+                    last_dt = parse_iso(last_spoke)
+                    if last_dt is not None and (now - last_dt).total_seconds() < 600:
+                        return None
+                except Exception:
+                    pass
+
             # If queue is empty, try to seed from cadence deviations.
             if engine.queue_size() == 0:
                 try:
@@ -1894,9 +1905,24 @@ class Agent:
             state["proactive"] = engine.to_dict()
             save_state(state)
             # Return the structured content for the agent to phrase naturally.
-            node = candidate.node or "something"
-            kind = candidate.source.replace("cadence_", "")
-            return f"By the way — I noticed something about {node} ({kind}). Want me to tell you more?"
+            content = str(candidate.content or "").strip()
+            # Strip internal prefixes like "memory:commitment ", "cadence:unexpected_active node=...",
+            # "project:inactivity ProjectName: ..." to get the user-facing message.
+            for prefix in ("memory:", "cadence:", "project:"):
+                if content.startswith(prefix):
+                    rest = content[len(prefix):]
+                    # For cadence entries, strip "kind node=... strength=..." leaving nothing useful.
+                    if prefix == "cadence:":
+                        content = ""
+                        break
+                    # For memory/project, strip the kind label and take the actual text.
+                    parts = rest.split(" ", 1)
+                    content = parts[1] if len(parts) > 1 else parts[0]
+                    break
+            content = content.strip()
+            if not content:
+                return None
+            return f"By the way — {content}"
         except Exception:
             return None
 
