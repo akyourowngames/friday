@@ -141,9 +141,8 @@ class SpaceHoldToTalk:
         self.transcriber = SarvamTranscriber(settings)
         self.recorder = AudioRecorder(settings)
         self._keyboard = None
-        self._key_down = False
         self._recording = False
-        self._timer: threading.Timer | None = None
+        self._max_timer: threading.Timer | None = None
         self._lock = threading.Lock()
 
     def start(self) -> bool:
@@ -160,8 +159,7 @@ class SpaceHoldToTalk:
             return False
 
         self._keyboard = keyboard
-        keyboard.on_press_key(self.settings.voice_hotkey, self._on_key_down, suppress=False)
-        keyboard.on_release_key(self.settings.voice_hotkey, self._on_key_up, suppress=False)
+        keyboard.add_hotkey(self.settings.voice_hotkey, self._toggle_recording, suppress=True)
         return True
 
     def stop(self) -> None:
@@ -171,35 +169,34 @@ class SpaceHoldToTalk:
             except Exception:
                 pass
         self._keyboard = None
-
-    def _on_key_down(self, event) -> None:
         with self._lock:
-            if self._key_down:
-                return
-            self._key_down = True
-            self._timer = threading.Timer(self.settings.voice_hold_seconds, self._begin_recording)
-            self._timer.daemon = True
-            self._timer.start()
-
-    def _on_key_up(self, event) -> None:
-        with self._lock:
-            self._key_down = False
-            timer = self._timer
-            self._timer = None
             recording = self._recording
-        if timer is not None:
-            timer.cancel()
+            self._recording = False
+        if recording:
+            try:
+                self.recorder.stop()
+            except Exception:
+                pass
+
+    def _toggle_recording(self) -> None:
+        with self._lock:
+            recording = self._recording
         if recording:
             threading.Thread(target=self._finish_recording, daemon=True).start()
+        else:
+            threading.Thread(target=self._begin_recording, daemon=True).start()
 
     def _begin_recording(self) -> None:
         with self._lock:
-            if not self._key_down or self._recording:
+            if self._recording:
                 return
             self._recording = True
         try:
-            self.on_status("listening... release Space to send")
+            self.on_status("listening... press Ctrl+Space again to send")
             self.recorder.start()
+            self._max_timer = threading.Timer(self.settings.stt_max_seconds, self._finish_recording)
+            self._max_timer.daemon = True
+            self._max_timer.start()
         except Exception as exc:
             with self._lock:
                 self._recording = False
@@ -207,6 +204,10 @@ class SpaceHoldToTalk:
 
     def _finish_recording(self) -> None:
         try:
+            max_timer = self._max_timer
+            self._max_timer = None
+            if max_timer is not None:
+                max_timer.cancel()
             path = self.recorder.stop()
             with self._lock:
                 self._recording = False

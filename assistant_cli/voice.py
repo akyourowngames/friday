@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import queue
 import sys
 import threading
 from dataclasses import dataclass
@@ -74,6 +75,9 @@ class SarvamVoice:
         self.speaker = settings.voice_speaker.strip().lower() or "priya"
         self.last_result: VoiceResult | None = None
         self.last_error: str = ""
+        self._queue: queue.Queue[str] = queue.Queue()
+        self._queue_lock = threading.Lock()
+        self._queue_thread: threading.Thread | None = None
 
     def configured(self) -> bool:
         return bool(self.settings.sarvam_api_key.strip())
@@ -97,6 +101,7 @@ class SarvamVoice:
             "speaker": self.speaker,
             "language": self.settings.voice_language,
             "model": self.settings.voice_model,
+            "pace": str(self.settings.voice_pace),
             "codec": self.settings.voice_codec,
             "sample_rate": str(self.settings.voice_sample_rate),
             "output_dir": str(self.settings.voice_output_dir),
@@ -112,8 +117,11 @@ class SarvamVoice:
             self.play(result.path, wait=True)
             return
 
-        thread = threading.Thread(target=self._speak_worker, args=(text,), daemon=True)
-        thread.start()
+        speech = self._speech_text(text)
+        if not speech:
+            return
+        self._queue.put(speech)
+        self._ensure_queue_worker()
 
     def synthesize(self, text: str) -> VoiceResult:
         if not self.configured():
@@ -193,12 +201,26 @@ class SarvamVoice:
                 continue
         raise RuntimeError(f"No audio player found for {path}.")
 
-    def _speak_worker(self, text: str) -> None:
-        try:
-            result = self.synthesize(text)
-            self.play(result.path, wait=True)
-        except Exception as exc:
-            self.last_error = str(exc)
+    def _ensure_queue_worker(self) -> None:
+        with self._queue_lock:
+            if self._queue_thread is not None and self._queue_thread.is_alive():
+                return
+            self._queue_thread = threading.Thread(target=self._queue_worker, daemon=True)
+            self._queue_thread.start()
+
+    def _queue_worker(self) -> None:
+        while True:
+            try:
+                text = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                return
+            try:
+                result = self.synthesize(text)
+                self.play(result.path, wait=True)
+            except Exception as exc:
+                self.last_error = str(exc)
+            finally:
+                self._queue.task_done()
 
     def _speech_text(self, text: str) -> str:
         lines: list[str] = []

@@ -44,12 +44,37 @@ HELP_TEXT = """/help                         show commands
 /voice off                    stop auto-speaking replies
 /voice test                   synthesize and play a short test line
 /voice speaker <name>         change Bulbul voice, default priya
-/voice input on               enable hold-Space voice input
-/voice input off              disable hold-Space voice input
+/voice input on               enable Ctrl+Space voice input
+/voice input off              disable Ctrl+Space voice input
 /clear                        start a fresh session
 /ping                         test NVIDIA NIM
 /exit                         quit
 """
+
+
+def pop_voice_chunks(buffer: str, force: bool = False) -> tuple[list[str], str]:
+    text = str(buffer or "")
+    chunks: list[str] = []
+    while True:
+        cut = -1
+        for index, char in enumerate(text):
+            if char in ".?!\n" and index >= 8:
+                cut = index + 1
+                break
+        if cut == -1 and len(text) >= 180:
+            cut = text.rfind(" ", 0, 180)
+            if cut < 80:
+                cut = -1
+        if cut == -1:
+            break
+        chunk = text[:cut].strip()
+        text = text[cut:].strip()
+        if chunk:
+            chunks.append(chunk)
+    if force and text.strip():
+        chunks.append(text.strip())
+        text = ""
+    return chunks, text
 
 
 def render_header(runtime: FridayRuntime) -> None:
@@ -74,9 +99,10 @@ def run_ping() -> int:
         return 1
 
 
-def run_once(message: str, stream: bool) -> int:
+def run_once(message: str, stream: bool, voice_mode: bool = False) -> int:
     try:
         runtime = FridayRuntime(load_settings())
+        runtime.voice.set_enabled(voice_mode)
         answer = runtime.answer_once(message, stream=stream)
         if not stream:
             console.print(answer)
@@ -137,10 +163,11 @@ def run_voice_roundtrip_test(text: str) -> int:
         return 1
 
 
-def run_chat() -> int:
+def run_chat(voice_mode: bool = False) -> int:
     try:
         settings = load_settings()
         runtime = FridayRuntime(settings)
+        runtime.voice.set_enabled(voice_mode)
     except Exception as exc:
         console.print(f"[red]{format_error(exc)}[/red]")
         return 1
@@ -180,8 +207,8 @@ def run_chat() -> int:
             voice_input.stop()
             voice_input = None
 
-    if start_voice_input():
-        console.print("[dim]Hold Space to talk; release to send.[/dim]\n")
+    if runtime.voice.enabled and start_voice_input():
+        console.print("[dim]Ctrl+Space starts listening; Ctrl+Space again transcribes and sends.[/dim]\n")
 
     while True:
         try:
@@ -268,6 +295,7 @@ def run_chat() -> int:
             continue
         if command == "/voice on":
             runtime.voice.set_enabled(True)
+            start_voice_input()
             console.print("[green]Voice auto-speak is on.[/green]")
             continue
         if command == "/voice off":
@@ -276,11 +304,11 @@ def run_chat() -> int:
             continue
         if command == "/voice input on":
             if start_voice_input():
-                console.print("[green]Hold-Space voice input is on.[/green]")
+                console.print("[green]Ctrl+Space voice input is on.[/green]")
             continue
         if command == "/voice input off":
             stop_voice_input()
-            console.print("[green]Hold-Space voice input is off.[/green]")
+            console.print("[green]Ctrl+Space voice input is off.[/green]")
             continue
         if command == "/voice test":
             try:
@@ -312,6 +340,7 @@ def run_chat() -> int:
         user_message_id = runtime.store.append_message("user", user_text)
         console.print(Text("friday >", style="bold cyan"))
         answer = ""
+        voice_buffer = ""
         try:
             rag_context = runtime.agentic_rag.retrieve(user_text)
             recent = runtime.store.recent_messages(settings.last_messages)
@@ -319,10 +348,17 @@ def run_chat() -> int:
             with Live(Markdown(""), console=console, refresh_per_second=24, transient=False) as live:
                 for token in runtime.chat.stream(messages):
                     answer += token
+                    if runtime.voice.enabled:
+                        voice_buffer += token
+                        chunks, voice_buffer = pop_voice_chunks(voice_buffer)
+                        for chunk in chunks:
+                            runtime.speak_answer(chunk, wait=False)
                     live.update(Markdown(answer))
             runtime.store.append_message("assistant", answer)
             runtime._write_auto_memory(user_text, answer, user_message_id)
-            runtime.speak_answer(answer, wait=False)
+            if runtime.voice.enabled:
+                for chunk in pop_voice_chunks(voice_buffer, force=True)[0]:
+                    runtime.speak_answer(chunk, wait=False)
         except Exception as exc:
             console.print(f"[red]{format_error(exc)}[/red]")
         console.print()
@@ -333,6 +369,7 @@ def main() -> int:
     parser.add_argument("--ping", action="store_true", help="test NVIDIA NIM and exit")
     parser.add_argument("--once", help="send one message and exit")
     parser.add_argument("--no-stream", action="store_true", help="disable token streaming for --once")
+    parser.add_argument("--voice", action="store_true", help="enable Sarvam voice mode for this chat session")
     parser.add_argument("--rebuild-memory", action="store_true", help="rebuild the local LlamaIndex MiniLM index")
     parser.add_argument("--voice-test", nargs="?", const="Friday voice is online.", help="synthesize and play Sarvam voice")
     parser.add_argument("--transcribe-test", help="transcribe a WAV/MP3/etc file with Sarvam STT")
@@ -355,8 +392,8 @@ def main() -> int:
     if args.voice_roundtrip_test:
         return run_voice_roundtrip_test(args.voice_roundtrip_test)
     if args.once:
-        return run_once(args.once, stream=not args.no_stream)
-    return run_chat()
+        return run_once(args.once, stream=not args.no_stream, voice_mode=args.voice)
+    return run_chat(voice_mode=args.voice)
 
 
 if __name__ == "__main__":

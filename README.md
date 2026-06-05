@@ -172,7 +172,7 @@ This path uses:
 - local knowledge files under `knowledge/`
 - direct saved-memory context on every request, with optional agentic RAG query planning via `FRIDAY_AGENTIC_RAG_ENABLED=true`
 - optional Sarvam Bulbul v3 voice output with the `priya` female speaker
-- optional hold-Space voice input using Sarvam Saaras v3 STT
+- optional Ctrl+Space toggle voice input using Sarvam Saaras v3 STT
 
 Useful commands:
 
@@ -198,6 +198,7 @@ For non-interactive checks:
 ```powershell
 python chat.py --rebuild-memory
 python chat.py --ping
+python chat.py --voice
 python chat.py --voice-test
 python chat.py --voice-roundtrip-test
 python chat.py --transcribe-test storage/voice/some-file.wav
@@ -205,7 +206,7 @@ python chat.py --once "my name is Krish Verma"
 ```
 
 Voice is controlled by `SARVAM_API_KEY` plus `FRIDAY_VOICE_*` settings. Generated WAV files are saved under `storage/voice/` and ignored by git.
-Voice input is controlled by `FRIDAY_VOICE_INPUT_*` and `FRIDAY_STT_*` settings. In the interactive CLI, hold Space to record and release Space to transcribe and send the message.
+Voice input is controlled by `FRIDAY_VOICE_INPUT_*` and `FRIDAY_STT_*` settings. In the interactive CLI, press Ctrl+Space to start recording, then press Ctrl+Space again to transcribe and send.
 
 ## Verification
 
