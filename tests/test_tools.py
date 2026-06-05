@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 
 from assistant_cli.config import Settings
-from assistant_cli.tools import build_default_registry
+from assistant_cli.tools import TOOL_MODULES, build_default_registry
 
 
 def make_settings(root: Path, tavily_api_key: str = "") -> Settings:
@@ -64,6 +64,20 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertGreaterEqual(len(names), 13)
         for name in {"realtime_search", "weather", "geocode", "calculator", "unit_convert", "file_read"}:
             self.assertIn(name, names)
+
+    def test_each_registered_tool_has_own_module(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse((root / "assistant_cli" / "tools.py").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.build_registry(Path(tmp))
+            names = set(registry.names())
+
+        modules_by_tool = {module.SPEC.name: module.__name__.rsplit(".", 1)[-1] for module in TOOL_MODULES}
+        self.assertEqual(names, set(modules_by_tool))
+        for tool_name, module_name in modules_by_tool.items():
+            self.assertEqual(tool_name, module_name)
+            self.assertTrue((root / "assistant_cli" / "tools" / f"{module_name}.py").exists())
 
     def test_local_utility_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

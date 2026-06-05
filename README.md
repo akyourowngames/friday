@@ -66,6 +66,7 @@ Each session is also saved to `sessions/<session-id>.jsonl`, and the last 20 mes
 ## Tools
 
 Friday has a registry-driven local tool layer. Slash commands are explicit and fast; normal conversation still goes through the assistant model.
+Each tool lives in its own module under `assistant_cli/tools/<tool_name>.py`.
 The versioned catalog lives in `memory/registry/tools.md`.
 
 ```powershell
@@ -90,6 +91,7 @@ FRIDAY_TOOL_TIMEOUT_SECONDS=8
 ```
 
 Registered tools include realtime search, weather, geocode, reverse geocode, current time, calculator, unit conversion, hashing, base64 encode/decode, JSON formatting, UUIDs, random numbers, password generation, URL fetch, workspace file list/read, and local notes.
+See `memory/registry/tools.md` for one-line CLI prompts for every tool.
 
 ## Persona
 
