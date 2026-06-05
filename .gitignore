@@ -42,6 +42,7 @@ storage/project_log.jsonl
 storage/sessions/
 storage/assistant_rag_index/
 storage/voice/
+storage/voice_input/
 storage/friday_assistant.sqlite3*
 storage/friday_cli_history.txt
 storage/tool_embeddings.npy

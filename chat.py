@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -12,6 +13,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from assistant_cli.config import load_settings
+from assistant_cli.listen import SpaceHoldToTalk
 from assistant_cli.runtime import FridayRuntime, format_error
 
 
@@ -42,6 +44,8 @@ HELP_TEXT = """/help                         show commands
 /voice off                    stop auto-speaking replies
 /voice test                   synthesize and play a short test line
 /voice speaker <name>         change Bulbul voice, default priya
+/voice input on               enable hold-Space voice input
+/voice input off              disable hold-Space voice input
 /clear                        start a fresh session
 /ping                         test NVIDIA NIM
 /exit                         quit
@@ -107,6 +111,32 @@ def run_voice_test(text: str) -> int:
         return 1
 
 
+def run_transcribe_test(path: str) -> int:
+    try:
+        runtime = FridayRuntime(load_settings())
+        result = runtime.transcribe_file(Path(path))
+        console.print(f"[green]STT OK[/green] {result.text}")
+        console.print(f"[dim]{result.path} ({result.byte_count} bytes, {result.language_code})[/dim]")
+        runtime.close()
+        return 0
+    except Exception as exc:
+        console.print(f"[red]{format_error(exc)}[/red]")
+        return 1
+
+
+def run_voice_roundtrip_test(text: str) -> int:
+    try:
+        runtime = FridayRuntime(load_settings())
+        audio, transcript = runtime.voice_roundtrip_test(text)
+        console.print(f"[green]Roundtrip OK[/green] {transcript.text}")
+        console.print(f"[dim]tts={audio.path} ({audio.byte_count} bytes) stt={transcript.language_code}[/dim]")
+        runtime.close()
+        return 0
+    except Exception as exc:
+        console.print(f"[red]{format_error(exc)}[/red]")
+        return 1
+
+
 def run_chat() -> int:
     try:
         settings = load_settings()
@@ -119,11 +149,46 @@ def run_chat() -> int:
     render_header(runtime)
     console.print("[dim]Type /help for commands. Enter sends.[/dim]\n")
 
+    voice_input: SpaceHoldToTalk | None = None
+
+    def voice_status(message: str) -> None:
+        console.print(f"\n[dim]{message}[/dim]")
+
+    def submit_voice_text(text: str) -> None:
+        console.print(f"\n[cyan]voice >[/cyan] {text}")
+        try:
+            import keyboard
+
+            keyboard.write(text)
+            keyboard.press_and_release("enter")
+        except Exception as exc:
+            console.print(f"[red]Voice transcript ready but could not submit it: {exc}[/red]")
+
+    def start_voice_input() -> bool:
+        nonlocal voice_input
+        if voice_input is not None:
+            return True
+        voice_input = SpaceHoldToTalk(settings, submit_voice_text, voice_status)
+        started = voice_input.start()
+        if not started:
+            voice_input = None
+        return started
+
+    def stop_voice_input() -> None:
+        nonlocal voice_input
+        if voice_input is not None:
+            voice_input.stop()
+            voice_input = None
+
+    if start_voice_input():
+        console.print("[dim]Hold Space to talk; release to send.[/dim]\n")
+
     while True:
         try:
             user_text = session.prompt("you > ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
+            stop_voice_input()
             runtime.close()
             return 0
 
@@ -133,6 +198,7 @@ def run_chat() -> int:
 
         if command in {"/exit", "/quit", "exit", "quit"}:
             console.print("[dim]bye[/dim]")
+            stop_voice_input()
             runtime.close()
             return 0
         if command == "/help":
@@ -188,6 +254,10 @@ def run_chat() -> int:
             continue
         if command == "/voice":
             status = runtime.voice.status()
+            status["input_hotkey"] = settings.voice_hotkey
+            status["input_enabled"] = "yes" if voice_input is not None else "no"
+            status["stt_model"] = settings.stt_model
+            status["stt_language"] = settings.stt_language
             console.print(
                 Panel(
                     "\n".join(f"{key}: {value}" for key, value in status.items() if value),
@@ -203,6 +273,14 @@ def run_chat() -> int:
         if command == "/voice off":
             runtime.voice.set_enabled(False)
             console.print("[green]Voice auto-speak is off.[/green]")
+            continue
+        if command == "/voice input on":
+            if start_voice_input():
+                console.print("[green]Hold-Space voice input is on.[/green]")
+            continue
+        if command == "/voice input off":
+            stop_voice_input()
+            console.print("[green]Hold-Space voice input is off.[/green]")
             continue
         if command == "/voice test":
             try:
@@ -257,6 +335,13 @@ def main() -> int:
     parser.add_argument("--no-stream", action="store_true", help="disable token streaming for --once")
     parser.add_argument("--rebuild-memory", action="store_true", help="rebuild the local LlamaIndex MiniLM index")
     parser.add_argument("--voice-test", nargs="?", const="Friday voice is online.", help="synthesize and play Sarvam voice")
+    parser.add_argument("--transcribe-test", help="transcribe a WAV/MP3/etc file with Sarvam STT")
+    parser.add_argument(
+        "--voice-roundtrip-test",
+        nargs="?",
+        const="hello friday voice transcription test",
+        help="synthesize a line with Sarvam TTS, then transcribe it with Sarvam STT",
+    )
     args = parser.parse_args()
 
     if args.ping:
@@ -265,6 +350,10 @@ def main() -> int:
         return run_rebuild()
     if args.voice_test:
         return run_voice_test(args.voice_test)
+    if args.transcribe_test:
+        return run_transcribe_test(args.transcribe_test)
+    if args.voice_roundtrip_test:
+        return run_voice_roundtrip_test(args.voice_roundtrip_test)
     if args.once:
         return run_once(args.once, stream=not args.no_stream)
     return run_chat()

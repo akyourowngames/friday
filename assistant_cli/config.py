@@ -81,6 +81,16 @@ class AssistantSettings:
     voice_pace: float
     voice_temperature: float
     voice_max_chars: int
+    voice_input_enabled: bool
+    voice_hotkey: str
+    voice_hold_seconds: float
+    stt_model: str
+    stt_mode: str
+    stt_language: str
+    stt_sample_rate: int
+    stt_max_seconds: float
+    stt_min_seconds: float
+    stt_output_dir: Path
 
 
 def load_settings() -> AssistantSettings:
@@ -118,4 +128,14 @@ def load_settings() -> AssistantSettings:
         voice_pace=_env_float("FRIDAY_VOICE_PACE", 1.0),
         voice_temperature=_env_float("FRIDAY_VOICE_TEMPERATURE", 0.55),
         voice_max_chars=_env_int("FRIDAY_VOICE_MAX_CHARS", 900),
+        voice_input_enabled=_env_bool("FRIDAY_VOICE_INPUT_ENABLED", True),
+        voice_hotkey=_env("FRIDAY_VOICE_HOTKEY", "space"),
+        voice_hold_seconds=_env_float("FRIDAY_VOICE_HOLD_SECONDS", 0.30),
+        stt_model=_env("FRIDAY_STT_MODEL", "saaras:v3"),
+        stt_mode=_env("FRIDAY_STT_MODE", "transcribe"),
+        stt_language=_env("FRIDAY_STT_LANGUAGE", "en-IN"),
+        stt_sample_rate=_env_int("FRIDAY_STT_SAMPLE_RATE", 16000),
+        stt_max_seconds=_env_float("FRIDAY_STT_MAX_SECONDS", 30.0),
+        stt_min_seconds=_env_float("FRIDAY_STT_MIN_SECONDS", 0.35),
+        stt_output_dir=_path(_env("FRIDAY_STT_OUTPUT_DIR", "storage/voice_input")),
     )

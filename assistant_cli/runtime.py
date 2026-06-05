@@ -3,6 +3,7 @@ from __future__ import annotations
 from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 
 from .config import AssistantSettings
+from .listen import SarvamTranscriber, TranscriptResult
 from .memory_writer import AutoMemoryWriter
 from .nvidia_chat import NvidiaChat
 from .rag import AgenticRAG, KnowledgeRAG
@@ -19,6 +20,7 @@ class FridayRuntime:
         self.chat = NvidiaChat(settings)
         self.memory_writer = AutoMemoryWriter(settings)
         self.voice = SarvamVoice(settings)
+        self.transcriber = SarvamTranscriber(settings)
 
     def answer_once(self, user_text: str, stream: bool = True) -> str:
         user_message_id = self.store.append_message("user", user_text)
@@ -57,6 +59,14 @@ class FridayRuntime:
         result = self.voice.synthesize(text)
         self.voice.play(result.path, wait=True)
         return result
+
+    def transcribe_file(self, path) -> TranscriptResult:
+        return self.transcriber.transcribe_file(path)
+
+    def voice_roundtrip_test(self, text: str = "hello friday voice transcription test") -> tuple[VoiceResult, TranscriptResult]:
+        audio = self.voice.synthesize(text)
+        transcript = self.transcriber.transcribe_file(audio.path)
+        return audio, transcript
 
 
 def format_error(exc: Exception) -> str:
