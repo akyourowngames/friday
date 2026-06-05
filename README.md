@@ -87,11 +87,15 @@ Realtime search uses Tavily when you add the key:
 ```env
 TAVILY_API_KEY=your_tavily_key_here
 FRIDAY_TOOLS_ENABLED=true
+FRIDAY_AUTO_TOOLS_ENABLED=true
 FRIDAY_TOOL_TIMEOUT_SECONDS=8
+FRIDAY_TOOL_PLANNER_TIMEOUT_SECONDS=8
+FRIDAY_TOOL_MIN_CONFIDENCE=0.45
 ```
 
 Registered tools include realtime search, weather, geocode, reverse geocode, current time, calculator, unit conversion, hashing, base64 encode/decode, JSON formatting, UUIDs, random numbers, password generation, URL fetch, workspace file list/read, and local notes.
 See `memory/registry/tools.md` for one-line CLI prompts for every tool.
+Normal chat uses a model-planned router over the registered tool specs, then streams a natural model-written answer from the tool result.
 
 ## Persona
 

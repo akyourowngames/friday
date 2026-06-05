@@ -49,7 +49,11 @@ def make_settings(root: Path, tavily_api_key: str = "") -> Settings:
         stt_output_dir=str(root / "storage" / "voice_input"),
         tavily_api_key=tavily_api_key,
         tools_enabled=True,
+        auto_tools_enabled=True,
         tool_timeout_seconds=1.0,
+        tool_planner_timeout_seconds=1.0,
+        tool_min_confidence=0.45,
+        tool_result_max_chars=6000,
     )
 
 

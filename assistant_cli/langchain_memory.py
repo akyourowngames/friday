@@ -50,6 +50,9 @@ class JsonlChatMessageHistory:
     def add_ai_message(self, message: str) -> None:
         self._append("assistant", message)
 
+    def add_tool_message(self, tool: str, content: str) -> None:
+        self._append("tool", content, {"tool": str(tool or "")})
+
     def clear(self) -> None:
         if self.path.exists():
             self.path.unlink()
@@ -62,7 +65,7 @@ class JsonlChatMessageHistory:
             if str(row.get("content") or "").strip()
         ]
 
-    def _append(self, role: str, content: str) -> None:
+    def _append(self, role: str, content: str, extra: dict | None = None) -> None:
         text = str(content or "").strip()
         if not text:
             return
@@ -73,5 +76,7 @@ class JsonlChatMessageHistory:
             "content": text,
             "at": datetime.now().isoformat(timespec="seconds"),
         }
+        if extra:
+            record.update(extra)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")

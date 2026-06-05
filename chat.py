@@ -15,6 +15,7 @@ from assistant_cli.config import load_settings
 from assistant_cli.langchain_memory import JsonlChatMessageHistory
 from assistant_cli.memory import MemoryManager
 from assistant_cli.nvidia_chat import NvidiaChat
+from assistant_cli.tool_planner import ToolPlanner, tool_result_context
 from assistant_cli.tools import ToolRegistry, build_default_registry
 
 
@@ -158,6 +159,24 @@ def run_tool(name: str, raw_args: str = "{}") -> int:
             registry.close()
 
 
+def plan_and_execute_tool(
+    settings,
+    chat: NvidiaChat,
+    tools: ToolRegistry,
+    history: JsonlChatMessageHistory,
+    user_text: str,
+    conversation: list[dict[str, str]],
+) -> str:
+    if not settings.tools_enabled or not settings.auto_tools_enabled:
+        return ""
+    plan = ToolPlanner(chat, tools).plan(user_text, conversation)
+    if not plan.meets_confidence(settings.tool_min_confidence):
+        return ""
+    result = tools.execute(plan.tool, plan.arguments)
+    history.add_tool_message(plan.tool, json.dumps(result.as_dict(), ensure_ascii=False))
+    return tool_result_context(plan, result, settings.tool_result_max_chars)
+
+
 def run_ping(chat: NvidiaChat) -> int:
     try:
         console.print(chat.ping())
@@ -172,6 +191,7 @@ def run_once(user_text: str, voice_mode: bool = False) -> int:
         settings = load_settings()
         chat = NvidiaChat(settings)
         memory = MemoryManager(settings)
+        tools = build_default_registry(settings)
         from assistant_cli.voice import SarvamVoice
 
         voice = SarvamVoice(settings, enabled=voice_mode)
@@ -187,9 +207,15 @@ def run_once(user_text: str, voice_mode: bool = False) -> int:
         memory_context = ""
 
     history.add_user_message(user_text)
+    conversation = history.recent_openai_messages(settings.last_messages)
+    try:
+        planned_tool_context = plan_and_execute_tool(settings, chat, tools, history, user_text, conversation)
+    except Exception:
+        planned_tool_context = ""
+    answer_context = "\n\n".join(part for part in [memory_context, planned_tool_context] if part)
     answer = ""
     try:
-        for token in chat.stream_reply(memory_context, history.recent_openai_messages(settings.last_messages)):
+        for token in chat.stream_reply(answer_context, conversation):
             print(token, end="", flush=True)
             answer += token
         print()
@@ -200,6 +226,7 @@ def run_once(user_text: str, voice_mode: bool = False) -> int:
     history.add_ai_message(answer)
     memory.capture_user_facts(user_text, answer)
     voice.speak(answer, wait=True)
+    tools.close()
     return 0
 
 
@@ -256,8 +283,6 @@ def run_chat(voice_mode: bool = False) -> int:
         console.print(f"[red]{exc}[/red]")
         return 1
 
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.history import FileHistory
     from rich.live import Live
     from rich.markdown import Markdown
 
@@ -269,7 +294,12 @@ def run_chat(voice_mode: bool = False) -> int:
     voice = SarvamVoice(settings, enabled=voice_mode)
     tools = build_default_registry(settings)
     history = JsonlChatMessageHistory(settings.session_dir)
-    session = PromptSession(history=FileHistory(".friday_history"))
+    session = None
+    if sys.stdin.isatty():
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory
+
+        session = PromptSession(history=FileHistory(".friday_history"))
     render_header(settings.model, voice_mode=voice.enabled)
     console.print("[dim]Type /help for commands.[/dim]\n")
 
@@ -310,7 +340,15 @@ def run_chat(voice_mode: bool = False) -> int:
 
     while True:
         try:
-            user_text = session.prompt("you > ").strip()
+            if session is None:
+                raw = sys.stdin.readline()
+                if raw == "":
+                    raise EOFError
+                user_text = raw.strip()
+                if user_text:
+                    console.print(f"you > {user_text}")
+            else:
+                user_text = session.prompt("you > ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
             stop_voice_input()
@@ -448,13 +486,18 @@ def run_chat(voice_mode: bool = False) -> int:
 
         chat.add_user_message(user_text)
         history.add_user_message(user_text)
+        conversation = history.recent_openai_messages(settings.last_messages)
+        try:
+            planned_tool_context = plan_and_execute_tool(settings, chat, tools, history, user_text, conversation)
+        except Exception:
+            planned_tool_context = ""
+        answer_context = "\n\n".join(part for part in [memory_context, planned_tool_context] if part)
         answer = ""
         voice_buffer = ""
         console.print(Text("friday >", style="bold cyan"))
         try:
             with Live(Markdown(""), console=console, refresh_per_second=24, transient=False) as live:
-                conversation = history.recent_openai_messages(settings.last_messages)
-                for token in chat.stream_reply(memory_context, conversation):
+                for token in chat.stream_reply(answer_context, conversation):
                     answer += token
                     if voice.enabled:
                         voice_buffer += token

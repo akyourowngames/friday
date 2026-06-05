@@ -44,7 +44,11 @@ class Settings:
     stt_output_dir: str
     tavily_api_key: str
     tools_enabled: bool
+    auto_tools_enabled: bool
     tool_timeout_seconds: float
+    tool_planner_timeout_seconds: float
+    tool_min_confidence: float
+    tool_result_max_chars: int
 
 
 def load_settings() -> Settings:
@@ -92,5 +96,10 @@ def load_settings() -> Settings:
         stt_output_dir=os.getenv("FRIDAY_STT_OUTPUT_DIR", "storage/voice_input").strip(),
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
         tools_enabled=os.getenv("FRIDAY_TOOLS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+        auto_tools_enabled=os.getenv("FRIDAY_AUTO_TOOLS_ENABLED", "true").strip().lower()
+        in {"1", "true", "yes", "on"},
         tool_timeout_seconds=float(os.getenv("FRIDAY_TOOL_TIMEOUT_SECONDS", "8.0")),
+        tool_planner_timeout_seconds=float(os.getenv("FRIDAY_TOOL_PLANNER_TIMEOUT_SECONDS", "8.0")),
+        tool_min_confidence=float(os.getenv("FRIDAY_TOOL_MIN_CONFIDENCE", "0.45")),
+        tool_result_max_chars=int(os.getenv("FRIDAY_TOOL_RESULT_MAX_CHARS", "6000")),
     )

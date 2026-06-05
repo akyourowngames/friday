@@ -78,6 +78,25 @@ class NvidiaChat:
             if token:
                 yield token
 
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0,
+        max_tokens: int = 500,
+        timeout: float | None = None,
+    ) -> str:
+        kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        response = self.client.chat.completions.create(
+            model=self.settings.model,
+            messages=messages,  # type: ignore[arg-type]
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
+        return response.choices[0].message.content or ""
+
     def ping(self) -> str:
         response = self.client.chat.completions.create(
             model=self.settings.model,
