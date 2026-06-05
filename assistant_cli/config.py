@@ -82,7 +82,7 @@ def load_settings() -> AssistantSettings:
     return AssistantSettings(
         api_key=api_key,
         base_url=_env("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-        model=_env("NVIDIA_MODEL", "meta/llama-4-maverick-17b-128e-instruct"),
+        model=_env("NVIDIA_MODEL", "mistralai/ministral-14b-instruct-2512"),
         temperature=_env_float("FRIDAY_TEMPERATURE", 0.35),
         max_tokens=_env_int("FRIDAY_MAX_TOKENS", 1200),
         storage_dir=storage_dir,
@@ -93,7 +93,7 @@ def load_settings() -> AssistantSettings:
         rag_index_dir=_path(_env("FRIDAY_RAG_INDEX_DIR", "storage/assistant_rag_index")),
         rag_top_k=_env_int("FRIDAY_RAG_TOP_K", 5),
         last_messages=_env_int("FRIDAY_LAST_MESSAGES", 20),
-        agentic_rag_enabled=_env_bool("FRIDAY_AGENTIC_RAG_ENABLED", True),
+        agentic_rag_enabled=_env_bool("FRIDAY_AGENTIC_RAG_ENABLED", False),
         agentic_query_count=_env_int("FRIDAY_AGENTIC_QUERY_COUNT", 3),
         auto_memory_enabled=_env_bool("FRIDAY_AUTO_MEMORY_ENABLED", True),
     )

@@ -50,10 +50,10 @@ class KnowledgeRAG:
         self.settings.memory_dir.mkdir(parents=True, exist_ok=True)
         self.settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
         templates = {
-            "project.txt": "# Project Memory\n\n- Friday is a local Python CLI assistant.\n",
-            "user.txt": "# User Memory\n\n- Store stable user facts here.\n",
-            "preferences.txt": "# Preference Memory\n\n- Store assistant behavior preferences here.\n",
-            "personal.txt": "# Personal Memory\n\n- Store personal facts here.\n",
+            "project.txt": "# Project Memory\n",
+            "user.txt": "# User Memory\n",
+            "preferences.txt": "# Preference Memory\n",
+            "personal.txt": "# Personal Memory\n",
         }
         for filename, text in templates.items():
             path = self.settings.memory_dir / filename
@@ -72,6 +72,23 @@ class KnowledgeRAG:
             for pattern in ("*.txt", "*.md"):
                 files.extend(sorted(root.rglob(pattern)))
         return [path for path in files if path.exists() and path.is_file()]
+
+    def memory_context(self) -> str:
+        blocks: list[str] = []
+        for filename in dict.fromkeys(MEMORY_BUCKETS.values()):
+            path = self.settings.memory_dir / filename
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore").strip()
+            if text:
+                blocks.append(f"[{filename}]\n{text}")
+        if not blocks:
+            return ""
+        return (
+            "Saved permanent memory facts. Treat these as true for the current user "
+            "when they are relevant:\n"
+            + "\n\n---\n\n".join(blocks)
+        )
 
     def _marker_path(self) -> Path:
         return self.settings.rag_index_dir / ".source_mtime"
@@ -131,7 +148,7 @@ class KnowledgeRAG:
         if line.lower() not in existing.lower():
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(f"\n{line}\n")
-        self.rebuild()
+        self._index = None
         return path
 
 
@@ -175,6 +192,13 @@ class AgenticRAG:
         return deduped[: max(1, self.settings.agentic_query_count)]
 
     def retrieve(self, user_text: str) -> str:
+        blocks = []
+        memory_context = self.rag.memory_context()
+        if memory_context:
+            blocks.append(memory_context)
+        if self.rag.needs_rebuild():
+            return "\n\n".join(blocks)
+
         recent = self.store.recent_text(self.settings.last_messages)
         queries = self.plan_queries(user_text, recent)
         rag_hits: list[RagHit] = []
@@ -188,7 +212,6 @@ class AgenticRAG:
                     rag_hits.append(hit)
             db_hits.extend(self.store.search_messages(query, limit=2))
 
-        blocks = []
         if rag_hits:
             chunks = []
             for hit in rag_hits[: self.settings.rag_top_k]:

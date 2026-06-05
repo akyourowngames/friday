@@ -163,14 +163,14 @@ python chat.py
 
 This path uses:
 
-- NVIDIA NIM streaming chat with `meta/llama-4-maverick-17b-128e-instruct`
+- NVIDIA NIM streaming chat with `mistralai/ministral-14b-instruct-2512` by default
 - last 20 chat messages in every model request
 - append-only per-session JSONL transcripts under `storage/sessions/`
 - SQLite message and fact storage at `storage/friday_assistant.sqlite3`
 - LlamaIndex knowledge RAG over local MiniLM embeddings
 - editable memory files: `memory/project.txt`, `memory/user.txt`, `memory/preferences.txt`, `memory/personal.txt`
 - local knowledge files under `knowledge/`
-- agentic RAG query planning before retrieval
+- direct saved-memory context on every request, with optional agentic RAG query planning via `FRIDAY_AGENTIC_RAG_ENABLED=true`
 
 Useful commands:
 

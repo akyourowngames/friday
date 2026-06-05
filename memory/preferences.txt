@@ -2,3 +2,5 @@
 
 - The CLI should use single-line input where Enter sends the message.
 - Keep API keys, chat sessions, SQLite databases, and vector indexes out of git.
+
+- The user likes pizza.

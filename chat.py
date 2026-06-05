@@ -18,6 +18,16 @@ from assistant_cli.runtime import FridayRuntime, format_error
 console = Console()
 
 
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+configure_stdio()
+
+
 HELP_TEXT = """/help                         show commands
 /model                        show active model
 /session                      show session id and JSONL path
