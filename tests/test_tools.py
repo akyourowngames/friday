@@ -1,268 +1,172 @@
-﻿import tempfile
+from __future__ import annotations
+
+import json
+import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
-import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+import httpx
 
-from tools import engine
-from tools import fs_ops
-from tools import terminal_ops
-
-class FsOpsTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        (self.root / "a.txt").write_text("hello\nworld\n", encoding="utf-8")
-        (self.root / "dir").mkdir(parents=True, exist_ok=True)
-        (self.root / "dir" / "b.txt").write_text("groq key\n", encoding="utf-8")
-        (self.root / ".venv").mkdir(parents=True, exist_ok=True)
-        (self.root / ".venv" / "hidden.txt").write_text("secret groq\n", encoding="utf-8")
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-
-    def test_search_text(self) -> None:
-        out = fs_ops.search_text(self.root, "groq", ".", 20)
-        self.assertTrue(any("b.txt" in m for m in out["matches"]))
-
-    def test_write_edit_read(self) -> None:
-        fs_ops.write_file(self.root, "x.txt", "alpha beta", overwrite=True)
-        fs_ops.edit_file(self.root, "x.txt", "beta", "gamma", replace_all=False)
-        read = fs_ops.read_file(self.root, "x.txt")
-        self.assertIn("gamma", read["content"])
-
-    def test_rename_move_copy_delete(self) -> None:
-        fs_ops.rename_path(self.root, "a.txt", "a1.txt")
-        self.assertTrue((self.root / "a1.txt").exists())
-
-        fs_ops.move_path(self.root, "a1.txt", "moved/a2.txt")
-        self.assertTrue((self.root / "moved" / "a2.txt").exists())
-
-        fs_ops.copy_path(self.root, "moved/a2.txt", "copy/a2.txt", overwrite=True)
-        self.assertTrue((self.root / "copy" / "a2.txt").exists())
-
-        fs_ops.delete_path(self.root, "copy/a2.txt")
-        self.assertFalse((self.root / "copy" / "a2.txt").exists())
-
-    def test_path_escape_blocked(self) -> None:
-        with self.assertRaises(ValueError):
-            fs_ops.read_file(self.root, "../outside.txt")
-
-    def test_default_ignores_heavy_dirs(self) -> None:
-        listed = fs_ops.list_files(self.root, ".", 200)
-        paths = [e["path"] for e in listed["entries"]]
-        self.assertFalse(any(p.startswith(".venv/") for p in paths))
-
-        searched = fs_ops.search_text(self.root, "secret", ".", 50)
-        self.assertFalse(any(".venv/" in m for m in searched["matches"]))
-
-    def test_apply_patch_multi_file(self) -> None:
-        patch = """*** Begin Patch
-*** Update File: a.txt
-@@
--hello
-+hello patched
-*** Add File: new.txt
-+new line
-*** Move to: moved.txt
-*** Update File: dir/b.txt
-@@
--groq key
-+groq secret
-*** End Patch"""
-        # The add + move hunk above is invalid because Move belongs to update hunk.
-        # Use a proper multi-hunk patch:
-        patch = """*** Begin Patch
-*** Update File: a.txt
-@@
--hello
-+hello patched
-*** Add File: new.txt
-+new line
-*** Update File: dir/b.txt
-*** Move to: dir/b2.txt
-@@
--groq key
-+groq secret
-*** Delete File: dir/b2.txt
-*** End Patch"""
-        summary = fs_ops.apply_patch(self.root, patch)
-        self.assertIn("a.txt", summary["modified"])
-        self.assertIn("new.txt", summary["added"])
-        self.assertIn("dir/b2.txt", summary["deleted"])
-        self.assertIn("hello patched", (self.root / "a.txt").read_text(encoding="utf-8"))
+from assistant_cli.config import Settings
+from assistant_cli.tools import build_default_registry
 
 
-class EngineTests(unittest.TestCase):
-    def test_local_search_parsing_removes_for_prefix(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "data.txt").write_text("groq token", encoding="utf-8")
-            parsed = engine._parse_local_intent("search for groq", root)
-            self.assertIsNotNone(parsed)
-            name, args = parsed
-            self.assertEqual(name, "search_web")
-            self.assertEqual(args.get("query"), "groq")
-
-    def test_local_workspace_search_still_supported(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "data.txt").write_text("groq token", encoding="utf-8")
-            parsed = engine._parse_local_intent("search for groq in this workspace", root)
-            self.assertIsNotNone(parsed)
-            name, _ = parsed
-            self.assertEqual(name, "search_text")
-
-    def test_news_intent_default_hides_links(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            parsed = engine._parse_local_intent("search for latest ai news", root)
-            self.assertIsNotNone(parsed)
-            name, args = parsed
-            self.assertEqual(name, "search_news")
-            self.assertFalse(bool(args.get("include_urls")))
-
-    def test_news_intent_with_links_opt_in(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            parsed = engine._parse_local_intent("search for latest ai news with links", root)
-            self.assertIsNotNone(parsed)
-            name, args = parsed
-            self.assertEqual(name, "search_news")
-            self.assertTrue(bool(args.get("include_urls")))
-
-    def test_local_list_typo_workspace(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "z.txt").write_text("z", encoding="utf-8")
-            out = engine.try_direct_local_command("list file in workspave", workspace_root=root)
-            self.assertIsNotNone(out)
-            self.assertIn("z.txt", out)
-
-    def test_non_file_chat_does_not_trigger_local_read(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            out = engine.try_direct_local_command("how are yu", workspace_root=root)
-            self.assertIsNone(out)
-
-    def test_local_run_command_intent(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            out = engine.try_direct_local_command("run echo hello", workspace_root=root)
-            self.assertIsNotNone(out)
-            self.assertIn("stdout:", out.lower())
-            self.assertIn("hello", out.lower())
-
-    def test_local_run_python_snippet(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            out = engine.try_direct_local_command('run print("hi")', workspace_root=root)
-            self.assertIsNotNone(out)
-            self.assertIn("hi", out.lower())
-
-    def test_local_run_help(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            out = engine.try_direct_local_command("run", workspace_root=root)
-            self.assertIsNotNone(out)
-            self.assertIn("usage: run <command>", out.lower())
-
-    def test_open_file_prefers_read(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "README.md").write_text("hello readme", encoding="utf-8")
-            out = engine.try_direct_local_command("open README.md", workspace_root=root)
-            self.assertIsNotNone(out)
-            self.assertIn("file: README.md", out)
-            self.assertIn("hello readme", out)
-
-    def test_open_app_maps_to_launch_tool(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            parsed = engine._parse_local_intent("open notepad", root)
-            self.assertIsNotNone(parsed)
-            name, args = parsed
-            self.assertEqual(name, "launch_app")
-            self.assertEqual(args.get("app"), "notepad")
-
-    def test_close_app_maps_to_terminate_tool(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            parsed = engine._parse_local_intent("close notepad", root)
-            self.assertIsNotNone(parsed)
-            name, args = parsed
-            self.assertEqual(name, "terminate_app")
-            self.assertEqual(args.get("app"), "notepad")
-
-    def test_cron_status_intent(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            parsed = engine._parse_local_intent("cron status", root)
-            self.assertIsNotNone(parsed)
-            name, args = parsed
-            self.assertEqual(name, "cron")
-            self.assertEqual(args.get("action"), "status")
-
-    def test_play_music_intent(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            parsed = engine._parse_local_intent("play shape of you", root)
-            self.assertIsNotNone(parsed)
-            name, args = parsed
-            self.assertEqual(name, "play_music")
-            self.assertEqual(args.get("query"), "shape of you")
-
-    def test_stop_music_intent(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            parsed = engine._parse_local_intent("stop music", root)
-            self.assertIsNotNone(parsed)
-            name, _ = parsed
-            self.assertEqual(name, "stop_music")
+def make_settings(root: Path, tavily_api_key: str = "") -> Settings:
+    return Settings(
+        api_key="test-nvidia-key",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="test-model",
+        embed_model="test-embed",
+        persona_file="persona.md",
+        temperature=0.0,
+        max_tokens=200,
+        memory_dir=str(root / "memory"),
+        memory_index_dir=str(root / ".memory_index"),
+        memory_top_k=4,
+        session_dir=str(root / "sessions"),
+        last_messages=20,
+        auto_llm_memory=False,
+        sarvam_api_key="",
+        voice_enabled=False,
+        voice_speaker="priya",
+        voice_language="en-IN",
+        voice_model="bulbul:v3",
+        voice_output_dir=str(root / "storage" / "voice"),
+        voice_sample_rate=24000,
+        voice_codec="wav",
+        voice_pace=1.15,
+        voice_temperature=0.55,
+        voice_max_chars=900,
+        voice_input_enabled=False,
+        voice_hotkey="ctrl+space",
+        voice_hold_seconds=0.3,
+        stt_model="saaras:v3",
+        stt_mode="transcribe",
+        stt_language="en-IN",
+        stt_sample_rate=16000,
+        stt_max_seconds=30.0,
+        stt_min_seconds=0.35,
+        stt_output_dir=str(root / "storage" / "voice_input"),
+        tavily_api_key=tavily_api_key,
+        tools_enabled=True,
+        tool_timeout_seconds=1.0,
+    )
 
 
-class TerminalOpsTests(unittest.TestCase):
-    def test_run_command_argv(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            result = engine._call(
-                "run_command",
-                {"command": sys.executable, "args": ["-c", "print('ok')"], "cwd": "."},
-                root,
-            )
-            self.assertEqual(result["exit_code"], 0)
-            self.assertIn("ok", result["stdout"])
+class ToolRegistryTests(unittest.TestCase):
+    def build_registry(self, root: Path, client: httpx.Client | None = None, tavily_api_key: str = ""):
+        return build_default_registry(make_settings(root, tavily_api_key=tavily_api_key), root, client)
 
-    def test_launch_app_not_found(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            with self.assertRaises(FileNotFoundError):
-                engine._call("launch_app", {"app": "definitely_not_a_real_app_123"}, root)
+    def test_registry_has_expected_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.build_registry(Path(tmp))
+            names = set(registry.names())
+        self.assertGreaterEqual(len(names), 13)
+        for name in {"realtime_search", "weather", "geocode", "calculator", "unit_convert", "file_read"}:
+            self.assertIn(name, names)
 
-    def test_candidate_aliases_cover_vs_code_and_chrome(self) -> None:
-        vs = terminal_ops._candidate_app_names("vs code")
-        ch = terminal_ops._candidate_app_names("chrome")
-        self.assertTrue(any("code" in c.lower() for c in vs))
-        self.assertTrue(any("chrome" in c.lower() for c in ch))
+    def test_local_utility_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.build_registry(Path(tmp))
+            calc = registry.execute("calculator", {"expression": "(22 / 7) * 3"})
+            temp = registry.execute("unit_convert", {"value": 72, "from_unit": "fahrenheit", "to_unit": "celsius"})
+            encoded = registry.execute("base64_encode", {"text": "friday"})
+            decoded = registry.execute("base64_decode", {"text": encoded.text})
+            pretty = registry.execute("json_format", {"json_text": '{"b":2,"a":1}'})
 
-    def test_cron_tool_status_call(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            result = engine._call("cron", {"action": "status"}, root)
-            self.assertEqual(result.get("kind"), "cron_status")
+        self.assertTrue(calc.ok, calc.text)
+        self.assertIn("9.428", calc.text)
+        self.assertTrue(temp.ok, temp.text)
+        self.assertAlmostEqual(temp.data["result"], 22.2222222222)
+        self.assertEqual(decoded.text, "friday")
+        self.assertEqual(json.loads(pretty.text), {"a": 1, "b": 2})
 
-    def test_play_music_tool_call(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            with patch("tools.music_ops.play_music", return_value={"kind": "music_play", "launched": True, "pid": 1}):
-                result = engine._call("play_music", {"query": "shape of you"}, root)
-            self.assertEqual(result.get("kind"), "music_play")
+    def test_file_tools_stay_inside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "safe.txt").write_text("hello", encoding="utf-8")
+            registry = self.build_registry(root)
+            safe = registry.execute("file_read", {"path": "safe.txt"})
+            escape = registry.execute("file_read", {"path": "..\\outside.txt"})
+
+        self.assertTrue(safe.ok, safe.text)
+        self.assertEqual(safe.text, "hello")
+        self.assertFalse(escape.ok)
+        self.assertIn("inside", escape.text)
+
+    def test_tavily_missing_key_is_clean_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.build_registry(Path(tmp))
+            result = registry.execute("realtime_search", {"query": "NVIDIA NIM", "max_results": 3})
+
+        self.assertFalse(result.ok)
+        self.assertIn("TAVILY_API_KEY", result.text)
+        self.assertLess(result.latency_ms, 100)
+
+    def test_weather_and_geocode_use_http_client(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "geocoding-api.open-meteo.com" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "name": "Delhi",
+                                "admin1": "Delhi",
+                                "country": "India",
+                                "latitude": 28.6519,
+                                "longitude": 77.2315,
+                            }
+                        ]
+                    },
+                )
+            if "api.open-meteo.com" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "current": {
+                            "temperature_2m": 31.5,
+                            "apparent_temperature": 33.0,
+                            "relative_humidity_2m": 48,
+                            "wind_speed_10m": 9.2,
+                            "precipitation": 0,
+                        },
+                        "current_units": {
+                            "temperature_2m": "C",
+                            "apparent_temperature": "C",
+                            "relative_humidity_2m": "%",
+                            "wind_speed_10m": "km/h",
+                            "precipitation": "mm",
+                        },
+                    },
+                )
+            return httpx.Response(404)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = httpx.Client(transport=httpx.MockTransport(handler))
+            registry = self.build_registry(Path(tmp), client)
+            geocode = registry.execute("geocode", {"location": "Delhi"})
+            weather = registry.execute("weather", {"location": "Delhi"})
+
+        self.assertTrue(geocode.ok, geocode.text)
+        self.assertIn("lat=28.6519", geocode.text)
+        self.assertTrue(weather.ok, weather.text)
+        self.assertIn("Temperature: 31.5 C", weather.text)
+
+    def test_notes_are_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = self.build_registry(root)
+            added = registry.execute("note_add", {"text": "tool test note", "tags": ["test"]})
+            listed = registry.execute("note_list", {"limit": 5})
+            notes_file = root / "storage" / "tool_notes.jsonl"
+
+            self.assertTrue(added.ok, added.text)
+            self.assertTrue(listed.ok, listed.text)
+            self.assertTrue(notes_file.exists())
+            self.assertIn("tool test note", listed.text)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
+    unittest.main()

@@ -1,5 +1,14 @@
-.env
 .venv/
-.ankita/
 __pycache__/
 *.pyc
+.env
+.memory_index/
+.friday_history
+sessions/
+storage/voice/
+storage/voice_input/
+storage/tool_notes.jsonl
+memory/*.txt
+.pytest_cache/
+.ruff_cache/
+*.log

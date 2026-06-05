@@ -1,166 +1,118 @@
-# Personal AI Agent (Groq/Copilot Chat + Modular Tools)
+# Friday CLI
 
-The app is now split into:
-- `chat.py` -> chat runtime only
-- `llm/client.py` -> provider selection + API transport
-- `tools/fs_ops.py` -> file operations + workspace safety
-- `tools/engine.py` -> tool schemas, dispatch, NLP local routing
-- `corn/` -> cron scheduler core (store/schedule/service)
+Fast Python CLI assistant powered by NVIDIA's OpenAI-compatible NIM endpoint.
 
 ## Setup
 
 ```powershell
-cd ANKITA
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python chat.py --ping
+python chat.py
 ```
 
-## Configure
-
-`.env`:
+The API key is read from `.env`. The default chat model is:
 
 ```env
-LLM_PROVIDER=groq
-LLM_MAX_TOKENS=120
-
-# Groq
-GROQ_API_KEY=your_groq_api_key
-GROQ_MODEL=llama-3.1-8b-instant
-
-# Copilot (choose one auth mode)
-# COPILOT_GITHUB_TOKEN=your_github_token
-# COPILOT_API_KEY=your_copilot_api_token
-COPILOT_MODEL=gpt-4o
+NVIDIA_MODEL=mistralai/ministral-14b-instruct-2512
+PERSONA_FILE=persona.md
 ```
 
-## Run
+Useful commands inside the CLI:
+
+```text
+/help
+/model
+/memory
+/memory rebuild
+/memory files
+/memory search <query>
+/remember <project|user|preferences|personal> <fact>
+/tools
+/tool weather location=Delhi
+/tool realtime_search query="latest NVIDIA NIM models" max_results=5
+/voice
+/voice on
+/voice off
+/clear
+/ping
+/exit
+```
+
+Streaming is enabled through `POST /v1/chat/completions` using NVIDIA's OpenAI-compatible API.
+
+## Memory
+
+Friday uses LangChain JSONL chat history plus LlamaIndex for local memory retrieval over these editable text files:
+
+```text
+memory/project.txt
+memory/user.txt
+memory/preferences.txt
+memory/personal.txt
+```
+
+The retriever uses NVIDIA embeddings:
+
+```env
+NVIDIA_EMBED_MODEL=nvidia/nv-embedqa-e5-v5
+```
+
+Private memory files and the generated `.memory_index/` vector index are ignored by git.
+Each session is also saved to `sessions/<session-id>.jsonl`, and the last 20 messages are sent to the model.
+`AUTO_LLM_MEMORY=true` runs a prompt-driven fact extraction pass after each assistant reply so durable user/project/preferences facts can persist without local phrase shortcuts.
+
+## Tools
+
+Friday has a registry-driven local tool layer. Slash commands are explicit and fast; normal conversation still goes through the assistant model.
+The versioned catalog lives in `memory/registry/tools.md`.
+
+```powershell
+python chat.py --tool calculator --tool-args 'expression="(22/7)*3"'
+python chat.py --tool weather --tool-args 'location=Delhi'
+```
+
+Inside chat:
+
+```text
+/tools
+/tool geocode location="New Delhi"
+/tool unit_convert value=72 from_unit=fahrenheit to_unit=celsius
+```
+
+Realtime search uses Tavily when you add the key:
+
+```env
+TAVILY_API_KEY=your_tavily_key_here
+FRIDAY_TOOLS_ENABLED=true
+FRIDAY_TOOL_TIMEOUT_SECONDS=8
+```
+
+Registered tools include realtime search, weather, geocode, reverse geocode, current time, calculator, unit conversion, hashing, base64 encode/decode, JSON formatting, UUIDs, random numbers, password generation, URL fetch, workspace file list/read, and local notes.
+
+## Persona
+
+`persona.md` is loaded as Friday's system prompt for every chat request. Edit that file to tune the assistant voice, identity behavior, and operating rules.
+
+## Voice
+
+Normal mode stays text-only:
 
 ```powershell
 python chat.py
 ```
 
-`chat.py` now auto-starts the Corn scheduler in-process by default (`CORN_AUTO_RUN=true`).
-
-## Telegram Integration (OpenClaw-style Channel Adapter)
-
-This project now has a dedicated Telegram transport layer that reuses the same ANKITA agent runtime:
-- `agent_runtime.py` -> shared agent execution (LLM + tools + history)
-- `telegram_bot.py` -> Telegram polling bridge
-
-Set env:
-
-```env
-TELEGRAM_BOT_TOKEN=your_bot_token
-# Optional: only allow these chat ids
-# TELEGRAM_ALLOWED_CHAT_IDS=123456789,-1001234567890
-```
-
-Run:
+Voice mode enables Sarvam TTS plus Ctrl+Space voice input:
 
 ```powershell
-python telegram_bot.py
+python chat.py --voice
 ```
 
-`telegram_bot.py` also auto-starts Corn scheduler in-process by default.
-
-## Unified Gateway Entry
-
-Single launcher (OpenClaw-style unified runtime):
+In voice mode, press Ctrl+Space to start recording, then press Ctrl+Space again to transcribe and send. Normal Space stays untouched for typing. Voice checks:
 
 ```powershell
-python gateway.py
-```
-
-Mode selection:
-- `GATEWAY_MODE=telegram` -> run Telegram + Cron
-- `GATEWAY_MODE=chat` -> run CLI chat + Cron
-- unset `GATEWAY_MODE`: auto-select Telegram when `TELEGRAM_BOT_TOKEN` exists, otherwise chat
-
-Behavior:
-- per-chat memory sessions
-- `/reset` command clears session for that chat
-- update offset persistence in `.ankita/telegram/update-offset.json`
-
-## Tool Abilities (God Tier File Ops)
-- `list_files(path, max_entries)`
-- `read_file(path)`
-- `search_text(query, path, max_results)`
-- `write_file(path, content, overwrite)`
-- `edit_file(path, old_text, new_text, replace_all)`
-- `rename_path(path, new_name, overwrite)`
-- `delete_path(path, recursive, missing_ok)`
-- `move_path(src, dst, overwrite)`
-- `copy_path(src, dst, overwrite, recursive)`
-- `make_dir(path, parents, exist_ok)`
-- `file_info(path)`
-- `apply_patch(patch)`
-- `run_command(command, args, cwd, timeout_ms, use_shell, env)`
-- `launch_app(app, args, cwd)`
-- `terminate_app(app, force)`
-- `search_web(query, max_results)` (realtime web data)
-- `search_news(query, max_results)` (realtime news headlines)
-- `cron(action, ...)` (status/list/add/update/remove/run/runs/run_due)
-- `search_music(query, max_results)` (music candidate matching)
-- `play_music(query, headless, stop_current)` (headless/background playback)
-- `stop_music()` (stop active music playback)
-
-## Safety model (OpenClaw-inspired)
-- All paths are resolved under workspace root.
-- Any path escape (`../`) is blocked.
-- Destructive ops require explicit parameters (`recursive`, `overwrite`) and fail closed by default.
-
-## Notes
-- Local NLP routing handles common file commands directly (fast, no API cost).
-- Local NLP routing also handles explicit terminal commands like `run <command>`.
-- Local NLP routing handles app launch requests: `open notepad`, `launch calc`, `start code`.
-- Local NLP routing handles app close requests: `close notepad`, `kill chrome`.
-- Local NLP routing handles realtime search: `search web for ...`, `latest news about ...`.
-- Local NLP routing handles cron quick commands: `cron status`, `cron list`, `cron run <job_id>`.
-- Local NLP routing handles music commands: `play <song name>`, `stop music`.
-- `search_web` uses Google Custom Search API if configured; otherwise falls back to DuckDuckGo HTML.
-- LLM tool-calling handles advanced multi-step operations.
-- Copilot mode uses OpenClaw-style token exchange:
-  - GitHub token (`COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`) exchanges at `https://api.github.com/copilot_internal/v2/token`.
-  - If no GitHub token is set, ANKITA runs GitHub Device Login and opens browser auth flow automatically.
-  - Base URL is auto-derived from `proxy-ep=...` in the returned token.
-  - Token cache path: `.ankita/credentials/github-copilot.token.json`.
-  - GitHub device auth cache path: `.ankita/credentials/github.device.token.json`.
-
-## Test
-
-```powershell
-python -m unittest discover -s tests -p "test_*.py" -v
-```
-
-## Corn Worker (Cron Runner)
-
-Use the background worker to execute scheduled jobs:
-
-```powershell
-python corn_worker.py
-```
-
-Use this only if you want a dedicated scheduler process. For most setups, `chat.py`, `telegram_bot.py`, or `gateway.py` already runs cron internally.
-
-## Headless Music Playback Requirements
-
-`play_music` needs one of these local player stacks:
-- `yt-dlp` + `ffplay`
-- `mpv`
-- `vlc`
-
-If none are installed, ANKITA returns a clear install error.
-
-Example cron tool payload (from chat):
-
-```json
-{
-  "action": "add",
-  "job": {
-    "name": "quick-note",
-    "schedule": {"kind": "every", "every_ms": 60000},
-    "payload": {"kind": "note", "text": "heartbeat"}
-  }
-}
+python chat.py --voice-test
+python chat.py --voice-roundtrip-test
+python chat.py --transcribe-test storage/voice/some-file.wav
 ```
