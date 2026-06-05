@@ -37,6 +37,11 @@ HELP_TEXT = """/help                         show commands
 /memory search <query>        search knowledge RAG
 /db search <query>            search SQLite chat history
 /remember <bucket> <fact>     save fact to project/user/preferences/personal
+/voice                        show Sarvam voice status
+/voice on                     auto-speak Friday replies
+/voice off                    stop auto-speaking replies
+/voice test                   synthesize and play a short test line
+/voice speaker <name>         change Bulbul voice, default priya
 /clear                        start a fresh session
 /ping                         test NVIDIA NIM
 /exit                         quit
@@ -83,6 +88,18 @@ def run_rebuild() -> int:
         runtime = FridayRuntime(load_settings())
         runtime.rag.rebuild()
         console.print("[green]Memory index rebuilt.[/green]")
+        runtime.close()
+        return 0
+    except Exception as exc:
+        console.print(f"[red]{format_error(exc)}[/red]")
+        return 1
+
+
+def run_voice_test(text: str) -> int:
+    try:
+        runtime = FridayRuntime(load_settings())
+        result = runtime.voice_test(text)
+        console.print(f"[green]Voice OK[/green] {result.path} ({result.byte_count} bytes, {result.speaker})")
         runtime.close()
         return 0
     except Exception as exc:
@@ -169,6 +186,39 @@ def run_chat() -> int:
             runtime.store.append_fact(parts[1], parts[2])
             console.print(f"[green]Remembered in {path}.[/green]")
             continue
+        if command == "/voice":
+            status = runtime.voice.status()
+            console.print(
+                Panel(
+                    "\n".join(f"{key}: {value}" for key, value in status.items() if value),
+                    title="Sarvam Voice",
+                    border_style="cyan",
+                )
+            )
+            continue
+        if command == "/voice on":
+            runtime.voice.set_enabled(True)
+            console.print("[green]Voice auto-speak is on.[/green]")
+            continue
+        if command == "/voice off":
+            runtime.voice.set_enabled(False)
+            console.print("[green]Voice auto-speak is off.[/green]")
+            continue
+        if command == "/voice test":
+            try:
+                result = runtime.voice_test()
+                console.print(f"[green]Voice OK[/green] {result.path} ({result.byte_count} bytes, {result.speaker})")
+            except Exception as exc:
+                console.print(f"[red]{format_error(exc)}[/red]")
+            continue
+        if command.startswith("/voice speaker "):
+            speaker = user_text[len("/voice speaker ") :].strip()
+            try:
+                runtime.voice.set_speaker(speaker)
+                console.print(f"[green]Voice speaker set to {runtime.voice.speaker}.[/green]")
+            except Exception as exc:
+                console.print(f"[red]{format_error(exc)}[/red]")
+            continue
         if command == "/clear":
             runtime.close()
             runtime = FridayRuntime(settings)
@@ -194,6 +244,7 @@ def run_chat() -> int:
                     live.update(Markdown(answer))
             runtime.store.append_message("assistant", answer)
             runtime._write_auto_memory(user_text, answer, user_message_id)
+            runtime.speak_answer(answer, wait=False)
         except Exception as exc:
             console.print(f"[red]{format_error(exc)}[/red]")
         console.print()
@@ -205,12 +256,15 @@ def main() -> int:
     parser.add_argument("--once", help="send one message and exit")
     parser.add_argument("--no-stream", action="store_true", help="disable token streaming for --once")
     parser.add_argument("--rebuild-memory", action="store_true", help="rebuild the local LlamaIndex MiniLM index")
+    parser.add_argument("--voice-test", nargs="?", const="Friday voice is online.", help="synthesize and play Sarvam voice")
     args = parser.parse_args()
 
     if args.ping:
         return run_ping()
     if args.rebuild_memory:
         return run_rebuild()
+    if args.voice_test:
+        return run_voice_test(args.voice_test)
     if args.once:
         return run_once(args.once, stream=not args.no_stream)
     return run_chat()

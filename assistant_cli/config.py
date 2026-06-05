@@ -70,6 +70,17 @@ class AssistantSettings:
     agentic_rag_enabled: bool
     agentic_query_count: int
     auto_memory_enabled: bool
+    sarvam_api_key: str
+    voice_enabled: bool
+    voice_speaker: str
+    voice_language: str
+    voice_model: str
+    voice_output_dir: Path
+    voice_sample_rate: int
+    voice_codec: str
+    voice_pace: float
+    voice_temperature: float
+    voice_max_chars: int
 
 
 def load_settings() -> AssistantSettings:
@@ -96,4 +107,15 @@ def load_settings() -> AssistantSettings:
         agentic_rag_enabled=_env_bool("FRIDAY_AGENTIC_RAG_ENABLED", False),
         agentic_query_count=_env_int("FRIDAY_AGENTIC_QUERY_COUNT", 3),
         auto_memory_enabled=_env_bool("FRIDAY_AUTO_MEMORY_ENABLED", True),
+        sarvam_api_key=_env("SARVAM_API_KEY", ""),
+        voice_enabled=_env_bool("FRIDAY_VOICE_ENABLED", False),
+        voice_speaker=_env("FRIDAY_VOICE_SPEAKER", "priya"),
+        voice_language=_env("FRIDAY_VOICE_LANGUAGE", "en-IN"),
+        voice_model=_env("FRIDAY_VOICE_MODEL", "bulbul:v3"),
+        voice_output_dir=_path(_env("FRIDAY_VOICE_OUTPUT_DIR", "storage/voice")),
+        voice_sample_rate=_env_int("FRIDAY_VOICE_SAMPLE_RATE", 24000),
+        voice_codec=_env("FRIDAY_VOICE_CODEC", "wav"),
+        voice_pace=_env_float("FRIDAY_VOICE_PACE", 1.0),
+        voice_temperature=_env_float("FRIDAY_VOICE_TEMPERATURE", 0.55),
+        voice_max_chars=_env_int("FRIDAY_VOICE_MAX_CHARS", 900),
     )

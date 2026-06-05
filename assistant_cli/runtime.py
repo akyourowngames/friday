@@ -7,6 +7,7 @@ from .memory_writer import AutoMemoryWriter
 from .nvidia_chat import NvidiaChat
 from .rag import AgenticRAG, KnowledgeRAG
 from .session_store import SessionStore
+from .voice import SarvamVoice, VoiceResult
 
 
 class FridayRuntime:
@@ -17,6 +18,7 @@ class FridayRuntime:
         self.agentic_rag = AgenticRAG(settings, self.rag, self.store)
         self.chat = NvidiaChat(settings)
         self.memory_writer = AutoMemoryWriter(settings)
+        self.voice = SarvamVoice(settings)
 
     def answer_once(self, user_text: str, stream: bool = True) -> str:
         user_message_id = self.store.append_message("user", user_text)
@@ -35,6 +37,7 @@ class FridayRuntime:
 
         self.store.append_message("assistant", answer)
         self._write_auto_memory(user_text, answer, user_message_id)
+        self.speak_answer(answer, wait=True)
         return answer
 
     def _write_auto_memory(self, user_text: str, answer: str, source_message_id: int) -> None:
@@ -46,6 +49,14 @@ class FridayRuntime:
 
     def close(self) -> None:
         self.store.end()
+
+    def speak_answer(self, answer: str, wait: bool = False) -> None:
+        self.voice.speak(answer, wait=wait)
+
+    def voice_test(self, text: str = "Friday voice is online.") -> VoiceResult:
+        result = self.voice.synthesize(text)
+        self.voice.play(result.path, wait=True)
+        return result
 
 
 def format_error(exc: Exception) -> str:

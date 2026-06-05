@@ -171,6 +171,7 @@ This path uses:
 - editable memory files: `memory/project.txt`, `memory/user.txt`, `memory/preferences.txt`, `memory/personal.txt`
 - local knowledge files under `knowledge/`
 - direct saved-memory context on every request, with optional agentic RAG query planning via `FRIDAY_AGENTIC_RAG_ENABLED=true`
+- optional Sarvam Bulbul v3 voice output with the `priya` female speaker
 
 Useful commands:
 
@@ -180,6 +181,11 @@ Useful commands:
 /memory search <query>
 /db search <query>
 /remember <project|user|preferences|personal> <fact>
+/voice
+/voice on
+/voice off
+/voice test
+/voice speaker <name>
 /session
 /ping
 ```
@@ -189,8 +195,11 @@ For non-interactive checks:
 ```powershell
 python chat.py --rebuild-memory
 python chat.py --ping
+python chat.py --voice-test
 python chat.py --once "my name is Krish Verma"
 ```
+
+Voice is controlled by `SARVAM_API_KEY` plus `FRIDAY_VOICE_*` settings. Generated WAV files are saved under `storage/voice/` and ignored by git.
 
 ## Verification
 
