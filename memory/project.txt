@@ -1,0 +1,4 @@
+# Project Memory
+
+- Friday is a local Python CLI assistant powered by NVIDIA NIM.
+- Friday uses LlamaIndex and local MiniLM embeddings for knowledge RAG.

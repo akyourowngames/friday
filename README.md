@@ -153,6 +153,45 @@ needed. The most important configuration areas are:
 - `TELEGRAM_BOT_TOKEN` and `KING_TELEGRAM_*` for the Telegram watcher daemon
 - `KING_VERIFICATION_PIPELINE_*` for bounded ship checks
 
+## Standalone Friday CLI
+
+The repo also ships a direct local CLI entrypoint:
+
+```powershell
+python chat.py
+```
+
+This path uses:
+
+- NVIDIA NIM streaming chat with `meta/llama-4-maverick-17b-128e-instruct`
+- last 20 chat messages in every model request
+- append-only per-session JSONL transcripts under `storage/sessions/`
+- SQLite message and fact storage at `storage/friday_assistant.sqlite3`
+- LlamaIndex knowledge RAG over local MiniLM embeddings
+- editable memory files: `memory/project.txt`, `memory/user.txt`, `memory/preferences.txt`, `memory/personal.txt`
+- local knowledge files under `knowledge/`
+- agentic RAG query planning before retrieval
+
+Useful commands:
+
+```text
+/memory
+/memory rebuild
+/memory search <query>
+/db search <query>
+/remember <project|user|preferences|personal> <fact>
+/session
+/ping
+```
+
+For non-interactive checks:
+
+```powershell
+python chat.py --rebuild-memory
+python chat.py --ping
+python chat.py --once "my name is Krish Verma"
+```
+
 ## Verification
 
 Use the repo-owned verification path before claiming a change is shipped:

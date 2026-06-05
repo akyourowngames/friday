@@ -1,6 +1,8 @@
 openai>=1.0.0
 httpx>=0.24.0
 rich>=13.0.0
+prompt-toolkit>=3.0.51
+llama-index-core>=0.12.0
 onnxruntime>=1.17.0
 duckduckgo_search>=3.0.0
 numpy>=1.24.0
