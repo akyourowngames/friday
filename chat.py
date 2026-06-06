@@ -4,6 +4,8 @@ import argparse
 import json
 import shlex
 import sys
+import threading
+import time
 from pathlib import Path
 
 from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
@@ -175,6 +177,26 @@ def plan_and_execute_tool(
     result = tools.execute(plan.tool, plan.arguments)
     history.add_tool_message(plan.tool, json.dumps(result.as_dict(), ensure_ascii=False))
     return tool_result_context(plan, result, settings.tool_result_max_chars)
+
+
+def capture_memory_after_reply(settings, memory: MemoryManager, user_text: str, answer: str) -> None:
+    if not settings.auto_llm_memory:
+        return
+    if settings.auto_llm_memory_async:
+        thread = threading.Thread(target=memory.capture_user_facts, args=(user_text, answer), daemon=True)
+        thread.start()
+        return
+    memory.capture_user_facts(user_text, answer)
+
+
+def timing_line(timings: dict[str, float | None]) -> str:
+    parts: list[str] = []
+    for key in ("memory", "tool_route", "first_token", "total"):
+        value = timings.get(key)
+        if value is None:
+            continue
+        parts.append(f"{key}={int(value * 1000)}ms")
+    return " | ".join(parts)
 
 
 def run_ping(chat: NvidiaChat) -> int:
@@ -478,26 +500,34 @@ def run_chat(voice_mode: bool = False) -> int:
             run_ping(chat)
             continue
 
-        try:
-            memory_context = memory.prompt_context()
-        except Exception as exc:
-            print_error(exc)
-            memory_context = ""
-
         chat.add_user_message(user_text)
         history.add_user_message(user_text)
         conversation = history.recent_openai_messages(settings.last_messages)
-        try:
-            planned_tool_context = plan_and_execute_tool(settings, chat, tools, history, user_text, conversation)
-        except Exception:
-            planned_tool_context = ""
-        answer_context = "\n\n".join(part for part in [memory_context, planned_tool_context] if part)
         answer = ""
         voice_buffer = ""
+        turn_started = time.perf_counter()
+        timings: dict[str, float | None] = {"first_token": None}
         console.print(Text("friday >", style="bold cyan"))
         try:
-            with Live(Markdown(""), console=console, refresh_per_second=24, transient=False) as live:
+            with Live(Markdown("_thinking..._"), console=console, refresh_per_second=24, transient=False) as live:
+                started = time.perf_counter()
+                try:
+                    memory_context = memory.prompt_context()
+                except Exception as exc:
+                    print_error(exc)
+                    memory_context = ""
+                timings["memory"] = time.perf_counter() - started
+                started = time.perf_counter()
+                try:
+                    planned_tool_context = plan_and_execute_tool(settings, chat, tools, history, user_text, conversation)
+                except Exception:
+                    planned_tool_context = ""
+                timings["tool_route"] = time.perf_counter() - started
+                answer_context = "\n\n".join(part for part in [memory_context, planned_tool_context] if part)
+
                 for token in chat.stream_reply(answer_context, conversation):
+                    if timings["first_token"] is None:
+                        timings["first_token"] = time.perf_counter() - turn_started
                     answer += token
                     if voice.enabled:
                         voice_buffer += token
@@ -512,7 +542,10 @@ def run_chat(voice_mode: bool = False) -> int:
 
         chat.add_assistant_message(answer)
         history.add_ai_message(answer)
-        memory.capture_user_facts(user_text, answer)
+        capture_memory_after_reply(settings, memory, user_text, answer)
+        timings["total"] = time.perf_counter() - turn_started
+        if settings.debug_timing:
+            console.print(f"[dim]timing: {timing_line(timings)}[/dim]")
         if voice.enabled:
             for chunk in pop_voice_chunks(voice_buffer, force=True)[0]:
                 voice.speak(chunk, wait=False)

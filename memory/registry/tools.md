@@ -8,6 +8,7 @@ Each tool implementation lives in `assistant_cli/tools/<tool_name>.py`.
 - Normal chat must not be routed by local keyword, regex, or canned phrase checks.
 - Slash commands are explicit commands and may call tools directly.
 - Normal chat uses a prompt/model-driven planner over the registered tool specs before the assistant writes the final answer.
+- A registry-driven prefilter skips the planner for casual messages with no tool-shaped catalog match.
 - Tool behavior lives in registered tool specs and handlers, not natural-language assistant replies.
 - Realtime web search requires `TAVILY_API_KEY`; other public HTTP tools use short timeouts from `FRIDAY_TOOL_TIMEOUT_SECONDS`.
 

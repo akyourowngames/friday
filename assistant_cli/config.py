@@ -21,6 +21,7 @@ class Settings:
     session_dir: str
     last_messages: int
     auto_llm_memory: bool
+    auto_llm_memory_async: bool
     sarvam_api_key: str
     voice_enabled: bool
     voice_speaker: str
@@ -46,9 +47,13 @@ class Settings:
     tools_enabled: bool
     auto_tools_enabled: bool
     tool_timeout_seconds: float
+    tool_planner_model: str
     tool_planner_timeout_seconds: float
     tool_min_confidence: float
+    tool_prefilter_threshold: float
+    tool_prefilter_max_candidates: int
     tool_result_max_chars: int
+    debug_timing: bool
 
 
 def load_settings() -> Settings:
@@ -72,6 +77,8 @@ def load_settings() -> Settings:
         session_dir=os.getenv("SESSION_DIR", "sessions").strip(),
         last_messages=int(os.getenv("LAST_MESSAGES", "20")),
         auto_llm_memory=os.getenv("AUTO_LLM_MEMORY", "true").strip().lower() in {"1", "true", "yes", "on"},
+        auto_llm_memory_async=os.getenv("AUTO_LLM_MEMORY_ASYNC", "true").strip().lower()
+        in {"1", "true", "yes", "on"},
         sarvam_api_key=os.getenv("SARVAM_API_KEY", "").strip(),
         voice_enabled=os.getenv("FRIDAY_VOICE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         voice_speaker=os.getenv("FRIDAY_VOICE_SPEAKER", "priya").strip(),
@@ -99,7 +106,11 @@ def load_settings() -> Settings:
         auto_tools_enabled=os.getenv("FRIDAY_AUTO_TOOLS_ENABLED", "true").strip().lower()
         in {"1", "true", "yes", "on"},
         tool_timeout_seconds=float(os.getenv("FRIDAY_TOOL_TIMEOUT_SECONDS", "8.0")),
+        tool_planner_model=os.getenv("FRIDAY_TOOL_PLANNER_MODEL", "nvidia/llama-3.1-nemotron-nano-8b-v1").strip(),
         tool_planner_timeout_seconds=float(os.getenv("FRIDAY_TOOL_PLANNER_TIMEOUT_SECONDS", "8.0")),
         tool_min_confidence=float(os.getenv("FRIDAY_TOOL_MIN_CONFIDENCE", "0.45")),
+        tool_prefilter_threshold=float(os.getenv("FRIDAY_TOOL_PREFILTER_THRESHOLD", "0.10")),
+        tool_prefilter_max_candidates=int(os.getenv("FRIDAY_TOOL_PREFILTER_MAX_CANDIDATES", "5")),
         tool_result_max_chars=int(os.getenv("FRIDAY_TOOL_RESULT_MAX_CHARS", "6000")),
+        debug_timing=os.getenv("FRIDAY_DEBUG_TIMING", "false").strip().lower() in {"1", "true", "yes", "on"},
     )

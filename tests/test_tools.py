@@ -26,6 +26,7 @@ def make_settings(root: Path, tavily_api_key: str = "") -> Settings:
         session_dir=str(root / "sessions"),
         last_messages=20,
         auto_llm_memory=False,
+        auto_llm_memory_async=True,
         sarvam_api_key="",
         voice_enabled=False,
         voice_speaker="priya",
@@ -51,9 +52,13 @@ def make_settings(root: Path, tavily_api_key: str = "") -> Settings:
         tools_enabled=True,
         auto_tools_enabled=True,
         tool_timeout_seconds=1.0,
+        tool_planner_model="test-model",
         tool_planner_timeout_seconds=1.0,
         tool_min_confidence=0.45,
+        tool_prefilter_threshold=0.10,
+        tool_prefilter_max_candidates=5,
         tool_result_max_chars=6000,
+        debug_timing=False,
     )
 
 

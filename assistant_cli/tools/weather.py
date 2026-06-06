@@ -7,7 +7,7 @@ from .geo_common import geocode_location, place_label
 
 SPEC = ToolSpec(
     name="weather",
-    description="Get current weather by location or latitude/longitude using Open-Meteo.",
+    description="Get current weather, temperature, feels-like, humidity, wind, precipitation, or rain by location or coordinates using Open-Meteo.",
     parameters=schema(
         {
             "location": {"type": "string", "description": "City or place name."},

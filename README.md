@@ -89,13 +89,18 @@ TAVILY_API_KEY=your_tavily_key_here
 FRIDAY_TOOLS_ENABLED=true
 FRIDAY_AUTO_TOOLS_ENABLED=true
 FRIDAY_TOOL_TIMEOUT_SECONDS=8
+FRIDAY_TOOL_PLANNER_MODEL=nvidia/llama-3.1-nemotron-nano-8b-v1
 FRIDAY_TOOL_PLANNER_TIMEOUT_SECONDS=8
 FRIDAY_TOOL_MIN_CONFIDENCE=0.45
+FRIDAY_TOOL_PREFILTER_THRESHOLD=0.10
+FRIDAY_TOOL_PREFILTER_MAX_CANDIDATES=5
+FRIDAY_DEBUG_TIMING=false
 ```
 
 Registered tools include realtime search, weather, geocode, reverse geocode, current time, calculator, unit conversion, hashing, base64 encode/decode, JSON formatting, UUIDs, random numbers, password generation, URL fetch, workspace file list/read, and local notes.
 See `memory/registry/tools.md` for one-line CLI prompts for every tool.
 Normal chat uses a model-planned router over the registered tool specs, then streams a natural model-written answer from the tool result.
+Set `FRIDAY_DEBUG_TIMING=true` to print memory, tool-route, first-token, and total timings after each turn.
 
 ## Persona
 

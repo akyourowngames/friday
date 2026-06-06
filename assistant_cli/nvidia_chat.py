@@ -84,12 +84,13 @@ class NvidiaChat:
         temperature: float = 0,
         max_tokens: int = 500,
         timeout: float | None = None,
+        model: str | None = None,
     ) -> str:
         kwargs: dict[str, Any] = {}
         if timeout is not None:
             kwargs["timeout"] = timeout
         response = self.client.chat.completions.create(
-            model=self.settings.model,
+            model=model or self.settings.model,
             messages=messages,  # type: ignore[arg-type]
             temperature=temperature,
             max_tokens=max_tokens,
