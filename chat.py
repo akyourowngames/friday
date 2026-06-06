@@ -17,7 +17,8 @@ from assistant_cli.config import load_settings
 from assistant_cli.langchain_memory import JsonlChatMessageHistory
 from assistant_cli.memory import MemoryManager
 from assistant_cli.nvidia_chat import NvidiaChat
-from assistant_cli.tool_planner import ToolPlanner, tool_result_context
+from assistant_cli.project_context import project_prompt_context
+from assistant_cli.tool_planner import ToolPlanner, candidate_tool_specs, tool_result_context
 from assistant_cli.tools import ToolRegistry, build_default_registry
 
 
@@ -101,10 +102,20 @@ def pop_voice_chunks(buffer: str, force: bool = False) -> tuple[list[str], str]:
     return chunks, text
 
 
-def parse_tool_args(raw: str) -> dict:
-    text = str(raw or "").strip()
-    if not text:
-        return {}
+def parse_tool_args(raw: str | list[str]) -> dict:
+    if isinstance(raw, list):
+        parts = [str(part) for part in raw if str(part).strip()]
+        if not parts:
+            return {}
+        if len(parts) == 1:
+            return parse_tool_args(parts[0])
+        text = " ".join(parts)
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        parts = shlex.split(text)
+
     if text.startswith("{"):
         data = json.loads(text)
         if not isinstance(data, dict):
@@ -113,7 +124,7 @@ def parse_tool_args(raw: str) -> dict:
 
     args: dict[str, object] = {}
     free_parts: list[str] = []
-    for part in shlex.split(text):
+    for part in parts:
         if "=" not in part:
             free_parts.append(part)
             continue
@@ -144,7 +155,7 @@ def render_tool_result(result) -> None:
     console.print(Panel(result.text or json.dumps(result.data, indent=2), title=title, border_style=style))
 
 
-def run_tool(name: str, raw_args: str = "{}") -> int:
+def run_tool(name: str, raw_args: str | list[str] = "{}") -> int:
     registry: ToolRegistry | None = None
     try:
         settings = load_settings()
@@ -171,12 +182,31 @@ def plan_and_execute_tool(
 ) -> str:
     if not settings.tools_enabled or not settings.auto_tools_enabled:
         return ""
-    plan = ToolPlanner(chat, tools).plan(user_text, conversation)
+    candidate_specs = candidate_tool_specs(
+        user_text,
+        tools.specs(),
+        threshold=settings.tool_prefilter_threshold,
+        max_candidates=settings.tool_prefilter_max_candidates,
+    )
+    plan = ToolPlanner(chat, tools).plan(user_text, conversation, recent_tool_results=history.recent_tool_results())
     if not plan.meets_confidence(settings.tool_min_confidence):
+        if candidate_specs:
+            return no_tool_executed_context(candidate_specs)
         return ""
     result = tools.execute(plan.tool, plan.arguments)
     history.add_tool_message(plan.tool, json.dumps(result.as_dict(), ensure_ascii=False))
     return tool_result_context(plan, result, settings.tool_result_max_chars)
+
+
+def no_tool_executed_context(candidate_specs) -> str:
+    names = ", ".join(spec.name for spec in candidate_specs)
+    return (
+        "The current user request looked related to registered local tools, "
+        f"but no tool was executed for this turn. Candidate tools were: {names}. "
+        "If the user asked to create, update, complete, reopen, delete, or verify project/task state, "
+        "say plainly that no change or verification was performed in this turn. "
+        "Do not claim a project/task mutation, confirmation, or double-check happened without a current tool result."
+    )
 
 
 def capture_memory_after_reply(settings, memory: MemoryManager, user_text: str, answer: str) -> None:
@@ -227,6 +257,7 @@ def run_once(user_text: str, voice_mode: bool = False) -> int:
     except Exception as exc:
         print_error(exc)
         memory_context = ""
+    project_context = project_prompt_context(settings)
 
     history.add_user_message(user_text)
     conversation = history.recent_openai_messages(settings.last_messages)
@@ -234,10 +265,15 @@ def run_once(user_text: str, voice_mode: bool = False) -> int:
         planned_tool_context = plan_and_execute_tool(settings, chat, tools, history, user_text, conversation)
     except Exception:
         planned_tool_context = ""
-    answer_context = "\n\n".join(part for part in [memory_context, planned_tool_context] if part)
+    answer_context = (
+        planned_tool_context
+        if planned_tool_context
+        else "\n\n".join(part for part in [memory_context, project_context] if part)
+    )
     answer = ""
+    answer_temperature = 0 if planned_tool_context else None
     try:
-        for token in chat.stream_reply(answer_context, conversation):
+        for token in chat.stream_reply(answer_context, conversation, temperature=answer_temperature):
             print(token, end="", flush=True)
             answer += token
         print()
@@ -516,6 +552,7 @@ def run_chat(voice_mode: bool = False) -> int:
                 except Exception as exc:
                     print_error(exc)
                     memory_context = ""
+                project_context = project_prompt_context(settings)
                 timings["memory"] = time.perf_counter() - started
                 started = time.perf_counter()
                 try:
@@ -523,9 +560,14 @@ def run_chat(voice_mode: bool = False) -> int:
                 except Exception:
                     planned_tool_context = ""
                 timings["tool_route"] = time.perf_counter() - started
-                answer_context = "\n\n".join(part for part in [memory_context, planned_tool_context] if part)
+                answer_context = (
+                    planned_tool_context
+                    if planned_tool_context
+                    else "\n\n".join(part for part in [memory_context, project_context] if part)
+                )
+                answer_temperature = 0 if planned_tool_context else None
 
-                for token in chat.stream_reply(answer_context, conversation):
+                for token in chat.stream_reply(answer_context, conversation, temperature=answer_temperature):
                     if timings["first_token"] is None:
                         timings["first_token"] = time.perf_counter() - turn_started
                     answer += token
@@ -557,7 +599,7 @@ def main() -> int:
     parser.add_argument("--ping", action="store_true", help="test the NVIDIA chat endpoint and exit")
     parser.add_argument("--once", help="send one message and exit")
     parser.add_argument("--tool", help="run a registered tool by name and exit")
-    parser.add_argument("--tool-args", default="{}", help="tool args as JSON or key=value pairs")
+    parser.add_argument("--tool-args", nargs=argparse.REMAINDER, default=[], help="tool args as JSON or key=value pairs")
     parser.add_argument("--voice", action="store_true", help="enable Sarvam voice mode for this chat session")
     parser.add_argument("--voice-test", nargs="?", const="Friday voice is online.", help="synthesize and play Sarvam voice")
     parser.add_argument("--transcribe-test", help="transcribe an audio file with Sarvam STT")

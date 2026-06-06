@@ -19,6 +19,7 @@ class Settings:
     memory_index_dir: str
     memory_top_k: int
     session_dir: str
+    project_db: str
     last_messages: int
     auto_llm_memory: bool
     auto_llm_memory_async: bool
@@ -75,6 +76,7 @@ def load_settings() -> Settings:
         memory_index_dir=os.getenv("MEMORY_INDEX_DIR", ".memory_index").strip(),
         memory_top_k=int(os.getenv("MEMORY_TOP_K", "4")),
         session_dir=os.getenv("SESSION_DIR", "sessions").strip(),
+        project_db=os.getenv("FRIDAY_PROJECT_DB", "storage/projects.sqlite3").strip(),
         last_messages=int(os.getenv("LAST_MESSAGES", "20")),
         auto_llm_memory=os.getenv("AUTO_LLM_MEMORY", "true").strip().lower() in {"1", "true", "yes", "on"},
         auto_llm_memory_async=os.getenv("AUTO_LLM_MEMORY_ASYNC", "true").strip().lower()

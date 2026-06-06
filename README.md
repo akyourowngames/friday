@@ -32,6 +32,7 @@ Useful commands inside the CLI:
 /tools
 /tool weather location=Delhi
 /tool realtime_search query="latest NVIDIA NIM models" max_results=5
+/tool project_manage action=task_list project=Friday status=pending
 /voice
 /voice on
 /voice off
@@ -63,6 +64,14 @@ Private memory files and the generated `.memory_index/` vector index are ignored
 Each session is also saved to `sessions/<session-id>.jsonl`, and the last 20 messages are sent to the model.
 `AUTO_LLM_MEMORY=true` runs a prompt-driven fact extraction pass after each assistant reply so durable user/project/preferences facts can persist without local phrase shortcuts.
 
+Operational project/task state lives in SQLite, separate from durable memory files:
+
+```env
+FRIDAY_PROJECT_DB=storage/projects.sqlite3
+```
+
+Friday injects a concise active-project summary into chat context when that database exists.
+
 ## Tools
 
 Friday has a registry-driven local tool layer. Slash commands are explicit and fast; normal conversation still goes through the assistant model.
@@ -72,6 +81,10 @@ The versioned catalog lives in `memory/registry/tools.md`.
 ```powershell
 python chat.py --tool calculator --tool-args 'expression="(22/7)*3"'
 python chat.py --tool weather --tool-args 'location=Delhi'
+python chat.py --tool project_manage --tool-args action=project_create name=Friday
+python chat.py --tool project_manage --tool-args action=task_create project=Friday title="test project tool" priority=high
+python chat.py --tool project_manage --tool-args action=task_complete_all project=Friday
+python chat.py --tool project_manage --tool-args action=summary
 ```
 
 Inside chat:
@@ -97,7 +110,7 @@ FRIDAY_TOOL_PREFILTER_MAX_CANDIDATES=5
 FRIDAY_DEBUG_TIMING=false
 ```
 
-Registered tools include realtime search, weather, geocode, reverse geocode, current time, calculator, unit conversion, hashing, base64 encode/decode, JSON formatting, UUIDs, random numbers, password generation, URL fetch, workspace file list/read, and local notes.
+Registered tools include realtime search, weather, geocode, reverse geocode, current time, calculator, unit conversion, hashing, base64 encode/decode, JSON formatting, UUIDs, random numbers, password generation, project/task management, URL fetch, workspace file list/read, and local notes.
 See `memory/registry/tools.md` for one-line CLI prompts for every tool.
 Normal chat uses a model-planned router over the registered tool specs, then streams a natural model-written answer from the tool result.
 Set `FRIDAY_DEBUG_TIMING=true` to print memory, tool-route, first-token, and total timings after each turn.

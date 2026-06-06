@@ -7,7 +7,31 @@ from .core import JsonObject
 
 def str_arg(args: JsonObject, key: str, default: str = "") -> str:
     value = args.get(key, default)
+    if isinstance(value, dict):
+        for candidate in _field_candidates(key):
+            nested = value.get(candidate)
+            if nested is None or isinstance(nested, (dict, list)):
+                continue
+            return str(nested).strip()
+        return ""
+    if isinstance(value, list):
+        return ""
     return str(value if value is not None else "").strip()
+
+
+def _field_candidates(key: str) -> tuple[str, ...]:
+    hints = {
+        "project": ("name", "project_name", "id", "project_id"),
+        "project_id": ("id", "project_id", "name"),
+        "name": ("name", "title", "id"),
+        "title": ("title", "name", "text", "value", "id"),
+        "task": ("title", "task", "name", "id", "task_id"),
+        "task_id": ("id", "task_id", "title"),
+        "parent_task": ("title", "task", "name", "id", "task_id"),
+        "parent_task_id": ("id", "task_id", "title"),
+        "note": ("note", "text", "value"),
+    }
+    return hints.get(key, (key, "value", "text", "name", "title", "id"))
 
 
 def int_arg(args: JsonObject, key: str, default: int, minimum: int, maximum: int) -> int:

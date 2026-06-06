@@ -17,7 +17,7 @@ If the saved context does not contain a requested fact, say that plainly."""
 class NvidiaChat:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.client = OpenAI(base_url=settings.base_url, api_key=settings.api_key, timeout=25.0, max_retries=0)
+        self.client = OpenAI(base_url=settings.base_url, api_key=settings.api_key, timeout=60.0, max_retries=0)
         self.system_prompt = self._load_persona()
         self.messages: list[dict[str, str]] = [{"role": "system", "content": self.system_prompt}]
 
@@ -54,18 +54,19 @@ class NvidiaChat:
         if not memory_context:
             return messages
 
-        messages[0]["content"] = f"{self.system_prompt}\n\n{memory_context}"
+        messages.append({"role": "system", "content": memory_context})
         return messages
 
     def stream_reply(
         self,
         memory_context: str = "",
         conversation_messages: list[dict[str, str]] | None = None,
+        temperature: float | None = None,
     ) -> Iterator[str]:
         stream = self.client.chat.completions.create(
             model=self.settings.model,
             messages=self._messages_for_request(memory_context, conversation_messages),  # type: ignore[arg-type]
-            temperature=self.settings.temperature,
+            temperature=self.settings.temperature if temperature is None else temperature,
             max_tokens=self.settings.max_tokens,
             stream=True,
         )

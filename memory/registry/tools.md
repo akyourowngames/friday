@@ -11,6 +11,7 @@ Each tool implementation lives in `assistant_cli/tools/<tool_name>.py`.
 - A registry-driven prefilter skips the planner for casual messages with no tool-shaped catalog match.
 - Tool behavior lives in registered tool specs and handlers, not natural-language assistant replies.
 - Realtime web search requires `TAVILY_API_KEY`; other public HTTP tools use short timeouts from `FRIDAY_TOOL_TIMEOUT_SECONDS`.
+- Project task follow-ups that refer to a listed group, such as marking them/all/those done, must call `project_manage` with a bulk action and let the final assistant prose come from the tool result.
 
 ## Commands
 
@@ -36,6 +37,7 @@ python chat.py --tool <name> --tool-args "<key=value args>"
 - `uuid_generate`: UUID generation.
 - `random_number`: random integer generation.
 - `password_generate`: local random password generation.
+- `project_manage`: SQLite project and task management.
 - `url_fetch`: HTTP/HTTPS text fetch.
 - `file_list`: workspace-safe file listing.
 - `file_read`: workspace-safe text file reading.
@@ -59,6 +61,12 @@ python chat.py --tool json_format --tool-args 'json_text="{\"b\":2,\"a\":1}"'
 python chat.py --tool uuid_generate --tool-args 'count=3'
 python chat.py --tool random_number --tool-args 'minimum=1 maximum=10 count=3'
 python chat.py --tool password_generate --tool-args 'length=20 symbols=true'
+python chat.py --tool project_manage --tool-args action=project_create name=Friday
+python chat.py --tool project_manage --tool-args action=task_create project=Friday title="fix voice latency" priority=high due=tomorrow tags=voice
+python chat.py --tool project_manage --tool-args action=task_complete_all project=Friday
+python chat.py --tool project_manage --tool-args action=task_complete task="fix voice latency" project=Friday
+python chat.py --tool project_manage --tool-args action=task_list project=Friday status=pending
+python chat.py --tool project_manage --tool-args action=summary
 python chat.py --tool url_fetch --tool-args 'url=https://example.com max_chars=1000'
 python chat.py --tool file_list --tool-args 'path=. max_entries=20'
 python chat.py --tool file_read --tool-args 'path=README.md max_chars=1200'

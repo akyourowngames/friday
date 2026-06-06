@@ -65,6 +65,10 @@ class JsonlChatMessageHistory:
             if str(row.get("content") or "").strip()
         ]
 
+    def recent_tool_results(self, limit: int = 8) -> list[dict]:
+        rows = [row for row in self.records() if row.get("role") == "tool"]
+        return rows[-max(0, int(limit)) :]
+
     def _append(self, role: str, content: str, extra: dict | None = None) -> None:
         text = str(content or "").strip()
         if not text:

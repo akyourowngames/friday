@@ -8,6 +8,9 @@ sessions/
 storage/voice/
 storage/voice_input/
 storage/tool_notes.jsonl
+storage/projects.sqlite3
+storage/projects.sqlite3-*
+storage/live-probe-*
 memory/*.txt
 .pytest_cache/
 .ruff_cache/

@@ -24,6 +24,7 @@ def make_settings(root: Path, tavily_api_key: str = "") -> Settings:
         memory_index_dir=str(root / ".memory_index"),
         memory_top_k=4,
         session_dir=str(root / "sessions"),
+        project_db=str(root / "storage" / "projects.sqlite3"),
         last_messages=20,
         auto_llm_memory=False,
         auto_llm_memory_async=True,
