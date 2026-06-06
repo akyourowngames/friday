@@ -48,11 +48,16 @@ class Settings:
     tools_enabled: bool
     auto_tools_enabled: bool
     tool_timeout_seconds: float
+    tool_router_prompt: str
+    tool_verifier_prompt: str
     tool_planner_model: str
+    tool_planner_fallback_model: str
+    tool_verifier_model: str
+    tool_verifier_fallback_model: str
     tool_planner_timeout_seconds: float
-    tool_min_confidence: float
-    tool_prefilter_threshold: float
-    tool_prefilter_max_candidates: int
+    tool_planner_retries: int
+    tool_planner_max_calls: int
+    tool_response_model: str
     tool_result_max_chars: int
     debug_timing: bool
 
@@ -63,11 +68,16 @@ def load_settings() -> Settings:
     api_key = os.getenv("NVIDIA_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("NVIDIA_API_KEY is missing. Add it to .env or your shell environment.")
+    model = os.getenv("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct").strip()
+    planner_model = os.getenv("FRIDAY_TOOL_PLANNER_MODEL", "meta/llama-3.3-70b-instruct").strip()
+    planner_fallback_model = (
+        os.getenv("FRIDAY_TOOL_PLANNER_FALLBACK_MODEL", "minimaxai/minimax-m2.7").strip() or model
+    )
 
     return Settings(
         api_key=api_key,
         base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip(),
-        model=os.getenv("NVIDIA_MODEL", "mistralai/ministral-14b-instruct-2512").strip(),
+        model=model,
         embed_model=os.getenv("NVIDIA_EMBED_MODEL", "nvidia/nv-embedqa-e5-v5").strip(),
         persona_file=os.getenv("PERSONA_FILE", "persona.md").strip(),
         temperature=float(os.getenv("ASSISTANT_TEMPERATURE", "0.35")),
@@ -108,11 +118,25 @@ def load_settings() -> Settings:
         auto_tools_enabled=os.getenv("FRIDAY_AUTO_TOOLS_ENABLED", "true").strip().lower()
         in {"1", "true", "yes", "on"},
         tool_timeout_seconds=float(os.getenv("FRIDAY_TOOL_TIMEOUT_SECONDS", "8.0")),
-        tool_planner_model=os.getenv("FRIDAY_TOOL_PLANNER_MODEL", "nvidia/llama-3.1-nemotron-nano-8b-v1").strip(),
-        tool_planner_timeout_seconds=float(os.getenv("FRIDAY_TOOL_PLANNER_TIMEOUT_SECONDS", "8.0")),
-        tool_min_confidence=float(os.getenv("FRIDAY_TOOL_MIN_CONFIDENCE", "0.45")),
-        tool_prefilter_threshold=float(os.getenv("FRIDAY_TOOL_PREFILTER_THRESHOLD", "0.10")),
-        tool_prefilter_max_candidates=int(os.getenv("FRIDAY_TOOL_PREFILTER_MAX_CANDIDATES", "5")),
+        tool_router_prompt=os.getenv("FRIDAY_TOOL_ROUTER_PROMPT", "prompts/tool_router.md").strip(),
+        tool_verifier_prompt=os.getenv("FRIDAY_TOOL_VERIFIER_PROMPT", "prompts/tool_plan_verifier.md").strip(),
+        tool_planner_model=planner_model,
+        tool_planner_fallback_model=planner_fallback_model,
+        tool_verifier_model=os.getenv(
+            "FRIDAY_TOOL_VERIFIER_MODEL",
+            "qwen/qwen3-next-80b-a3b-instruct",
+        ).strip(),
+        tool_verifier_fallback_model=os.getenv(
+            "FRIDAY_TOOL_VERIFIER_FALLBACK_MODEL",
+            "minimaxai/minimax-m2.7",
+        ).strip(),
+        tool_planner_timeout_seconds=float(os.getenv("FRIDAY_TOOL_PLANNER_TIMEOUT_SECONDS", "18.0")),
+        tool_planner_retries=int(os.getenv("FRIDAY_TOOL_PLANNER_RETRIES", "0")),
+        tool_planner_max_calls=int(os.getenv("FRIDAY_TOOL_PLANNER_MAX_CALLS", "8")),
+        tool_response_model=os.getenv(
+            "FRIDAY_TOOL_RESPONSE_MODEL",
+            "qwen/qwen3-next-80b-a3b-instruct",
+        ).strip(),
         tool_result_max_chars=int(os.getenv("FRIDAY_TOOL_RESULT_MAX_CHARS", "6000")),
         debug_timing=os.getenv("FRIDAY_DEBUG_TIMING", "false").strip().lower() in {"1", "true", "yes", "on"},
     )

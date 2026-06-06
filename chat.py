@@ -17,8 +17,7 @@ from assistant_cli.config import load_settings
 from assistant_cli.langchain_memory import JsonlChatMessageHistory
 from assistant_cli.memory import MemoryManager
 from assistant_cli.nvidia_chat import NvidiaChat
-from assistant_cli.project_context import project_prompt_context
-from assistant_cli.tool_planner import ToolPlanner, candidate_tool_specs, tool_result_context
+from assistant_cli.tool_planner import ToolPlan, ToolPlanner, no_tool_executed_context, tool_results_context
 from assistant_cli.tools import ToolRegistry, build_default_registry
 
 
@@ -179,34 +178,20 @@ def plan_and_execute_tool(
     history: JsonlChatMessageHistory,
     user_text: str,
     conversation: list[dict[str, str]],
-) -> str:
+) -> tuple[str, bool, ToolPlan, list]:
     if not settings.tools_enabled or not settings.auto_tools_enabled:
-        return ""
-    candidate_specs = candidate_tool_specs(
-        user_text,
-        tools.specs(),
-        threshold=settings.tool_prefilter_threshold,
-        max_candidates=settings.tool_prefilter_max_candidates,
-    )
+        return "", False, ToolPlan(), []
     plan = ToolPlanner(chat, tools).plan(user_text, conversation, recent_tool_results=history.recent_tool_results())
-    if not plan.meets_confidence(settings.tool_min_confidence):
-        if candidate_specs:
-            return no_tool_executed_context(candidate_specs)
-        return ""
-    result = tools.execute(plan.tool, plan.arguments)
-    history.add_tool_message(plan.tool, json.dumps(result.as_dict(), ensure_ascii=False))
-    return tool_result_context(plan, result, settings.tool_result_max_chars)
+    history.add_planner_message(json.dumps(plan.as_dict(), ensure_ascii=False))
+    if not plan.uses_tool:
+        return no_tool_executed_context(plan), False, plan, []
 
-
-def no_tool_executed_context(candidate_specs) -> str:
-    names = ", ".join(spec.name for spec in candidate_specs)
-    return (
-        "The current user request looked related to registered local tools, "
-        f"but no tool was executed for this turn. Candidate tools were: {names}. "
-        "If the user asked to create, update, complete, reopen, delete, or verify project/task state, "
-        "say plainly that no change or verification was performed in this turn. "
-        "Do not claim a project/task mutation, confirmation, or double-check happened without a current tool result."
-    )
+    results = []
+    for call in plan.calls:
+        result = tools.execute(call.tool, call.arguments)
+        results.append(result)
+        history.add_tool_message(call.tool, json.dumps(result.as_dict(), ensure_ascii=False))
+    return tool_results_context(plan, results, settings.tool_result_max_chars), True, plan, results
 
 
 def capture_memory_after_reply(settings, memory: MemoryManager, user_text: str, answer: str) -> None:
@@ -257,26 +242,43 @@ def run_once(user_text: str, voice_mode: bool = False) -> int:
     except Exception as exc:
         print_error(exc)
         memory_context = ""
-    project_context = project_prompt_context(settings)
-
     history.add_user_message(user_text)
     conversation = history.recent_openai_messages(settings.last_messages)
     try:
-        planned_tool_context = plan_and_execute_tool(settings, chat, tools, history, user_text, conversation)
-    except Exception:
-        planned_tool_context = ""
-    answer_context = (
-        planned_tool_context
-        if planned_tool_context
-        else "\n\n".join(part for part in [memory_context, project_context] if part)
+        planned_tool_context, tool_executed, tool_plan, tool_results = plan_and_execute_tool(
+            settings, chat, tools, history, user_text, conversation
+        )
+    except Exception as exc:
+        planned_tool_context = (
+            "No registered tool was executed because the local tool runtime failed. "
+            "Do not claim any tool-backed read or change succeeded. "
+            f"Runtime error: {type(exc).__name__}: {exc}"
+        )
+        tool_executed = False
+        tool_plan = ToolPlan(error=f"{type(exc).__name__}: {exc}")
+        tool_results = []
+    guarded_turn = tool_executed or bool(tool_plan.error or tool_plan.rejection)
+    answer_context = planned_tool_context if guarded_turn else "\n\n".join(
+        part for part in [memory_context, planned_tool_context] if part
     )
+    answer_conversation = [{"role": "user", "content": user_text}] if guarded_turn else conversation
     answer = ""
-    answer_temperature = 0 if planned_tool_context else None
+    answer_temperature = 0 if guarded_turn else None
+    answer_model = settings.tool_response_model if guarded_turn else None
     try:
-        for token in chat.stream_reply(answer_context, conversation, temperature=answer_temperature):
-            print(token, end="", flush=True)
-            answer += token
-        print()
+        if tool_executed:
+            answer = chat.grounded_reply(answer_context, user_text, tool_results)
+            print(answer)
+        else:
+            for token in chat.stream_reply(
+                answer_context,
+                answer_conversation,
+                temperature=answer_temperature,
+                model=answer_model,
+            ):
+                print(token, end="", flush=True)
+                answer += token
+            print()
     except Exception as exc:
         print_error(exc)
         return 1
@@ -552,31 +554,51 @@ def run_chat(voice_mode: bool = False) -> int:
                 except Exception as exc:
                     print_error(exc)
                     memory_context = ""
-                project_context = project_prompt_context(settings)
                 timings["memory"] = time.perf_counter() - started
                 started = time.perf_counter()
                 try:
-                    planned_tool_context = plan_and_execute_tool(settings, chat, tools, history, user_text, conversation)
-                except Exception:
-                    planned_tool_context = ""
+                    planned_tool_context, tool_executed, tool_plan, tool_results = plan_and_execute_tool(
+                        settings, chat, tools, history, user_text, conversation
+                    )
+                except Exception as exc:
+                    planned_tool_context = (
+                        "No registered tool was executed because the local tool runtime failed. "
+                        "Do not claim any tool-backed read or change succeeded. "
+                        f"Runtime error: {type(exc).__name__}: {exc}"
+                    )
+                    tool_executed = False
+                    tool_plan = ToolPlan(error=f"{type(exc).__name__}: {exc}")
+                    tool_results = []
                 timings["tool_route"] = time.perf_counter() - started
-                answer_context = (
-                    planned_tool_context
-                    if planned_tool_context
-                    else "\n\n".join(part for part in [memory_context, project_context] if part)
+                guarded_turn = tool_executed or bool(tool_plan.error or tool_plan.rejection)
+                answer_context = planned_tool_context if guarded_turn else "\n\n".join(
+                    part for part in [memory_context, planned_tool_context] if part
                 )
-                answer_temperature = 0 if planned_tool_context else None
+                answer_conversation = [{"role": "user", "content": user_text}] if guarded_turn else conversation
+                answer_temperature = 0 if guarded_turn else None
+                answer_model = settings.tool_response_model if guarded_turn else None
 
-                for token in chat.stream_reply(answer_context, conversation, temperature=answer_temperature):
-                    if timings["first_token"] is None:
-                        timings["first_token"] = time.perf_counter() - turn_started
-                    answer += token
-                    if voice.enabled:
-                        voice_buffer += token
-                        chunks, voice_buffer = pop_voice_chunks(voice_buffer)
-                        for chunk in chunks:
-                            voice.speak(chunk, wait=False)
+                if tool_executed:
+                    answer = chat.grounded_reply(answer_context, user_text, tool_results)
+                    timings["first_token"] = time.perf_counter() - turn_started
+                    voice_buffer = answer if voice.enabled else ""
                     live.update(Markdown(answer))
+                else:
+                    for token in chat.stream_reply(
+                        answer_context,
+                        answer_conversation,
+                        temperature=answer_temperature,
+                        model=answer_model,
+                    ):
+                        if timings["first_token"] is None:
+                            timings["first_token"] = time.perf_counter() - turn_started
+                        answer += token
+                        if voice.enabled:
+                            voice_buffer += token
+                            chunks, voice_buffer = pop_voice_chunks(voice_buffer)
+                            for chunk in chunks:
+                                voice.speak(chunk, wait=False)
+                        live.update(Markdown(answer))
         except Exception as exc:
             print_error(exc)
             chat.messages.pop()

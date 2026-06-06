@@ -8,12 +8,20 @@ from pathlib import Path
 from assistant_cli.langchain_memory import JsonlChatMessageHistory
 from assistant_cli.project_context import project_prompt_context
 from assistant_cli.project_store import ProjectStore, project_db_path
-from assistant_cli.tool_planner import candidate_tool_specs
 from assistant_cli.tools import build_default_registry
 from test_tools import make_settings
 
 
 class ProjectStoreTests(unittest.TestCase):
+    def test_project_reference_can_resolve_a_unique_natural_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProjectStore(Path(tmp) / "projects.sqlite3")
+            store.create_project("Friday")
+
+            project = store.resolve_project("my friday project")
+
+        self.assertEqual(project["name"], "Friday")
+
     def test_project_task_crud_persists_across_store_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -111,6 +119,27 @@ class ProjectManageToolTests(unittest.TestCase):
                 "project_manage",
                 {"action": "task_create", "project": "Friday", "title": "bulk completion target"},
             )
+            created_many = registry.execute(
+                "project_manage",
+                {
+                    "action": "task_create_many",
+                    "project": "Friday",
+                    "tasks": [
+                        {"title": "dated high priority", "priority": "high", "due": "tomorrow 5pm"},
+                        {"title": "weekly audit", "recurrence": "every Friday"},
+                    ],
+                },
+            )
+            bulk_updated = registry.execute(
+                "project_manage",
+                {
+                    "action": "task_bulk_update",
+                    "project": "Friday",
+                    "task_ids": ["dated high priority", "weekly audit"],
+                    "priority": "urgent",
+                    "due": "next Friday at 6pm",
+                },
+            )
             updated_task = registry.execute(
                 "project_manage",
                 {"action": "task_update", "task_id": task_id, "status": "blocked", "priority": "urgent"},
@@ -157,6 +186,16 @@ class ProjectManageToolTests(unittest.TestCase):
         self.assertTrue(created_task.ok, created_task.text)
         self.assertEqual(created_task.data["task"]["priority"], "high")
         self.assertTrue(second_task.ok, second_task.text)
+        self.assertTrue(created_many.ok, created_many.text)
+        self.assertEqual(created_many.data["created_count"], 2)
+        self.assertTrue(bulk_updated.ok, bulk_updated.text)
+        self.assertEqual(bulk_updated.data["updated_count"], 2)
+        self.assertTrue(all(task["priority"] == "urgent" for task in bulk_updated.data["updated_tasks"]))
+        self.assertTrue(all(task["due_at"] for task in bulk_updated.data["updated_tasks"]))
+        self.assertEqual(
+            next(task for task in created_many.data["created_tasks"] if task["title"] == "weekly audit")["recurrence"],
+            "every Friday",
+        )
         self.assertTrue(updated_task.ok, updated_task.text)
         self.assertEqual(updated_task.data["task"]["status"], "blocked")
         self.assertEqual(updated_task.data["task"]["priority"], "urgent")
@@ -206,26 +245,6 @@ class ProjectManageToolTests(unittest.TestCase):
         self.assertEqual(rows[-1]["role"], "tool")
         self.assertEqual(rows[-1]["tool"], "project_manage")
         self.assertIn("record tool result", rows[-1]["content"])
-
-
-class ProjectManagePlannerTests(unittest.TestCase):
-    def test_registry_prefilter_finds_project_task_requests(self) -> None:
-        settings = make_settings(Path("."))
-        registry = build_default_registry(settings)
-        specs = registry.specs()
-
-        add_task = candidate_tool_specs("add a task in Friday to test weather tool", specs, 0.10, 5)
-        pending = candidate_tool_specs("what tasks are pending for Friday?", specs, 0.10, 5)
-        mark_them_done = candidate_tool_specs("mark them done", specs, 0.10, 5)
-        double_check = candidate_tool_specs("yeah double check pls", specs, 0.10, 5)
-        casual = candidate_tool_specs("thanks bud", specs, 0.10, 5)
-        registry.close()
-
-        self.assertIn("project_manage", {spec.name for spec in add_task})
-        self.assertIn("project_manage", {spec.name for spec in pending})
-        self.assertIn("project_manage", {spec.name for spec in mark_them_done})
-        self.assertIn("project_manage", {spec.name for spec in double_check})
-        self.assertEqual(casual, [])
 
 
 if __name__ == "__main__":

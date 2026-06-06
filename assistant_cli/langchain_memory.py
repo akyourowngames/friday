@@ -53,6 +53,9 @@ class JsonlChatMessageHistory:
     def add_tool_message(self, tool: str, content: str) -> None:
         self._append("tool", content, {"tool": str(tool or "")})
 
+    def add_planner_message(self, content: str) -> None:
+        self._append("planner", content)
+
     def clear(self) -> None:
         if self.path.exists():
             self.path.unlink()

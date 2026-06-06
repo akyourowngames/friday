@@ -21,7 +21,7 @@ def project_prompt_context(settings: Settings, workspace_root: Path | None = Non
 
     lines = [
         "Local project management context from Friday's SQLite project database.",
-        "Use this for project and task questions. Do not dump every row unless the user asks for details.",
+        "Use this only when it is relevant to the latest project/task question. Do not mention it in social replies.",
         "This is a read-only snapshot: never claim a project/task was created, updated, completed, deleted, or verified unless a project_manage tool result for the current turn proves it.",
         "For follow-up requests like marking them done or double-checking task state, use project_manage instead of answering from this snapshot alone.",
     ]

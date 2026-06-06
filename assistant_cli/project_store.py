@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,18 @@ def normalize_tags(value: object) -> list[str]:
     return tags
 
 
+def _object_text(value: object, keys: tuple[str, ...]) -> str:
+    if isinstance(value, dict):
+        for key in keys:
+            nested = value.get(key)
+            if nested is not None and not isinstance(nested, (dict, list)):
+                return str(nested).strip()
+        return ""
+    if isinstance(value, list):
+        return ""
+    return str(value or "").strip()
+
+
 def normalize_due(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -99,6 +112,31 @@ def normalize_due(value: object) -> str:
     }
     if lowered in named_dates:
         return named_dates[lowered].isoformat()
+    try:
+        import dateparser
+
+        parsed = dateparser.parse(
+            text,
+            settings={
+                "PREFER_DATES_FROM": "future",
+                "RETURN_AS_TIMEZONE_AWARE": True,
+            },
+        )
+        if parsed is None:
+            from dateparser.search import search_dates
+
+            matches = search_dates(
+                text,
+                settings={
+                    "PREFER_DATES_FROM": "future",
+                    "RETURN_AS_TIMEZONE_AWARE": True,
+                },
+            )
+            parsed = matches[-1][1] if matches else None
+        if parsed is not None:
+            return parsed.isoformat(timespec="minutes")
+    except ImportError:
+        pass
     try:
         return datetime.fromisoformat(text).isoformat(timespec="seconds")
     except ValueError:
@@ -152,6 +190,7 @@ class ProjectStore:
                     priority TEXT NOT NULL DEFAULT 'normal',
                     due_at TEXT NOT NULL DEFAULT '',
                     tags_json TEXT NOT NULL DEFAULT '[]',
+                    recurrence TEXT NOT NULL DEFAULT '',
                     parent_task_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -185,6 +224,9 @@ class ProjectStore:
                 );
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "recurrence" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT NOT NULL DEFAULT ''")
 
     def create_project(self, name: str, description: str = "", status: str = "in_progress") -> JsonObject:
         project_name = str(name or "").strip()
@@ -285,6 +327,7 @@ class ProjectStore:
         due: object = "",
         tags: object = None,
         parent_task: str = "",
+        recurrence: str = "",
     ) -> JsonObject:
         project_row = self.ensure_project(project)
         task_title = str(title or "").strip()
@@ -307,9 +350,9 @@ class ProjectStore:
                 """
                 INSERT INTO tasks(
                     id, project_id, title, description, status, priority, due_at,
-                    tags_json, parent_task_id, created_at, updated_at, completed_at
+                    tags_json, recurrence, parent_task_id, created_at, updated_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -320,6 +363,7 @@ class ProjectStore:
                     clean_priority,
                     normalize_due(due),
                     tags_json,
+                    str(recurrence or "").strip(),
                     parent_id or None,
                     timestamp,
                     timestamp,
@@ -329,6 +373,38 @@ class ProjectStore:
             conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (timestamp, project_row["id"]))
             self._event(conn, project_row["id"], task_id, "task_create", {"title": task_title, "status": clean_status})
         return {"task": self.get_task(task_id), "project": self.get_project(project_row["id"]), "created": True}
+
+    def create_tasks(self, project: str, tasks: list[JsonObject]) -> JsonObject:
+        project_row = self.ensure_project(project)
+        if not tasks:
+            raise ValueError("tasks must contain at least one task")
+        created_tasks: list[JsonObject] = []
+        existing_tasks: list[JsonObject] = []
+        for item in tasks:
+            title = _object_text(item.get("title"), ("title", "name", "text", "value"))
+            if not title:
+                raise ValueError("every task requires a title")
+            result = self.create_task(
+                project=project_row["id"],
+                title=title,
+                description=_object_text(item.get("description"), ("description", "text", "value")),
+                status=_object_text(item.get("status"), ("status", "value")) or "pending",
+                priority=_object_text(item.get("priority"), ("priority", "value")) or "normal",
+                due=item.get("due", ""),
+                tags=item.get("tags", []),
+                recurrence=_object_text(item.get("recurrence"), ("recurrence", "value", "text")),
+            )
+            if result["created"]:
+                created_tasks.append(result["task"])
+            else:
+                existing_tasks.append(result["task"])
+        return {
+            "project": self.get_project(project_row["id"]),
+            "created_tasks": created_tasks,
+            "existing_tasks": existing_tasks,
+            "created_count": len(created_tasks),
+            "existing_count": len(existing_tasks),
+        }
 
     def list_tasks(
         self,
@@ -373,7 +449,7 @@ class ProjectStore:
 
     def update_task(self, task: str, project: str = "", **changes: object) -> JsonObject:
         current = self.resolve_task(task, project=project)
-        allowed = {"title", "description", "status", "priority", "due_at", "tags_json"}
+        allowed = {"title", "description", "status", "priority", "due_at", "tags_json", "recurrence"}
         assignments: list[str] = []
         values: list[object] = []
         payload: JsonObject = {}
@@ -390,6 +466,8 @@ class ProjectStore:
                 value = normalize_due(value)
             elif key == "tags_json":
                 value = json.dumps(normalize_tags(value), ensure_ascii=False)
+            elif key == "recurrence":
+                value = str(value or "").strip()
             elif key == "title" and not str(value or "").strip():
                 continue
             assignments.append(f"{key} = ?")
@@ -409,6 +487,58 @@ class ProjectStore:
             conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (timestamp, current["project_id"]))
             self._event(conn, current["project_id"], current["id"], "task_update", payload)
         return self.get_task(current["id"])
+
+    def bulk_update_tasks(
+        self,
+        project: str = "",
+        task_refs: list[str] | None = None,
+        match_status: str = "",
+        status: object = None,
+        priority: object = None,
+        due: object = None,
+        tags: object = None,
+        recurrence: object = None,
+        include_done: bool = False,
+    ) -> JsonObject:
+        refs = [str(ref).strip() for ref in (task_refs or []) if str(ref).strip()]
+        if not project and not refs:
+            raise ValueError("project or task_ids is required for a bulk update")
+        changes: JsonObject = {}
+        if status not in (None, ""):
+            changes["status"] = status
+        if priority not in (None, ""):
+            changes["priority"] = priority
+        if due not in (None, ""):
+            changes["due_at"] = due
+        if tags not in (None, ""):
+            changes["tags_json"] = tags
+        if recurrence not in (None, ""):
+            changes["recurrence"] = recurrence
+        if not changes:
+            raise ValueError("at least one task field must be provided for a bulk update")
+
+        selected: list[JsonObject] = []
+        if refs:
+            for ref in refs:
+                task = self.resolve_task(ref, project=project)
+                if task["id"] not in {item["id"] for item in selected}:
+                    selected.append(task)
+        else:
+            selected = self.list_tasks(
+                project=project,
+                status=match_status,
+                include_archived=False,
+                include_done=include_done or match_status == "done",
+                limit=200,
+            )
+        updated = [self.update_task(task["id"], **changes) for task in selected]
+        project_ids = sorted({task["project_id"] for task in updated})
+        return {
+            "updated_tasks": updated,
+            "updated_count": len(updated),
+            "projects": [self.get_project(project_id) for project_id in project_ids],
+            "changes": changes,
+        }
 
     def set_task_status(self, task: str, status: str, project: str = "") -> JsonObject:
         current = self.resolve_task(task, project=project)
@@ -498,6 +628,33 @@ class ProjectStore:
             self._event(conn, current["project_id"], None, "task_delete", {"task": current})
         return current
 
+    def delete_tasks(
+        self,
+        project: str = "",
+        task_refs: list[str] | None = None,
+        delete_all: bool = False,
+        match_status: str = "",
+    ) -> JsonObject:
+        refs = [str(ref).strip() for ref in (task_refs or []) if str(ref).strip()]
+        if not refs and not (delete_all and project):
+            raise ValueError("task_ids are required unless all=true and project is provided")
+        selected: list[JsonObject] = []
+        if refs:
+            for ref in refs:
+                task = self.resolve_task(ref, project=project)
+                if task["id"] not in {item["id"] for item in selected}:
+                    selected.append(task)
+        else:
+            selected = self.list_tasks(
+                project=project,
+                status=match_status,
+                include_archived=True,
+                include_done=True,
+                limit=200,
+            )
+        deleted = [self.delete_task(task["id"]) for task in selected]
+        return {"deleted_tasks": deleted, "deleted_count": len(deleted)}
+
     def add_subtask(
         self,
         parent_task: str,
@@ -507,6 +664,7 @@ class ProjectStore:
         priority: str = "normal",
         due: object = "",
         tags: object = None,
+        recurrence: str = "",
     ) -> JsonObject:
         parent = self.resolve_task(parent_task, project=project)
         return self.create_task(
@@ -517,6 +675,7 @@ class ProjectStore:
             due=due,
             tags=tags,
             parent_task=parent["id"],
+            recurrence=recurrence,
         )
 
     def add_note(self, task: str, note: str, project: str = "") -> JsonObject:
@@ -615,7 +774,15 @@ class ProjectStore:
                 f"SELECT * FROM projects WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT 1",
                 values,
             ).fetchone()
-        return self._project(row) if row else None
+            if row:
+                return self._project(row)
+            fallback_clauses = [] if allow_archived else ["status != 'archived'"]
+            fallback_where = f"WHERE {' AND '.join(fallback_clauses)}" if fallback_clauses else ""
+            candidates = conn.execute(
+                f"SELECT * FROM projects {fallback_where} ORDER BY updated_at DESC LIMIT 100"
+            ).fetchall()
+        matched = _unique_project_match(text, candidates)
+        return self._project(matched) if matched else None
 
     def get_project(self, project_id: str) -> JsonObject:
         with self.connect() as conn:
@@ -771,6 +938,7 @@ class ProjectStore:
             "priority": row["priority"],
             "due_at": row["due_at"] or "",
             "tags": tags if isinstance(tags, list) else [],
+            "recurrence": row["recurrence"] if "recurrence" in row.keys() else "",
             "parent_task_id": row["parent_task_id"] or "",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -793,3 +961,36 @@ class ProjectStore:
             "payload": payload if isinstance(payload, dict) else {},
             "created_at": row["created_at"],
         }
+
+
+def _entity_words(value: object) -> list[str]:
+    cleaned = "".join(char.lower() if char.isalnum() else " " for char in str(value or ""))
+    return [word for word in cleaned.split() if word]
+
+
+def _project_match_score(query: str, name: str) -> float:
+    query_words = _entity_words(query)
+    name_words = _entity_words(name)
+    if not query_words or not name_words:
+        return 0.0
+    query_text = " ".join(query_words)
+    name_text = " ".join(name_words)
+    score = SequenceMatcher(None, query_text, name_text).ratio()
+    query_set = set(query_words)
+    name_set = set(name_words)
+    if name_set.issubset(query_set) or query_set.issubset(name_set):
+        score = max(score, 0.86)
+    return score
+
+
+def _unique_project_match(query: str, rows: list[sqlite3.Row]) -> sqlite3.Row | None:
+    ranked = sorted(
+        ((_project_match_score(query, str(row["name"])), row) for row in rows),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if not ranked or ranked[0][0] < 0.76:
+        return None
+    if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.08:
+        return None
+    return ranked[0][1]

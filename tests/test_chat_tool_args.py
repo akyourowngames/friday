@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from chat import no_tool_executed_context, parse_tool_args
-from assistant_cli.tools.core import ToolSpec, schema
+from chat import parse_tool_args
+from assistant_cli.tool_planner import ToolPlan, no_tool_executed_context
 
 
 class ChatToolArgsTests(unittest.TestCase):
@@ -30,19 +30,11 @@ class ChatToolArgsTests(unittest.TestCase):
         self.assertEqual(args["title"], "fix voice latency")
 
     def test_no_tool_context_blocks_unproven_mutation_claims(self) -> None:
-        context = no_tool_executed_context(
-            [
-                ToolSpec(
-                    name="project_manage",
-                    description="Manage projects",
-                    parameters=schema({}),
-                )
-            ]
-        )
+        context = no_tool_executed_context(ToolPlan(error="planner timeout"))
 
-        self.assertIn("no tool was executed", context)
-        self.assertIn("no change or verification", context)
-        self.assertIn("project_manage", context)
+        self.assertIn("No registered tool was executed", context)
+        self.assertIn("Do not claim", context)
+        self.assertIn("planner timeout", context)
 
 
 if __name__ == "__main__":

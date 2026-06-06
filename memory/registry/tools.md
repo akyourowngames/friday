@@ -7,11 +7,11 @@ Each tool implementation lives in `assistant_cli/tools/<tool_name>.py`.
 
 - Normal chat must not be routed by local keyword, regex, or canned phrase checks.
 - Slash commands are explicit commands and may call tools directly.
-- Normal chat uses a prompt/model-driven planner over the registered tool specs before the assistant writes the final answer.
-- A registry-driven prefilter skips the planner for casual messages with no tool-shaped catalog match.
+- Normal chat uses NVIDIA native function calling over the registered tool schemas before the assistant writes the final answer.
 - Tool behavior lives in registered tool specs and handlers, not natural-language assistant replies.
 - Realtime web search requires `TAVILY_API_KEY`; other public HTTP tools use short timeouts from `FRIDAY_TOOL_TIMEOUT_SECONDS`.
-- Project task follow-ups that refer to a listed group, such as marking them/all/those done, must call `project_manage` with a bulk action and let the final assistant prose come from the tool result.
+- Project/task auto-routing uses the dedicated one-tool-per-file schemas. The legacy `project_manage` tool remains available for explicit `/tool` commands.
+- Project task follow-ups that refer to a listed group must preserve the complete referenced set; project-scoped bulk actions use the dedicated bulk tools.
 
 ## Commands
 
@@ -37,7 +37,10 @@ python chat.py --tool <name> --tool-args "<key=value args>"
 - `uuid_generate`: UUID generation.
 - `random_number`: random integer generation.
 - `password_generate`: local random password generation.
-- `project_manage`: SQLite project and task management.
+- `project_create`, `project_list`, `project_get`, `project_update`, `project_archive`: persistent SQLite project operations.
+- `task_create`, `task_create_many`, `task_list`, `task_update`, `task_bulk_update`: persistent task creation, reads, and updates.
+- `task_complete`, `task_complete_all`, `task_reopen_all`, `task_delete`: task lifecycle operations.
+- `project_manage`: legacy explicit-command gateway for project/task operations; excluded from normal auto-routing.
 - `url_fetch`: HTTP/HTTPS text fetch.
 - `file_list`: workspace-safe file listing.
 - `file_read`: workspace-safe text file reading.
@@ -61,8 +64,24 @@ python chat.py --tool json_format --tool-args 'json_text="{\"b\":2,\"a\":1}"'
 python chat.py --tool uuid_generate --tool-args 'count=3'
 python chat.py --tool random_number --tool-args 'minimum=1 maximum=10 count=3'
 python chat.py --tool password_generate --tool-args 'length=20 symbols=true'
+python chat.py --tool project_create --tool-args 'name=Friday description="Local AI assistant"'
+python chat.py --tool project_list
+python chat.py --tool project_get --tool-args 'project="my Friday project"'
+python chat.py --tool project_update --tool-args 'project=Friday description="My AI assistant"'
+python chat.py --tool project_archive --tool-args 'project=Friday'
+python chat.py --tool task_create --tool-args 'project=Friday title="fix voice latency" priority=high due="tomorrow 5pm"'
+python chat.py --tool task_create_many --tool-args 'project=Friday tasks="[{\"title\":\"Tool sanity\"},{\"title\":\"JSONL audit\"}]"'
+python chat.py --tool task_list --tool-args 'project=Friday status=pending'
+python chat.py --tool task_update --tool-args 'project=Friday task="JSONL audit" priority=urgent due="next Friday at 6pm"'
+python chat.py --tool task_bulk_update --tool-args 'project=Friday match_status=pending priority=high'
+python chat.py --tool task_complete --tool-args 'project=Friday task="fix voice latency"'
+python chat.py --tool task_complete_all --tool-args 'project=Friday'
+python chat.py --tool task_reopen_all --tool-args 'project=Friday'
+python chat.py --tool task_delete --tool-args 'project=Friday task="obsolete task"'
 python chat.py --tool project_manage --tool-args action=project_create name=Friday
 python chat.py --tool project_manage --tool-args action=task_create project=Friday title="fix voice latency" priority=high due=tomorrow tags=voice
+python chat.py --tool project_manage --tool-args action=task_create_many project=Friday tasks='[{"title":"Tool sanity"},{"title":"Persistence check"},{"title":"Latency pass"},{"title":"JSONL audit"}]'
+python chat.py --tool project_manage --tool-args action=task_bulk_update project=Friday match_status=pending priority=high due="tomorrow 5pm"
 python chat.py --tool project_manage --tool-args action=task_complete_all project=Friday
 python chat.py --tool project_manage --tool-args action=task_complete task="fix voice latency" project=Friday
 python chat.py --tool project_manage --tool-args action=task_list project=Friday status=pending

@@ -11,6 +11,7 @@ storage/tool_notes.jsonl
 storage/projects.sqlite3
 storage/projects.sqlite3-*
 storage/live-probe-*
+storage/live-*
 memory/*.txt
 .pytest_cache/
 .ruff_cache/

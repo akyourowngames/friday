@@ -20,6 +20,7 @@ class ToolSpec:
     description: str
     parameters: JsonObject
     examples: tuple[str, ...] = ()
+    auto_route: bool = True
 
     def openai_schema(self) -> JsonObject:
         return {
@@ -86,11 +87,14 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self._specs)
 
-    def specs(self) -> list[ToolSpec]:
-        return [self._specs[name] for name in self.names()]
+    def specs(self, auto_only: bool = False) -> list[ToolSpec]:
+        specs = [self._specs[name] for name in self.names()]
+        if auto_only:
+            specs = [spec for spec in specs if spec.auto_route]
+        return specs
 
-    def openai_schemas(self) -> list[JsonObject]:
-        return [spec.openai_schema() for spec in self.specs()]
+    def openai_schemas(self, auto_only: bool = False) -> list[JsonObject]:
+        return [spec.openai_schema() for spec in self.specs(auto_only=auto_only)]
 
     def close(self) -> None:
         close = getattr(self.context.http, "close", None)

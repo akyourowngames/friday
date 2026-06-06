@@ -15,13 +15,16 @@ ACTIONS = (
     "project_update",
     "project_archive",
     "task_create",
+    "task_create_many",
     "task_list",
     "task_update",
+    "task_bulk_update",
     "task_complete",
     "task_complete_all",
     "task_pending",
     "task_pending_all",
     "task_delete",
+    "task_delete_many",
     "subtask_add",
     "note_add",
     "activity",
@@ -33,7 +36,8 @@ SPEC = ToolSpec(
     name="project_manage",
     description=(
         "Manage local projects and tasks in SQLite: create projects, create/list/update/complete/pending/delete tasks, "
-        "bulk-complete or reopen all open tasks, add subtasks, add task notes, inspect activity history, and summarize active work."
+        "create many tasks in one call, bulk-update priorities/dates/statuses, bulk-complete or reopen tasks, "
+        "add subtasks and notes, inspect activity history, and summarize multiple active projects."
     ),
     parameters=schema(
         {
@@ -51,19 +55,57 @@ SPEC = ToolSpec(
             "description": {"type": "string", "description": "Project or task description."},
             "task_id": {"type": "string", "description": "Task id for update/status/delete/note/subtask actions."},
             "task": {"type": "string", "description": "Task title or partial title when task_id is not known."},
+            "task_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Task ids or exact titles for batch update/delete operations.",
+            },
             "all": {"type": "boolean", "description": "Set true when the user asks to update all matching tasks."},
             "title": {"type": "string", "description": "Task or subtask title."},
+            "tasks": {
+                "type": "array",
+                "description": "Tasks to create together. Use for action task_create_many.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "blocked", "done", "archived"],
+                        },
+                        "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
+                        "due": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "recurrence": {"type": "string"},
+                    },
+                    "required": ["title"],
+                    "additionalProperties": False,
+                },
+            },
             "status": {
                 "type": "string",
                 "enum": ["pending", "in_progress", "blocked", "done", "archived"],
                 "description": "Project or task status.",
+            },
+            "match_status": {
+                "type": "string",
+                "enum": ["pending", "in_progress", "blocked", "done", "archived"],
+                "description": "Optional current-status filter for task_bulk_update.",
             },
             "priority": {
                 "type": "string",
                 "enum": ["low", "normal", "high", "urgent"],
                 "description": "Task priority.",
             },
-            "due": {"type": "string", "description": "Due date text such as today, tomorrow, next week, or YYYY-MM-DD."},
+            "due": {
+                "type": "string",
+                "description": "Due date/time such as tomorrow 5pm, next Friday, or an ISO date/time.",
+            },
+            "recurrence": {
+                "type": "string",
+                "description": "Optional recurrence text such as daily, weekdays, weekly, or every Friday.",
+            },
             "tags": {"type": "array", "items": {"type": "string"}, "description": "Task tags."},
             "parent_task_id": {"type": "string", "description": "Parent task id for subtask_add."},
             "parent_task": {"type": "string", "description": "Parent task title or id for subtask_add."},
@@ -78,6 +120,8 @@ SPEC = ToolSpec(
         'project_manage action=project_create name=Friday',
         'project_manage action=task_complete_all project=Friday',
         'project_manage action=task_create project=Friday title="fix voice latency" priority=high due=tomorrow',
+        'project_manage action=task_create_many project=Friday tasks=[{"title":"Tool sanity"},{"title":"JSONL audit"}]',
+        'project_manage action=task_bulk_update project=Friday match_status=pending priority=high due="tomorrow 5pm"',
         'project_manage action=task_complete task_id=task_abc123',
         'project_manage action=task_list project=Friday status=pending',
         'project_manage action=summary',
@@ -94,6 +138,7 @@ SPEC = ToolSpec(
         "check those tasks again",
         "what tasks are pending for Friday?",
     ),
+    auto_route=False,
 )
 
 
@@ -157,7 +202,10 @@ def _run_action(store: ProjectStore, action: str, args: JsonObject) -> JsonObjec
             due=args.get("due", ""),
             tags=args.get("tags", []),
             parent_task=str_arg(args, "parent_task_id"),
+            recurrence=str_arg(args, "recurrence"),
         )
+    if action == "task_create_many":
+        return store.create_tasks(project=project, tasks=_task_items(args))
     if action == "task_list":
         return {
             "tasks": store.list_tasks(
@@ -179,8 +227,21 @@ def _run_action(store: ProjectStore, action: str, args: JsonObject) -> JsonObjec
                 priority=str_arg(args, "priority") or None,
                 due_at=args.get("due") if args.get("due") else None,
                 tags_json=args.get("tags") if args.get("tags") else None,
+                recurrence=str_arg(args, "recurrence") or None,
             )
         }
+    if action == "task_bulk_update":
+        return store.bulk_update_tasks(
+            project=project,
+            task_refs=_string_list(args.get("task_ids")),
+            match_status=str_arg(args, "match_status"),
+            status=str_arg(args, "status") or None,
+            priority=str_arg(args, "priority") or None,
+            due=args.get("due") if args.get("due") else None,
+            tags=args.get("tags") if args.get("tags") else None,
+            recurrence=str_arg(args, "recurrence") or None,
+            include_done=_bool_arg(args, "include_done"),
+        )
     if action == "task_complete":
         if not task or _bool_arg(args, "all"):
             return store.set_tasks_status(project=project, status="done")
@@ -195,6 +256,13 @@ def _run_action(store: ProjectStore, action: str, args: JsonObject) -> JsonObjec
         return store.set_tasks_status(project=project, status="pending")
     if action == "task_delete":
         return {"task": store.delete_task(task, project=project), "deleted": True}
+    if action == "task_delete_many":
+        return store.delete_tasks(
+            project=project,
+            task_refs=_string_list(args.get("task_ids")),
+            delete_all=_bool_arg(args, "all"),
+            match_status=str_arg(args, "match_status"),
+        )
     if action == "subtask_add":
         return store.add_subtask(
             parent_task=(
@@ -209,6 +277,7 @@ def _run_action(store: ProjectStore, action: str, args: JsonObject) -> JsonObjec
             priority=str_arg(args, "priority", "normal"),
             due=args.get("due", ""),
             tags=args.get("tags", []),
+            recurrence=str_arg(args, "recurrence"),
         )
     if action == "note_add":
         return store.add_note(task, str_arg(args, "note"), project=project)
@@ -252,6 +321,13 @@ def _normalize_action(action: str) -> str:
         "show_pending_tasks": "task_list",
         "check_tasks": "task_list",
         "verify_tasks": "task_list",
+        "create_tasks": "task_create_many",
+        "add_tasks": "task_create_many",
+        "bulk_create_tasks": "task_create_many",
+        "update_tasks": "task_bulk_update",
+        "bulk_update_tasks": "task_bulk_update",
+        "delete_tasks": "task_delete_many",
+        "bulk_delete_tasks": "task_delete_many",
         "complete_task": "task_complete",
         "complete_tasks": "task_complete_all",
         "complete_all": "task_complete_all",
@@ -265,6 +341,33 @@ def _normalize_action(action: str) -> str:
 
 def _task_ref(args: JsonObject) -> str:
     return str_arg(args, "task_id") or str_arg(args, "task") or str_arg(args, "title")
+
+
+def _task_items(args: JsonObject) -> list[JsonObject]:
+    value = args.get("tasks")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("tasks must be a JSON array") from exc
+    if not isinstance(value, list):
+        raise ValueError("tasks must be an array")
+    tasks = [item for item in value if isinstance(item, dict)]
+    if not tasks:
+        raise ValueError("tasks must contain at least one task object")
+    return tasks
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = [value]
+        value = parsed
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _bool_arg(args: JsonObject, key: str, default: bool = False) -> bool:
@@ -285,6 +388,19 @@ def _limit(args: JsonObject, default: int = 30) -> int:
 
 
 def _render_text(action: str, data: JsonObject) -> str:
+    if "created_tasks" in data:
+        created = data.get("created_tasks", [])
+        existing = data.get("existing_tasks", [])
+        project = data.get("project", {})
+        lines = [
+            f"Created {len(created)} task(s) in {project.get('name', project.get('id', 'project'))}; "
+            f"{len(existing)} already existed."
+        ]
+        lines.extend(_task_line(task) for task in created)
+        if existing:
+            lines.append("Existing tasks:")
+            lines.extend(_task_line(task) for task in existing)
+        return "\n".join(lines)
     if "updated_tasks" in data:
         tasks = data["updated_tasks"]
         projects = data.get("projects", [])
@@ -297,6 +413,11 @@ def _render_text(action: str, data: JsonObject) -> str:
         if tasks:
             lines.extend(_task_line(task) for task in tasks)
         return "\n".join(lines)
+    if "deleted_tasks" in data:
+        tasks = data.get("deleted_tasks", [])
+        if not tasks:
+            return "No tasks were deleted."
+        return "Deleted tasks:\n" + "\n".join(_task_line(task) for task in tasks)
     if "note" in data:
         note = data["note"]
         task = data["task"]
@@ -355,11 +476,12 @@ def _project_line(project: JsonObject) -> str:
 
 def _task_line(task: JsonObject) -> str:
     due = f" due={task['due_at']}" if task.get("due_at") else ""
+    recurrence = f" recurrence={task['recurrence']}" if task.get("recurrence") else ""
     return (
         "- "
         f"{task['title']} ({task['id']}) "
         f"project={task.get('project_name', task.get('project_id'))} "
-        f"status={task['status']} priority={task['priority']}{due}"
+        f"status={task['status']} priority={task['priority']}{due}{recurrence}"
     )
 
 

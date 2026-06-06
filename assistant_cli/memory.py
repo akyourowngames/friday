@@ -98,6 +98,8 @@ class MemoryManager:
     def prompt_context(self) -> str:
         blocks: list[str] = []
         for path in self.files():
+            if path.name == "project.txt":
+                continue
             if not path.exists():
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore").strip()
@@ -109,7 +111,9 @@ class MemoryManager:
         return (
             "Saved permanent memory facts are below. Treat these facts as true for the current user. "
             "A saved name is identity context, and saved likes/preferences answer preference questions. "
-            "If a requested fact is present below, use it directly. If it is absent, say it is not saved.\n\n"
+            "If a requested fact is present below, use it directly. If it is absent, say it is not saved. "
+            "These text files are not authoritative for current project/task existence, status, counts, dates, "
+            "or mutations; operational project state must come from a successful current-turn project tool result.\n\n"
             + "\n\n---\n\n".join(blocks)
         )
 
@@ -144,7 +148,7 @@ class MemoryManager:
 
         prompt = {
             "user_message": text,
-            "allowed_buckets": ["personal", "preferences", "project", "user"],
+            "allowed_buckets": ["personal", "preferences", "user"],
             "output_contract": {
                 "facts": [
                     {
@@ -158,6 +162,8 @@ class MemoryManager:
                 "Return an empty facts list when there is no durable memory to save.",
                 "Save stable identity, preference, project, and long-term user facts.",
                 "Do not save transient chat filler or one-off questions.",
+                "Do not save project/task existence, status, schedules, priorities, due dates, or claimed assistant actions.",
+                "Operational project and task state belongs only in the SQLite project tools.",
             ],
         }
 
