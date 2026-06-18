@@ -1,7 +1,11 @@
 """Tests for the memory system with sqlite-vec and FTS5."""
 
+import sys
+import types
+
 import pytest
 
+from ares import embeddings
 from ares.memory import MemoryStore
 
 
@@ -104,3 +108,21 @@ class TestMemoryStore:
         """Searching an empty database returns empty list."""
         results = store.search("anything")
         assert results == []
+
+    def test_store_works_when_sentence_transformers_import_fails(self, tmp_path, monkeypatch):
+        """Memory storage falls back instead of failing when optional embedding deps break."""
+        module = types.ModuleType("sentence_transformers")
+        monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+        embeddings._MODEL_CACHE.clear()
+        fallback_store = MemoryStore(
+            db_path=tmp_path / "fallback.db",
+            embedding_backend="onnx",
+        )
+        try:
+            fact_id = fallback_store.store("User is a JEE aspirant", category="fact")
+            results = fallback_store.search("JEE")
+        finally:
+            fallback_store.close()
+
+        assert fact_id > 0
+        assert any("JEE aspirant" in result["fact_text"] for result in results)

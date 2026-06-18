@@ -133,6 +133,9 @@ Config is stored at `~/.ares/config.json`:
 for example an optimized or quantized ONNX artifact. Leave it empty to let Sentence Transformers
 choose the default file.
 
+If the Sentence Transformers/ONNX/Torch stack fails to import or load, Ares falls back to a
+deterministic local hash embedding backend so memory storage still works.
+
 `web_search_provider` can be `auto`, `tavily`, or `ddgs`. In `auto` mode, Ares uses Tavily
 when `TAVILY_API_KEY` or `tavily_api_key` is configured, then falls back to `ddgs`.
 Set `tavily_search_depth` to `advanced` when you want deeper Tavily searches.

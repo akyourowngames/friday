@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ares.config import get_db_path
 from ares.dates import now_local_iso, parse_user_datetime
+from ares.sqlite_utils import connect_sqlite
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -20,8 +21,7 @@ class TaskStore:
     def __init__(self, db_path: Path | None = None):
         self.db_path = db_path or get_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
-        self.conn.row_factory = sqlite3.Row
+        self.conn = connect_sqlite(self.db_path)
         self._init_db()
 
     def _init_db(self):

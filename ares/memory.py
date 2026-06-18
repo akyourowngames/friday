@@ -12,6 +12,7 @@ from ares.embeddings import (
     EMBEDDING_DIMS,
     EmbeddingProvider,
 )
+from ares.sqlite_utils import connect_sqlite
 
 EMBEDDING_MODEL_NAME = DEFAULT_EMBEDDING_MODEL
 
@@ -75,8 +76,7 @@ class MemoryStore:
             file_name=config.embedding_file_name,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
-        self.conn.row_factory = sqlite3.Row
+        self.conn = connect_sqlite(self.db_path)
         self._init_db()
 
     def _init_db(self):

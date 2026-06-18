@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import suppress
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -229,6 +230,15 @@ class AresCLI:
         if len(parts) == 2 and re.match(r"^[a-z][a-z0-9_]*$", parts[0]):
             return parts[0] or "unknown", parts[1]
         return "unknown", inner
+
+    def _cleanup_step(self, label: str, func) -> None:
+        """Run one shutdown step without letting cleanup errors crash Ares."""
+        try:
+            func()
+        except sqlite3.OperationalError as exc:
+            self.console.print(f"[dim yellow]Shutdown warning ({label}): {exc}[/dim yellow]")
+        except Exception as exc:
+            self.console.print(f"[dim yellow]Shutdown warning ({label}): {exc}[/dim yellow]")
 
     def _edit_file(self, file_path: Path, name: str) -> None:
         """Open a context file in the user's editor, or print its path."""
@@ -544,10 +554,19 @@ class AresCLI:
                     await self._reminder_task
 
             # Cleanup
-            await self.agent.close()
-            self.conversation_store.end_conversation(self.conversation_id)
-            self.conversation_store.summarize_conversation(self.conversation_id)
-            self.memory_store.close()
-            self.task_store.close()
-            self.conversation_store.close()
+            try:
+                await self.agent.close()
+            except Exception as exc:
+                self.console.print(f"[dim yellow]Shutdown warning (agent): {exc}[/dim yellow]")
+            self._cleanup_step("memory store", self.memory_store.close)
+            self._cleanup_step("task store", self.task_store.close)
+            self._cleanup_step(
+                "end conversation",
+                lambda: self.conversation_store.end_conversation(self.conversation_id),
+            )
+            self._cleanup_step(
+                "summarize conversation",
+                lambda: self.conversation_store.summarize_conversation(self.conversation_id),
+            )
+            self._cleanup_step("conversation store", self.conversation_store.close)
             self.console.print(f"\n[dim]Goodbye! {self.icons['bye']}[/dim]\n")

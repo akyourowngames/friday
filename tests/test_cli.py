@@ -1,6 +1,7 @@
 """Tests for CLI startup helpers."""
 
 import json
+import sqlite3
 from io import StringIO
 from pathlib import Path
 
@@ -208,6 +209,19 @@ def test_soul_profile_and_context_commands_render():
     assert "Alice" in output
     assert "Current Project Context" in output
     assert "Buy milk" in output
+
+
+def test_cleanup_step_reports_sqlite_lock_without_crashing():
+    app = make_cli()
+
+    app._cleanup_step(
+        "end conversation",
+        lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+    )
+
+    output = app.console_file.getvalue()
+    assert "Shutdown warning" in output
+    assert "database is locked" in output
 
 
 @pytest.mark.asyncio
