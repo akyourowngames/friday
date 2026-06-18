@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+data/
+.tmp-home/
+.tmp-home-verify/
+.tmp-v2-cli/
+*.db
+*.sqlite
+*.sqlite3
+*.log

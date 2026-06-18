@@ -1,0 +1,454 @@
+"""Terminal UI using Rich and prompt_toolkit."""
+
+import asyncio
+from contextlib import suppress
+import re
+import sys
+from pathlib import Path
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.styles import Style
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.markdown import Markdown
+from rich.live import Live
+from rich.text import Text
+from rich.table import Table
+
+from ares.agent import Agent
+from ares.conversations import ConversationStore
+from ares.exporter import export_data, import_data
+from ares.memory import MemoryStore
+from ares.reminders import DesktopNotifier, ReminderService
+from ares.renders import get_renderer, render_generic_tool
+from ares.tasks import TaskStore
+from ares.config import load_config, save_config
+from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
+from ares.llm import FREE_MODELS
+
+# ── Styles ────────────────────────────────────────────────────
+STYLE = Style.from_dict({
+    "prompt": "bold ansicyan",
+})
+
+COMPLETER = WordCompleter([
+    "/help", "/tasks", "/memory", "/model", "/clear",
+    "/forget", "/export", "/import", "/reset", "/exit",
+], ignore_case=True)
+
+
+def _history_path() -> str:
+    """Return an expanded prompt history path and ensure its directory exists."""
+    path = Path("~/.ares_history").expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def _supports_unicode_output() -> bool:
+    """Return whether stdout is likely to handle emoji and symbols."""
+    encoding = (sys.stdout.encoding or "").lower()
+    return "utf" in encoding
+
+
+class AresCLI:
+    """The main CLI application for Ares."""
+
+    def __init__(self):
+        self.console = Console()
+        self.unicode_output = _supports_unicode_output()
+        self.icons = {
+            "fire": "🔥" if self.unicode_output else "*",
+            "tasks": "📋" if self.unicode_output else "Tasks",
+            "thinking": "🤔" if self.unicode_output else "...",
+            "tool": "⚙️" if self.unicode_output else "*",
+            "bot": "🤖" if self.unicode_output else "Ares",
+            "bye": "👋" if self.unicode_output else "",
+            "prompt": "❯ " if self.unicode_output else "> ",
+            "current": " ← current" if self.unicode_output else " < current",
+        }
+        self.config = load_config()
+        self.memory_store = MemoryStore()
+        self.task_store = TaskStore()
+        self.conversation_store = ConversationStore()
+        self.conversation_id = self.conversation_store.start_conversation()
+        self.conversation_store.summarize_ended_without_summary(
+            min_messages=self.config.session_summary_messages
+        )
+        self.agent = Agent(
+            memory_store=self.memory_store,
+            task_store=self.task_store,
+            conversation_store=self.conversation_store,
+            api_key=self.config.api_key,
+            base_url=self.config.api_base_url,
+            model=self.config.model,
+        )
+        self.conversation_history: list[dict] = self.conversation_store.get_recent_messages(
+            limit=self.config.max_context_messages
+        )
+        self.reminder_service = ReminderService(
+            self.task_store,
+            self._notify_reminder,
+            poll_seconds=self.config.reminder_poll_seconds,
+            notifier=DesktopNotifier(enabled=self.config.enable_desktop_notifications),
+        )
+        self._reminder_task: asyncio.Task | None = None
+        self.session = None
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            self.session = PromptSession(
+                history=FileHistory(_history_path()),
+                auto_suggest=AutoSuggestFromHistory(),
+                completer=COMPLETER,
+                complete_while_typing=True,
+                style=STYLE,
+            )
+
+    async def _prompt(self) -> str:
+        """Read one prompt line from an interactive session or plain stdin."""
+        if self.session is not None:
+            return await self.session.prompt_async(self.icons["prompt"])
+        return await asyncio.to_thread(input, self.icons["prompt"])
+
+    def _show_banner(self):
+        """Display the welcome banner."""
+        memory_count = len(self.memory_store.list_all())
+        pending_tasks = self.task_store.list_pending()
+
+        self.console.print()
+        self.console.print(Panel(
+            f"[bold]{self.icons['fire']} Ares[/bold]\n"
+            f"[dim]v0.1.0[/dim] | "
+            f"[cyan]Model: {self.config.model}[/cyan] | "
+            f"[green]Memory: {memory_count} facts[/green] | "
+            f"[yellow]Tasks: {len(pending_tasks)} pending[/yellow]",
+            border_style="bright_cyan",
+            padding=(0, 1),
+        ))
+        self.console.print()
+
+        # Show pending tasks if any
+        if pending_tasks:
+            self.console.print(f"[bold yellow]{self.icons['tasks']} Pending tasks:[/bold yellow]")
+            for t in pending_tasks[:5]:
+                due = f" (due: {t['due']})" if t.get("due") else ""
+                self.console.print(f"  • {t['title']}{due}")
+            self.console.print()
+
+    def _notify_reminder(self, task: dict) -> None:
+        """Render an in-terminal reminder notification."""
+        due = f"\n[dim]Due: {task['due']}[/dim]" if task.get("due") else ""
+        self.console.print()
+        self.console.print(Panel(
+            f"[bold yellow]Reminder[/bold yellow]\n{task['title']}{due}",
+            border_style="yellow",
+            padding=(0, 1),
+        ))
+        self.console.print()
+
+    def _print_tasks(self, tasks: list[dict], title: str = "Tasks") -> None:
+        if not tasks:
+            self.console.print("[dim]No tasks found.[/dim]")
+            return
+        table = Table(title=title, border_style="yellow")
+        table.add_column("ID", style="dim")
+        table.add_column("Title")
+        table.add_column("Priority", style="bold")
+        table.add_column("Status")
+        table.add_column("Due")
+        table.add_column("Reminder")
+        for task in tasks:
+            table.add_row(
+                str(task["id"]),
+                task["title"],
+                task.get("priority", "medium"),
+                task.get("status", "pending"),
+                task.get("due") or "—",
+                task.get("reminder_at") or "—",
+            )
+        self.console.print(table)
+
+    def _print_memories(self, memories: list[dict], title: str = "Memories") -> None:
+        if not memories:
+            self.console.print("[dim]No memories found.[/dim]")
+            return
+        table = Table(title=title, border_style="green")
+        table.add_column("ID", style="dim")
+        table.add_column("Category", style="cyan")
+        table.add_column("Importance")
+        table.add_column("Fact")
+        table.add_column("Updated", style="dim")
+        for memory in memories:
+            table.add_row(
+                str(memory["fact_id"]),
+                memory.get("category", "note"),
+                str(memory.get("importance", 0.5)),
+                memory["fact_text"],
+                memory.get("updated_at") or "—",
+            )
+        self.console.print(table)
+
+    def _show_model_list(self) -> None:
+        self.console.print(f"[bold]Current model:[/bold] {self.config.model}")
+        self.console.print("[dim]Known free models:[/dim]")
+        for model in FREE_MODELS:
+            marker = self.icons["current"] if model == self.config.model else ""
+            self.console.print(f"  • {model}{marker}")
+
+    def _tool_status(self, tool_name: str) -> tuple[str, str]:
+        """Return status text and border style for a running tool."""
+        statuses = {
+            "web_search": ("Searching web...", "bright_green"),
+            "read_file": ("Reading file...", "bright_blue"),
+            "search_files": ("Searching files...", "bright_yellow"),
+            "list_directory": ("Listing directory...", "bright_magenta"),
+        }
+        return statuses.get(tool_name, ("Running tool...", "dim"))
+
+    def _parse_tool_token(self, token: str) -> tuple[str, str]:
+        """Parse [tool:name:content] tokens with a fallback for legacy tokens."""
+        inner = token[6:-1]
+        parts = inner.split(":", 1)
+        if len(parts) == 2 and re.match(r"^[a-z][a-z0-9_]*$", parts[0]):
+            return parts[0] or "unknown", parts[1]
+        return "unknown", inner
+
+    def _handle_command(self, cmd: str) -> bool:
+        """Handle slash commands. Returns False if should exit."""
+        parts = cmd.strip().split(maxsplit=1)
+        command = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if command == "/help":
+            table = Table(title="Commands", border_style="cyan")
+            table.add_column("Command", style="cyan")
+            table.add_column("Description")
+            table.add_row("/help", "Show available commands")
+            table.add_row("/tasks [all|search|complete|cancel]", "Review and manage tasks")
+            table.add_row("/memory [search|edit|delete]", "Review and manage memories")
+            table.add_row("/forget ID", "Delete a memory by ID")
+            table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
+            table.add_row("/clear", "Clear terminal screen")
+            table.add_row("/export", "Export data to JSON")
+            table.add_row("/import PATH [--config]", "Import data from an Ares JSON export")
+            table.add_row("/reset", "Reset conversation context")
+            table.add_row("/exit", "Exit Ares")
+            self.console.print(table)
+
+        elif command == "/tasks":
+            if not arg:
+                self._print_tasks(self.task_store.list_pending(), "Pending Tasks")
+            elif arg == "all":
+                self._print_tasks(self.task_store.list_all(include_done=True), "All Tasks")
+            elif arg.startswith("search "):
+                self._print_tasks(self.task_store.search(arg[7:].strip(), include_done=True), "Task Search")
+            elif arg.startswith("complete "):
+                task_id = int(arg.split(maxsplit=1)[1])
+                if self.task_store.complete(task_id):
+                    self.console.print(f"[green]Completed task #{task_id}.[/green]")
+                else:
+                    self.console.print(f"[red]Task #{task_id} was not found or is not pending.[/red]")
+            elif arg.startswith("cancel "):
+                task_id = int(arg.split(maxsplit=1)[1])
+                if self.task_store.cancel(task_id):
+                    self.console.print(f"[yellow]Cancelled task #{task_id}.[/yellow]")
+                else:
+                    self.console.print(f"[red]Task #{task_id} was not found.[/red]")
+            else:
+                self.console.print("[red]Usage: /tasks [all|search QUERY|complete ID|cancel ID][/red]")
+
+        elif command == "/memory":
+            if not arg:
+                self._print_memories(self.memory_store.get_recent(limit=10), "Recent Memories")
+            elif arg.startswith("search "):
+                self._print_memories(self.memory_store.search(arg[7:].strip(), limit=10), "Memory Search")
+            elif arg.startswith("edit "):
+                edit_parts = arg.split(maxsplit=2)
+                if len(edit_parts) < 3:
+                    self.console.print("[red]Usage: /memory edit ID NEW_TEXT[/red]")
+                else:
+                    fact_id = int(edit_parts[1])
+                    if self.memory_store.update(fact_id, fact_text=edit_parts[2]):
+                        self.console.print(f"[green]Updated memory #{fact_id}.[/green]")
+                    else:
+                        self.console.print(f"[red]Memory #{fact_id} was not found.[/red]")
+            elif arg.startswith("delete "):
+                fact_id = int(arg.split(maxsplit=1)[1])
+                if self.memory_store.delete(fact_id):
+                    self.console.print(f"[yellow]Forgot memory #{fact_id}.[/yellow]")
+                else:
+                    self.console.print(f"[red]Memory #{fact_id} was not found.[/red]")
+            else:
+                self.console.print("[red]Usage: /memory [search QUERY|edit ID NEW_TEXT|delete ID][/red]")
+
+        elif command == "/forget":
+            if not arg:
+                self.console.print("[red]Usage: /forget MEMORY_ID[/red]")
+            else:
+                fact_id = int(arg)
+                if self.memory_store.delete(fact_id):
+                    self.console.print(f"[yellow]Forgot memory #{fact_id}.[/yellow]")
+                else:
+                    self.console.print(f"[red]Memory #{fact_id} was not found.[/red]")
+
+        elif command == "/model":
+            if not arg or arg == "list":
+                self._show_model_list()
+            else:
+                self.config.model = arg
+                save_config(self.config)
+                self.agent.set_model(arg)
+                self.console.print(f"[green]Model switched to {arg}.[/green]")
+
+        elif command == "/clear":
+            self.console.clear()
+
+        elif command == "/export":
+            path = export_data(
+                memory_store=self.memory_store,
+                task_store=self.task_store,
+                conversation_store=self.conversation_store,
+                config=self.config,
+                path=arg or None,
+            )
+            self.console.print(f"[green]Exported data to {path}[/green]")
+
+        elif command == "/import":
+            if not arg:
+                self.console.print("[red]Usage: /import PATH [--config][/red]")
+            else:
+                import_config = "--config" in arg.split()
+                path = arg.replace("--config", "").strip()
+                counts = import_data(
+                    path,
+                    memory_store=self.memory_store,
+                    task_store=self.task_store,
+                    conversation_store=self.conversation_store,
+                    import_config=import_config,
+                )
+                if import_config:
+                    self.config = load_config()
+                    self.agent.set_model(self.config.model)
+                self.console.print(
+                    "[green]Imported "
+                    f"{counts['memories']} memories, {counts['tasks']} tasks, "
+                    f"{counts['conversations']} conversations.[/green]"
+                )
+
+        elif command == "/reset":
+            self.conversation_history = []
+            self.console.print("[dim]Conversation reset. Memory preserved.[/dim]")
+
+        elif command == "/exit":
+            return False
+
+        else:
+            self.console.print(f"[red]Unknown command: {command}. Type /help for available commands.[/red]")
+
+        return True
+
+    async def _process_input(self, user_input: str):
+        """Process a user message through the agent and display response."""
+        tool_renderables = []
+
+        self.console.print()
+
+        with Live(console=self.console, refresh_per_second=10, transient=True) as live:
+            live.update(Panel(
+                Text(f"{self.icons['thinking']} Thinking...", style="bold italic dim"),
+                border_style="dim blue",
+            ))
+
+            full_response = ""
+            try:
+                async for token in self.agent.run_stream(user_input, self.conversation_history):
+                    if token.startswith("[tool:"):
+                        tool_name, tool_content = self._parse_tool_token(token)
+                        status, color = self._tool_status(tool_name)
+                        live.update(Panel(
+                            Text(status, style=f"bold {color}"),
+                            border_style=color,
+                        ))
+                        try:
+                            renderer = get_renderer(tool_name)
+                            tool_renderables.append(renderer(tool_content))
+                        except Exception:
+                            tool_renderables.append(render_generic_tool(tool_content))
+                    else:
+                        full_response += token
+                        if full_response.strip():
+                            live.update(Markdown(full_response))
+            except Exception as e:
+                full_response = f"Error: {e}"
+
+        # Show rendered tool results before the final assistant response.
+        for renderable in tool_renderables:
+            self.console.print(renderable)
+
+        # Show final response
+        if full_response.strip():
+            self.console.print(Panel(
+                Markdown(full_response),
+                title=f"{self.icons['bot']} Ares",
+                border_style="bright_blue",
+                padding=(0, 1),
+            ))
+
+        # Update conversation history
+        self.conversation_history.append({"role": "user", "content": user_input})
+        self.conversation_history.append({"role": "assistant", "content": full_response})
+        self.conversation_store.add_exchange(self.conversation_id, user_input, full_response)
+
+        # Trim conversation history
+        max_msgs = self.config.max_context_messages
+        if len(self.conversation_history) > max_msgs:
+            self.conversation_history = self.conversation_history[-max_msgs:]
+
+        self.console.print()
+
+    async def run(self):
+        """Main CLI loop."""
+        self._reminder_task = asyncio.create_task(self.reminder_service.run())
+        self._show_banner()
+
+        try:
+            while True:
+                try:
+                    user_input = await self._prompt()
+
+                    if not user_input.strip():
+                        continue
+
+                    if user_input.strip().startswith("/"):
+                        try:
+                            should_continue = self._handle_command(user_input.strip())
+                        except Exception as e:
+                            self.console.print(f"[red]Command error: {e}[/red]")
+                            should_continue = True
+                        if not should_continue:
+                            break
+                        continue
+
+                    await self._process_input(user_input)
+
+                except KeyboardInterrupt:
+                    self.console.print("\n[dim]Interrupted. Press /exit to quit.[/dim]\n")
+                    continue
+                except EOFError:
+                    break
+        finally:
+            if self._reminder_task is not None:
+                self._reminder_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._reminder_task
+
+            # Cleanup
+            await self.agent.close()
+            self.conversation_store.end_conversation(self.conversation_id)
+            self.conversation_store.summarize_conversation(self.conversation_id)
+            self.memory_store.close()
+            self.task_store.close()
+            self.conversation_store.close()
+            self.console.print(f"\n[dim]Goodbye! {self.icons['bye']}[/dim]\n")
