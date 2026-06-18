@@ -1,14 +1,20 @@
 """Core agent loop: LLM interaction, tool execution, context building."""
 
 import json
+from pathlib import Path
 from typing import AsyncIterator
 
+from ares.context import ProjectContext
+from ares.context_blend import build_context_prompt
 from ares.memory import MemoryStore
 from ares.tasks import TaskStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.llm import LLMClient
-from ares.prompts import SYSTEM_PROMPT, build_context_prompt
+from ares.models import AppConfig
+from ares.profile import ProfileManager
+from ares.prompts import SYSTEM_PROMPT
+from ares.soul import SoulManager
 
 
 class Agent:
@@ -22,6 +28,7 @@ class Agent:
         api_key: str = "",
         base_url: str = "",
         model: str = "",
+        config: AppConfig | None = None,
     ):
         self.memory_store = memory_store
         self.task_store = task_store
@@ -34,14 +41,28 @@ class Agent:
         self.tools = get_tool_definitions()
 
         kwargs = {}
-        if api_key:
-            kwargs["api_key"] = api_key
-        if base_url:
-            kwargs["base_url"] = base_url
-        if model:
-            kwargs["model"] = model
+        if api_key or config:
+            kwargs["api_key"] = api_key or (config.api_key if config else "")
+        if base_url or config:
+            kwargs["base_url"] = base_url or (config.api_base_url if config else "")
+        if model or config:
+            kwargs["model"] = model or (config.model if config else "")
         self.llm = LLMClient(**kwargs)
+        if config is not None:
+            self.llm.config = config
         self.tool_executor.config = self.llm.config
+        self.config = self.llm.config
+
+        data_dir = Path(self.config.data_dir).expanduser()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
+        self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=self.config.profile_path)
+        self.project_context = ProjectContext(
+            enabled=self.config.project_context_enabled,
+            max_files=self.config.project_context_max_files,
+        )
+        self.soul_manager.ensure_exists()
+        self.profile_manager.ensure_exists()
 
     def build_messages(self, user_input: str, conversation_history: list[dict],
                        context: str = "") -> list[dict]:
@@ -56,13 +77,26 @@ class Agent:
         return messages
 
     def get_context(self, user_input: str) -> str:
-        """Retrieve relevant memories and pending tasks for context."""
-        memories = self.memory_store.search(user_input, limit=5)
+        """Build full context: soul + profile + project + memories + tasks."""
+        soul_ctx = self.soul_manager.get_context(token_budget=200)
+        profile_ctx = self.profile_manager.get_context(token_budget=400)
+        project_ctx = ""
+        if self.config.project_context_enabled:
+            project_ctx = self.project_context.get_context(token_budget=400)
+        memories = self.memory_store.search(user_input, limit=self.config.max_memory_retrieval)
         tasks = self.task_store.list_pending()
         summaries = []
         if self.conversation_store is not None:
             summaries = self.conversation_store.get_recent_summaries(limit=5)
-        return build_context_prompt(memories, tasks, summaries)
+        return build_context_prompt(
+            soul_context=soul_ctx,
+            profile_context=profile_ctx,
+            project_context=project_ctx,
+            memories=memories,
+            tasks=tasks,
+            conversation_summaries=summaries,
+            token_budget=self.config.context_token_budget,
+        )
 
     def set_model(self, model: str) -> None:
         """Switch the underlying chat model."""

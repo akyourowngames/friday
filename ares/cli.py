@@ -20,11 +20,15 @@ from rich.text import Text
 from rich.table import Table
 
 from ares.agent import Agent
+from ares.context import ProjectContext
+from ares.context_blend import build_context_prompt
 from ares.conversations import ConversationStore
 from ares.exporter import export_data, import_data
 from ares.memory import MemoryStore
+from ares.profile import ProfileManager, PROFILE_TEMPLATE
 from ares.reminders import DesktopNotifier, ReminderService
 from ares.renders import get_renderer, render_generic_tool
+from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.tasks import TaskStore
 from ares.config import load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
@@ -38,6 +42,7 @@ STYLE = Style.from_dict({
 COMPLETER = WordCompleter([
     "/help", "/tasks", "/memory", "/model", "/clear",
     "/forget", "/export", "/import", "/reset", "/exit",
+    "/soul", "/profile", "/context",
 ], ignore_case=True)
 
 
@@ -73,6 +78,15 @@ class AresCLI:
         self.config = load_config()
         self.memory_store = MemoryStore()
         self.task_store = TaskStore()
+        data_dir = Path(self.config.data_dir).expanduser()
+        self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
+        self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=self.config.profile_path)
+        self.project_context = ProjectContext(
+            enabled=self.config.project_context_enabled,
+            max_files=self.config.project_context_max_files,
+        )
+        self.soul_manager.ensure_exists()
+        self.profile_manager.ensure_exists()
         self.conversation_store = ConversationStore()
         self.conversation_id = self.conversation_store.start_conversation()
         self.conversation_store.summarize_ended_without_summary(
@@ -85,6 +99,7 @@ class AresCLI:
             api_key=self.config.api_key,
             base_url=self.config.api_base_url,
             model=self.config.model,
+            config=self.config,
         )
         self.conversation_history: list[dict] = self.conversation_store.get_recent_messages(
             limit=self.config.max_context_messages
@@ -215,6 +230,33 @@ class AresCLI:
             return parts[0] or "unknown", parts[1]
         return "unknown", inner
 
+    def _edit_file(self, file_path: Path, name: str) -> None:
+        """Open a context file in the user's editor, or print its path."""
+        import os
+        import subprocess
+
+        if not file_path.exists():
+            self.console.print(f"[yellow]Creating {name} file...[/yellow]")
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            template = SOUL_TEMPLATE if name == "soul" else PROFILE_TEMPLATE
+            file_path.write_text(template, encoding="utf-8")
+
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+        if editor:
+            self.console.print(f"[dim]Opening {file_path} in {editor}...[/dim]")
+            try:
+                subprocess.run([editor, str(file_path)], check=False)
+            except FileNotFoundError:
+                self.console.print(f"[red]Editor '{editor}' not found. Edit manually: {file_path}[/red]")
+        elif sys.platform == "win32":
+            self.console.print(f"[dim]Opening {file_path}...[/dim]")
+            try:
+                os.startfile(str(file_path))
+            except OSError:
+                self.console.print(f"[yellow]Could not open editor. Edit manually: {file_path}[/yellow]")
+        else:
+            self.console.print(f"[yellow]No $EDITOR set. Edit manually: {file_path}[/yellow]")
+
     def _handle_command(self, cmd: str) -> bool:
         """Handle slash commands. Returns False if should exit."""
         parts = cmd.strip().split(maxsplit=1)
@@ -234,6 +276,9 @@ class AresCLI:
             table.add_row("/export", "Export data to JSON")
             table.add_row("/import PATH [--config]", "Import data from an Ares JSON export")
             table.add_row("/reset", "Reset conversation context")
+            table.add_row("/soul [show|edit]", "View or edit Ares' personality")
+            table.add_row("/profile [show|edit]", "View or edit your profile")
+            table.add_row("/context", "Show active context for this session")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
 
@@ -340,6 +385,60 @@ class AresCLI:
         elif command == "/reset":
             self.conversation_history = []
             self.console.print("[dim]Conversation reset. Memory preserved.[/dim]")
+
+        elif command == "/soul":
+            if not arg or arg == "show":
+                content = self.soul_manager.read()
+                if content:
+                    self.console.print(Panel(
+                        Markdown(content),
+                        title="Soul - Ares Personality",
+                        border_style="bright_magenta",
+                        padding=(0, 1),
+                    ))
+                else:
+                    self.console.print("[dim]No soul file found. Use /soul edit to create one.[/dim]")
+            elif arg == "edit":
+                self._edit_file(self.soul_manager.soul_path, "soul")
+            else:
+                self.console.print("[red]Usage: /soul [show|edit][/red]")
+
+        elif command == "/profile":
+            if not arg or arg == "show":
+                content = self.profile_manager.read()
+                if content:
+                    self.console.print(Panel(
+                        Markdown(content),
+                        title="Profile - User Identity",
+                        border_style="bright_green",
+                        padding=(0, 1),
+                    ))
+                else:
+                    self.console.print("[dim]No profile file found. Use /profile edit to create one.[/dim]")
+            elif arg == "edit":
+                self._edit_file(self.profile_manager.profile_path, "profile")
+            else:
+                self.console.print("[red]Usage: /profile [show|edit][/red]")
+
+        elif command == "/context":
+            context_str = build_context_prompt(
+                soul_context=self.soul_manager.get_context(),
+                profile_context=self.profile_manager.get_context(),
+                project_context=self.project_context.get_context()
+                if self.config.project_context_enabled else "",
+                memories=self.memory_store.get_recent(limit=5),
+                tasks=self.task_store.list_pending(),
+                token_budget=self.config.context_token_budget,
+            )
+            if context_str:
+                self.console.print(Panel(
+                    Markdown(context_str),
+                    title="Active Context",
+                    border_style="bright_cyan",
+                    padding=(0, 1),
+                ))
+            else:
+                self.console.print("[dim]No context active.[/dim]")
 
         elif command == "/exit":
             return False

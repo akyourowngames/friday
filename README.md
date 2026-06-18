@@ -10,6 +10,7 @@ A terminal-based personal AI assistant that remembers everything about you and h
 - **Task management** — create reminders and to-dos naturally
 - **Runtime reminder engine** — checks due reminders while Ares is running and can send desktop notifications
 - **Conversation persistence** — stores chat turns and session summaries in SQLite
+- **Proactive context** — loads a user-owned soul file, profile, and project context every turn
 - **ONNX embeddings** — uses Sentence Transformers' ONNX backend by default for faster memory embeddings
 - **Streaming-first tool calls** — streams tokens immediately while detecting tool calls mid-stream
 - **Web search summaries** — renders concise summaries plus numbered source cards
@@ -44,6 +45,7 @@ Just type naturally:
 - "what do you know about me?"
 - "remind me to call the dentist tomorrow at 2pm"
 - "what tasks do I have?"
+- "show my active context"
 - "search the web for Python 3.13 release notes"
 - "use Tavily to search for today's AI news"
 - "read pyproject.toml"
@@ -73,6 +75,11 @@ Just type naturally:
 | `/import PATH` | Import memories, tasks, and conversations from JSON |
 | `/import PATH --config` | Import data and non-secret config |
 | `/reset` | Reset conversation context |
+| `/soul` | Show Ares' personality file |
+| `/soul edit` | Open or create `soul.md` for editing |
+| `/profile` | Show your profile file |
+| `/profile edit` | Open or create `profile.md` for editing |
+| `/context` | Show the active blended context |
 | `/exit` | Exit Ares |
 
 ### Tool Examples
@@ -113,7 +120,12 @@ Config is stored at `~/.ares/config.json`:
   "session_summary_messages": 2,
   "web_search_provider": "auto",
   "tavily_api_key": "",
-  "tavily_search_depth": "basic"
+  "tavily_search_depth": "basic",
+  "soul_path": "",
+  "profile_path": "",
+  "project_context_enabled": true,
+  "context_token_budget": 2000,
+  "project_context_max_files": 2
 }
 ```
 
@@ -125,6 +137,11 @@ choose the default file.
 when `TAVILY_API_KEY` or `tavily_api_key` is configured, then falls back to `ddgs`.
 Set `tavily_search_depth` to `advanced` when you want deeper Tavily searches.
 
+`soul_path` and `profile_path` can point to custom markdown files. Leave them empty
+to use `soul.md` and `profile.md` under `data_dir`. Project context scans the current
+directory for files like `CLAUDE.md`, `AGENTS.md`, `pyproject.toml`, `package.json`,
+and `README.md`.
+
 ## Persistence
 
 Stored across sessions:
@@ -133,6 +150,8 @@ Stored across sessions:
 - Tasks, due dates, reminder timestamps, and sent-reminder state in `~/.ares/data/ares.db`
 - Conversation sessions, chat turns, and compact session summaries in `~/.ares/data/ares.db`
 - Config in `~/.ares/config.json`
+- Ares personality in `~/.ares/data/soul.md` by default
+- User profile in `~/.ares/data/profile.md` by default
 - Terminal input history in `~/.ares_history`
 
 Not stored:

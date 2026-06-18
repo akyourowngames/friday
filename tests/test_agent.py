@@ -5,6 +5,7 @@ import pytest
 
 from ares.agent import Agent
 from ares.memory import MemoryStore
+from ares.models import AppConfig
 from ares.tasks import TaskStore
 
 
@@ -12,7 +13,12 @@ from ares.tasks import TaskStore
 def agent(tmp_path, fake_embedding_provider):
     mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
     task_store = TaskStore(db_path=tmp_path / "tasks.db")
-    return Agent(memory_store=mem_store, task_store=task_store, api_key="test-key")
+    return Agent(
+        memory_store=mem_store,
+        task_store=task_store,
+        api_key="test-key",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
 
 
 class TestAgent:
@@ -34,6 +40,22 @@ class TestAgent:
         messages = agent.build_messages("Hello", [], context=context)
         all_content = " ".join(m["content"] for m in messages)
         assert "dark mode" in all_content
+
+    def test_get_context_includes_soul_profile_memory_and_tasks(self, agent):
+        """Full context includes proactive layers plus memories and tasks."""
+        agent.soul_manager.soul_path.write_text("## Personality\nBe direct.", encoding="utf-8")
+        agent.profile_manager.profile_path.write_text("## Identity\nName: Alice", encoding="utf-8")
+        agent.memory_store.store("User likes tea", category="preference")
+        agent.task_store.create("Buy milk")
+
+        context = agent.get_context("tea")
+
+        assert "Ares Personality" in context
+        assert "Be direct" in context
+        assert "User Profile" in context
+        assert "Alice" in context
+        assert "User likes tea" in context
+        assert "Buy milk" in context
 
     def test_process_tool_calls_store_memory(self, agent, tmp_path):
         """Processing a store_memory tool call stores the fact."""

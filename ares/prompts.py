@@ -23,6 +23,23 @@ You have access to these tools:
 - **search_files**: Search local files by name or content.
 - **list_directory**: List local directory contents.
 
+## Your Personality
+
+Your personality may be defined in a soul file provided in context.
+Follow those guidelines for tone, communication style, and values.
+
+## About the User
+
+The user's profile may be provided in context. Use it to personalize responses:
+- Use their name when it feels natural
+- Reference their projects and goals when relevant
+- Respect their stated preferences
+
+## Project Context
+
+When project context is provided, you are working within that codebase.
+Follow its conventions, use its tools, and reference its structure.
+
 ## Web Search
 
 Use `web_search` when:
@@ -61,8 +78,15 @@ Rules:
 
 ## Context
 
-You will receive relevant memories about the user at the start of each conversation.
-Use this context to provide personalized responses.
+You will receive layered context at the start of each turn:
+- Your personality (soul)
+- User profile and preferences
+- Current project context
+- Recent session summaries
+- Relevant memories
+- Pending tasks
+
+Use this context to provide personalized, contextual responses.
 
 ## Privacy
 
@@ -83,37 +107,12 @@ FIRST_RUN_MESSAGE = """Welcome to **Ares**! I'm your personal AI assistant — t
 - Create tasks: "remind me to call mom tomorrow at 3pm"
 - Type `/help` for all commands
 
+**Customize me:**
+- `/soul edit` — change my personality and communication style
+- `/profile edit` — tell me about yourself so I can help better
+
 **Privacy note:** I use free AI models that may log data for model improvement.
 Your personal data (memories, tasks) stays 100% local on your machine.
 If you want stronger privacy, you can switch to a paid model with `/model`.
 
 Let's get started! What's on your mind?"""
-
-
-def build_context_prompt(
-    memories: list[dict],
-    tasks: list[dict],
-    conversation_summaries: list[str] | None = None,
-) -> str:
-    """Build a context string from retrieved memories and pending tasks."""
-    parts = []
-
-    if conversation_summaries:
-        parts.append("## Recent session summaries:")
-        for summary in conversation_summaries:
-            parts.append(f"- {summary}")
-
-    if memories:
-        parts.append("## What I know about you:")
-        for m in memories:
-            cat = m.get("category", "note")
-            importance = m.get("importance", 0.5)
-            parts.append(f"- [{cat}, importance={importance}] #{m['fact_id']}: {m['fact_text']}")
-
-    if tasks:
-        parts.append("\n## Your pending tasks:")
-        for t in tasks[:5]:
-            due = f" (due: {t['due']})" if t.get("due") else ""
-            parts.append(f"- {t['title']}{due}")
-
-    return "\n".join(parts) if parts else ""

@@ -2,6 +2,7 @@
 
 import json
 from io import StringIO
+from pathlib import Path
 
 import pytest
 from rich.console import Console
@@ -72,7 +73,32 @@ class DummyMemoryStore:
 
 class DummyTaskStore:
     def list_pending(self):
-        return []
+        return [{"title": "Buy milk", "due": None}]
+
+
+class DummySoulManager:
+    soul_path = Path("soul.md")
+
+    def read(self):
+        return "# Soul\nBe concise."
+
+    def get_context(self, token_budget=200):
+        return "## Ares Personality\nBe concise."
+
+
+class DummyProfileManager:
+    profile_path = Path("profile.md")
+
+    def read(self):
+        return "# About Me\nName: Alice"
+
+    def get_context(self, token_budget=400):
+        return "## User Profile\nName: Alice"
+
+
+class DummyProjectContext:
+    def get_context(self, token_budget=400):
+        return "## Current Project Context\n# Ares"
 
 
 class DummyConversationStore:
@@ -91,6 +117,9 @@ def make_cli():
     app.agent = DummyAgent()
     app.memory_store = DummyMemoryStore()
     app.task_store = DummyTaskStore()
+    app.soul_manager = DummySoulManager()
+    app.profile_manager = DummyProfileManager()
+    app.project_context = DummyProjectContext()
     app.conversation_store = DummyConversationStore()
     app.conversation_id = 1
     app.conversation_history = []
@@ -165,6 +194,20 @@ def test_export_command_calls_exporter(monkeypatch, tmp_path):
     assert called["memory_store"] is app.memory_store
     assert called["task_store"] is app.task_store
     assert called["path"] == str(tmp_path / "out.json")
+
+
+def test_soul_profile_and_context_commands_render():
+    app = make_cli()
+
+    assert app._handle_command("/soul")
+    assert app._handle_command("/profile")
+    assert app._handle_command("/context")
+
+    output = app.console_file.getvalue()
+    assert "Ares Personality" in output or "Soul" in output
+    assert "Alice" in output
+    assert "Current Project Context" in output
+    assert "Buy milk" in output
 
 
 @pytest.mark.asyncio

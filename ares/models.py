@@ -82,3 +82,8 @@ class AppConfig(BaseModel):
     web_search_provider: str = "auto"
     tavily_api_key: str = ""
     tavily_search_depth: str = "basic"
+    soul_path: str = ""
+    profile_path: str = ""
+    project_context_enabled: bool = True
+    context_token_budget: int = 2000
+    project_context_max_files: int = 2

@@ -7,6 +7,7 @@ import pytest
 from ares.agent import Agent
 from ares.llm import LLMClient
 from ares.memory import MemoryStore
+from ares.models import AppConfig
 from ares.tasks import TaskStore
 
 
@@ -63,7 +64,12 @@ async def test_llm_chat_stream_yields_structured_content_and_tool_chunks():
 async def test_agent_run_stream_no_tools_uses_streaming_only(tmp_path, fake_embedding_provider):
     mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
     task_store = TaskStore(db_path=tmp_path / "tasks.db")
-    agent = Agent(memory_store=mem_store, task_store=task_store, api_key="test-key")
+    agent = Agent(
+        memory_store=mem_store,
+        task_store=task_store,
+        api_key="test-key",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
 
     async def forbidden_chat(*_args, **_kwargs):
         raise AssertionError("run_stream should not make a blocking preflight chat call")
@@ -86,7 +92,12 @@ async def test_agent_run_stream_no_tools_uses_streaming_only(tmp_path, fake_embe
 async def test_agent_run_stream_detects_and_executes_tool_call(tmp_path, fake_embedding_provider):
     mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
     task_store = TaskStore(db_path=tmp_path / "tasks.db")
-    agent = Agent(memory_store=mem_store, task_store=task_store, api_key="test-key")
+    agent = Agent(
+        memory_store=mem_store,
+        task_store=task_store,
+        api_key="test-key",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
     call_count = 0
 
     async def forbidden_chat(*_args, **_kwargs):

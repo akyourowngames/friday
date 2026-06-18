@@ -7,6 +7,7 @@ This is the current practical map of what Ares can do after the streaming, file-
 Ares is a terminal assistant wrapped around an OpenAI-compatible chat model endpoint. The model does the reasoning, planning, tool selection, and final response writing. Ares gives that model a local tool belt:
 
 - long-term memory over SQLite + vector search
+- proactive context from soul/profile/project files
 - task and reminder management
 - conversation history and session summaries
 - current web search through Tavily or ddgs
@@ -35,6 +36,27 @@ The model can answer normal questions without tools, but it should call tools wh
 | `read_file` | Reads a local text file with line numbers. | "read README.md lines 1 to 80" |
 | `search_files` | Searches files by content or name. | "find files containing sqlite_vec" |
 | `list_directory` | Lists directory contents. | "list the docs directory" |
+
+## Proactive Context
+
+Ares now loads layered context every turn:
+
+- `soul.md`: Ares' personality and communication style
+- `profile.md`: user identity, preferences, projects, goals, and notes
+- project files in the current directory, such as `CLAUDE.md`, `AGENTS.md`, `pyproject.toml`, `package.json`, and `README.md`
+- recent session summaries
+- relevant memories
+- pending tasks
+
+The files are user-owned. Ares creates templates on first run but does not auto-edit them.
+
+Commands:
+
+- `/soul`: show the personality file
+- `/soul edit`: open or create the personality file
+- `/profile`: show the user profile
+- `/profile edit`: open or create the profile
+- `/context`: show the full blended context currently being injected
 
 ## Web Search
 
@@ -133,6 +155,12 @@ Stored in `~/.ares/config.json`:
 - reminder settings
 - web search provider settings
 - Tavily API key, if configured there
+- proactive context settings and optional custom soul/profile paths
+
+Stored as markdown files:
+
+- Ares personality in `~/.ares/data/soul.md` by default
+- user profile in `~/.ares/data/profile.md` by default
 
 Stored in `~/.ares_history`:
 
