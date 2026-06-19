@@ -8,7 +8,7 @@ from ares.filesystem import list_directory, read_file, search_files
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.tasks import TaskStore
-from ares.web import payload_to_json, web_search_payload
+from ares.web import fetch_url_tool, payload_to_json, web_search_payload
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
@@ -126,10 +126,15 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "web_search",
-            "Search the web for current information, news, weather, recent developments, or facts that may have changed.",
+            "Search the web AND automatically read the top results. Returns search results plus the full content of the top 3 pages. One call does everything — no need to fetch URLs separately.",
             {
                 "query": {"type": "string", "description": "The web search query."},
                 "max_results": {"type": "integer", "default": 5},
+                "fetch_top": {
+                    "type": "integer",
+                    "default": 3,
+                    "description": "How many top results to automatically fetch full content for (0 to skip fetching).",
+                },
                 "provider": {
                     "type": "string",
                     "enum": ["auto", "tavily", "ddgs"],
@@ -138,6 +143,24 @@ def get_tool_definitions() -> list[dict]:
                 },
             },
             ["query"],
+        ),
+        _tool(
+            "fetch_url",
+            "Fetch a web page and extract its readable text content. Use after web_search to read the full content of a specific page.",
+            {
+                "url": {"type": "string", "description": "The URL to fetch (must start with http:// or https://)."},
+                "max_chars": {
+                    "type": "integer",
+                    "default": 15000,
+                    "description": "Maximum characters to return (default 15000).",
+                },
+                "extract_text": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "If true, strips HTML tags and returns plain text. If false, returns raw HTML.",
+                },
+            },
+            ["url"],
         ),
         _tool(
             "read_file",
@@ -200,6 +223,7 @@ class ToolExecutor:
             "get_due_soon": self._get_due_soon,
             "export_data": self._export_data,
             "web_search": self._web_search,
+            "fetch_url": self._fetch_url,
             "read_file": self._read_file,
             "search_files": self._search_files,
             "list_directory": self._list_directory,
@@ -330,6 +354,9 @@ class ToolExecutor:
             provider=args.get("provider"),
         )
         return payload_to_json(payload)
+
+    def _fetch_url(self, args: dict) -> str:
+        return fetch_url_tool(args)
 
     def _read_file(self, args: dict) -> str:
         return read_file(

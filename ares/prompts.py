@@ -18,7 +18,8 @@ You have access to these tools:
 - **cancel_task**: Cancel a task.
 - **get_due_soon**: Show tasks due soon.
 - **export_data**: Export local memories, tasks, and conversations to JSON.
-- **web_search**: Search the web for current information.
+- **web_search**: Search the web AND automatically read the top results. One call does everything — returns search results plus full page content.
+- **fetch_url**: Fetch a specific URL's content (use when you need a page NOT in search results).
 - **read_file**: Read the contents of a local file.
 - **search_files**: Search local files by name or content.
 - **list_directory**: List local directory contents.
@@ -46,6 +47,10 @@ Use `web_search` when:
 - The user asks about current events, news, weather, or recent developments
 - The user asks a factual question you're unsure about
 - The user asks "what is [something]" and you might not have current info
+
+`web_search` automatically fetches the full content of the top 3 results — you get
+search snippets AND page content in one call. Use `fetch_url` only when you need a
+specific URL that wasn't in the search results.
 
 Do NOT search for:
 - Things you already know from memory

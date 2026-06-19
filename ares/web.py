@@ -157,8 +157,13 @@ def web_search_payload(
     max_results: int = 5,
     *,
     provider: str | None = None,
+    fetch_top: int = 3,
+    max_fetch_chars: int = 8000,
 ) -> dict[str, Any]:
-    """Return structured web search payload with summary and results."""
+    """Return structured web search payload with summary, results, AND fetched content.
+
+    Automatically fetches the top N results so Ares doesn't need to call fetch_url separately.
+    """
     config = load_config()
     selected_provider = (provider or config.web_search_provider or "auto").lower()
     errors: list[str] = []
@@ -184,6 +189,7 @@ def web_search_payload(
                     "summary": "No summary available.",
                     "answer": "",
                     "results": [],
+                    "fetched": [],
                     "errors": errors,
                 }
             results, ddgs_errors = ddgs_search(query, max_results=max_results)
@@ -203,12 +209,32 @@ def web_search_payload(
         errors.extend(ddgs_errors)
         actual_provider = "ddgs"
 
+    # Automatically fetch top results for full content
+    fetched: list[dict[str, Any]] = []
+    if fetch_top > 0 and results:
+        for result in results[:fetch_top]:
+            url = result.get("url", "")
+            if not url:
+                continue
+            try:
+                page = fetch_url(url, max_chars=max_fetch_chars)
+                if not page["error"]:
+                    fetched.append({
+                        "url": url,
+                        "title": page.get("title", result.get("title", "")),
+                        "content": page["content"],
+                        "truncated": page.get("truncated", False),
+                    })
+            except Exception as exc:
+                errors.append(f"Failed to fetch {url}: {exc}")
+
     return {
         "query": query,
         "provider": actual_provider,
         "summary": summarize_results(results, answer),
         "answer": answer,
         "results": results,
+        "fetched": fetched,
         "errors": errors,
     }
 
@@ -259,3 +285,160 @@ def format_results(results_or_payload: list[dict] | dict) -> str:
 def payload_to_json(payload: dict[str, Any]) -> str:
     """Serialize a web search payload for tool transport."""
     return json.dumps(payload, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# fetch_url — fetch and extract readable content from a URL
+# ---------------------------------------------------------------------------
+
+MAX_FETCH_BYTES = 2 * 1024 * 1024  # 2 MB limit
+DEFAULT_FETCH_TIMEOUT = 15.0
+
+
+def _strip_html_tags(html: str) -> str:
+    """Remove HTML tags and return plain text."""
+    # Remove script and style elements
+    text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove HTML comments
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    # Replace br/p/div/li with newlines
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?(p|div|li|h[1-6]|tr|blockquote)[^>]*>", "\n", text, flags=re.IGNORECASE)
+    # Remove all remaining tags
+    text = re.sub(r"<[^>]+>", "", text)
+    # Decode common HTML entities
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    text = text.replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
+    # Collapse multiple whitespace/newlines
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _extract_meta_description(html: str) -> str:
+    """Try to extract meta description from HTML."""
+    match = re.search(
+        r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+    # Try reversed attribute order
+    match = re.search(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']',
+        html,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def fetch_url(
+    url: str,
+    max_chars: int = 15000,
+    timeout: float = DEFAULT_FETCH_TIMEOUT,
+    extract_text: bool = True,
+) -> dict[str, Any]:
+    """Fetch a URL and return its content as readable text.
+
+    Returns dict with keys: url, title, content, content_type, truncated, error
+    """
+    result: dict[str, Any] = {
+        "url": url,
+        "title": "",
+        "content": "",
+        "content_type": "",
+        "truncated": False,
+        "error": "",
+    }
+
+    # Validate URL
+    if not url.startswith(("http://", "https://")):
+        result["error"] = "URL must start with http:// or https://"
+        return result
+
+    try:
+        with httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            },
+        ) as client:
+            response = client.get(url)
+            response.raise_for_status()
+    except httpx.TimeoutException:
+        result["error"] = f"Request timed out after {timeout}s"
+        return result
+    except httpx.HTTPStatusError as exc:
+        result["error"] = f"HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
+        return result
+    except Exception as exc:
+        result["error"] = f"Request failed: {exc}"
+        return result
+
+    content_type = response.headers.get("content-type", "")
+    result["content_type"] = content_type
+
+    # Handle non-HTML content
+    if "text/html" not in content_type and "text/" in content_type:
+        # Plain text or other text type
+        text = response.text[:MAX_FETCH_BYTES].decode(errors="replace")
+        if len(text) > max_chars:
+            text = text[:max_chars]
+            result["truncated"] = True
+        result["content"] = text
+        return result
+
+    if "text/html" not in content_type:
+        result["error"] = f"Unsupported content type: {content_type}. Can only fetch text/HTML."
+        return result
+
+    # Parse HTML
+    html = response.text[:MAX_FETCH_BYTES]
+
+    # Extract title
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE)
+    if title_match:
+        result["title"] = re.sub(r"\s+", " ", title_match.group(1)).strip()
+
+    if extract_text:
+        text = _strip_html_tags(html)
+    else:
+        text = html
+
+    # Truncate if needed
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n[Content truncated at {} chars]".format(max_chars)
+        result["truncated"] = True
+
+    result["content"] = text
+    return result
+
+
+def fetch_url_tool(args: dict) -> str:
+    """Tool wrapper for fetch_url."""
+    url = args.get("url", "")
+    max_chars = int(args.get("max_chars", 15000))
+    extract_text = bool(args.get("extract_text", True))
+
+    data = fetch_url(url, max_chars=max_chars, extract_text=extract_text)
+
+    if data["error"]:
+        return f"Error fetching {url}: {data['error']}"
+
+    parts = []
+    if data["title"]:
+        parts.append(f"Title: {data['title']}")
+    parts.append(f"URL: {data['url']}")
+    parts.append(f"Content type: {data['content_type']}")
+    parts.append("")
+    parts.append(data["content"])
+
+    if data["truncated"]:
+        parts.append("\n[Content was truncated due to length]")
+
+    return "\n".join(parts)
