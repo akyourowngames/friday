@@ -220,6 +220,17 @@ class ConversationStore:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def delete_empty_conversations(self) -> int:
+        """Delete conversations that have no messages. Returns count deleted."""
+        cursor = self.conn.execute(
+            """DELETE FROM conversations
+               WHERE id NOT IN (
+                   SELECT DISTINCT conversation_id FROM conversation_messages
+               )"""
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
     def close(self) -> None:
         """Close the database connection."""
         self.conn.close()

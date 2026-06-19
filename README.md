@@ -15,7 +15,7 @@ A terminal-based personal AI assistant that remembers everything about you and h
 - **Streaming-first tool calls** — streams tokens immediately while detecting tool calls mid-stream
 - **Web search summaries** — renders concise summaries plus numbered source cards
 - **Tavily or ddgs search** — uses Tavily when configured, otherwise falls back to zero-key `ddgs`
-- **Read-only file access** — reads files, searches file contents/names, and lists directories safely
+- **File access** — reads files (read/search/list), gets file metadata, globs file patterns, writes files, edits files with fuzzy matching, creates directories, deletes files, and moves files — writes sandboxed to home directory
 - **Export/import** — JSON backup and restore for memories, tasks, conversations, and non-secret config
 - **Beautiful terminal UI** — streaming markdown, thinking indicators, rich panels
 - **Desktop app** — Electron + React interface with streaming chat, sessions, tools, settings, and status
@@ -204,7 +204,7 @@ Not stored:
 - No telemetry, no analytics, no phone-home
 - Free models may log data for improvement — switch to paid models for privacy
 - Web search sends the search query to Tavily or external `ddgs` backends
-- File tools are read-only and restricted to your home directory
+- File read operations are unrestricted. File write operations are sandboxed to your home directory with protected paths (`~/.ares/`) blocked and destructive operations require explicit user confirmation
 - Use `/model` to see available models
 
 ## Tech Stack

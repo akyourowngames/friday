@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from ares.conversations import ConversationStore
 from ares.exporter import export_data
-from ares.filesystem import list_directory, read_file, search_files, get_file_info as _get_file_info_impl, glob_pattern as _glob_pattern_impl
+from ares.filesystem import (
+    list_directory, read_file, search_files, get_file_info as _get_file_info_impl,
+    glob_pattern as _glob_pattern_impl, disk_usage as _disk_usage_impl,
+    checksum as _checksum_impl, copy_file as _copy_file_impl,
+    find_duplicates as _find_duplicates_impl, tail_file as _tail_file_impl,
+    head_file as _head_file_impl, count_lines as _count_lines_impl,
+    file_tree as _file_tree_impl,
+)
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.tasks import TaskStore
@@ -263,6 +270,79 @@ def get_tool_definitions() -> list[dict]:
             },
             ["source", "destination"],
         ),
+        _tool(
+            "disk_usage",
+            "Show disk usage for a directory tree with sizes and file counts (like du -sh).",
+            {
+                "path": {"type": "string", "description": "Directory to analyze.", "default": "."},
+                "max_depth": {"type": "integer", "default": 2, "description": "How deep to traverse (1-5)."},
+            },
+        ),
+        _tool(
+            "checksum",
+            "Compute file checksum hash (md5, sha1, sha256, sha512). Useful for verifying file integrity.",
+            {
+                "path": {"type": "string", "description": "File path."},
+                "algorithm": {"type": "string", "default": "sha256", "description": "Hash algorithm: md5, sha1, sha256, or sha512."},
+            },
+            ["path"],
+        ),
+        _tool(
+            "copy_file",
+            "Copy a file to a new location.",
+            {
+                "source": {"type": "string", "description": "Source file path."},
+                "destination": {"type": "string", "description": "Destination file path."},
+                "overwrite": {"type": "boolean", "default": False, "description": "Overwrite if destination exists."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview without copying."},
+            },
+            ["source", "destination"],
+        ),
+        _tool(
+            "find_duplicates",
+            "Find duplicate files by size and content hash. Useful for cleaning up redundant files.",
+            {
+                "path": {"type": "string", "description": "Directory to scan.", "default": "."},
+                "min_size": {"type": "integer", "default": 1024, "description": "Minimum file size to check (bytes)."},
+                "max_results": {"type": "integer", "default": 50, "description": "Max duplicate groups to show."},
+            },
+        ),
+        _tool(
+            "tail_file",
+            "Read the last N lines of a file (like Unix tail).",
+            {
+                "path": {"type": "string", "description": "File path."},
+                "num_lines": {"type": "integer", "default": 20, "description": "Number of lines to read from end."},
+            },
+            ["path"],
+        ),
+        _tool(
+            "head_file",
+            "Read the first N lines of a file (like Unix head).",
+            {
+                "path": {"type": "string", "description": "File path."},
+                "num_lines": {"type": "integer", "default": 20, "description": "Number of lines to read."},
+            },
+            ["path"],
+        ),
+        _tool(
+            "count_lines",
+            "Count lines in files with optional content and name filtering (like wc -l).",
+            {
+                "path": {"type": "string", "description": "Directory to scan.", "default": "."},
+                "pattern": {"type": "string", "default": "", "description": "Content regex pattern to match lines."},
+                "name_pattern": {"type": "string", "default": "", "description": "File name glob pattern (e.g. *.py)."},
+            },
+        ),
+        _tool(
+            "file_tree",
+            "Display directory tree structure (like the tree command).",
+            {
+                "path": {"type": "string", "description": "Directory path.", "default": "."},
+                "max_depth": {"type": "integer", "default": 3, "description": "Max depth to show (1-10)."},
+                "show_files": {"type": "boolean", "default": True, "description": "Show files (false = dirs only)."},
+            },
+        ),
     ]
 
 
@@ -307,6 +387,14 @@ class ToolExecutor:
             "create_directory": self._create_directory,
             "delete_file": self._delete_file,
             "move_file": self._move_file,
+            "disk_usage": self._disk_usage,
+            "checksum": self._checksum,
+            "copy_file": self._copy_file,
+            "find_duplicates": self._find_duplicates,
+            "tail_file": self._tail_file,
+            "head_file": self._head_file,
+            "count_lines": self._count_lines,
+            "file_tree": self._file_tree,
         }
         try:
             handler = handlers[tool_name]
@@ -544,3 +632,56 @@ class ToolExecutor:
             )
 
         return _move_file_impl(source, destination, dry_run=dry_run)
+
+    def _disk_usage(self, args: dict) -> str:
+        return _disk_usage_impl(
+            path=args.get("path", "."),
+            max_depth=int(args.get("max_depth", 2)),
+        )
+
+    def _checksum(self, args: dict) -> str:
+        return _checksum_impl(
+            path=args["path"],
+            algorithm=args.get("algorithm", "sha256"),
+        )
+
+    def _copy_file(self, args: dict) -> str:
+        return _copy_file_impl(
+            source=args["source"],
+            destination=args["destination"],
+            overwrite=bool(args.get("overwrite", False)),
+            dry_run=bool(args.get("dry_run", False)),
+        )
+
+    def _find_duplicates(self, args: dict) -> str:
+        return _find_duplicates_impl(
+            path=args.get("path", "."),
+            min_size=int(args.get("min_size", 1024)),
+            max_results=int(args.get("max_results", 50)),
+        )
+
+    def _tail_file(self, args: dict) -> str:
+        return _tail_file_impl(
+            path=args["path"],
+            num_lines=int(args.get("num_lines", 20)),
+        )
+
+    def _head_file(self, args: dict) -> str:
+        return _head_file_impl(
+            path=args["path"],
+            num_lines=int(args.get("num_lines", 20)),
+        )
+
+    def _count_lines(self, args: dict) -> str:
+        return _count_lines_impl(
+            path=args.get("path", "."),
+            pattern=args.get("pattern", ""),
+            name_pattern=args.get("name_pattern", ""),
+        )
+
+    def _file_tree(self, args: dict) -> str:
+        return _file_tree_impl(
+            path=args.get("path", "."),
+            max_depth=int(args.get("max_depth", 3)),
+            show_files=bool(args.get("show_files", True)),
+        )

@@ -1,7 +1,7 @@
 import { MessageSquare, Pencil, Trash2, X, Check, MoreHorizontal, Pin, Copy, ExternalLink, Download, Archive } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 
-export function SessionItem({ session, active, onClick, onRename, onDelete }) {
+export function SessionItem({ session, active, streaming, onClick, onRename, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
@@ -81,7 +81,7 @@ export function SessionItem({ session, active, onClick, onRename, onDelete }) {
   }
 
   return (
-    <div className={`session-item-wrap ${active ? "active" : ""}`} ref={menuRef}>
+    <div className={`session-item-wrap ${active ? "active" : ""} ${streaming ? "streaming" : ""}`} ref={menuRef}>
       <button
         className="session-item"
         type="button"
@@ -89,7 +89,15 @@ export function SessionItem({ session, active, onClick, onRename, onDelete }) {
         onContextMenu={handleContextMenu}
         title={session.title}
       >
-        <MessageSquare size={14} className="session-icon" />
+        <div className="session-icon-wrap">
+          <MessageSquare size={14} className="session-icon" />
+          {streaming && (
+            <>
+              <span className="session-pulse" />
+              <span className="session-pulse-dot" />
+            </>
+          )}
+        </div>
         <span className="session-title-text">{session.title || "New session"}</span>
         <span className="session-meta">
           {session.message_count ? <small>{session.message_count}</small> : null}

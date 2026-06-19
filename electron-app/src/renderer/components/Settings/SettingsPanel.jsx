@@ -1,59 +1,72 @@
-import { Database, KeyRound, RotateCw, X } from "lucide-react";
+import { X, RefreshCw, Server, Cpu, Database, CheckCircle2 } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore.js";
 import { ModelSelector } from "./ModelSelector.jsx";
 
 export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
-  const model = useSettingsStore((state) => state.model);
-  const memoryCount = useSettingsStore((state) => state.memoryCount);
-  const taskCount = useSettingsStore((state) => state.taskCount);
-  const serverUrl = useSettingsStore((state) => state.serverUrl);
+  const model = useSettingsStore((s) => s.model);
+  const memoryCount = useSettingsStore((s) => s.memoryCount);
+  const taskCount = useSettingsStore((s) => s.taskCount);
+  const serverUrl = useSettingsStore((s) => s.serverUrl);
 
   return (
-    <div className="settings-scrim" role="presentation" onMouseDown={onClose}>
-      <aside className="settings-panel" role="dialog" aria-label="Settings" onMouseDown={(e) => e.stopPropagation()}>
-        <header>
-          <div>
-            <h2>Settings</h2>
-            <p>Runtime controls for this Ares desktop session.</p>
-          </div>
-          <button className="icon-button" type="button" aria-label="Close settings" onClick={onClose}>
-            <X size={17} />
+    <div className="settings-scrim" onClick={onClose}>
+      <aside className="settings-panel" onClick={(e) => e.stopPropagation()}>
+        <header className="settings-header">
+          <h2>Settings</h2>
+          <button className="settings-close" onClick={onClose} aria-label="Close">
+            <X size={18} />
           </button>
         </header>
 
-        <div className="settings-group">
-          <ModelSelector onSetModel={onSetModel} />
-          <label className="field">
-            <span>
-              <KeyRound size={15} />
+        <div className="settings-body">
+          <section className="settings-section">
+            <h3 className="settings-section-title">
+              <Cpu size={14} />
+              Model
+            </h3>
+            <ModelSelector onSetModel={onSetModel} />
+          </section>
+
+          <section className="settings-section">
+            <h3 className="settings-section-title">
+              <Server size={14} />
               Server
-            </span>
-            <input value={serverUrl || "ws://127.0.0.1:8765"} readOnly />
-          </label>
-        </div>
+            </h3>
+            <div className="settings-field">
+              <input
+                className="settings-input"
+                value={serverUrl || "ws://127.0.0.1:8765"}
+                readOnly
+              />
+            </div>
+          </section>
 
-        <div className="settings-metrics">
-          <div>
-            <Database size={16} />
-            <span>Memories</span>
-            <strong>{memoryCount}</strong>
-          </div>
-          <div>
-            <Database size={16} />
-            <span>Tasks</span>
-            <strong>{taskCount}</strong>
-          </div>
-          <div>
-            <Database size={16} />
-            <span>Model</span>
-            <strong>{model}</strong>
-          </div>
-        </div>
+          <section className="settings-section">
+            <h3 className="settings-section-title">
+              <Database size={14} />
+              Status
+            </h3>
+            <div className="settings-stats">
+              <div className="settings-stat">
+                <span className="settings-stat-label">Memories</span>
+                <span className="settings-stat-value">{memoryCount}</span>
+              </div>
+              <div className="settings-stat">
+                <span className="settings-stat-label">Tasks</span>
+                <span className="settings-stat-value">{taskCount}</span>
+              </div>
+              <div className="settings-stat">
+                <span className="settings-stat-label">Model</span>
+                <span className="settings-stat-value settings-stat-model">{model}</span>
+              </div>
+            </div>
+          </section>
 
-        <button className="primary-button" type="button" onClick={onRefresh}>
-          <RotateCw size={16} />
-          Refresh desktop state
-        </button>
+          <button className="settings-refresh" onClick={onRefresh}>
+            <RefreshCw size={15} />
+            Refresh state
+          </button>
+        </div>
       </aside>
     </div>
   );

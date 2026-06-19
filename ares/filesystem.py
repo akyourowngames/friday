@@ -27,9 +27,39 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+def _normalize_path(path: str) -> str:
+    r"""Normalize path for cross-platform compatibility.
+    
+    Handles Unix-style paths on Windows (e.g., /c/Users -> C:/Users)
+    and normalizes separators.
+    """
+    import sys
+    if not path:
+        return "."
+    
+    # On Windows, convert Unix-style drive paths
+    if sys.platform == "win32":
+        # Handle /c/Users -> C:\Users
+        if len(path) >= 3 and path[0] == "/" and path[2] == "/" and path[1].isalpha():
+            drive = path[1].upper()
+            rest = path[2:].replace("/", "\\")
+            path = f"{drive}:{rest}"
+        # Handle //c/Users -> \\c\Users (UNC-like)
+        elif len(path) >= 4 and path.startswith("//") and path[2].isalpha() and path[3] == "/":
+            drive = path[2].upper()
+            rest = path[3:].replace("/", "\\")
+            path = f"\\\\{drive}:{rest}"
+    
+    return path
+
+
 def resolve_path(path: str = ".") -> Path:
-    """Resolve a path. No access restrictions for reads."""
-    return Path(path or ".").expanduser().resolve()
+    """Resolve a path. No access restrictions for reads.
+    
+    Handles Windows paths, Unix-style paths, ~ expansion, and relative paths.
+    """
+    normalized = _normalize_path(path or ".")
+    return Path(normalized).expanduser().resolve()
 
 
 def _is_binary(path: Path, check_bytes: int = 1024) -> bool:
@@ -416,5 +446,399 @@ def glob_pattern(pattern: str, path: str = ".", max_results: int = 50) -> str:
 
     if len(matches) >= bounded_max:
         lines.append(f"... (capped at {bounded_max} results)")
+
+    return "\n".join(lines)
+
+
+def disk_usage(path: str = ".", max_depth: int = 2) -> str:
+    """Show disk usage for a directory tree (like du -sh).
+    
+    Args:
+        path: Directory to analyze
+        max_depth: How deep to traverse (1-5, default 2)
+    """
+    root = resolve_path(path)
+    if not root.exists():
+        return f"Path not found: {path}"
+    if not root.is_file():
+        if not root.is_dir():
+            return f"Not a directory: {path}"
+
+    depth = max(1, min(int(max_depth), 5))
+
+    def _get_size(p: Path) -> tuple[int, int]:
+        """Return (total_size, file_count) for directory."""
+        total = 0
+        count = 0
+        try:
+            for item in p.rglob("*"):
+                if item.is_file():
+                    try:
+                        total += item.stat().st_size
+                        count += 1
+                    except (OSError, PermissionError):
+                        pass
+        except (OSError, PermissionError):
+            pass
+        return total, count
+
+    def _format_tree(p: Path, current_depth: int, prefix: str = "") -> list[str]:
+        lines = []
+        if current_depth > depth:
+            return lines
+        try:
+            items = sorted(p.iterdir(), key=lambda x: x.name.lower())
+        except (PermissionError, OSError):
+            return lines
+
+        dirs = [i for i in items if i.is_dir()]
+        files = [i for i in items if i.is_file()]
+
+        for d in dirs[:20]:  # limit to 20 subdirs
+            name = d.name + "/"
+            try:
+                size, count = _get_size(d)
+                size_str = _format_size(size)
+                lines.append(f"{prefix}{name}  {size_str} ({count} files)")
+                if current_depth < depth:
+                    lines.extend(_format_tree(d, current_depth + 1, prefix + "  "))
+            except (OSError, PermissionError):
+                lines.append(f"{prefix}{name}  [access denied]")
+
+        for f in files[:50]:  # limit to 50 files per dir
+            try:
+                size = f.stat().st_size
+                lines.append(f"{prefix}{f.name}  {_format_size(size)}")
+            except (OSError, PermissionError):
+                lines.append(f"{prefix}{f.name}  [access denied]")
+
+        return lines
+
+    total_size, total_files = _get_size(root)
+    lines = [f"[Disk Usage: {_display_path(root)}]"]
+    lines.append(f"  Total: {_format_size(total_size)} ({total_files:,} files)")
+    lines.append("")
+    lines.extend(_format_tree(root, 1))
+
+    return "\n".join(lines)
+
+
+def checksum(path: str, algorithm: str = "sha256") -> str:
+    """Compute file checksum (md5, sha1, sha256, sha512)."""
+    import hashlib
+
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        return f"File not found: {path}"
+    if not resolved.is_file():
+        return f"Not a file: {path}"
+
+    algo = algorithm.lower().replace("-", "")
+    if algo not in ("md5", "sha1", "sha256", "sha512"):
+        return f"Unsupported algorithm: {algorithm}. Use md5, sha1, sha256, or sha512."
+
+    try:
+        h = hashlib.new(algo)
+        with open(resolved, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        hash_hex = h.hexdigest()
+
+        size = _format_size(resolved.stat().st_size)
+        return (
+            f"[Checksum: {_display_path(resolved)}]\n"
+            f"  Algorithm: {algo.upper()}\n"
+            f"  Hash: {hash_hex}\n"
+            f"  Size: {size}"
+        )
+    except PermissionError:
+        return f"Permission denied: {_display_path(resolved)}"
+    except OSError as e:
+        return f"Error computing checksum: {e}"
+
+
+def copy_file(source: str, destination: str, overwrite: bool = False, dry_run: bool = False) -> str:
+    """Copy a file to a new location."""
+    import shutil
+
+    src = resolve_path(source)
+    if not src.exists():
+        return f"Source not found: {source}"
+    if not src.is_file():
+        return f"Not a file: {source}"
+
+    dst = resolve_path(destination)
+    if dst.exists() and not overwrite:
+        dst_size = _format_size(dst.stat().st_size) if dst.is_file() else "dir"
+        return (
+            f"Destination exists ({dst_size}). "
+            f"Use overwrite=true to replace."
+        )
+
+    src_size = _format_size(src.stat().st_size)
+    preview = f"Copy {_display_path(src)} ({src_size}) → {_display_path(dst)}"
+
+    if dry_run:
+        return f"[DRY RUN] {preview}"
+
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+        return f"{preview}"
+    except PermissionError:
+        return f"Permission denied: {_display_path(dst)}"
+    except OSError as e:
+        return f"Error copying file: {e}"
+
+
+def find_duplicates(path: str = ".", min_size: int = 1024, max_results: int = 50) -> str:
+    """Find duplicate files by size and hash.
+    
+    Scans directory for files with identical size and content hash.
+    Useful for finding redundant files to clean up.
+    """
+    import hashlib
+
+    root = resolve_path(path)
+    if not root.exists():
+        return f"Path not found: {path}"
+    if not root.is_dir():
+        return f"Not a directory: {path}"
+
+    size_map: dict[int, list[Path]] = {}
+
+    # Group files by size
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        # Skip ignored directories
+        parts = p.relative_to(root).parts
+        if any(part in SKIP_DIRS for part in parts):
+            continue
+        try:
+            size = p.stat().st_size
+            if size >= min_size:
+                size_map.setdefault(size, []).append(p)
+        except (OSError, PermissionError):
+            continue
+
+    # Find duplicates by hashing files with same size
+    dup_groups: list[tuple[int, str, list[Path]]] = []
+    for size, files in size_map.items():
+        if len(files) < 2:
+            continue
+        hash_map: dict[str, list[Path]] = {}
+        for f in files:
+            try:
+                h = hashlib.md5()
+                with open(f, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(8192), b""):
+                        h.update(chunk)
+                key = h.hexdigest()
+                hash_map.setdefault(key, []).append(f)
+            except (OSError, PermissionError):
+                continue
+        for h, dup_files in hash_map.items():
+            if len(dup_files) >= 2:
+                dup_groups.append((size, h, dup_files))
+
+    if not dup_groups:
+        return "No duplicate files found."
+
+    dup_groups.sort(key=lambda x: -x[0])  # largest first
+    lines = [f"[Duplicate Files in {_display_path(root)}]"]
+
+    shown = 0
+    for size, h, files in dup_groups:
+        if shown >= max_results:
+            lines.append(f"... and {len(dup_groups) - shown} more duplicate groups")
+            break
+        lines.append(f"\n  {_format_size(size)} (md5: {h[:8]}...):")
+        for f in files[:10]:
+            lines.append(f"    {_display_path(f)}")
+        if len(files) > 10:
+            lines.append(f"    ... and {len(files) - 10} more")
+        shown += 1
+
+    total_dup_size = sum(s for s, _, files in dup_groups for _ in files[1:])
+    lines.insert(1, f"  Found {len(dup_groups)} duplicate groups, {_format_size(total_dup_size)} recoverable")
+
+    return "\n".join(lines)
+
+
+def tail_file(path: str, num_lines: int = 20) -> str:
+    """Read the last N lines of a file (like Unix tail)."""
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        return f"File not found: {path}"
+    if not resolved.is_file():
+        return f"Not a file: {path}"
+
+    bounded = max(1, min(int(num_lines), 500))
+
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except PermissionError:
+        return f"Permission denied: {_display_path(resolved)}"
+
+    total = len(lines)
+    start = max(0, total - bounded)
+    selected = lines[start:]
+
+    parts = [f"[Tail: {_display_path(resolved)} (last {len(selected)} of {total} lines)]"]
+    for i, line in enumerate(selected, start + 1):
+        parts.append(f"{i:>6}\t{line.rstrip()}")
+
+    return "\n".join(parts)
+
+
+def head_file(path: str, num_lines: int = 20) -> str:
+    """Read the first N lines of a file (like Unix head)."""
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        return f"File not found: {path}"
+    if not resolved.is_file():
+        return f"Not a file: {path}"
+
+    bounded = max(1, min(int(num_lines), 500))
+
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            lines = []
+            for i, line in enumerate(f):
+                if i >= bounded:
+                    break
+                lines.append(line)
+    except PermissionError:
+        return f"Permission denied: {_display_path(resolved)}"
+
+    total_lines = 0
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
+            total_lines = sum(1 for _ in f)
+    except (OSError, PermissionError):
+        pass
+
+    parts = [f"[Head: {_display_path(resolved)} (first {len(lines)} of {total_lines} lines)]"]
+    for i, line in enumerate(lines, 1):
+        parts.append(f"{i:>6}\t{line.rstrip()}")
+
+    if total_lines > len(lines):
+        parts.append(f"({total_lines - len(lines)} more lines below)")
+
+    return "\n".join(parts)
+
+
+def count_lines(path: str = "", pattern: str = "", name_pattern: str = "") -> str:
+    """Count lines in files, optionally filtered by content pattern and file name.
+    
+    Like 'wc -l' with optional grep filtering.
+    """
+    root = resolve_path(path or ".")
+    if not root.exists():
+        return f"Path not found: {path}"
+    if not root.is_dir():
+        return f"Not a directory: {path}"
+
+    content_pattern = None
+    if pattern:
+        try:
+            content_pattern = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            content_pattern = re.compile(re.escape(pattern), re.IGNORECASE)
+
+    total_lines = 0
+    total_files = 0
+    file_counts: list[tuple[str, int]] = []
+
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        parts = p.relative_to(root).parts
+        if any(part in SKIP_DIRS for part in parts):
+            continue
+        if name_pattern and not fnmatch.fnmatch(p.name, name_pattern):
+            continue
+
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                if content_pattern:
+                    count = sum(1 for line in f if content_pattern.search(line))
+                else:
+                    count = sum(1 for _ in f)
+            if count > 0:
+                total_lines += count
+                total_files += 1
+                file_counts.append((_display_path(p), count))
+        except (OSError, PermissionError):
+            continue
+
+    file_counts.sort(key=lambda x: -x[1])
+
+    lines = [f"[Line Count: {_display_path(root)}]"]
+    lines.append(f"  Total: {total_lines:,} lines in {total_files} files")
+
+    if pattern:
+        lines.append(f"  Matching pattern: '{pattern}'")
+    if name_pattern:
+        lines.append(f"  File filter: '{name_pattern}'")
+
+    lines.append("")
+    for path_str, count in file_counts[:30]:
+        lines.append(f"  {count:>8}  {path_str}")
+
+    if len(file_counts) > 30:
+        lines.append(f"  ... and {len(file_counts) - 30} more files")
+
+    return "\n".join(lines)
+
+
+def file_tree(path: str = ".", max_depth: int = 3, show_files: bool = True) -> str:
+    """Display directory tree structure (like tree command)."""
+    root = resolve_path(path)
+    if not root.exists():
+        return f"Path not found: {path}"
+    if not root.is_dir():
+        return f"Not a directory: {path}"
+
+    depth = max(1, min(int(max_depth), 10))
+
+    def _build_tree(p: Path, current_depth: int, prefix: str = "") -> list[str]:
+        lines = []
+        if current_depth > depth:
+            return lines
+
+        try:
+            items = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+        except (PermissionError, OSError):
+            return [f"{prefix}[access denied]"]
+
+        if show_files:
+            items = [i for i in items if i.is_dir() or not any(
+                part in SKIP_DIRS for part in (i.relative_to(root).parts if i.is_file() else ())
+            )]
+        else:
+            items = [i for i in items if i.is_dir()]
+
+        for i, item in enumerate(items):
+            is_last = (i == len(items) - 1)
+            connector = "└── " if is_last else "├── "
+            child_prefix = "    " if is_last else "│   "
+
+            if item.is_dir():
+                name = item.name + "/"
+                lines.append(f"{prefix}{connector}{name}")
+                if current_depth < depth:
+                    lines.extend(_build_tree(item, current_depth + 1, prefix + child_prefix))
+            else:
+                if show_files:
+                    lines.append(f"{prefix}{connector}{item.name}")
+
+        return lines
+
+    lines = [f"[Tree: {_display_path(root)}]"]
+    lines.append(root.name + "/")
+    lines.extend(_build_tree(root, 1))
 
     return "\n".join(lines)

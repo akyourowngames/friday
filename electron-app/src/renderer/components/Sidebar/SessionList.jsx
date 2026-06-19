@@ -1,7 +1,7 @@
 import { useSessionStore } from "../../stores/sessionStore.js";
 import { SessionItem } from "./SessionItem.jsx";
 
-export function SessionList({ onLoadSession, onRenameSession, onDeleteSession }) {
+export function SessionList({ onLoadSession, onRenameSession, onDeleteSession, isStreaming }) {
   const sessions = useSessionStore((state) => state.filteredSessions());
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
 
@@ -15,6 +15,7 @@ export function SessionList({ onLoadSession, onRenameSession, onDeleteSession })
         <SessionItem
           session={session}
           active={session.id === activeSessionId}
+          streaming={session.id === activeSessionId && isStreaming}
           onClick={onLoadSession}
           onRename={onRenameSession}
           onDelete={onDeleteSession}

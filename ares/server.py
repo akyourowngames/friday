@@ -95,7 +95,8 @@ class AresServer:
             memory_store=self.memory_store,
             task_store=self.task_store,
         )
-        self.conversation_id = self.conversation_store.start_conversation()
+        self.conversation_id = None
+        self.conversation_store.delete_empty_conversations()
         self._server = None
 
     async def run_forever(self) -> None:
@@ -161,7 +162,11 @@ class AresServer:
             await self._send_error(websocket, "Message content is required")
             return
 
-        session_id = int(message.get("session_id") or self.conversation_id)
+        session_id = message.get("session_id")
+        if session_id:
+            session_id = int(session_id)
+        else:
+            session_id = self.conversation_store.start_conversation()
         self.conversation_id = session_id
         history = self._conversation_history(session_id)
         response_parts: list[str] = []
@@ -204,11 +209,12 @@ class AresServer:
                 "session_id": session_id,
             },
         )
+        await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
         await self._send(websocket, self._status())
 
     async def _handle_new_session(self, websocket: Any) -> None:
-        self.conversation_id = self.conversation_store.start_conversation()
+        self.conversation_id = None
         await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
 
@@ -228,7 +234,7 @@ class AresServer:
             return
         self.conversation_store.delete_conversation(session_id)
         if self.conversation_id == session_id:
-            self.conversation_id = self.conversation_store.start_conversation()
+            self.conversation_id = None
             await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
 
@@ -290,6 +296,7 @@ class AresServer:
         return history
 
     def _sessions(self) -> list[dict[str, Any]]:
+        self.conversation_store.delete_empty_conversations()
         sessions: list[dict[str, Any]] = []
         for row in self.conversation_store.list_conversations():
             item = _as_jsonable(row)

@@ -46,7 +46,7 @@ export default function App() {
               title="Settings"
               onClick={() => setSettingsOpen(true)}
             >
-              <Settings size={17} />
+              <Settings size={18} strokeWidth={2.2} />
             </button>
           </div>
         </header>

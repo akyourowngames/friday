@@ -1,4 +1,4 @@
-"""Write file system operations for Ares with home-directory sandboxing."""
+"""Write file system operations for Ares."""
 
 from __future__ import annotations
 
@@ -6,40 +6,13 @@ import os
 import tempfile
 from pathlib import Path
 
-from ares.filesystem import _allowed_roots, _display_path, _format_size, SKIP_DIRS
-
-PROTECTED_PREFIXES = (".ares",)
-
-
-def _home() -> Path:
-    return Path.home().resolve()
+from ares.filesystem import _allowed_roots, _display_path, _format_size, _normalize_path, SKIP_DIRS
 
 
 def resolve_write_path(path: str) -> Path:
-    """Resolve and validate a write path. Must be inside home directory.
-    Blocks writes to protected Ares system paths (~/.ares/)."""
-    expanded = Path(path).expanduser().resolve()
-    home = _home()
-
-    # Check it's inside home
-    try:
-        expanded.relative_to(home)
-    except ValueError:
-        raise ValueError(f"Access denied: {path} is outside home directory")
-
-    # Check it's not a protected Ares path
-    try:
-        rel = expanded.relative_to(home)
-        for part in rel.parts:
-            if part in PROTECTED_PREFIXES:
-                raise ValueError(
-                    f"Access denied: {path} is a protected Ares system path"
-                )
-    except ValueError:
-        # If we can't get a relative path (shouldn't happen), block
-        if "relative to" not in str(ValueError):
-            raise
-
+    """Resolve a write path. No access restrictions."""
+    normalized = _normalize_path(path)
+    expanded = Path(normalized).expanduser().resolve()
     return expanded
 
 

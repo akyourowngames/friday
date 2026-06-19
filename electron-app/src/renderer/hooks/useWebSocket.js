@@ -130,8 +130,9 @@ export function useWebSocket() {
       return;
     }
     clearChat();
+    setActiveSessionId(null);
     aresSocket.send({ type: "new_session" });
-  }, [clearChat]);
+  }, [clearChat, setActiveSessionId]);
 
   const loadSession = useCallback((sessionId) => {
     aresSocket.send({ type: "load_session", session_id: sessionId });
