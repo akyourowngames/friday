@@ -1,4 +1,4 @@
-import { MessageSquare, Pencil, Trash2, X, Check } from "lucide-react";
+import { MessageSquare, Pencil, Trash2, X, Check, MoreHorizontal, Pin, Copy, ExternalLink, Download, Archive } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 
 export function SessionItem({ session, active, onClick, onRename, onDelete }) {
@@ -25,6 +25,12 @@ export function SessionItem({ session, active, onClick, onRename, onDelete }) {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [menuOpen]);
+
+  function handleMenuClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenuOpen(!menuOpen);
+  }
 
   function handleContextMenu(e) {
     e.preventDefault();
@@ -75,24 +81,55 @@ export function SessionItem({ session, active, onClick, onRename, onDelete }) {
   }
 
   return (
-    <div className="session-item-wrap" ref={menuRef}>
+    <div className={`session-item-wrap ${active ? "active" : ""}`} ref={menuRef}>
       <button
-        className={`session-item ${active ? "active" : ""}`}
+        className="session-item"
         type="button"
         onClick={() => onClick(session.id)}
         onContextMenu={handleContextMenu}
         title={session.title}
       >
-        <MessageSquare size={14} />
-        <span>{session.title || "New session"}</span>
-        {session.message_count ? <small>{session.message_count}</small> : null}
+        <MessageSquare size={14} className="session-icon" />
+        <span className="session-title-text">{session.title || "New session"}</span>
+        <span className="session-meta">
+          {session.message_count ? <small>{session.message_count}</small> : null}
+          <div 
+            className="session-more-btn"
+            onClick={handleMenuClick}
+            role="button"
+            tabIndex={0}
+          >
+            <MoreHorizontal size={14} />
+          </div>
+        </span>
       </button>
       {menuOpen ? (
         <div className="context-menu">
+          <button type="button" onClick={() => setMenuOpen(false)}>
+            <Pin size={13} />
+            <span>Pin</span>
+          </button>
+          <button type="button" onClick={() => { navigator.clipboard.writeText(session.id.toString()); setMenuOpen(false); }}>
+            <Copy size={13} />
+            <span>Copy ID</span>
+          </button>
+          <button type="button" onClick={() => setMenuOpen(false)}>
+            <ExternalLink size={13} />
+            <span>New window</span>
+          </button>
+          <button type="button" onClick={() => setMenuOpen(false)}>
+            <Download size={13} />
+            <span>Export</span>
+          </button>
           <button type="button" onClick={startRename}>
             <Pencil size={13} />
             <span>Rename</span>
           </button>
+          <button type="button" onClick={() => setMenuOpen(false)}>
+            <Archive size={13} />
+            <span>Archive</span>
+          </button>
+          <div className="context-menu-divider" />
           <button type="button" className="danger" onClick={handleDelete}>
             <Trash2 size={13} />
             <span>Delete</span>

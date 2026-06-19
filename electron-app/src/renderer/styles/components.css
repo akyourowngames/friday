@@ -285,36 +285,66 @@ kbd {
   background: var(--bg-active);
 }
 
-.session-item svg {
+.session-item .session-icon {
   flex-shrink: 0;
   opacity: 0.5;
   transition: opacity var(--duration-fast);
 }
 
-.session-item:hover svg {
+.session-item:hover .session-icon {
   opacity: 0.8;
 }
 
-.session-item span {
+.session-item .session-title-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.session-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .session-item small {
-  flex-shrink: 0;
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
 
-.session-item.active {
+.session-more-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: all var(--duration-fast);
+}
+
+.session-more-btn svg {
+  opacity: 1 !important;
+}
+
+.session-item:hover .session-more-btn {
+  opacity: 1;
+}
+
+.session-more-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.session-item-wrap.active .session-item {
   background: var(--bg-elevated);
   color: var(--text-primary);
 }
 
-.session-item.active svg {
+.session-item-wrap.active .session-icon {
   opacity: 1;
   color: var(--accent);
 }
@@ -343,6 +373,12 @@ kbd {
   -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   animation: fadeIn var(--duration-fast) var(--ease-out);
+}
+
+.context-menu-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 4px 0;
 }
 
 .context-menu button {
