@@ -28,12 +28,8 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 def resolve_path(path: str = ".") -> Path:
-    """Resolve and validate a path. Access is limited to the home directory."""
-    expanded = Path(path or ".").expanduser().resolve()
-    roots = _allowed_roots()
-    if not any(_is_relative_to(expanded, root) for root in roots):
-        raise ValueError(f"Access denied: {path} is outside home directory")
-    return expanded
+    """Resolve a path. No access restrictions for reads."""
+    return Path(path or ".").expanduser().resolve()
 
 
 def _is_binary(path: Path, check_bytes: int = 1024) -> bool:
@@ -323,5 +319,102 @@ def list_directory(path: str = ".", max_items: int = 30) -> str:
 
     if len(items) > bounded_max:
         lines.append(f"... and {len(items) - bounded_max} more item(s)")
+
+    return "\n".join(lines)
+
+
+def _format_timestamp(ts: float) -> str:
+    """Format a timestamp as a human-readable string."""
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (OSError, ValueError):
+        return "unknown"
+
+
+def get_file_info(path: str) -> str:
+    """Get metadata about a file or directory."""
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        return f"File not found: {path}"
+
+    stat = resolved.stat()
+    size = _format_size(stat.st_size)
+    mtime = _format_timestamp(stat.st_mtime)
+    atime = _format_timestamp(stat.st_atime)
+    ctime = _format_timestamp(stat.st_ctime)
+
+    if resolved.is_symlink():
+        ftype = "symlink"
+    elif resolved.is_dir():
+        ftype = "directory"
+    elif resolved.is_file():
+        ftype = "file"
+    else:
+        ftype = "unknown"
+
+    is_binary = "no"
+    if resolved.is_file():
+        try:
+            is_binary = "yes" if _is_binary(resolved) else "no"
+        except (OSError, PermissionError):
+            is_binary = "unknown"
+
+    lines = [
+        f"[File Info: {_display_path(resolved)}]",
+        f"  Type: {ftype}",
+        f"  Size: {size} ({stat.st_size:,} bytes)",
+        f"  Modified: {mtime}",
+        f"  Accessed: {atime}",
+        f"  Created: {ctime}",
+    ]
+    if resolved.is_file():
+        lines.append(f"  Binary: {is_binary}")
+
+    return "\n".join(lines)
+
+
+def glob_pattern(pattern: str, path: str = ".", max_results: int = 50) -> str:
+    """Find files matching a glob pattern."""
+    root = resolve_path(path)
+    if not root.exists():
+        return f"Directory not found: {path}"
+    if not root.is_dir():
+        return f"Not a directory: {path}"
+
+    bounded_max = max(1, min(int(max_results), 500))
+    matches = []
+
+    try:
+        for match in root.rglob(pattern):
+            # Skip ignored directories
+            parts = match.relative_to(root).parts
+            if any(p in SKIP_DIRS for p in parts):
+                continue
+            matches.append(match)
+            if len(matches) >= bounded_max:
+                break
+    except (OSError, PermissionError) as e:
+        return f"Error searching: {e}"
+
+    if not matches:
+        return f"No matches for '{pattern}' in {_display_path(root)}"
+
+    # Sort: directories first, then by path
+    matches.sort(key=lambda p: (p.is_file(), str(p).lower()))
+
+    lines = [f"Found {len(matches)} match(es) for '{pattern}':"]
+    for m in matches:
+        if m.is_dir():
+            lines.append(f"  [dir]  {_display_path(m)}/")
+        else:
+            try:
+                size = _format_size(m.stat().st_size)
+            except OSError:
+                size = "?"
+            lines.append(f"  [file] {_display_path(m)}  {size}")
+
+    if len(matches) >= bounded_max:
+        lines.append(f"... (capped at {bounded_max} results)")
 
     return "\n".join(lines)

@@ -18,9 +18,9 @@ class FakeAgent:
     def __init__(self):
         self.model = "deepseek-v4-flash-free"
 
-    async def run_stream(self, message, history=None):
+    async def run_stream(self, message, conversation_history=None):
         assert message == "search bitcoin"
-        assert history == []
+        assert conversation_history == []
         yield "I will check. "
         yield '[tool:web_search:{"query":"bitcoin price","results":[{"title":"CoinMarketCap","url":"https://example.test","snippet":"BTC price"}]}]'
         yield "Bitcoin is moving today."

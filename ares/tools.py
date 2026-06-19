@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from ares.conversations import ConversationStore
 from ares.exporter import export_data
-from ares.filesystem import list_directory, read_file, search_files
+from ares.filesystem import list_directory, read_file, search_files, get_file_info as _get_file_info_impl, glob_pattern as _glob_pattern_impl
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.tasks import TaskStore
 from ares.web import fetch_url_tool, payload_to_json, web_search_payload
-
-
+from ares.filesystem_write import write_file as _write_file_impl
+from ares.filesystem_write import edit_file as _edit_file_impl
+from ares.filesystem_write import create_directory as _create_directory_impl
+from ares.filesystem_write import delete_file as _delete_file_impl
+from ares.filesystem_write import move_file as _move_file_impl
 def _tool(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
     return {
         "type": "function",
@@ -190,6 +193,76 @@ def get_tool_definitions() -> list[dict]:
                 "max_items": {"type": "integer", "default": 30},
             },
         ),
+        _tool(
+            "get_file_info",
+            "Get metadata about a file or directory: type, size, timestamps, binary status.",
+            {
+                "path": {"type": "string", "description": "File or directory path."},
+            },
+            ["path"],
+        ),
+        _tool(
+            "glob_pattern",
+            "Find files matching a glob pattern (e.g. **/*.py, src/**/*.ts).",
+            {
+                "pattern": {"type": "string", "description": "Glob pattern."},
+                "path": {"type": "string", "default": ".", "description": "Directory to search from."},
+                "max_results": {"type": "integer", "default": 50, "description": "Max files to return."},
+            },
+            ["pattern"],
+        ),
+        _tool(
+            "write_file",
+            "Create a new file or overwrite an existing one. If overwriting, confirm=true is required.",
+            {
+                "path": {"type": "string", "description": "File path to write."},
+                "content": {"type": "string", "description": "File content to write."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview without writing."},
+                "confirm": {"type": "boolean", "default": False, "description": "Confirm destructive overwrite."},
+            },
+            ["path", "content"],
+        ),
+        _tool(
+            "edit_file",
+            "Edit a file by searching and replacing text. old_text must match uniquely. If no match, returns the closest content as a suggestion.",
+            {
+                "path": {"type": "string", "description": "File path."},
+                "old_text": {"type": "string", "description": "Text to find (must match uniquely in the file)."},
+                "new_text": {"type": "string", "description": "Replacement text."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview without editing."},
+            },
+            ["path", "old_text", "new_text"],
+        ),
+        _tool(
+            "create_directory",
+            "Create a directory and any missing parent directories (mkdir -p).",
+            {
+                "path": {"type": "string", "description": "Directory path to create."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview without creating."},
+            },
+            ["path"],
+        ),
+        _tool(
+            "delete_file",
+            "Delete a file or empty directory. Always requires confirm=true.",
+            {
+                "path": {"type": "string", "description": "File or directory path to delete."},
+                "confirm": {"type": "boolean", "default": False, "description": "Confirm deletion."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview without deleting."},
+            },
+            ["path"],
+        ),
+        _tool(
+            "move_file",
+            "Move or rename a file or directory. Creates parent directories of destination as needed.",
+            {
+                "source": {"type": "string", "description": "Current file path."},
+                "destination": {"type": "string", "description": "New file path."},
+                "confirm": {"type": "boolean", "default": False, "description": "Confirm if destination exists."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview without moving."},
+            },
+            ["source", "destination"],
+        ),
     ]
 
 
@@ -227,6 +300,13 @@ class ToolExecutor:
             "read_file": self._read_file,
             "search_files": self._search_files,
             "list_directory": self._list_directory,
+            "get_file_info": self._get_file_info,
+            "glob_pattern": self._glob_pattern,
+            "write_file": self._write_file,
+            "edit_file": self._edit_file,
+            "create_directory": self._create_directory,
+            "delete_file": self._delete_file,
+            "move_file": self._move_file,
         }
         try:
             handler = handlers[tool_name]
@@ -378,3 +458,89 @@ class ToolExecutor:
             path=args.get("path", "."),
             max_items=int(args.get("max_items", 30)),
         )
+
+    def _get_file_info(self, args: dict) -> str:
+        return _get_file_info_impl(args["path"])
+
+    def _glob_pattern(self, args: dict) -> str:
+        return _glob_pattern_impl(
+            args["pattern"],
+            path=args.get("path", "."),
+            max_results=int(args.get("max_results", 50)),
+        )
+
+    def _write_file(self, args: dict) -> str:
+        path = args["path"]
+        content = args["content"]
+        dry_run = bool(args.get("dry_run", False))
+        confirm = bool(args.get("confirm", False))
+
+        # Check if file exists and needs confirmation
+        from ares.filesystem import resolve_path as read_resolve
+        try:
+            resolved = read_resolve(path)
+            is_overwrite = resolved.exists()
+        except ValueError:
+            is_overwrite = False
+
+        if is_overwrite and not confirm and not dry_run:
+            from ares.filesystem import _format_size
+            try:
+                size = _format_size(resolved.stat().st_size)
+            except OSError:
+                size = "unknown"
+            return (
+                f"⚠ CONFIRM REQUIRED: This will overwrite {path} ({size}). "
+                f"Re-call with confirm=true to proceed."
+            )
+
+        return _write_file_impl(path, content, dry_run=dry_run)
+
+    def _edit_file(self, args: dict) -> str:
+        return _edit_file_impl(
+            args["path"],
+            args["old_text"],
+            args["new_text"],
+            dry_run=bool(args.get("dry_run", False)),
+        )
+
+    def _create_directory(self, args: dict) -> str:
+        return _create_directory_impl(
+            args["path"],
+            dry_run=bool(args.get("dry_run", False)),
+        )
+
+    def _delete_file(self, args: dict) -> str:
+        path = args["path"]
+        dry_run = bool(args.get("dry_run", False))
+        confirm = bool(args.get("confirm", False))
+
+        if not confirm and not dry_run:
+            return (
+                f"⚠ CONFIRM REQUIRED: This will delete {path}. "
+                f"Re-call with confirm=true to proceed."
+            )
+
+        return _delete_file_impl(path, dry_run=dry_run)
+
+    def _move_file(self, args: dict) -> str:
+        source = args["source"]
+        destination = args["destination"]
+        dry_run = bool(args.get("dry_run", False))
+        confirm = bool(args.get("confirm", False))
+
+        # Check if destination exists and needs confirmation
+        from ares.filesystem import resolve_path as read_resolve
+        try:
+            dst_resolved = read_resolve(destination)
+            dst_exists = dst_resolved.exists()
+        except ValueError:
+            dst_exists = False
+
+        if dst_exists and not confirm and not dry_run:
+            return (
+                f"⚠ CONFIRM REQUIRED: Destination {destination} already exists. "
+                f"Re-call with confirm=true to proceed (will overwrite)."
+            )
+
+        return _move_file_impl(source, destination, dry_run=dry_run)

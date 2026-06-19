@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 16
+        assert len(tools) == 23
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -37,6 +37,13 @@ class TestToolDefinitions:
             "read_file",
             "search_files",
             "list_directory",
+            "get_file_info",
+            "glob_pattern",
+            "write_file",
+            "edit_file",
+            "create_directory",
+            "delete_file",
+            "move_file",
         }
 
     def test_tools_have_schemas(self):
@@ -47,6 +54,54 @@ class TestToolDefinitions:
             assert "parameters" in tool["function"]
             assert "properties" in tool["function"]["parameters"]
 
+
+def test_get_file_info_tool_definition():
+    from ares.tools import get_tool_definitions
+    defs = get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert "get_file_info" in names
+
+
+def test_glob_pattern_tool_definition():
+    from ares.tools import get_tool_definitions
+    defs = get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert "glob_pattern" in names
+
+
+def test_write_file_tool_definition():
+    from ares.tools import get_tool_definitions
+    defs = get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert "write_file" in names
+
+
+def test_edit_file_tool_definition():
+    from ares.tools import get_tool_definitions
+    defs = get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert "edit_file" in names
+
+
+def test_create_directory_tool_definition():
+    from ares.tools import get_tool_definitions
+    defs = get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert "create_directory" in names
+
+
+def test_delete_file_tool_definition():
+    from ares.tools import get_tool_definitions
+    defs = get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert "delete_file" in names
+
+
+def test_move_file_tool_definition():
+    from ares.tools import get_tool_definitions
+    defs = get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert "move_file" in names
 
 class TestToolExecutor:
     @pytest.fixture
@@ -192,3 +247,30 @@ class TestToolExecutor:
         """Unknown tool name raises ValueError."""
         with pytest.raises(ValueError, match="Unknown tool"):
             executor.execute("nonexistent_tool", {})
+
+    def test_executor_write_file_new(self, executor, tmp_path, monkeypatch):
+        monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("ares.filesystem_write._home", lambda: tmp_path)
+        path = str(tmp_path / "test.txt")
+        result = executor.execute("write_file", {"path": path, "content": "hello"})
+        assert "Created" in result
+
+    def test_executor_write_file_overwrite_blocked(self, executor, tmp_path, monkeypatch):
+        monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("ares.filesystem_write._home", lambda: tmp_path)
+        path = tmp_path / "existing.txt"
+        path.write_text("old", encoding="utf-8")
+        result = executor.execute("write_file", {"path": str(path), "content": "new"})
+        assert "CONFIRM" in result
+        assert path.read_text(encoding="utf-8") == "old"  # unchanged
+
+    def test_executor_delete_file_blocked_without_confirm(self, executor, tmp_path, monkeypatch):
+        monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("ares.filesystem_write._home", lambda: tmp_path)
+        path = tmp_path / "victim.txt"
+        path.write_text("bye", encoding="utf-8")
+        result = executor.execute("delete_file", {"path": str(path)})
+        assert "CONFIRM" in result
+        assert path.exists()  # unchanged
+
+
