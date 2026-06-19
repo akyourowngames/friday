@@ -1,5 +1,6 @@
 """Entry point: python -m ares"""
 
+import argparse
 import asyncio
 import threading
 from collections.abc import Coroutine
@@ -37,8 +38,23 @@ def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
     return result.get("value")
 
 
+async def _run_server(host: str, port: int) -> None:
+    from ares.server import run_server
+
+    await run_server(host=host, port=port)
+
+
 def main():
-    _run_coro(_run_cli())
+    parser = argparse.ArgumentParser(description="Ares personal AI assistant")
+    parser.add_argument("--server", action="store_true", help="Run the desktop WebSocket server")
+    parser.add_argument("--host", default="127.0.0.1", help="Server host for --server")
+    parser.add_argument("--port", type=int, default=8765, help="Server port for --server")
+    args = parser.parse_args()
+
+    if args.server:
+        _run_coro(_run_server(args.host, args.port))
+    else:
+        _run_coro(_run_cli())
 
 
 if __name__ == "__main__":

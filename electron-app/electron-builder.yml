@@ -1,0 +1,24 @@
+appId: dev.ares.desktop
+productName: Ares
+directories:
+  output: release
+files:
+  - dist/**
+  - src/main/**
+  - package.json
+asarUnpack:
+  - src/main/**
+win:
+  target:
+    - nsis
+  artifactName: Ares-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target:
+    - dmg
+linux:
+  target:
+    - AppImage

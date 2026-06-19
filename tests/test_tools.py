@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 15
+        assert len(tools) == 16
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -33,6 +33,7 @@ class TestToolDefinitions:
             "get_due_soon",
             "export_data",
             "web_search",
+            "fetch_url",
             "read_file",
             "search_files",
             "list_directory",
@@ -153,6 +154,19 @@ class TestToolExecutor:
         payload = json.loads(result)
         assert payload["summary"] == "Summary"
         assert payload["results"][0]["title"] == "Result"
+
+    def test_fetch_url_tool(self, executor, monkeypatch):
+        """fetch_url returns structured page extraction payload."""
+        monkeypatch.setattr("ares.tools.fetch_url_tool", lambda args: json.dumps({
+            "url": args["url"],
+            "title": "Example",
+            "content": "Readable page text",
+            "error": "",
+        }))
+        result = executor.execute("fetch_url", {"url": "https://example.com"})
+        payload = json.loads(result)
+        assert payload["title"] == "Example"
+        assert payload["content"] == "Readable page text"
 
     def test_file_tools(self, executor, tmp_path, monkeypatch):
         """read_file, search_files, and list_directory expose read-only local access."""

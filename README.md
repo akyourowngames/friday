@@ -18,6 +18,7 @@ A terminal-based personal AI assistant that remembers everything about you and h
 - **Read-only file access** — reads files, searches file contents/names, and lists directories safely
 - **Export/import** — JSON backup and restore for memories, tasks, conversations, and non-secret config
 - **Beautiful terminal UI** — streaming markdown, thinking indicators, rich panels
+- **Desktop app** — Electron + React interface with streaming chat, sessions, tools, settings, and status
 - **100% local data** — all your info stays on your machine
 - **Free to run** — uses OpenCode Zen free models
 
@@ -30,6 +31,30 @@ pip install -e .
 # Run
 python -m ares
 ```
+
+### Desktop App
+
+```bash
+# Install Python package first
+pip install -e .
+
+# Install desktop dependencies
+cd electron-app
+npm install
+
+# Run the Electron desktop app
+npm run dev
+```
+
+For renderer-only development, run:
+
+```bash
+python -m ares --server
+cd electron-app
+npm run dev:vite
+```
+
+Open `http://127.0.0.1:5173` for the browser-hosted renderer. The Electron app and CLI share the same Ares backend, config, memories, tasks, conversations, `soul.md`, and `profile.md`.
 
 ## First Run
 
@@ -81,6 +106,14 @@ Just type naturally:
 | `/profile edit` | Open or create `profile.md` for editing |
 | `/context` | Show the active blended context |
 | `/exit` | Exit Ares |
+
+### Server Mode
+
+| Command | Description |
+|---------|-------------|
+| `python -m ares --server` | Start the desktop WebSocket server on `127.0.0.1:8765` |
+| `python -m ares --server --port 8766` | Start the server on a custom port |
+| `ares-server` | Console script for the same WebSocket server |
 
 ### Tool Examples
 
@@ -156,6 +189,7 @@ Stored across sessions:
 - Ares personality in `~/.ares/data/soul.md` by default
 - User profile in `~/.ares/data/profile.md` by default
 - Terminal input history in `~/.ares_history`
+- Desktop dependencies in `electron-app/node_modules/` after `npm install`
 
 Not stored:
 
@@ -188,6 +222,8 @@ Not stored:
 - ripgrep if installed, with Python regex fallback (file content search)
 - httpx (async HTTP)
 - pydantic (data models)
+- websockets (desktop server protocol)
+- Electron + React + Zustand + Vite (desktop client)
 
 ## License
 
