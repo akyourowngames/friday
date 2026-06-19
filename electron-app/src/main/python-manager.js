@@ -1,5 +1,4 @@
 const { spawn } = require("child_process");
-const crypto = require("crypto");
 const net = require("net");
 const path = require("path");
 
@@ -18,6 +17,10 @@ class PythonManager {
   async start() {
     if (this.process) {
       return this.url;
+    }
+
+    if (this.port === 8765) {
+      this.port = await this.getFreePort();
     }
 
     const python = process.env.ARES_PYTHON || "python";
@@ -63,6 +66,18 @@ class PythonManager {
       }
 
       const child = this.process;
+      const pid = child.pid;
+      this.process = null;
+      this.ready = false;
+
+      if (process.platform === "win32") {
+        const { exec } = require("child_process");
+        exec(`taskkill /pid ${pid} /T /F`, () => {
+          resolve();
+        });
+        return;
+      }
+
       const timeout = setTimeout(() => {
         if (child.exitCode === null) {
           child.kill("SIGKILL");
@@ -82,32 +97,15 @@ class PythonManager {
     return new Promise((resolve, reject) => {
       const attempt = () => {
         const socket = net.createConnection(this.port, this.host);
-        const key = crypto.randomBytes(16).toString("base64");
-        const request = [
-          "GET / HTTP/1.1",
-          `Host: ${this.host}:${this.port}`,
-          "Upgrade: websocket",
-          "Connection: Upgrade",
-          `Sec-WebSocket-Key: ${key}`,
-          "Sec-WebSocket-Version: 13",
-          "",
-          ""
-        ].join("\r\n");
+        let resolved = false;
 
-        let response = "";
         socket.once("connect", () => {
-          socket.write(request);
+          resolved = true;
+          socket.destroy();
+          resolve();
         });
-        socket.on("data", (data) => {
-          response += data.toString("utf8");
-          if (response.includes("101 Switching Protocols")) {
-            socket.end();
-            resolve();
-          }
-        });
-        socket.once("connect", () => {
-          socket.setTimeout(1000);
-        });
+
+        socket.setTimeout(1000);
         socket.once("timeout", () => {
           socket.destroy();
           retryOrFail();
@@ -118,6 +116,7 @@ class PythonManager {
         });
 
         function retryOrFail() {
+          if (resolved) return;
           if (Date.now() - startedAt > timeoutMs) {
             reject(new Error(`Ares server did not open ${this.host}:${this.port}`));
             return;
@@ -126,6 +125,17 @@ class PythonManager {
         }
       };
       attempt();
+    });
+  }
+
+  getFreePort() {
+    return new Promise((resolve, reject) => {
+      const srv = net.createServer();
+      srv.listen(0, this.host, () => {
+        const port = srv.address().port;
+        srv.close(() => resolve(port));
+      });
+      srv.on("error", reject);
     });
   }
 }

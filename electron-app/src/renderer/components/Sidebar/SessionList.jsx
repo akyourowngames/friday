@@ -1,7 +1,7 @@
 import { useSessionStore } from "../../stores/sessionStore.js";
 import { SessionItem } from "./SessionItem.jsx";
 
-export function SessionList({ onLoadSession }) {
+export function SessionList({ onLoadSession, onRenameSession, onDeleteSession }) {
   const sessions = useSessionStore((state) => state.filteredSessions());
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
 
@@ -16,6 +16,8 @@ export function SessionList({ onLoadSession }) {
           session={session}
           active={session.id === activeSessionId}
           onClick={onLoadSession}
+          onRename={onRenameSession}
+          onDelete={onDeleteSession}
           key={session.id}
         />
       ))}

@@ -1,19 +1,15 @@
 import {
-  Archive,
-  Bot,
   CalendarClock,
-  LayoutDashboard,
-  MessageCircle,
+  Bot,
   Plus,
   RefreshCw,
   Search,
-  Sparkles
 } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore.js";
 import { useSettingsStore } from "../../stores/settingsStore.js";
 import { SessionList } from "./SessionList.jsx";
 
-export function Sidebar({ onNewSession, onLoadSession, onRefresh }) {
+export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSession, onDeleteSession }) {
   const search = useSessionStore((state) => state.search);
   const setSearch = useSessionStore((state) => state.setSearch);
   const memoryCount = useSettingsStore((state) => state.memoryCount);
@@ -27,24 +23,7 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh }) {
           <span>New session</span>
           <kbd>Ctrl N</kbd>
         </button>
-        <nav className="sidebar-nav" aria-label="Ares navigation">
-          <button type="button">
-            <Sparkles size={16} />
-            <span>Skills & Tools</span>
-          </button>
-          <button type="button">
-            <MessageCircle size={16} />
-            <span>Messaging</span>
-          </button>
-          <button type="button">
-            <Archive size={16} />
-            <span>Artifacts</span>
-          </button>
-          <button type="button">
-            <LayoutDashboard size={16} />
-            <span>Dashboard</span>
-          </button>
-        </nav>
+
         <label className="sidebar-search">
           <Search size={15} />
           <input
@@ -58,17 +37,25 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh }) {
       <section className="sidebar-section">
         <div className="section-title">
           <span>Sessions</span>
-          <button className="tiny-icon" type="button" title="Refresh" onClick={onRefresh}>
+          <button
+            className="tiny-icon"
+            type="button"
+            title="Refresh"
+            onClick={onRefresh}
+          >
             <RefreshCw size={13} />
           </button>
         </div>
-        <SessionList onLoadSession={onLoadSession} />
+        <SessionList
+          onLoadSession={onLoadSession}
+          onRenameSession={onRenameSession}
+          onDeleteSession={onDeleteSession}
+        />
       </section>
 
       <section className="sidebar-section compact-section">
         <div className="section-title">
-          <span>Cron jobs</span>
-          <small>{taskCount}</small>
+          <span>System</span>
         </div>
         <div className="task-pill">
           <CalendarClock size={14} />

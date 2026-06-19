@@ -26,7 +26,7 @@ export function ChatArea({ onSend }) {
       onDragLeave={() => setDragging(false)}
       onDrop={onDrop}
     >
-      <MessageList />
+      <MessageList onSend={onSend} />
       {dragging ? <div className="drop-overlay">Drop files into Ares</div> : null}
       <Composer onSend={onSend} />
     </section>

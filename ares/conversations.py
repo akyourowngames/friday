@@ -198,6 +198,28 @@ class ConversationStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def delete_conversation(self, conversation_id: int) -> bool:
+        """Delete a conversation and all its messages."""
+        self.conn.execute(
+            "DELETE FROM conversation_messages WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        cursor = self.conn.execute(
+            "DELETE FROM conversations WHERE id = ?",
+            (conversation_id,),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def rename_conversation(self, conversation_id: int, title: str) -> bool:
+        """Set a custom summary/title for a conversation."""
+        cursor = self.conn.execute(
+            "UPDATE conversations SET summary = ? WHERE id = ?",
+            (title.strip(), conversation_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def close(self) -> None:
         """Close the database connection."""
         self.conn.close()

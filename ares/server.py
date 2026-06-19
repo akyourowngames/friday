@@ -11,10 +11,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 try:  # websockets 13+
-    from websockets.asyncio.server import ServerConnection, serve
-except ImportError:  # pragma: no cover - compatibility for older supported releases
+    from websockets.asyncio.server import ServerConnection
+except ImportError:  # pragma: no cover
     from websockets.server import WebSocketServerProtocol as ServerConnection
-    from websockets.server import serve
+
+from websockets.server import serve
+
+try:
+    from websockets.exceptions import ConnectionClosed
+except ImportError:  # pragma: no cover
+    from websockets.exceptions import ConnectionClosedError as ConnectionClosed
 
 from ares.agent import Agent
 from ares.config import load_config, save_config
@@ -101,10 +107,13 @@ class AresServer:
 
     async def handle_client(self, websocket: ServerConnection) -> None:
         """Handle a connected desktop renderer."""
-        await self._send(websocket, self._session_info())
-        await self._send(websocket, self._status())
-        async for raw in websocket:
-            await self.handle_message(websocket, raw)
+        try:
+            await self._send(websocket, self._session_info())
+            await self._send(websocket, self._status())
+            async for raw in websocket:
+                await self.handle_message(websocket, raw)
+        except ConnectionClosed:
+            pass  # client disconnected (e.g. health-check probe or user closed app)
 
     async def handle_message(self, websocket: Any, raw: str | bytes) -> None:
         """Handle one client JSON message."""
@@ -137,6 +146,10 @@ class AresServer:
                 await self._send(websocket, {"type": "tasks", "tasks": self._tasks()})
             elif msg_type == "get_status":
                 await self._send(websocket, self._status())
+            elif msg_type == "rename_session":
+                await self._handle_rename_session(websocket, message)
+            elif msg_type == "delete_session":
+                await self._handle_delete_session(websocket, message)
             else:
                 await self._send_error(websocket, f"Unknown message type: {msg_type}")
         except Exception as exc:  # pragma: no cover - guardrail for desktop runtime
@@ -154,7 +167,7 @@ class AresServer:
         response_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
 
-        async for chunk in self.agent.run_stream(content, history=history):
+        async for chunk in self.agent.run_stream(content, conversation_history=history):
             parsed = parse_tool_token(chunk)
             if parsed:
                 tool_name, tool_content = parsed
@@ -197,6 +210,26 @@ class AresServer:
     async def _handle_new_session(self, websocket: Any) -> None:
         self.conversation_id = self.conversation_store.start_conversation()
         await self._send(websocket, self._session_info())
+        await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
+
+    async def _handle_rename_session(self, websocket: Any, message: dict[str, Any]) -> None:
+        session_id = int(message.get("session_id") or 0)
+        title = str(message.get("title") or "").strip()
+        if not session_id or not title:
+            await self._send_error(websocket, "session_id and title are required")
+            return
+        self.conversation_store.rename_conversation(session_id, title)
+        await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
+
+    async def _handle_delete_session(self, websocket: Any, message: dict[str, Any]) -> None:
+        session_id = int(message.get("session_id") or 0)
+        if not session_id:
+            await self._send_error(websocket, "session_id is required")
+            return
+        self.conversation_store.delete_conversation(session_id)
+        if self.conversation_id == session_id:
+            self.conversation_id = self.conversation_store.start_conversation()
+            await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
 
     async def _handle_load_session(self, websocket: Any, message: dict[str, Any]) -> None:
@@ -315,18 +348,20 @@ class AresServer:
 
     async def _send(self, websocket: Any, payload: dict[str, Any]) -> None:
         await websocket.send(json.dumps(payload, ensure_ascii=False))
-
-    def close(self) -> None:
-        for obj in (
-            self.agent,
-            self.conversation_store,
-            self.memory_store,
-            self.task_store,
-        ):
-            close = getattr(obj, "close", None)
-            if close:
-                with suppress(Exception):
-                    close()
+    async def close(self) -> None:
+            """Shut down stores."""
+            for obj in (
+                self.agent,
+                self.conversation_store,
+                self.memory_store,
+                self.task_store,
+            ):
+                close = getattr(obj, "close", None)
+                if close:
+                    with suppress(Exception):
+                        result = close()
+                        if result is not None:
+                            await result
 
 
 async def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -334,7 +369,7 @@ async def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     try:
         await server.run_forever()
     finally:
-        server.close()
+        await server.close()
 
 
 def main() -> None:

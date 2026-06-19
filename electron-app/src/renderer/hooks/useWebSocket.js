@@ -142,6 +142,14 @@ export function useWebSocket() {
     aresSocket.send({ type: "get_status" });
   }, []);
 
+  const renameSession = useCallback((sessionId, title) => {
+    aresSocket.send({ type: "rename_session", session_id: sessionId, title });
+  }, []);
+
+  const deleteSession = useCallback((sessionId) => {
+    aresSocket.send({ type: "delete_session", session_id: sessionId });
+  }, []);
+
   const reconnect = useCallback(async () => {
     const serverUrl = window.aresDesktop
       ? await window.aresDesktop.restartServer()
@@ -156,6 +164,8 @@ export function useWebSocket() {
     loadSession,
     setModel,
     refreshSidebar,
-    reconnect
+    reconnect,
+    renameSession,
+    deleteSession
   };
 }

@@ -22,7 +22,12 @@ function createWindow() {
     minWidth: 980,
     minHeight: 620,
     backgroundColor: "#0b0b0c",
-    titleBarStyle: "hiddenInset",
+    titleBarStyle: "hidden",
+    titleBarOverlay: {
+      color: "#0b0b0c",
+      symbolColor: "#fafafa",
+      height: 36,
+    },
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
