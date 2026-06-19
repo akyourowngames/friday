@@ -125,6 +125,10 @@ export function useWebSocket() {
   );
 
   const newSession = useCallback(() => {
+    const state = useChatStore.getState();
+    if (state.messages.length === 0) {
+      return;
+    }
     clearChat();
     aresSocket.send({ type: "new_session" });
   }, [clearChat]);
