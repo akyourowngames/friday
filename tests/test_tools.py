@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 40
+        assert len(tools) == 41
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -61,6 +61,7 @@ class TestToolDefinitions:
             "resize_image",
             "convert_image",
             "crop_image",
+            "terminal_exec",
         }
 
     def test_tools_have_schemas(self):

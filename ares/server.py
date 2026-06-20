@@ -111,6 +111,12 @@ class AresServer:
         self.conversation_id = None
         self.conversation_store.delete_empty_conversations()
         self._server = None
+        self._terminal_output_buffer: dict[str, str] = {}
+        self._terminal_command_events: dict[str, asyncio.Event] = {}
+
+        # Wire terminal_exec callback to ToolExecutor
+        if hasattr(self.agent, "tool_executor"):
+            self.agent.tool_executor._terminal_exec_callback = self._terminal_exec_via_websocket
 
     async def _execute_task_in_background(self, prompt: str, max_turns: int) -> dict:
         """Run an isolated agent loop for background task execution."""
@@ -263,6 +269,14 @@ class AresServer:
                 await self._handle_rename_session(websocket, message)
             elif msg_type == "delete_session":
                 await self._handle_delete_session(websocket, message)
+            elif msg_type == "terminal:exec":
+                await self._handle_terminal_exec(websocket, message)
+            elif msg_type == "terminal:exec_result":
+                cmd_id = message.get("cmd_id", "")
+                output = message.get("output", "")
+                if cmd_id in self._terminal_command_events:
+                    self._terminal_output_buffer[cmd_id] = output
+                    self._terminal_command_events[cmd_id].set()
             else:
                 await self._send_error(websocket, f"Unknown message type: {msg_type}")
         except Exception as exc:  # pragma: no cover - guardrail for desktop runtime
@@ -469,6 +483,62 @@ class AresServer:
             if "query" in payload:
                 return {"query": payload["query"]}
         return {}
+
+    async def _handle_terminal_exec(self, websocket: Any, message: dict) -> None:
+        """Forward a command to the frontend terminal."""
+        command = message.get("command", "")
+        cmd_id = f"cmd-{id(message)}"
+
+        self._terminal_output_buffer[cmd_id] = ""
+        self._terminal_command_events[cmd_id] = asyncio.Event()
+
+        await self._send(websocket, {
+            "type": "terminal:exec",
+            "command": command,
+            "cmd_id": cmd_id,
+        })
+
+        timeout = message.get("timeout", 30)
+        try:
+            await asyncio.wait_for(
+                self._terminal_command_events[cmd_id].wait(),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            await self._send_error(websocket, f"Terminal command timed out after {timeout}s")
+        finally:
+            output = self._terminal_output_buffer.pop(cmd_id, "")
+            self._terminal_command_events.pop(cmd_id, None)
+
+    async def _terminal_exec_via_websocket(self, command: str, wait: bool = True, timeout: int = 30) -> str:
+        """Send a command to the frontend terminal and optionally wait for result."""
+        if not self._connected_websockets:
+            return "Error: No desktop client connected."
+
+        cmd_id = f"cmd-{int(asyncio.get_event_loop().time() * 1000)}"
+        self._terminal_output_buffer[cmd_id] = ""
+        event = asyncio.Event()
+        self._terminal_command_events[cmd_id] = event
+
+        ws = self._connected_websockets[0]
+        await self._send(ws, {
+            "type": "terminal:exec",
+            "command": command,
+            "cmd_id": cmd_id,
+        })
+
+        if not wait:
+            return f"Command sent to terminal: {command}"
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return f"Error: Terminal command timed out after {timeout}s"
+        finally:
+            output = self._terminal_output_buffer.pop(cmd_id, "")
+            self._terminal_command_events.pop(cmd_id, None)
+
+        return output if output else f"Command completed (no output): {command}"
 
     async def _send_error(self, websocket: Any, message: str) -> None:
         await self._send(websocket, {"type": "error", "message": message})

@@ -447,6 +447,16 @@ def get_tool_definitions() -> list[dict]:
             },
             required=["path", "right", "bottom"],
         ),
+        _tool(
+            "terminal_exec",
+            "Send a command to the interactive terminal panel and wait for it to complete. Use when you need visible output the user can see, or when running commands that need interactive shell features. For simple one-shot commands that don't need visibility, prefer run_command.",
+            {
+                "command": {"type": "string", "description": "Shell command to execute in the terminal"},
+                "wait": {"type": "boolean", "description": "Wait for command to complete (default true)"},
+                "timeout": {"type": "integer", "description": "Max seconds to wait for completion (default 30)"},
+            },
+            required=["command"],
+        ),
     ]
 
 
@@ -510,6 +520,7 @@ class ToolExecutor:
             "resize_image": self._resize_image,
             "convert_image": self._convert_image,
             "crop_image": self._crop_image,
+            "terminal_exec": self._terminal_exec,
         }
         try:
             handler = handlers[tool_name]
@@ -893,3 +904,18 @@ class ToolExecutor:
             bottom=args["bottom"],
             output=args.get("output"),
         )
+
+    def _terminal_exec(self, args: dict) -> str:
+        """Send a command to the interactive terminal panel."""
+        command = args["command"]
+        wait = bool(args.get("wait", True))
+        timeout = int(args.get("timeout", 30))
+
+        if not hasattr(self, '_terminal_exec_callback') or self._terminal_exec_callback is None:
+            return "Error: No terminal connected. Open the terminal panel in the desktop app first."
+
+        try:
+            result = self._terminal_exec_callback(command, wait=wait, timeout=timeout)
+            return result
+        except Exception as e:
+            return f"Error executing in terminal: {e}"

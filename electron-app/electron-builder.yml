@@ -8,6 +8,9 @@ files:
   - package.json
 asarUnpack:
   - src/main/**
+extraResources:
+  - from: ../dist/ares-server
+    to: ares-server
 win:
   target:
     - nsis

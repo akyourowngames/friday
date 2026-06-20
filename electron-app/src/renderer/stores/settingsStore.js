@@ -89,6 +89,7 @@ export const useSettingsStore = create((set) => ({
   taskCount: 0,
   autoExecCount: 0,
   settingsOpen: false,
+  sidebarCollapsed: false,
   lastError: "",
   taskNotifications: [],
   executorState: "unknown",
@@ -141,6 +142,10 @@ export const useSettingsStore = create((set) => ({
 
   setSettingsOpen(settingsOpen) {
     set({ settingsOpen });
+  },
+
+  toggleSidebar() {
+    set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed }));
   },
 
   setLastError(lastError) {

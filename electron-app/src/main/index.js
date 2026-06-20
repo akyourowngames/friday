@@ -1,9 +1,11 @@
 const { app, BrowserWindow, ipcMain, nativeTheme, shell } = require("electron");
 const path = require("path");
 const { PythonManager } = require("./python-manager");
+const TerminalManager = require("./terminal-manager");
 
 const isDev = !app.isPackaged;
 const pythonManager = new PythonManager();
+const terminalManager = new TerminalManager();
 let mainWindow = null;
 
 function rendererEntry() {
@@ -37,6 +39,8 @@ function createWindow() {
     }
   });
 
+  terminalManager.setWindow(mainWindow);
+
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
   });
@@ -44,6 +48,12 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
+  });
+
+  mainWindow.on("closed", () => {
+    terminalManager.kill();
+    terminalManager.setWindow(null);
+    mainWindow = null;
   });
 
   return mainWindow.loadURL(rendererEntry());
@@ -58,6 +68,28 @@ ipcMain.handle("ares:restart-server", async () => {
 });
 
 ipcMain.handle("ares:get-app-version", () => app.getVersion());
+
+// ── Terminal IPC handlers ──────────────────────────────────────
+
+ipcMain.handle("ares:terminal:create", () => {
+  return terminalManager.create();
+});
+
+ipcMain.on("ares:terminal:write", (_, data) => {
+  terminalManager.write(data);
+});
+
+ipcMain.on("ares:terminal:resize", (_, { cols, rows }) => {
+  terminalManager.resize(cols, rows);
+});
+
+ipcMain.on("ares:terminal:kill", () => {
+  terminalManager.kill();
+});
+
+ipcMain.handle("ares:terminal:isActive", () => {
+  return terminalManager.isActive();
+});
 
 app.whenReady().then(async () => {
   await pythonManager.start();

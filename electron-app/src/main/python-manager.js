@@ -1,6 +1,7 @@
 const { spawn } = require("child_process");
 const net = require("net");
 const path = require("path");
+const fs = require("fs");
 
 class PythonManager {
   constructor({ host = "127.0.0.1", port = 8765 } = {}) {
@@ -14,6 +15,19 @@ class PythonManager {
     return `ws://${this.host}:${this.port}`;
   }
 
+  _resolveServerCommand() {
+    const isPackaged = !process.env.ELECTRON_DEV && fs.existsSync(path.join(process.resourcesPath || "", "ares-server", "ares-server.exe"));
+
+    if (isPackaged) {
+      const exePath = path.join(process.resourcesPath, "ares-server", "ares-server.exe");
+      return { command: exePath, args: ["--host", this.host, "--port", String(this.port)], cwd: undefined };
+    }
+
+    const python = process.env.ARES_PYTHON || "python";
+    const repoRoot = process.env.ARES_REPO_ROOT || path.resolve(__dirname, "..", "..", "..");
+    return { command: python, args: ["-m", "ares", "--server", "--host", this.host, "--port", String(this.port)], cwd: repoRoot };
+  }
+
   async start() {
     if (this.process) {
       return this.url;
@@ -23,12 +37,10 @@ class PythonManager {
       this.port = await this.getFreePort();
     }
 
-    const python = process.env.ARES_PYTHON || "python";
-    const repoRoot = process.env.ARES_REPO_ROOT || path.resolve(__dirname, "..", "..", "..");
-    const args = ["-m", "ares", "--server", "--host", this.host, "--port", String(this.port)];
+    const { command, args, cwd } = this._resolveServerCommand();
 
-    this.process = spawn(python, args, {
-      cwd: repoRoot,
+    this.process = spawn(command, args, {
+      cwd,
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
@@ -48,7 +60,7 @@ class PythonManager {
       process.stdout.write(`[ares-server] exited code=${code} signal=${signal}\n`);
     });
 
-    await this.waitForPort(15000);
+    await this.waitForPort(30000);
     this.ready = true;
     return this.url;
   }
