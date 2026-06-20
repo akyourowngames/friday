@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 23
+        assert len(tools) == 40
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -31,6 +31,8 @@ class TestToolDefinitions:
             "complete_task",
             "cancel_task",
             "get_due_soon",
+            "get_execution_status",
+            "get_executor_status",
             "export_data",
             "web_search",
             "fetch_url",
@@ -44,6 +46,21 @@ class TestToolDefinitions:
             "create_directory",
             "delete_file",
             "move_file",
+            "disk_usage",
+            "checksum",
+            "copy_file",
+            "find_duplicates",
+            "tail_file",
+            "head_file",
+            "count_lines",
+            "file_tree",
+            "run_code",
+            "run_command",
+            "generate_image",
+            "image_info",
+            "resize_image",
+            "convert_image",
+            "crop_image",
         }
 
     def test_tools_have_schemas(self):
@@ -250,14 +267,12 @@ class TestToolExecutor:
 
     def test_executor_write_file_new(self, executor, tmp_path, monkeypatch):
         monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("ares.filesystem_write._home", lambda: tmp_path)
         path = str(tmp_path / "test.txt")
         result = executor.execute("write_file", {"path": path, "content": "hello"})
         assert "Created" in result
 
     def test_executor_write_file_overwrite_blocked(self, executor, tmp_path, monkeypatch):
         monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("ares.filesystem_write._home", lambda: tmp_path)
         path = tmp_path / "existing.txt"
         path.write_text("old", encoding="utf-8")
         result = executor.execute("write_file", {"path": str(path), "content": "new"})
@@ -266,7 +281,6 @@ class TestToolExecutor:
 
     def test_executor_delete_file_blocked_without_confirm(self, executor, tmp_path, monkeypatch):
         monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("ares.filesystem_write._home", lambda: tmp_path)
         path = tmp_path / "victim.txt"
         path.write_text("bye", encoding="utf-8")
         result = executor.execute("delete_file", {"path": str(path)})

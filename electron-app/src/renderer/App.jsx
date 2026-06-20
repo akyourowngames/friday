@@ -4,6 +4,7 @@ import { ChatArea } from "./components/Chat/ChatArea.jsx";
 import { SettingsPanel } from "./components/Settings/SettingsPanel.jsx";
 import { Sidebar } from "./components/Sidebar/Sidebar.jsx";
 import { StatusBar } from "./components/common/StatusBar.jsx";
+import { TaskNotification } from "./components/common/TaskNotification.jsx";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 import { useSettingsStore } from "./stores/settingsStore.js";
 
@@ -35,7 +36,7 @@ export default function App() {
       <main className="main-pane">
         <header className="top-bar">
           <div className="top-title">
-            <span>Ares Desktop</span>
+            <span>Ares</span>
             <small>{connection.connected ? "Connected" : "Reconnecting"}</small>
           </div>
           <div className="top-bar-actions">
@@ -51,6 +52,7 @@ export default function App() {
           </div>
         </header>
         <ChatArea onSend={connection.sendMessage} />
+        <TaskNotification />
         <StatusBar onRetry={connection.reconnect} />
       </main>
       {settingsOpen ? (

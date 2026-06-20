@@ -1,10 +1,13 @@
 import { MessageSquare, Pencil, Trash2, X, Check, MoreHorizontal, Pin, Copy, ExternalLink, Download, Archive } from "lucide-react";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 
 export function SessionItem({ session, active, streaming, onClick, onRename, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const wrapRef = useRef(null);
   const menuRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -15,26 +18,55 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
     }
   }, [renaming]);
 
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
+
   useEffect(() => {
     if (!menuOpen) return;
-    function handleClick(e) {
+    function handleDown(e) {
       if (menuRef.current && !menuRef.current.contains(e.target)) {
-        setMenuOpen(false);
+        closeMenu();
       }
     }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [menuOpen]);
+    function handleScroll() {
+      closeMenu();
+    }
+    document.addEventListener("mousedown", handleDown, true);
+    document.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", handleDown, true);
+      document.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [menuOpen, closeMenu]);
 
-  function handleMenuClick(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    setMenuOpen(!menuOpen);
+  function calcPos(triggerEl) {
+    const rect = triggerEl.getBoundingClientRect();
+    let top = rect.bottom + 4;
+    let left = rect.left;
+    if (top + 320 > window.innerHeight) {
+      top = rect.top - 320;
+      if (top < 4) top = 4;
+    }
+    if (left + 180 > window.innerWidth) {
+      left = window.innerWidth - 180;
+    }
+    return { top, left };
   }
 
   function handleContextMenu(e) {
     e.preventDefault();
+    setMenuPos(calcPos(wrapRef.current));
     setMenuOpen(true);
+  }
+
+  function handleMenuClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menuOpen) {
+      setMenuOpen(false);
+    } else {
+      setMenuPos(calcPos(wrapRef.current));
+      setMenuOpen(true);
+    }
   }
 
   function startRename() {
@@ -81,7 +113,7 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
   }
 
   return (
-    <div className={`session-item-wrap ${active ? "active" : ""} ${streaming ? "streaming" : ""}`} ref={menuRef}>
+    <div className={`session-item-wrap ${active ? "active" : ""} ${streaming ? "streaming" : ""}`} ref={wrapRef}>
       <button
         className="session-item"
         type="button"
@@ -101,7 +133,7 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
         <span className="session-title-text">{session.title || "New session"}</span>
         <span className="session-meta">
           {session.message_count ? <small>{session.message_count}</small> : null}
-          <div 
+          <div
             className="session-more-btn"
             onClick={handleMenuClick}
             role="button"
@@ -111,21 +143,25 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
           </div>
         </span>
       </button>
-      {menuOpen ? (
-        <div className="context-menu">
-          <button type="button" onClick={() => setMenuOpen(false)}>
+      {menuOpen ? createPortal(
+        <div
+          className="context-menu"
+          ref={menuRef}
+          style={{ position: "fixed", top: menuPos.top, left: menuPos.left, zIndex: 9999 }}
+        >
+          <button type="button" onClick={closeMenu}>
             <Pin size={13} />
             <span>Pin</span>
           </button>
-          <button type="button" onClick={() => { navigator.clipboard.writeText(session.id.toString()); setMenuOpen(false); }}>
+          <button type="button" onClick={() => { navigator.clipboard.writeText(session.id.toString()); closeMenu(); }}>
             <Copy size={13} />
             <span>Copy ID</span>
           </button>
-          <button type="button" onClick={() => setMenuOpen(false)}>
+          <button type="button" onClick={closeMenu}>
             <ExternalLink size={13} />
             <span>New window</span>
           </button>
-          <button type="button" onClick={() => setMenuOpen(false)}>
+          <button type="button" onClick={closeMenu}>
             <Download size={13} />
             <span>Export</span>
           </button>
@@ -133,7 +169,7 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
             <Pencil size={13} />
             <span>Rename</span>
           </button>
-          <button type="button" onClick={() => setMenuOpen(false)}>
+          <button type="button" onClick={closeMenu}>
             <Archive size={13} />
             <span>Archive</span>
           </button>
@@ -142,7 +178,8 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
             <Trash2 size={13} />
             <span>Delete</span>
           </button>
-        </div>
+        </div>,
+        document.body
       ) : null}
     </div>
   );

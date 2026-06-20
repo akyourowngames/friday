@@ -31,6 +31,7 @@ from ares.reminders import DesktopNotifier, ReminderService
 from ares.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.tasks import TaskStore
+from ares.task_executor import TaskExecutor
 from ares.config import load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
@@ -44,6 +45,7 @@ COMPLETER = WordCompleter([
     "/help", "/tasks", "/memory", "/model", "/clear",
     "/forget", "/export", "/import", "/reset", "/exit",
     "/soul", "/profile", "/context",
+    "/tasks auto on", "/tasks auto off", "/tasks auto list", "/tasks history", "/tasks executor",
 ], ignore_case=True)
 
 
@@ -111,7 +113,17 @@ class AresCLI:
             poll_seconds=self.config.reminder_poll_seconds,
             notifier=DesktopNotifier(enabled=self.config.enable_desktop_notifications),
         )
+        self.task_executor = TaskExecutor(
+            self.task_store,
+            self._execute_task_in_background,
+            self._notify_auto_complete,
+            poll_seconds=self.config.task_executor_poll_seconds,
+            max_turns=self.config.task_executor_max_turns,
+            enabled=self.config.task_executor_enabled,
+        )
+        self.agent.tool_executor.task_executor = self.task_executor
         self._reminder_task: asyncio.Task | None = None
+        self._executor_task: asyncio.Task | None = None
         self.session = None
         if sys.stdin.isatty() and sys.stdout.isatty():
             self.session = PromptSession(
@@ -159,6 +171,74 @@ class AresCLI:
         self.console.print()
         self.console.print(Panel(
             f"[bold yellow]Reminder[/bold yellow]\n{task['title']}{due}",
+            border_style="yellow",
+            padding=(0, 1),
+        ))
+        self.console.print()
+
+    async def _execute_task_in_background(self, prompt: str, max_turns: int) -> dict:
+        """Run an isolated agent loop for background task execution."""
+        from ares.llm import LLMClient
+
+        llm = LLMClient(
+            api_key=self.config.api_key,
+            base_url=self.config.api_base_url,
+            model=self.config.model,
+        )
+        try:
+            from ares.tools import get_tool_definitions, ToolExecutor
+
+            tools = get_tool_definitions()
+            from ares.task_executor import ALLOWED_TOOLS
+            allowed_defs = [t for t in tools if t["function"]["name"] in ALLOWED_TOOLS]
+
+            messages = [{"role": "user", "content": prompt}]
+            summary_parts = []
+
+            for _ in range(max_turns):
+                response = await llm.chat(messages, tools=allowed_defs)
+                if response.get("tool_calls"):
+                    messages.append({
+                        "role": "assistant",
+                        "content": response.get("content") or "",
+                        "tool_calls": response["tool_calls"],
+                    })
+                    executor = ToolExecutor(
+                        memory_store=self.memory_store,
+                        task_store=self.task_store,
+                        conversation_store=self.conversation_store,
+                    )
+                    for call in response["tool_calls"]:
+                        fn = call["function"]
+                        args = __import__("json").loads(fn.get("arguments") or "{}")
+                        result = executor.execute(fn["name"], args)
+                        messages.append({
+                            "tool_call_id": call.get("id", ""),
+                            "role": "tool",
+                            "content": result,
+                        })
+                        summary_parts.append(f"{fn['name']}: {result[:200]}")
+                else:
+                    content = response.get("content", "")
+                    if content:
+                        summary_parts.append(content)
+                    break
+
+            return {"summary": "\n".join(summary_parts) if summary_parts else "Task completed."}
+        finally:
+            await llm.close()
+
+    def _notify_auto_complete(self, task_info: dict) -> None:
+        """Render an in-terminal auto-completion notification."""
+        status = task_info.get("status", "done")
+        icon = "✅" if status == "done" else "⚠️"
+        label = "Fully completed" if status == "done" else "Partially completed"
+        notes = task_info.get("notes", "")
+        notes_str = f"\n[dim]Notes: {notes}[/dim]" if notes else ""
+        self.console.print()
+        self.console.print(Panel(
+            f"[bold yellow]⚡ Auto-completed: {task_info['title']}[/bold yellow]\n"
+            f"{icon} {label}{notes_str}",
             border_style="yellow",
             padding=(0, 1),
         ))
@@ -279,6 +359,11 @@ class AresCLI:
             table.add_column("Description")
             table.add_row("/help", "Show available commands")
             table.add_row("/tasks [all|search|complete|cancel]", "Review and manage tasks")
+            table.add_row("/tasks auto on ID", "Mark task for auto-execution")
+            table.add_row("/tasks auto off ID", "Remove task from auto-execution")
+            table.add_row("/tasks auto list", "Show auto-executable tasks")
+            table.add_row("/tasks history", "Show recently auto-executed tasks")
+            table.add_row("/tasks executor", "Show executor status and stats")
             table.add_row("/memory [search|edit|delete]", "Review and manage memories")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
@@ -311,8 +396,62 @@ class AresCLI:
                     self.console.print(f"[yellow]Cancelled task #{task_id}.[/yellow]")
                 else:
                     self.console.print(f"[red]Task #{task_id} was not found.[/red]")
+            elif arg.startswith("auto on "):
+                task_id = int(arg.split(maxsplit=2)[2])
+                if self.task_store.update(task_id, auto_executable="yes"):
+                    self.console.print(f"[green]Task #{task_id} marked for auto-execution.[/green]")
+                else:
+                    self.console.print(f"[red]Task #{task_id} was not found.[/red]")
+            elif arg.startswith("auto off "):
+                task_id = int(arg.split(maxsplit=2)[2])
+                if self.task_store.update(task_id, auto_executable="no"):
+                    self.console.print(f"[yellow]Task #{task_id} removed from auto-execution.[/yellow]")
+                else:
+                    self.console.print(f"[red]Task #{task_id} was not found.[/red]")
+            elif arg == "auto list":
+                tasks = self.task_store.get_auto_executable()
+                if not tasks:
+                    self.console.print("[dim]No tasks marked for auto-execution.[/dim]")
+                else:
+                    self._print_tasks(tasks, "Auto-Executable Tasks")
+            elif arg == "executor":
+                stats = self.task_executor.stats
+                panel = Panel(
+                    f"[bold]Task Executor[/bold]\n"
+                    f"[cyan]State:[/cyan] {stats['state']}\n"
+                    f"[cyan]Enabled:[/cyan] {'yes' if stats['enabled'] else 'no'}\n"
+                    f"[cyan]Poll interval:[/cyan] {stats['poll_seconds']}s\n"
+                    f"[cyan]Tasks completed:[/cyan] {stats['tasks_completed']}\n"
+                    f"[cyan]Tasks failed:[/cyan] {stats['tasks_failed']}\n"
+                    + (f"[cyan]Current task:[/cyan] #{stats['current_task_id']} \"{stats['current_task_title']}\"\n" if stats['current_task_id'] else "")
+                    + (f"[cyan]Last error:[/cyan] [red]{stats['last_error']}[/red]\n" if stats['last_error'] else "")
+                    + (f"[cyan]Started at:[/cyan] {stats['started_at']}\n" if stats['started_at'] else ""),
+                    border_style="yellow",
+                    padding=(0, 1),
+                )
+                self.console.print(panel)
+            elif arg == "history":
+                tasks = self.task_store.get_recently_executed()
+                if not tasks:
+                    self.console.print("[dim]No tasks have been auto-executed yet.[/dim]")
+                else:
+                    table = Table(title="Execution History", border_style="yellow")
+                    table.add_column("ID", style="dim")
+                    table.add_column("Title")
+                    table.add_column("Status")
+                    table.add_column("Notes")
+                    table.add_column("Executed At", style="dim")
+                    for t in tasks:
+                        table.add_row(
+                            str(t["id"]),
+                            t["title"],
+                            t.get("status", "pending"),
+                            (t.get("execution_notes") or "")[:60],
+                            t.get("executed_at") or "—",
+                        )
+                    self.console.print(table)
             else:
-                self.console.print("[red]Usage: /tasks [all|search QUERY|complete ID|cancel ID][/red]")
+                self.console.print("[red]Usage: /tasks [all|search QUERY|complete ID|cancel ID|auto on|off|list|history|executor][/red]")
 
         elif command == "/memory":
             if not arg:
@@ -505,9 +644,33 @@ class AresCLI:
                 padding=(0, 1),
             ))
 
-        # Update conversation history
+        # Update conversation history with full message exchange (including tool calls)
         self.conversation_history.append({"role": "user", "content": user_input})
-        self.conversation_history.append({"role": "assistant", "content": full_response})
+
+        # Use the agent's internal messages which include tool calls and results
+        if self.agent.last_messages:
+            # Extract only the new messages (skip system prompt and prior history)
+            built_messages = self.agent.last_messages
+            # Find messages after the last user message (the one we just sent)
+            user_msg_idx = len(built_messages) - 1
+            for i in range(len(built_messages) - 1, -1, -1):
+                if built_messages[i].get("role") == "user" and built_messages[i].get("content") == user_input:
+                    user_msg_idx = i
+                    break
+            # Save assistant + tool messages that followed the user message
+            for msg in built_messages[user_msg_idx + 1:]:
+                clean_msg = {"role": msg["role"]}
+                if msg.get("content"):
+                    clean_msg["content"] = msg["content"]
+                if msg.get("tool_calls"):
+                    clean_msg["tool_calls"] = msg["tool_calls"]
+                if msg.get("tool_call_id"):
+                    clean_msg["tool_call_id"] = msg["tool_call_id"]
+                self.conversation_history.append(clean_msg)
+        else:
+            # Fallback: save just the text response
+            self.conversation_history.append({"role": "assistant", "content": full_response})
+
         self.conversation_store.add_exchange(self.conversation_id, user_input, full_response)
 
         # Trim conversation history
@@ -520,6 +683,7 @@ class AresCLI:
     async def run(self):
         """Main CLI loop."""
         self._reminder_task = asyncio.create_task(self.reminder_service.run())
+        self._executor_task = asyncio.create_task(self.task_executor.run())
         self._show_banner()
 
         try:
@@ -552,6 +716,10 @@ class AresCLI:
                 self._reminder_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self._reminder_task
+            if self._executor_task is not None:
+                self._executor_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._executor_task
 
             # Cleanup
             try:

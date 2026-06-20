@@ -21,6 +21,14 @@ from ares.filesystem_write import edit_file as _edit_file_impl
 from ares.filesystem_write import create_directory as _create_directory_impl
 from ares.filesystem_write import delete_file as _delete_file_impl
 from ares.filesystem_write import move_file as _move_file_impl
+from ares.code_execution import run_code
+from ares.shell_execution import run_command
+from ares.image_generate import generate_image
+from ares.image_edit import image_info as _image_info
+from ares.image_edit import resize_image as _resize_image
+from ares.image_edit import convert_image as _convert_image
+from ares.image_edit import crop_image as _crop_image
+
 def _tool(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
     return {
         "type": "function",
@@ -94,6 +102,16 @@ def get_tool_definitions() -> list[dict]:
                     "enum": ["low", "medium", "high"],
                     "default": "medium",
                 },
+                "auto_executable": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, Ares will try to auto-complete this task in the background.",
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "Max tool-use turns for auto-execution (default 10).",
+                },
             },
             ["title"],
         ),
@@ -128,6 +146,16 @@ def get_tool_definitions() -> list[dict]:
             "get_due_soon",
             "Show pending tasks due within the next N hours.",
             {"hours": {"type": "integer", "default": 24}},
+        ),
+        _tool(
+            "get_execution_status",
+            "Show recently auto-completed tasks with execution notes.",
+            {"limit": {"type": "integer", "default": 10}},
+        ),
+        _tool(
+            "get_executor_status",
+            "Show the background task executor's current state: idle, running, stopped, disabled. Returns which task is being executed, error state, and completion stats.",
+            {},
         ),
         _tool(
             "export_data",
@@ -343,6 +371,82 @@ def get_tool_definitions() -> list[dict]:
                 "show_files": {"type": "boolean", "default": True, "description": "Show files (false = dirs only)."},
             },
         ),
+        _tool(
+            "run_code",
+            "Execute Python code in an isolated subprocess. Full access to stdlib, pip, filesystem, network. Returns exit code + output.",
+            {
+                "code": {"type": "string", "description": "Python code to execute"},
+                "timeout": {"type": "integer", "description": "Max seconds before kill (1-300, default 30)"},
+                "cwd": {"type": "string", "description": "Working directory (default: home)"},
+            },
+            required=["code"],
+        ),
+        _tool(
+            "run_command",
+            "Execute a shell command (bash, git, npm, python, docker, etc.). Full system access. Supports pipes, redirects, && chaining.",
+            {
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "timeout": {"type": "integer", "description": "Max seconds before kill (1-300, default 30)"},
+                "cwd": {"type": "string", "description": "Working directory"},
+            },
+            required=["command"],
+        ),
+        _tool(
+            "generate_image",
+            "Generate an image from a text prompt using Pollinations.ai (free, no API key). Returns saved file path.",
+            {
+                "prompt": {"type": "string", "description": "Text description of the image to generate"},
+                "width": {"type": "integer", "description": "Output width in pixels (default 1024)"},
+                "height": {"type": "integer", "description": "Output height in pixels (default 1024)"},
+                "model": {"type": "string", "enum": ["flux", "turbo", "stable-diffusion"], "description": "Model to use (default flux)"},
+                "seed": {"type": "integer", "description": "Deterministic seed for reproducibility"},
+            },
+            required=["prompt"],
+        ),
+        _tool(
+            "image_info",
+            "Get metadata about an image: dimensions, format, mode, file size, EXIF data.",
+            {
+                "path": {"type": "string", "description": "Path to the image file"},
+            },
+            required=["path"],
+        ),
+        _tool(
+            "resize_image",
+            "Resize an image preserving aspect ratio. Uses LANCZOS resampling (highest quality).",
+            {
+                "path": {"type": "string", "description": "Source image path"},
+                "width": {"type": "integer", "description": "Target width (scales proportionally)"},
+                "height": {"type": "integer", "description": "Target height (scales proportionally)"},
+                "percent": {"type": "integer", "description": "Scale by percentage (50 = half)"},
+                "output": {"type": "string", "description": "Output path (default: overwrite source)"},
+            },
+            required=["path"],
+        ),
+        _tool(
+            "convert_image",
+            "Convert image between formats (PNG, JPEG, WebP, BMP, GIF). Handles RGBA to JPEG transparency.",
+            {
+                "path": {"type": "string", "description": "Source image path"},
+                "format": {"type": "string", "enum": ["png", "jpeg", "webp", "bmp", "gif"], "description": "Target format"},
+                "output": {"type": "string", "description": "Output path (default: same name, new extension)"},
+                "quality": {"type": "integer", "description": "JPEG/WebP quality 1-100 (default 85)"},
+            },
+            required=["path", "format"],
+        ),
+        _tool(
+            "crop_image",
+            "Crop a rectangular region from an image. Coordinates in pixels, right/bottom exclusive.",
+            {
+                "path": {"type": "string", "description": "Source image path"},
+                "left": {"type": "integer", "description": "Left edge in pixels (default 0)"},
+                "top": {"type": "integer", "description": "Top edge in pixels (default 0)"},
+                "right": {"type": "integer", "description": "Right edge in pixels (exclusive)"},
+                "bottom": {"type": "integer", "description": "Bottom edge in pixels (exclusive)"},
+                "output": {"type": "string", "description": "Output path (default: overwrite source)"},
+            },
+            required=["path", "right", "bottom"],
+        ),
     ]
 
 
@@ -355,11 +459,13 @@ class ToolExecutor:
         task_store: TaskStore,
         conversation_store: ConversationStore | None = None,
         config: AppConfig | None = None,
+        task_executor: Any | None = None,
     ):
         self.memory = memory_store
         self.tasks = task_store
         self.conversations = conversation_store
         self.config = config
+        self.task_executor = task_executor
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool by name with the given arguments. Returns a result string."""
@@ -374,6 +480,8 @@ class ToolExecutor:
             "complete_task": self._complete_task,
             "cancel_task": self._cancel_task,
             "get_due_soon": self._get_due_soon,
+            "get_execution_status": self._get_execution_status,
+            "get_executor_status": self._get_executor_status,
             "export_data": self._export_data,
             "web_search": self._web_search,
             "fetch_url": self._fetch_url,
@@ -395,6 +503,13 @@ class ToolExecutor:
             "head_file": self._head_file,
             "count_lines": self._count_lines,
             "file_tree": self._file_tree,
+            "run_code": self._run_code,
+            "run_command": self._run_command,
+            "generate_image": self._generate_image,
+            "image_info": self._image_info,
+            "resize_image": self._resize_image,
+            "convert_image": self._convert_image,
+            "crop_image": self._crop_image,
         }
         try:
             handler = handlers[tool_name]
@@ -447,16 +562,21 @@ class ToolExecutor:
         return f"Memory #{fact_id} was not found."
 
     def _create_task(self, args: dict) -> str:
+        auto_exec = "yes" if args.get("auto_executable", False) else "no"
+        max_turns = int(args.get("max_turns", 10))
         task_id = self.tasks.create(
             args["title"],
             description=args.get("description"),
             due=args.get("due"),
             priority=args.get("priority", "medium"),
             reminder_at=args.get("reminder_at"),
+            auto_executable=auto_exec,
+            max_turns=max_turns,
         )
         task = self.tasks.get(task_id)
         due_str = f" (due: {task['due']})" if task and task.get("due") else ""
-        return f"Created task #{task_id}: {args['title']}{due_str}"
+        auto_str = " [auto]" if auto_exec == "yes" else ""
+        return f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
 
     def _format_task(self, task: dict) -> str:
         due = f" | due: {task['due']}" if task.get("due") else ""
@@ -504,6 +624,42 @@ class ToolExecutor:
         return "\n".join([f"Due in the next {hours} hour(s):"] + [
             self._format_task(t) for t in tasks
         ])
+
+    def _get_execution_status(self, args: dict) -> str:
+        limit = int(args.get("limit", 10))
+        tasks = self.tasks.get_recently_executed(limit=limit)
+        if not tasks:
+            return "No tasks have been auto-executed yet."
+        lines = [f"Recently executed ({len(tasks)} task(s)):"]
+        for t in tasks:
+            status_icon = "✅" if t["status"] == "done" else "⚠️"
+            lines.append(
+                f"  {status_icon} #{t['id']} {t['title']} [{t['status']}]"
+            )
+            if t.get("execution_notes"):
+                lines.append(f"     Notes: {t['execution_notes']}")
+            if t.get("executed_at"):
+                lines.append(f"     At: {t['executed_at']}")
+        return "\n".join(lines)
+
+    def _get_executor_status(self, args: dict) -> str:
+        if self.task_executor is None:
+            return "Executor not available (no reference configured)."
+        stats = self.task_executor.stats if hasattr(self.task_executor, "stats") else {}
+        lines = [f"Executor state: {stats.get('state', 'unknown')}"]
+        if stats.get("enabled") is not None:
+            lines.append(f"Enabled: {'yes' if stats['enabled'] else 'no'}")
+        if stats.get("current_task_title"):
+            lines.append(f"Currently executing: #{stats['current_task_id']} \"{stats['current_task_title']}\"")
+        if stats.get("last_error"):
+            lines.append(f"Last error: {stats['last_error']}")
+        if stats.get("tasks_completed") is not None:
+            lines.append(f"Tasks completed: {stats['tasks_completed']}")
+        if stats.get("tasks_failed") is not None:
+            lines.append(f"Tasks failed: {stats['tasks_failed']}")
+        if stats.get("started_at"):
+            lines.append(f"Started at: {stats['started_at']}")
+        return "\n".join(lines)
 
     def _export_data(self, args: dict) -> str:
         path = export_data(
@@ -684,4 +840,56 @@ class ToolExecutor:
             path=args.get("path", "."),
             max_depth=int(args.get("max_depth", 3)),
             show_files=bool(args.get("show_files", True)),
+        )
+
+    def _run_code(self, args: dict) -> str:
+        code = args["code"]
+        timeout = int(args.get("timeout", 30))
+        cwd = args.get("cwd")
+        return run_code(code, timeout=timeout, cwd=cwd)
+
+    def _run_command(self, args: dict) -> str:
+        command = args["command"]
+        timeout = int(args.get("timeout", 30))
+        cwd = args.get("cwd")
+        return run_command(command, timeout=timeout, cwd=cwd)
+
+    def _generate_image(self, args: dict) -> str:
+        prompt = args["prompt"]
+        width = int(args.get("width", 1024))
+        height = int(args.get("height", 1024))
+        model = args.get("model", "flux")
+        seed = args.get("seed")
+        if seed is not None:
+            seed = int(seed)
+        return generate_image(prompt, width=width, height=height, model=model, seed=seed)
+
+    def _image_info(self, args: dict) -> str:
+        return _image_info(args["path"])
+
+    def _resize_image(self, args: dict) -> str:
+        return _resize_image(
+            args["path"],
+            width=args.get("width"),
+            height=args.get("height"),
+            percent=args.get("percent"),
+            output=args.get("output"),
+        )
+
+    def _convert_image(self, args: dict) -> str:
+        return _convert_image(
+            args["path"],
+            format=args["format"],
+            output=args.get("output"),
+            quality=int(args.get("quality", 85)),
+        )
+
+    def _crop_image(self, args: dict) -> str:
+        return _crop_image(
+            args["path"],
+            left=int(args.get("left", 0)),
+            top=int(args.get("top", 0)),
+            right=args["right"],
+            bottom=args["bottom"],
+            output=args.get("output"),
         )

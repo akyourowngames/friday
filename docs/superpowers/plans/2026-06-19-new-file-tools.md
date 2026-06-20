@@ -1,6 +1,6 @@
 # New File Tools Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Expand Ares from 3 read-only file tools to 8 tools covering reads (glob, file info) and writes (write, edit, mkdir, delete, move), with tiered safety.
 
@@ -29,7 +29,7 @@
 
 The spec says reads should be unrestricted. Currently `resolve_path()` blocks anything outside `~`. We need to split the logic: reads become unrestricted, writes keep the sandbox in `filesystem_write.py`.
 
-- [ ] **Step 1: Write failing test for unrestricted reads**
+- [x] **Step 1: Write failing test for unrestricted reads**
 
 ```python
 # tests/test_filesystem.py — add to existing file
@@ -40,12 +40,12 @@ def test_resolve_path_outside_home():
     assert result == Path("/tmp/somefile.txt")
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem.py::test_resolve_path_outside_home -v`
 Expected: FAIL — `ValueError: Access denied`
 
-- [ ] **Step 3: Remove sandbox from resolve_path**
+- [x] **Step 3: Remove sandbox from resolve_path**
 
 In `ares/filesystem.py`, replace the body of `resolve_path` with:
 
@@ -57,12 +57,12 @@ def resolve_path(path: str = ".") -> Path:
 
 Keep `_allowed_roots()` and `_is_relative_to()` — they're used by `filesystem_write.py` later.
 
-- [ ] **Step 4: Run all existing filesystem tests to verify nothing broke**
+- [x] **Step 4: Run all existing filesystem tests to verify nothing broke**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem.py -v`
 Expected: All existing tests PASS. The new test from Step 1 also PASSES.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -83,7 +83,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/filesystem.py` — add `get_file_info()` function
 - Modify: `tests/test_filesystem.py` — add tests
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 # tests/test_filesystem.py — add to existing file
@@ -121,12 +121,12 @@ def test_get_file_info_binary(tmp_path):
     assert "Binary: yes" in result
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem.py::test_get_file_info_regular_file tests/test_filesystem.py::test_get_file_info_directory tests/test_filesystem.py::test_get_file_info_not_found tests/test_filesystem.py::test_get_file_info_binary -v`
 Expected: FAIL — `ImportError: cannot import name 'get_file_info'`
 
-- [ ] **Step 3: Implement `get_file_info`**
+- [x] **Step 3: Implement `get_file_info`**
 
 Add to `ares/filesystem.py` after the existing `list_directory` function:
 
@@ -185,12 +185,12 @@ def _format_timestamp(ts: float) -> str:
         return "unknown"
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem.py -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -211,7 +211,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/filesystem.py` — add `glob_pattern()` function
 - Modify: `tests/test_filesystem.py` — add tests
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 # tests/test_filesystem.py — add to existing file
@@ -260,12 +260,12 @@ def test_glob_pattern_skips_ignored_dirs(tmp_path):
     assert "config.py" not in result
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem.py::test_glob_pattern_basic tests/test_filesystem.py::test_glob_pattern_recursive tests/test_filesystem.py::test_glob_pattern_no_matches tests/test_filesystem.py::test_glob_pattern_skips_ignored_dirs -v`
 Expected: FAIL — `ImportError: cannot import name 'glob_pattern'`
 
-- [ ] **Step 3: Implement `glob_pattern`**
+- [x] **Step 3: Implement `glob_pattern`**
 
 Add to `ares/filesystem.py` after `get_file_info`:
 
@@ -316,12 +316,12 @@ def glob_pattern(pattern: str, path: str = ".", max_results: int = 50) -> str:
     return "\n".join(lines)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem.py -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -342,7 +342,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Create: `ares/filesystem_write.py`
 - Create: `tests/test_filesystem_write.py`
 
-- [ ] **Step 1: Write failing tests for sandbox**
+- [x] **Step 1: Write failing tests for sandbox**
 
 ```python
 # tests/test_filesystem_write.py
@@ -415,12 +415,12 @@ def test_atomic_write_cleanup_on_failure(tmp_path, monkeypatch):
     assert len(temp_files) == 0
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem_write.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'ares.filesystem_write'`
 
-- [ ] **Step 3: Create `filesystem_write.py`**
+- [x] **Step 3: Create `filesystem_write.py`**
 
 ```python
 # ares/filesystem_write.py
@@ -694,12 +694,12 @@ def move_file(source: str, destination: str, dry_run: bool = False) -> str:
     return f"Moved {_display_path(src)}{src_info} → {_display_path(dst)}"
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem_write.py -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -721,7 +721,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/tools.py` — add tool definition + handler
 - Modify: `tests/test_filesystem_write.py` — add write_file tests
 
-- [ ] **Step 1: Write failing tests for write_file**
+- [x] **Step 1: Write failing tests for write_file**
 
 ```python
 # tests/test_filesystem_write.py — add to existing file
@@ -778,12 +778,12 @@ def test_write_file_outside_home_rejected(tmp_path, monkeypatch):
         write_file("/tmp/evil.txt", "payload")
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem_write.py -k "write_file" -v`
 Expected: FAIL — write_file not registered in tools.py yet, but the function exists in filesystem_write.py so direct tests should pass. The ToolExecutor test will fail.
 
-- [ ] **Step 3: Add write_file tool definition to tools.py**
+- [x] **Step 3: Add write_file tool definition to tools.py**
 
 In `ares/tools.py`, add to the `get_tool_definitions()` list (after `list_directory`):
 
@@ -844,12 +844,12 @@ Register in `handlers` dict:
 "write_file": self._write_file,
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/ -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -870,7 +870,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/tools.py` — add tool definition + handler
 - Modify: `tests/test_filesystem_write.py` — add edit_file tests
 
-- [ ] **Step 1: Write failing tests for edit_file**
+- [x] **Step 1: Write failing tests for edit_file**
 
 ```python
 # tests/test_filesystem_write.py — add to existing file
@@ -936,12 +936,12 @@ def test_edit_file_not_found(tmp_path, monkeypatch):
     assert "not found" in result.lower()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem_write.py -k "edit_file" -v`
 Expected: FAIL — edit_file not registered in tools.py yet.
 
-- [ ] **Step 3: Add edit_file tool definition to tools.py**
+- [x] **Step 3: Add edit_file tool definition to tools.py**
 
 In `ares/tools.py`, add to `get_tool_definitions()`:
 
@@ -983,12 +983,12 @@ Register in `handlers`:
 "edit_file": self._edit_file,
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/ -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -1009,7 +1009,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/tools.py` — add tool definition + handler
 - Modify: `tests/test_filesystem_write.py` — add tests
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 # tests/test_filesystem_write.py — add to existing file
@@ -1044,12 +1044,12 @@ def test_create_directory_dry_run(tmp_path, monkeypatch):
     assert not target.exists()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem_write.py -k "create_directory" -v`
 Expected: FAIL — not registered in tools.py.
 
-- [ ] **Step 3: Add create_directory tool definition to tools.py**
+- [x] **Step 3: Add create_directory tool definition to tools.py**
 
 In `ares/tools.py`, add to `get_tool_definitions()`:
 
@@ -1087,12 +1087,12 @@ Register in `handlers`:
 "create_directory": self._create_directory,
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/ -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -1110,7 +1110,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/tools.py` — add tool definition + handler
 - Modify: `tests/test_filesystem_write.py` — add tests
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 # tests/test_filesystem_write.py — add to existing file
@@ -1172,12 +1172,12 @@ def test_delete_dry_run(tmp_path, monkeypatch):
     assert target.exists()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem_write.py -k "delete" -v`
 Expected: FAIL — not registered in tools.py.
 
-- [ ] **Step 3: Add delete_file tool definition + handler to tools.py**
+- [x] **Step 3: Add delete_file tool definition + handler to tools.py**
 
 In `ares/tools.py`, add to `get_tool_definitions()`:
 
@@ -1223,12 +1223,12 @@ Register in `handlers`:
 "delete_file": self._delete_file,
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/ -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -1249,7 +1249,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/tools.py` — add tool definition + handler
 - Modify: `tests/test_filesystem_write.py` — add tests
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 # tests/test_filesystem_write.py — add to existing file
@@ -1313,12 +1313,12 @@ def test_move_file_creates_parent_dirs(tmp_path, monkeypatch):
     assert dst.read_text(encoding="utf-8") == "data"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_filesystem_write.py -k "move_file" -v`
 Expected: FAIL — not registered in tools.py.
 
-- [ ] **Step 3: Add move_file tool definition + handler to tools.py**
+- [x] **Step 3: Add move_file tool definition + handler to tools.py**
 
 In `ares/tools.py`, add to `get_tool_definitions()`:
 
@@ -1374,12 +1374,12 @@ Register in `handlers`:
 "move_file": self._move_file,
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/ -v`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -1400,7 +1400,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `ares/tools.py` — add tool definitions + handlers for read tools
 - Modify: `tests/test_tools.py` — add tests for new tool definitions
 
-- [ ] **Step 1: Write failing tests for tool definitions**
+- [x] **Step 1: Write failing tests for tool definitions**
 
 ```python
 # tests/test_tools.py — add to existing file
@@ -1454,12 +1454,12 @@ def test_move_file_tool_definition():
     assert "move_file" in names
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/test_tools.py -k "tool_definition" -v`
 Expected: The new read tool tests (get_file_info, glob_pattern) may already pass if the definitions were added earlier. The write tool tests should all pass by this point.
 
-- [ ] **Step 3: Add remaining tool definitions to tools.py**
+- [x] **Step 3: Add remaining tool definitions to tools.py**
 
 The read tool definitions for `get_file_info` and `glob_pattern` need to be added to `get_tool_definitions()`:
 
@@ -1512,12 +1512,12 @@ Register in `handlers`:
 "glob_pattern": self._glob_pattern,
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/ -v`
 Expected: All tests PASS. All 8 file tools should be registered.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd C:\Users\anime\ares
@@ -1538,7 +1538,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `tests/test_filesystem_write.py` — add end-to-end integration tests
 - Modify: `tests/test_tools.py` — add executor integration tests
 
-- [ ] **Step 1: Write integration tests**
+- [x] **Step 1: Write integration tests**
 
 ```python
 # tests/test_filesystem_write.py — add to existing file
@@ -1633,12 +1633,12 @@ def test_executor_delete_file_blocked_without_confirm(tmp_path, monkeypatch):
     assert path.exists()  # unchanged
 ```
 
-- [ ] **Step 2: Run all tests**
+- [x] **Step 2: Run all tests**
 
 Run: `cd C:\Users\anime\ares && python -m pytest tests/ -v`
 Expected: All tests PASS. Full integration verified.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd C:\Users\anime\ares

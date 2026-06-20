@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
 
 from ares.agent import Agent
 from ares.config import load_config, save_config
+from ares.task_executor import TaskExecutor
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
@@ -95,12 +96,119 @@ class AresServer:
             memory_store=self.memory_store,
             task_store=self.task_store,
         )
+        self.task_executor = TaskExecutor(
+            self.task_store,
+            self._execute_task_in_background,
+            self._notify_auto_complete,
+            poll_seconds=self.config.task_executor_poll_seconds,
+            max_turns=self.config.task_executor_max_turns,
+            enabled=self.config.task_executor_enabled,
+        )
+        if hasattr(self.agent, "tool_executor"):
+            self.agent.tool_executor.task_executor = self.task_executor
+        self.task_executor.status_callback = self._push_status_to_clients
+        self._connected_websockets: list = []
         self.conversation_id = None
         self.conversation_store.delete_empty_conversations()
         self._server = None
 
+    async def _execute_task_in_background(self, prompt: str, max_turns: int) -> dict:
+        """Run an isolated agent loop for background task execution."""
+        from ares.llm import LLMClient
+        from ares.tools import get_tool_definitions, ToolExecutor
+        from ares.task_executor import ALLOWED_TOOLS
+        import json as _json
+
+        llm = LLMClient(
+            api_key=self.config.api_key,
+            base_url=self.config.api_base_url,
+            model=self.config.model,
+        )
+        try:
+            tools = get_tool_definitions()
+            allowed_defs = [t for t in tools if t["function"]["name"] in ALLOWED_TOOLS]
+            messages = [{"role": "user", "content": prompt}]
+            summary_parts = []
+
+            for _ in range(max_turns):
+                response = await llm.chat(messages, tools=allowed_defs)
+                if response.get("tool_calls"):
+                    messages.append({
+                        "role": "assistant",
+                        "content": response.get("content") or "",
+                        "tool_calls": response["tool_calls"],
+                    })
+                    executor = ToolExecutor(
+                        memory_store=self.memory_store,
+                        task_store=self.task_store,
+                        conversation_store=self.conversation_store,
+                    )
+                    for call in response["tool_calls"]:
+                        fn = call["function"]
+                        args = _json.loads(fn.get("arguments") or "{}")
+                        result = executor.execute(fn["name"], args)
+                        messages.append({
+                            "tool_call_id": call.get("id", ""),
+                            "role": "tool",
+                            "content": result,
+                        })
+                        summary_parts.append(f"{fn['name']}: {result[:200]}")
+                else:
+                    content = response.get("content", "")
+                    if content:
+                        summary_parts.append(content)
+                    break
+            return {"summary": "\n".join(summary_parts) if summary_parts else "Task completed."}
+        finally:
+            await llm.close()
+
+    async def _notify_auto_complete(self, task_info: dict) -> None:
+        """Send task_auto_complete event and inject result into chat."""
+        task_id = task_info.get("id")
+        title = task_info.get("title")
+        status = task_info.get("status")
+        notes = task_info.get("notes", "")
+
+        event = {
+            "type": "task_auto_complete",
+            "task_id": task_id,
+            "title": title,
+            "status": status,
+            "notes": notes,
+        }
+        ws_count = len(self._connected_websockets)
+        print(f"[Server] Task #{task_id} complete ({status}), ws_count={ws_count}")
+
+        for ws in list(self._connected_websockets):
+            try:
+                await self._send(ws, event)
+                print(f"[Server] task_auto_complete sent")
+            except Exception as e:
+                print(f"[Server] Failed to send task_auto_complete: {e}")
+
+        status_label = "completed" if status == "done" else "partially completed"
+        summary = notes[:2000] if notes else "No details available."
+        chat_msg = f"**Background task {status_label}:** {title}\n\n{summary}"
+        for ws in list(self._connected_websockets):
+            try:
+                await self._send(ws, {"type": "content", "text": chat_msg})
+                await self._send(ws, {"type": "response_done", "content": chat_msg, "tool_calls": []})
+                print(f"[Server] Result injected into chat")
+            except Exception as e:
+                print(f"[Server] Failed to inject chat: {e}")
+
+    async def _push_status_to_clients(self) -> None:
+        """Push updated status to all connected websockets."""
+        status = self._status()
+        for ws in list(self._connected_websockets):
+            try:
+                await self._send(ws, status)
+            except Exception:
+                pass
+
     async def run_forever(self) -> None:
         """Start the WebSocket server and block until cancelled."""
+        self.task_executor.start()
         async with serve(self.handle_client, self.host, self.port) as ws_server:
             self._server = ws_server
             print(f"Ares desktop server listening on ws://{self.host}:{self.port}")
@@ -108,6 +216,7 @@ class AresServer:
 
     async def handle_client(self, websocket: ServerConnection) -> None:
         """Handle a connected desktop renderer."""
+        self._connected_websockets.append(websocket)
         try:
             await self._send(websocket, self._session_info())
             await self._send(websocket, self._status())
@@ -115,6 +224,9 @@ class AresServer:
                 await self.handle_message(websocket, raw)
         except ConnectionClosed:
             pass  # client disconnected (e.g. health-check probe or user closed app)
+        finally:
+            if websocket in self._connected_websockets:
+                self._connected_websockets.remove(websocket)
 
     async def handle_message(self, websocket: Any, raw: str | bytes) -> None:
         """Handle one client JSON message."""
@@ -270,11 +382,17 @@ class AresServer:
         }
 
     def _status(self) -> dict[str, Any]:
+        executor_stats = self.task_executor.stats
         return {
             "type": "status",
             "model": self.config.model,
             "memory_count": len(self._memories()),
             "task_count": len(self._tasks()),
+            "auto_exec_count": len(self.task_store.get_auto_executable()),
+            "executor_state": executor_stats["state"],
+            "executor_current_task": executor_stats["current_task_title"],
+            "executor_tasks_completed": executor_stats["tasks_completed"],
+            "executor_tasks_failed": executor_stats["tasks_failed"],
             "session_id": self.conversation_id,
         }
 
@@ -330,6 +448,8 @@ class AresServer:
         return [_as_jsonable(item) for item in self.memory_store.get_recent()]
 
     def _tasks(self) -> list[dict[str, Any]]:
+        if hasattr(self.task_store, "list_all"):
+            return [_as_jsonable(item) for item in self.task_store.list_all()]
         if hasattr(self.task_store, "list_pending"):
             return [_as_jsonable(item) for item in self.task_store.list_pending()]
         if hasattr(self.task_store, "list_tasks"):
@@ -357,6 +477,7 @@ class AresServer:
         await websocket.send(json.dumps(payload, ensure_ascii=False))
     async def close(self) -> None:
             """Shut down stores."""
+            await self.task_executor.stop()
             for obj in (
                 self.agent,
                 self.conversation_store,

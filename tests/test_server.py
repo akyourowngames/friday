@@ -17,6 +17,7 @@ class FakeSocket:
 class FakeAgent:
     def __init__(self):
         self.model = "deepseek-v4-flash-free"
+        self.tool_executor = type("ToolExecutor", (), {"task_executor": None})()
 
     async def run_stream(self, message, conversation_history=None):
         assert message == "search bitcoin"
@@ -47,6 +48,9 @@ class FakeTaskStore:
     def list_pending(self):
         return [{"id": 1, "title": "Pay rent", "due_text": "in 5 days"}]
 
+    def get_auto_executable(self):
+        return []
+
     def close(self):
         pass
 
@@ -66,6 +70,9 @@ class FakeConversationStore:
 
     def add_exchange(self, conversation_id, user_message, assistant_message):
         self.exchanges.append((conversation_id, user_message, assistant_message))
+
+    def delete_empty_conversations(self):
+        return 0
 
     def close(self):
         pass

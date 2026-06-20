@@ -21,6 +21,7 @@ async def _answer() -> int:
 class DummyAgent:
     def __init__(self):
         self.model = None
+        self.last_messages = []
 
     def set_model(self, model: str) -> None:
         self.model = model

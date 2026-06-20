@@ -45,6 +45,11 @@ class TaskStore:
         _ensure_column(self.conn, "tasks", "updated_at", "TEXT")
         _ensure_column(self.conn, "tasks", "reminder_sent_at", "TEXT")
         _ensure_column(self.conn, "tasks", "original_due_text", "TEXT")
+        _ensure_column(self.conn, "tasks", "auto_executable", "TEXT DEFAULT 'no'")
+        _ensure_column(self.conn, "tasks", "execution_notes", "TEXT")
+        _ensure_column(self.conn, "tasks", "executed_at", "TEXT")
+        _ensure_column(self.conn, "tasks", "max_turns", "INTEGER DEFAULT 10")
+        _ensure_column(self.conn, "tasks", "retry_count", "INTEGER DEFAULT 0")
         self.conn.commit()
 
     def create(
@@ -54,13 +59,16 @@ class TaskStore:
         due: str | None = None,
         priority: str = "medium",
         reminder_at: str | None = None,
+        auto_executable: str = "no",
+        max_turns: int = 10,
     ) -> int:
         """Create a new task. Returns the task id."""
         normalized_due = parse_user_datetime(due)
         normalized_reminder = parse_user_datetime(reminder_at) if reminder_at else normalized_due
         cursor = self.conn.execute(
-            """INSERT INTO tasks (title, description, due, priority, reminder_at, original_due_text, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO tasks (title, description, due, priority, reminder_at,
+               original_due_text, updated_at, auto_executable, max_turns)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 title,
                 description,
@@ -69,6 +77,8 @@ class TaskStore:
                 normalized_reminder,
                 due if due != normalized_due else None,
                 now_local_iso(),
+                auto_executable,
+                max_turns,
             ),
         )
         self.conn.commit()
@@ -158,6 +168,26 @@ class TaskStore:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def update(self, task_id: int, **kwargs) -> bool:
+        """Update arbitrary fields on a task. Returns True if successful."""
+        allowed = {
+            "title", "description", "due", "priority", "status",
+            "execution_notes", "executed_at", "max_turns", "retry_count",
+            "auto_executable", "reminder_at",
+        }
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = now_local_iso()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [task_id]
+        cursor = self.conn.execute(
+            f"UPDATE tasks SET {set_clause} WHERE id = ?",
+            values,
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def cancel(self, task_id: int) -> bool:
         """Cancel a task. Returns True if successful."""
         cursor = self.conn.execute(
@@ -212,6 +242,26 @@ class TaskStore:
         )
         self.conn.commit()
         return cursor.rowcount > 0
+
+    def get_auto_executable(self) -> list[dict]:
+        """Get pending tasks marked as auto_executable."""
+        rows = self.conn.execute(
+            """SELECT * FROM tasks
+               WHERE status = 'pending' AND auto_executable = 'yes'
+               ORDER BY due IS NULL, due ASC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recently_executed(self, limit: int = 10) -> list[dict]:
+        """Get tasks that were auto-executed (done or partial), ordered by most recent."""
+        rows = self.conn.execute(
+            """SELECT * FROM tasks
+               WHERE executed_at IS NOT NULL
+               ORDER BY executed_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def search(self, query: str, limit: int = 10, include_done: bool = False) -> list[dict]:
         """Search tasks by title or description."""

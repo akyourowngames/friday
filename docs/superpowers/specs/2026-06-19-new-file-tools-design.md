@@ -1,7 +1,7 @@
 # New File Tools for Ares — Design Spec
 
 **Date:** 2026-06-19
-**Status:** Draft
+**Status:** Implemented
 **Author:** Claude (brainstorming session)
 
 ---

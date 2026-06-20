@@ -23,6 +23,7 @@ export function useWebSocket() {
   const setStatus = useSettingsStore((state) => state.setStatus);
   const setModelState = useSettingsStore((state) => state.setModel);
   const setLastError = useSettingsStore((state) => state.setLastError);
+  const addTaskNotification = useSettingsStore((state) => state.addTaskNotification);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +64,9 @@ export function useWebSocket() {
     });
     const offStatus = aresSocket.on("status", (payload) => setStatus(payload));
     const offModel = aresSocket.on("model_updated", ({ model }) => setModelState(model));
+    const offTaskAuto = aresSocket.on("task_auto_complete", (payload) => {
+      addTaskNotification(payload);
+    });
 
     async function connect() {
       const serverUrl = window.aresDesktop
@@ -90,6 +94,7 @@ export function useWebSocket() {
       offHistory();
       offStatus();
       offModel();
+      offTaskAuto();
     };
   }, [
     addError,
@@ -104,7 +109,8 @@ export function useWebSocket() {
     setModelState,
     setServerUrl,
     setSessions,
-    setStatus
+    setStatus,
+    addTaskNotification
   ]);
 
   const sendMessage = useCallback(

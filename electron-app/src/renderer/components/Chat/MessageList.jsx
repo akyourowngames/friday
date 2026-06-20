@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useChatStore } from "../../stores/chatStore.js";
+import { AresLogo } from "../common/AresLogo.jsx";
 import { Message } from "./Message.jsx";
 
 const HINTS = [
@@ -20,6 +21,7 @@ export function MessageList({ onSend }) {
   if (!messages.length) {
     return (
       <div className="empty-state">
+        <AresLogo size={72} className="god-logo" />
         <h1 className="god-title">ARES AGENT</h1>
         <p className="god-subtitle">
           Describe the task in your own words. I'll pick the right tools,

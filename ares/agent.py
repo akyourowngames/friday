@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from ares.context import ProjectContext
 from ares.context_blend import build_context_prompt
@@ -29,6 +29,7 @@ class Agent:
         base_url: str = "",
         model: str = "",
         config: AppConfig | None = None,
+        task_executor: Any | None = None,
     ):
         self.memory_store = memory_store
         self.task_store = task_store
@@ -37,8 +38,10 @@ class Agent:
             memory_store=memory_store,
             task_store=task_store,
             conversation_store=conversation_store,
+            task_executor=task_executor,
         )
         self.tools = get_tool_definitions()
+        self.last_messages: list[dict] = []
 
         kwargs = {}
         if api_key or config:
@@ -141,8 +144,8 @@ class Agent:
         messages = self.build_messages(user_input, conversation_history, context)
 
         # Agent loop: keep going while LLM wants to call tools
-        max_iterations = 5
-        for _ in range(max_iterations):
+        max_iterations = self.config.agent_max_iterations
+        for iteration in range(max_iterations):
             response = await self.llm.chat(messages, tools=self.tools)
 
             # Check for tool calls
@@ -167,13 +170,16 @@ class Agent:
                 yield content
             return
 
+        # If we exhaust all iterations, warn the user
+        yield "\n\n[Warning: Reached maximum tool iterations limit. Some steps may not have completed.]"
+
     async def run_stream(self, user_input: str, conversation_history: list[dict]) -> AsyncIterator[str]:
         """Run with streaming-first tool detection."""
         context = self.get_context(user_input)
         messages = self.build_messages(user_input, conversation_history, context)
 
-        max_iterations = 5
-        for _ in range(max_iterations):
+        max_iterations = self.config.agent_max_iterations
+        for iteration in range(max_iterations):
             tool_calls: dict[int, dict] = {}
             content_parts: list[str] = []
             has_tool_calls = False
@@ -235,7 +241,13 @@ class Agent:
                 messages.extend(self._tool_messages(tool_results))
                 continue
 
+            # Save messages for conversation history before returning
+            self.last_messages = messages
             return
+
+        # If we exhaust all iterations, warn the user
+        self.last_messages = messages
+        yield "[Warning: Reached maximum tool iterations limit. Some steps may not have completed.]"
 
     async def close(self):
         """Clean up resources."""

@@ -24,7 +24,9 @@ class TaskPriority(str, Enum):
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
+    IN_PROGRESS = "in_progress"
     DONE = "done"
+    PARTIAL = "partial"
     CANCELLED = "cancelled"
 
 
@@ -87,3 +89,8 @@ class AppConfig(BaseModel):
     project_context_enabled: bool = True
     context_token_budget: int = 2000
     project_context_max_files: int = 2
+    task_executor_enabled: bool = True
+    task_executor_poll_seconds: int = 5
+    task_executor_max_turns: int = 10
+    task_executor_max_cost_usd: float = 0.10
+    agent_max_iterations: int = 20

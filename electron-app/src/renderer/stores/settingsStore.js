@@ -87,8 +87,14 @@ export const useSettingsStore = create((set) => ({
   model: "deepseek-v4-flash-free",
   memoryCount: 0,
   taskCount: 0,
+  autoExecCount: 0,
   settingsOpen: false,
   lastError: "",
+  taskNotifications: [],
+  executorState: "unknown",
+  executorCurrentTask: null,
+  executorTasksCompleted: 0,
+  executorTasksFailed: 0,
 
   setConnected(connected) {
     set({ connected });
@@ -102,8 +108,31 @@ export const useSettingsStore = create((set) => ({
     set({
       model: status.model || "deepseek-v4-flash-free",
       memoryCount: status.memory_count ?? 0,
-      taskCount: status.task_count ?? 0
+      taskCount: status.task_count ?? 0,
+      autoExecCount: status.auto_exec_count ?? 0,
+      executorState: status.executor_state || "unknown",
+      executorCurrentTask: status.executor_current_task || null,
+      executorTasksCompleted: status.executor_tasks_completed ?? 0,
+      executorTasksFailed: status.executor_tasks_failed ?? 0
     });
+  },
+
+  addTaskNotification(notification) {
+    const id = `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    set((state) => ({
+      taskNotifications: [...state.taskNotifications, { ...notification, id }]
+    }));
+    setTimeout(() => {
+      set((state) => ({
+        taskNotifications: state.taskNotifications.filter((n) => n.id !== id)
+      }));
+    }, 12000);
+  },
+
+  dismissTaskNotification(id) {
+    set((state) => ({
+      taskNotifications: state.taskNotifications.filter((n) => n.id !== id)
+    }));
   },
 
   setModel(model) {

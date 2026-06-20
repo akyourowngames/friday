@@ -2,6 +2,7 @@ const path = require("path");
 
 module.exports = {
   root: path.join(__dirname, "src", "renderer"),
+  publicDir: path.join(__dirname, "public"),
   base: "./",
   esbuild: {
     jsx: "automatic"
