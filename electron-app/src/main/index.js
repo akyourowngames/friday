@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, nativeTheme, shell } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const { PythonManager } = require("./python-manager");
 const TerminalManager = require("./terminal-manager");
 
@@ -7,6 +8,22 @@ const isDev = !app.isPackaged;
 const pythonManager = new PythonManager();
 const terminalManager = new TerminalManager();
 let mainWindow = null;
+
+const debugLogPath = "c:\\Users\\anime\\ares\\terminal-debug.log";
+// Clean log file on start
+try {
+  fs.writeFileSync(debugLogPath, `[${new Date().toISOString()}] Logger initialized\n`);
+} catch (e) {
+  // ignore
+}
+
+function logToFile(msg) {
+  try {
+    fs.appendFileSync(debugLogPath, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch (e) {
+    // ignore
+  }
+}
 
 function rendererEntry() {
   if (isDev) {
@@ -45,6 +62,14 @@ function createWindow() {
     mainWindow.show();
   });
 
+  // Always allow Ctrl+Shift+I to open DevTools for debugging
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (input.control && input.shift && input.key.toLowerCase() === "i") {
+      mainWindow.webContents.toggleDevTools();
+      event.preventDefault();
+    }
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
@@ -71,19 +96,34 @@ ipcMain.handle("ares:get-app-version", () => app.getVersion());
 
 // ── Terminal IPC handlers ──────────────────────────────────────
 
+ipcMain.on("ares:log-to-file", (_, msg) => {
+  logToFile(msg);
+});
+
+ipcMain.on("focus-fix", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    logToFile("Main: focus-fix triggered, calling mainWindow.focus()");
+    mainWindow.focus();
+  }
+});
+
 ipcMain.handle("ares:terminal:create", () => {
+  logToFile("Main: ares:terminal:create called");
   return terminalManager.create();
 });
 
 ipcMain.on("ares:terminal:write", (_, data) => {
+  logToFile(`Main: ares:terminal:write received: ${JSON.stringify(data)}`);
   terminalManager.write(data);
 });
 
 ipcMain.on("ares:terminal:resize", (_, { cols, rows }) => {
+  logToFile(`Main: ares:terminal:resize: cols=${cols}, rows=${rows}`);
   terminalManager.resize(cols, rows);
 });
 
 ipcMain.on("ares:terminal:kill", () => {
+  logToFile("Main: ares:terminal:kill called");
   terminalManager.kill();
 });
 

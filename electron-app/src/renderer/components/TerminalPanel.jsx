@@ -24,10 +24,10 @@ export default function TerminalPanel() {
 
     const term = new Terminal({
       theme: {
-        background: '#0a0a0e',
+        background: '#0e0e12',
         foreground: '#d4d4d8',
         cursor: '#6B5B95',
-        cursorAccent: '#0a0a0e',
+        cursorAccent: '#0e0e12',
         selectionBackground: 'rgba(107, 91, 149, 0.3)',
         selectionForeground: '#ffffff',
         black: '#18181b',
@@ -68,18 +68,23 @@ export default function TerminalPanel() {
 
     requestAnimationFrame(() => {
       fitAddon.fit();
+      term.focus();
     });
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
+    // ── Wire up data flow ────────────────────────────────────
+
     const dataDisposable = term.onData((data) => {
+      window.aresDesktop?.logToFile(`Renderer: term.onData: data=${JSON.stringify(data)}`);
       writeToTerminal(data);
     });
 
     const aresDesktop = window.aresDesktop;
     if (aresDesktop?.terminal) {
       const unsubData = aresDesktop.terminal.onData((data) => {
+        window.aresDesktop?.logToFile(`Renderer: PTY data received: length=${data.length}`);
         term.write(data);
       });
       unsubscribersRef.current.push(unsubData);
@@ -114,8 +119,16 @@ export default function TerminalPanel() {
 
     window.addEventListener('resize', handleResize);
 
+    // Focus terminal when container is clicked
+    const handleContainerClick = () => {
+      term.focus();
+    };
+    const containerElem = containerRef.current;
+    containerElem.addEventListener('click', handleContainerClick);
+
     return () => {
       window.removeEventListener('resize', handleResize);
+      containerElem.removeEventListener('click', handleContainerClick);
       resizeObserver.disconnect();
       selectionDisposable.dispose();
       dataDisposable.dispose();
@@ -125,6 +138,39 @@ export default function TerminalPanel() {
       termRef.current = null;
       fitAddonRef.current = null;
     };
+  }, []);
+
+  // Focus and fit terminal when it connects
+  useEffect(() => {
+    window.aresDesktop?.logToFile(`Renderer: isConnected changed: isConnected=${isConnected}, termExists=${!!termRef.current}`);
+    if (isConnected && termRef.current) {
+      window.aresDesktop?.logToFile("Renderer: Terminal connected, fitting and focusing...");
+      termRef.current.focus();
+      if (fitAddonRef.current) {
+        try {
+          fitAddonRef.current.fit();
+          const dims = fitAddonRef.current.proposeDimensions();
+          if (dims) {
+            window.aresDesktop?.logToFile(`Renderer: resizing terminal on connect to cols=${dims.cols}, rows=${dims.rows}`);
+            resizeTerminal(dims.cols, dims.rows);
+          }
+        } catch (err) {
+          window.aresDesktop?.logToFile(`Renderer: error fitting terminal on connect: ${err.message}`);
+        }
+      }
+    }
+  }, [isConnected, resizeTerminal]);
+
+  // Listen for terminal clear events
+  useEffect(() => {
+    const handleClear = () => {
+      if (termRef.current) {
+        termRef.current.clear();
+        termRef.current.focus();
+      }
+    };
+    window.addEventListener('terminal:clear', handleClear);
+    return () => window.removeEventListener('terminal:clear', handleClear);
   }, []);
 
   useEffect(() => {

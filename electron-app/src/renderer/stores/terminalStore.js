@@ -48,6 +48,7 @@ const useTerminalStore = create((set, get) => ({
 
   writeToTerminal: (data) => {
     const aresDesktop = window.aresDesktop;
+    aresDesktop?.logToFile(`Store: writeToTerminal: isConnected=${get().isConnected}, data=${JSON.stringify(data)}`);
     if (aresDesktop?.terminal && get().isConnected) {
       aresDesktop.terminal.write(data);
     }

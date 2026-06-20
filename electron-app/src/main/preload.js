@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("aresDesktop", {
   restartServer: () => ipcRenderer.invoke("ares:restart-server"),
   getAppVersion: () => ipcRenderer.invoke("ares:get-app-version"),
   platform: process.platform,
+  logToFile: (msg) => ipcRenderer.send("ares:log-to-file", msg),
 
   // ── Terminal API ──────────────────────────────────────────
   terminal: {

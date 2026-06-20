@@ -114,9 +114,9 @@ class AresServer:
         self._terminal_output_buffer: dict[str, str] = {}
         self._terminal_command_events: dict[str, asyncio.Event] = {}
 
-        # Wire terminal_exec callback to ToolExecutor
+        # Wire terminal_exec callback to ToolExecutor (sync wrapper)
         if hasattr(self.agent, "tool_executor"):
-            self.agent.tool_executor._terminal_exec_callback = self._terminal_exec_via_websocket
+            self.agent.tool_executor._terminal_exec_callback = self._terminal_exec_sync
 
     async def _execute_task_in_background(self, prompt: str, max_turns: int) -> dict:
         """Run an isolated agent loop for background task execution."""
@@ -291,6 +291,10 @@ class AresServer:
         session_id = message.get("session_id")
         if session_id:
             session_id = int(session_id)
+            # Validate session exists; if not, create a new one
+            existing = self.conversation_store.get_messages(session_id)
+            if not existing and not self._conversation_exists(session_id):
+                session_id = self.conversation_store.start_conversation()
         else:
             session_id = self.conversation_store.start_conversation()
         self.conversation_id = session_id
@@ -394,6 +398,13 @@ class AresServer:
             "session_id": self.conversation_id,
             "model": self.config.model,
         }
+
+    def _conversation_exists(self, conversation_id: int) -> bool:
+        """Check if a conversation row exists in the database."""
+        row = self.conversation_store.conn.execute(
+            "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        return row is not None
 
     def _status(self) -> dict[str, Any]:
         executor_stats = self.task_executor.stats
@@ -539,6 +550,23 @@ class AresServer:
             self._terminal_command_events.pop(cmd_id, None)
 
         return output if output else f"Command completed (no output): {command}"
+
+    def _terminal_exec_sync(self, command: str, wait: bool = True, timeout: int = 30) -> str:
+        """Synchronous wrapper — fire command to terminal, return immediately."""
+        if not self._connected_websockets:
+            return "Error: No desktop client connected. Open the terminal panel first."
+
+        # Schedule the async version in the running event loop
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            asyncio.ensure_future(self._terminal_exec_via_websocket(command, wait=False, timeout=timeout))
+            return f"Command sent to terminal: {command}"
+
+        return "Error: No event loop available for terminal command."
 
     async def _send_error(self, websocket: Any, message: str) -> None:
         await self._send(websocket, {"type": "error", "message": message})

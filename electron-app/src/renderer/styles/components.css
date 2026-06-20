@@ -729,12 +729,18 @@ kbd {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   background-color: #0e0e12;
   background-image: url("../assets/bg.png");
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
+}
+
+.terminal-split-layout .chat-pane {
+  background-size: auto 100%;
+  background-position: center top;
 }
 
 .message-list {
@@ -768,6 +774,29 @@ kbd {
   flex: 1;
   min-height: 0;
   padding-bottom: 140px;
+  max-width: 100%;
+}
+
+.terminal-split-layout .empty-state {
+  padding: 24px 16px 140px;
+}
+
+.terminal-split-layout .god-title {
+  font-size: clamp(28px, 5vw, 72px);
+}
+
+.terminal-split-layout .god-subtitle {
+  font-size: 13px;
+  max-width: 360px;
+}
+
+.terminal-split-layout .empty-state-hints {
+  gap: 6px;
+}
+
+.terminal-split-layout .hint-chip {
+  padding: 6px 12px;
+  font-size: 12px;
 }
 
 .god-title {
@@ -2185,6 +2214,7 @@ kbd {
   min-height: 0;
   overflow: hidden;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
+  background: #0e0e12;
 }
 
 .terminal-split-layout .chat-panel {
@@ -2198,6 +2228,12 @@ kbd {
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
+  position: relative;
+}
+
+.terminal-split-layout .chat-pane {
+  background-size: auto;
+  background-position: center top;
 }
 
 /* Split divider */
@@ -2241,11 +2277,10 @@ kbd {
 .terminal-panel {
   display: flex;
   flex-direction: column;
-  min-width: 280px;
-  width: 40%;
-  background: rgba(10, 10, 14, 0.95);
-  backdrop-filter: blur(16px) saturate(1.2);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  min-width: 320px;
+  flex: 1;
+  background: #0e0e12;
+  border-left: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 /* Terminal header */
@@ -2253,78 +2288,192 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
-  background: rgba(255, 255, 255, 0.02);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  min-height: 38px;
+  padding: 0 16px;
+  background: rgba(18, 18, 22, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  min-height: 42px;
 }
 
 .terminal-header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
-.terminal-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #2ecc71;
-  box-shadow: 0 0 8px rgba(46, 204, 113, 0.5);
-  animation: terminalDotPulse 2s ease-in-out infinite;
-}
-
-@keyframes terminalDotPulse {
-  0%, 100% { box-shadow: 0 0 6px rgba(46, 204, 113, 0.4); }
-  50% { box-shadow: 0 0 12px rgba(46, 204, 113, 0.7); }
+.terminal-icon-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: rgba(107, 91, 149, 0.15);
+  border: 1px solid rgba(107, 91, 149, 0.25);
+  color: var(--accent-hover);
+  box-shadow: 0 0 10px rgba(107, 91, 149, 0.1);
 }
 
 .terminal-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-primary);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 
-.terminal-session-id {
+.terminal-header-divider {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 300;
+  user-select: none;
+}
+
+.terminal-shell-badge {
   font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.terminal-session-badge {
+  font-size: 10px;
+  font-weight: 500;
   color: var(--text-muted);
-  font-family: "JetBrains Mono", "Cascadia Code", monospace;
-  opacity: 0.6;
+  background: rgba(107, 91, 149, 0.08);
+  border: 1px solid rgba(107, 91, 149, 0.15);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: "JetBrains Mono", monospace;
+  cursor: help;
+}
+
+.terminal-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  margin-left: 4px;
+}
+
+.terminal-status-badge.active {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.06);
+  border-color: rgba(52, 211, 153, 0.15);
+}
+
+.terminal-status-badge.active .terminal-dot {
+  background: #34d399;
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.5);
+  animation: activeDotPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes activeDotPulse {
+  0%, 100% { transform: scale(1); opacity: 0.8; box-shadow: 0 0 6px rgba(52, 211, 153, 0.4); }
+  50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 12px rgba(52, 211, 153, 0.8); }
+}
+
+.terminal-status-badge.offline {
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.03);
+}
+
+.terminal-status-badge.offline .terminal-dot {
+  background: var(--text-muted);
+  box-shadow: none;
+  animation: none;
+  opacity: 0.5;
+}
+
+.terminal-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
 }
 
 .terminal-header-right {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
 }
 
-.terminal-restart-btn,
-.terminal-close-btn {
+.terminal-header-divider-v {
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 0 4px;
+}
+
+.terminal-action-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  background: none;
-  border: none;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 1px solid transparent;
   color: var(--text-muted);
   cursor: pointer;
   border-radius: 6px;
-  font-size: 13px;
-  line-height: 1;
-  transition: all 0.15s ease;
+  transition: all 150ms var(--ease-out);
 }
 
-.terminal-restart-btn:hover {
-  color: #2ecc71;
-  background: rgba(46, 204, 113, 0.08);
+.terminal-action-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.06);
 }
 
-.terminal-close-btn:hover {
-  color: #e74c3c;
-  background: rgba(231, 76, 60, 0.08);
+.terminal-action-btn:active {
+  background: rgba(255, 255, 255, 0.08);
+  transform: scale(0.96);
+}
+
+.terminal-action-btn.active {
+  color: var(--accent-hover);
+  background: rgba(107, 91, 149, 0.08);
+  border-color: rgba(107, 91, 149, 0.15);
+}
+
+.terminal-action-btn.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.terminal-action-btn.disabled:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.terminal-action-btn.restart:hover {
+  color: var(--warning);
+  background: rgba(251, 191, 36, 0.06);
+  border-color: rgba(251, 191, 36, 0.15);
+}
+
+.terminal-action-btn.close:hover {
+  color: var(--danger);
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.15);
+}
+
+.terminal-action-btn svg.success-icon {
+  color: var(--success);
 }
 
 /* Terminal container (xterm.js renders here) */
@@ -2332,6 +2481,26 @@ kbd {
   flex: 1;
   padding: 6px 8px;
   overflow: hidden;
+  background: #0e0e12;
+}
+
+/* Status dot in clean header */
+.terminal-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.terminal-status-dot.active {
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.4);
+  animation: activeDotPulse 1.8s ease-in-out infinite;
+}
+
+.terminal-status-dot.offline {
+  background: var(--text-muted);
+  opacity: 0.5;
 }
 
 /* xterm.js overrides */
