@@ -1,273 +1,330 @@
-"""Tests for proactive task execution."""
+"""Tests for the rewritten task executor with planning and step tracking."""
+
+import json
 import asyncio
-from unittest.mock import AsyncMock
-
-
-def _run(coro):
-    """Run a coroutine, creating an event loop if needed."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    return loop.run_until_complete(coro)
-
 import pytest
-
-from ares.task_executor import TaskExecutor
-from ares.tasks import TaskStore
-from ares.memory import MemoryStore
-from ares.tools import ToolExecutor
+from unittest.mock import AsyncMock, MagicMock, patch
+from ares.tools.tasks import TaskStore
+from ares.tools.dates import now_local_iso
 
 
-# ── Column existence tests ──────────────────────────────────────
-
-def test_task_store_has_auto_executable_column(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    task_id = store.create("Test task", auto_executable="yes")
-    task = store.get(task_id)
-    assert task["auto_executable"] == "yes"
-    store.close()
+def _make_store(tmp_path):
+    return TaskStore(db_path=tmp_path / "test.db")
 
 
-def test_task_store_has_execution_notes_column(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    task_id = store.create("Test task")
-    store.update(task_id, execution_notes="Did research, found 3 articles.")
-    task = store.get(task_id)
-    assert task["execution_notes"] == "Did research, found 3 articles."
-    store.close()
+def _make_task(store, **kwargs):
+    defaults = {"title": "test task", "auto_executable": "yes"}
+    defaults.update(kwargs)
+    return store.create(**defaults)
 
 
-def test_task_store_has_executed_at_column(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    task_id = store.create("Test task")
-    store.update(task_id, executed_at="2026-06-19T12:00:00")
-    task = store.get(task_id)
-    assert task["executed_at"] == "2026-06-19T12:00:00"
-    store.close()
+def _make_executor(store, mock_llm, mock_tool_executor=None):
+    """Create a TaskExecutor with mocked dependencies."""
+    from ares.task_executor import TaskExecutor
 
-
-def test_task_store_has_max_turns_column(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    task_id = store.create("Test task")
-    task = store.get(task_id)
-    assert task["max_turns"] == 10
-    store.close()
-
-
-def test_task_store_has_retry_count_column(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    task_id = store.create("Test task")
-    task = store.get(task_id)
-    assert task["retry_count"] == 0
-    store.close()
-
-
-# ── Classification tests ───────────────────────────────────────
-
-def test_classify_task_research():
-    executor = TaskExecutor.__new__(TaskExecutor)
-    assert executor._classify_task("Research Python async patterns") == "research"
-    assert executor._classify_task("Find out about database migrations") == "research"
-    assert executor._classify_task("Look up the best testing frameworks") == "research"
-    assert executor._classify_task("What is the capital of France") == "research"
-    assert executor._classify_task("Search for articles about AI safety") == "research"
-
-
-def test_classify_task_file():
-    executor = TaskExecutor.__new__(TaskExecutor)
-    assert executor._classify_task("Create file called notes.md") == "file"
-    assert executor._classify_task("Find the config file") == "file"
-    assert executor._classify_task("List files in the project") == "file"
-
-
-def test_classify_task_memory():
-    executor = TaskExecutor.__new__(TaskExecutor)
-    assert executor._classify_task("Remind me about the meeting") == "memory"
-    assert executor._classify_task("What did I say about the project") == "memory"
-
-
-def test_classify_task_unknown():
-    executor = TaskExecutor.__new__(TaskExecutor)
-    assert executor._classify_task("Buy groceries") is None
-    assert executor._classify_task("Call the dentist") is None
-
-
-# ── run_once tests ──────────────────────────────────────────────
-
-def test_run_once_processes_auto_executable_tasks(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    store.create("Research AI trends", auto_executable="yes")
-    store.create("Buy groceries", auto_executable="no")
-
-    executed = []
-
-    async def fake_runner(prompt, max_turns):
-        executed.append(prompt)
-        return {"summary": "Found 3 articles."}
-
-    def fake_callback(task_info):
-        pass
+    mock_callback = MagicMock()
+    mock_status = MagicMock()
 
     executor = TaskExecutor(
         task_store=store,
-        agent_runner=fake_runner,
-        callback=fake_callback,
+        agent_runner=AsyncMock(return_value={"summary": "done"}),
+        callback=mock_callback,
+        poll_seconds=1,
+        max_turns=5,
         enabled=True,
     )
+    executor.status_callback = mock_status
 
-    count = _run(executor.run_once())
-    assert count == 1
-    assert len(executed) == 1
-    assert "Research AI trends" in executed[0]
+    # Wire LLM and tool executor
+    executor.llm = mock_llm
+    executor.tool_executor = mock_tool_executor or MagicMock()
+    executor.allowed_tools = ["web_search", "read_file", "write_file"]
+    executor.planner = None
 
-    task = store.get(1)
-    assert task["status"] == "done"
-    assert "Found 3 articles" in task["execution_notes"]
-    assert task["executed_at"] is not None
-    store.close()
+    return executor
 
 
-def test_run_once_skips_unknown_tasks(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    store.create("Buy groceries", auto_executable="yes")
+class TestHelperMethods:
+    def test_log_event_creates_record(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        executor = _make_executor(store, AsyncMock())
+        executor._log_event(task_id, "info", None, "test message")
+        events = store.get_events(task_id)
+        assert len(events) == 1
+        assert events[0]["message"] == "test message"
+        assert events[0]["level"] == "info"
 
-    async def fake_runner(prompt, max_turns):
-        return {"summary": "Done"}
+    def test_log_event_with_step(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        executor = _make_executor(store, AsyncMock())
+        executor._log_event(task_id, "success", 2, "step done")
+        events = store.get_events(task_id)
+        assert events[0]["step"] == 2
 
-    executor = TaskExecutor(
-        task_store=store,
-        agent_runner=fake_runner,
-        callback=None,
-        enabled=True,
-    )
+    def test_set_state_updates_task(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        executor = _make_executor(store, AsyncMock())
+        executor._set_state(task_id, "running")
+        task = store.get(task_id)
+        assert task["state"] == "running"
 
-    count = _run(executor.run_once())
-    assert count == 1
+    def test_set_state_logs_event(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        executor = _make_executor(store, AsyncMock())
+        executor._set_state(task_id, "planning")
+        events = store.get_events(task_id)
+        assert any("planning" in e["message"] for e in events)
 
-    task = store.get(1)
-    assert task["status"] == "partial"
-    assert "not recognized" in task["execution_notes"]
-    store.close()
-
-
-def test_run_once_disabled_does_nothing(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    store.create("Research something", auto_executable="yes")
-
-    executor = TaskExecutor(
-        task_store=store,
-        agent_runner=AsyncMock(),
-        enabled=False,
-    )
-
-    count = _run(executor.run_once())
-    assert count == 0
-    store.close()
-
-
-def test_run_once_retries_on_failure(tmp_path):
-    store = TaskStore(db_path=tmp_path / "test.db")
-    store.create("Research AI trends", auto_executable="yes")
-
-    call_count = 0
-
-    async def failing_runner(prompt, max_turns):
-        nonlocal call_count
-        call_count += 1
-        raise RuntimeError("API error")
-
-    executor = TaskExecutor(
-        task_store=store,
-        agent_runner=failing_runner,
-        enabled=True,
-    )
-
-    _run(executor.run_once())
-    task = store.get(1)
-    assert task["status"] == "pending"
-    assert task["retry_count"] == 1
-    assert call_count == 1
-
-    _run(executor.run_once())
-    _run(executor.run_once())
-    assert call_count == 3
-
-    _run(executor.run_once())
-    task = store.get(1)
-    assert task["execution_notes"] == "Failed after 3 retries. Manual intervention needed."
-    store.close()
+    def test_format_size(self):
+        from ares.task_executor import TaskExecutor
+        assert TaskExecutor._format_size(0) == "0.0 B"
+        assert TaskExecutor._format_size(1024) == "1.0 KB"
+        assert TaskExecutor._format_size(1048576) == "1.0 MB"
+        assert TaskExecutor._format_size(1073741824) == "1.0 GB"
 
 
-# ── create_task tool test ───────────────────────────────────────
+class TestExecuteStep:
+    @pytest.mark.asyncio
+    async def test_execute_step_with_tool_calls(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        store.update(task_id, max_turns=5)
+        task = store.get(task_id)
 
-def test_create_task_with_auto_executable(tmp_path):
-    memory = MemoryStore(db_path=tmp_path / "memory.db")
-    tasks = TaskStore(db_path=tmp_path / "tasks.db")
-    executor = ToolExecutor(memory_store=memory, task_store=tasks)
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=[
+            {"tool_calls": [{"id": "c1", "tool": "web_search", "args": {"query": "test"}}], "content": None},
+            {"content": "Step complete", "tool_calls": None},
+        ])
 
-    result = executor.execute("create_task", {
-        "title": "Research Python async patterns",
-        "auto_executable": True,
-    })
-    assert "Created task" in result
-    assert "[auto]" in result
+        mock_tool = MagicMock()
+        mock_tool.execute = MagicMock(return_value="search results")
 
-    task = tasks.get(1)
-    assert task["auto_executable"] == "yes"
-    memory.close()
-    tasks.close()
+        executor = _make_executor(store, mock_llm, mock_tool)
+        executor.tool_executor = mock_tool
+
+        step = {"step": 1, "title": "Search", "description": "find stuff", "status": "pending"}
+        result = await executor._execute_step(task, step)
+
+        assert result["status"] == "success"
+        assert result["tool_calls"] == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_step_tracks_artifacts(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        store.update(task_id, max_turns=5)
+        task = store.get(task_id)
+
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=[
+            {"tool_calls": [{"id": "c1", "tool": "write_file", "args": {"path": "/tmp/test.md"}}], "content": None},
+            {"content": "Done", "tool_calls": None},
+        ])
+
+        mock_tool = MagicMock()
+        mock_tool.execute = MagicMock(return_value="written")
+
+        executor = _make_executor(store, mock_llm, mock_tool)
+        executor.tool_executor = mock_tool
+
+        step = {"step": 1, "title": "Write", "description": "write file", "status": "pending"}
+        result = await executor._execute_step(task, step)
+
+        assert len(result["artifacts"]) == 1
+        assert result["artifacts"][0]["path"] == "/tmp/test.md"
 
 
-# ── End-to-end integration test ─────────────────────────────────
+class TestHandleFailure:
+    @pytest.mark.asyncio
+    async def test_retry_on_first_failure(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        store.update(task_id, attempt=1, max_attempts=3)
+        task = store.get(task_id)
 
-def test_full_workflow_end_to_end(tmp_path):
-    from ares.memory import MemoryStore
+        executor = _make_executor(store, AsyncMock())
 
-    memory = MemoryStore(db_path=tmp_path / "memory.db")
-    store = TaskStore(db_path=tmp_path / "tasks.db")
-    tool_executor = ToolExecutor(memory_store=memory, task_store=store)
+        with patch("ares.task_executor.asyncio.sleep", new_callable=AsyncMock):
+            await executor._handle_failure(task_id, task, "timeout")
 
-    result = tool_executor.execute("create_task", {
-        "title": "Research Python async patterns",
-        "description": "Find best practices for asyncio",
-        "auto_executable": True,
-    })
-    assert "Created task" in result
-    assert "[auto]" in result
+        task = store.get(task_id)
+        assert task["state"] == "queued"
+        assert task["attempt"] == 2
+        assert task["retry_reason"] == "timeout"
 
-    auto_tasks = store.get_auto_executable()
-    assert len(auto_tasks) == 1
-    assert auto_tasks[0]["title"] == "Research Python async patterns"
+    @pytest.mark.asyncio
+    async def test_exhaust_retries(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        store.update(task_id, attempt=3, max_attempts=3)
+        task = store.get(task_id)
 
-    executed = []
+        executor = _make_executor(store, AsyncMock())
+        await executor._handle_failure(task_id, task, "persistent error")
 
-    async def fake_runner(prompt, max_turns):
-        executed.append(prompt)
-        return {"summary": "Found 3 articles about asyncio patterns."}
+        task = store.get(task_id)
+        assert task["state"] == "failed"
+        assert "3 attempts" in (task.get("execution_notes") or "")
 
-    executor = TaskExecutor(
-        task_store=store,
-        agent_runner=fake_runner,
-        enabled=True,
-    )
-    _run(executor.run_once())
 
-    task = store.get(1)
-    assert task["status"] == "done"
-    assert "Found 3 articles" in task["execution_notes"]
-    assert task["executed_at"] is not None
+class TestResumeTask:
+    @pytest.mark.asyncio
+    async def test_resume_skips_completed_steps(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
 
-    history = store.get_recently_executed()
-    assert len(history) == 1
-    assert history[0]["title"] == "Research Python async patterns"
+        plan = [
+            {"step": 1, "title": "Step 1", "description": "d1", "status": "completed"},
+            {"step": 2, "title": "Step 2", "description": "d2", "status": "pending"},
+            {"step": 3, "title": "Step 3", "description": "d3", "status": "pending"},
+        ]
+        store.update(task_id,
+            state="failed",
+            plan=json.dumps(plan),
+            total_steps=3,
+            current_step=2,
+            completed_steps=json.dumps([1]),
+        )
+        task = store.get(task_id)
 
-    auto_tasks = store.get_auto_executable()
-    assert len(auto_tasks) == 0
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(return_value={"content": "Step done", "tool_calls": None})
 
-    status_result = tool_executor.execute("get_execution_status", {"limit": 10})
-    assert "Research Python async patterns" in status_result
-    assert "\u2705" in status_result
+        executor = _make_executor(store, mock_llm)
+        executor.planner = MagicMock()
+        executor.planner.generate_plan = AsyncMock(return_value=plan)
 
-    memory.close()
-    store.close()
+        await executor._resume_task(task)
+
+        task = store.get(task_id)
+        assert task["state"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_resume_all_completed(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+
+        plan = [{"step": 1, "title": "S1", "description": "d", "status": "completed"}]
+        store.update(task_id,
+            state="failed",
+            plan=json.dumps(plan),
+            total_steps=1,
+            completed_steps=json.dumps([1]),
+        )
+        task = store.get(task_id)
+
+        executor = _make_executor(store, AsyncMock())
+        await executor._resume_task(task)
+
+        task = store.get(task_id)
+        assert task["state"] == "completed"
+
+
+class TestCompletionReport:
+    @pytest.mark.asyncio
+    async def test_report_generation(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        store.update(task_id, attempt=1, max_attempts=3)
+        task = store.get(task_id)
+
+        report_json = json.dumps({
+            "title": "Researched LLMs",
+            "summary": "Comprehensive research on LLMs.",
+            "key_results": ["Transformers use self-attention"],
+        })
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(return_value={"content": report_json})
+
+        executor = _make_executor(store, mock_llm)
+        plan = [{"step": 1, "title": "Research", "description": "d", "status": "completed"}]
+
+        report = await executor._generate_completion_report(task, plan, tool_call_count=5)
+        assert report["title"] == "Researched LLMs"
+        assert report["steps_completed"] == 1
+        assert report["tool_calls_made"] == 5
+        assert report["status_emoji"] == "✓"
+
+    @pytest.mark.asyncio
+    async def test_report_fallback_on_error(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store)
+        store.update(task_id, attempt=1, max_attempts=3)
+        task = store.get(task_id)
+
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=Exception("LLM error"))
+
+        executor = _make_executor(store, mock_llm)
+        plan = [{"step": 1, "title": "Research", "description": "d", "status": "completed"}]
+
+        report = await executor._generate_completion_report(task, plan, tool_call_count=0)
+        assert "summary" in report
+        assert report["steps_completed"] == 1
+
+
+class TestToolDefinitions:
+    def test_resume_task_definition_exists(self):
+        from ares.tools.definitions import get_tool_definitions
+        defs = get_tool_definitions()
+        names = {d["function"]["name"] for d in defs}
+        assert "resume_task" in names
+
+    def test_get_task_events_definition_exists(self):
+        from ares.tools.definitions import get_tool_definitions
+        defs = get_tool_definitions()
+        names = {d["function"]["name"] for d in defs}
+        assert "get_task_events" in names
+
+    def test_get_task_artifacts_definition_exists(self):
+        from ares.tools.definitions import get_tool_definitions
+        defs = get_tool_definitions()
+        names = {d["function"]["name"] for d in defs}
+        assert "get_task_artifacts" in names
+
+
+class TestToolExecutorHandlers:
+    def _make_executor(self, tmp_path):
+        from ares.tools.executor import ToolExecutor
+        from ares.memory import MemoryStore
+        memory = MemoryStore(db_path=tmp_path / "memory.db")
+        store = TaskStore(db_path=tmp_path / "test.db")
+        te = ToolExecutor(memory_store=memory, task_store=store)
+        return te, store
+
+    def test_resume_task_not_found(self, tmp_path):
+        te, _ = self._make_executor(tmp_path)
+        result = te.execute("resume_task", {"task_id": 999})
+        assert "not found" in result
+
+    def test_resume_task_wrong_state(self, tmp_path):
+        te, store = self._make_executor(tmp_path)
+        task_id = store.create("test")
+        result = te.execute("resume_task", {"task_id": task_id})
+        assert "cannot be resumed" in result
+
+    def test_get_task_events_empty(self, tmp_path):
+        te, store = self._make_executor(tmp_path)
+        task_id = store.create("test")
+        result = te.execute("get_task_events", {"task_id": task_id})
+        assert "No events" in result
+
+    def test_get_task_events_with_events(self, tmp_path):
+        te, store = self._make_executor(tmp_path)
+        task_id = store.create("test")
+        store.add_event(task_id, "info", None, "started")
+        store.add_event(task_id, "success", 1, "step done")
+        result = te.execute("get_task_events", {"task_id": task_id})
+        assert "started" in result
+        assert "step done" in result
+
+    def test_get_task_artifacts_empty(self, tmp_path):
+        te, store = self._make_executor(tmp_path)
+        task_id = store.create("test")
+        result = te.execute("get_task_artifacts", {"task_id": task_id})
+        assert "No artifacts" in result
