@@ -252,3 +252,26 @@ class TestTaskStoreV2Methods:
         store.set_state(task_id, "running")
         task = store.get(task_id)
         assert task["state"] == "running"
+
+
+# ── v2: TaskState model tests ────────────────────────────────────
+
+
+class TestTaskStateModel:
+    def test_task_state_enum_has_all_states(self):
+        from ares.models import TaskState
+        states = {s.value for s in TaskState}
+        assert "queued" in states
+        assert "planning" in states
+        assert "running" in states
+        assert "retrying" in states
+        assert "completed" in states
+        assert "failed" in states
+        assert "cancelled" in states
+
+    def test_task_transitions_defined(self):
+        from ares.models import TASK_TRANSITIONS
+        assert "queued" in TASK_TRANSITIONS
+        assert "planning" in TASK_TRANSITIONS["queued"]
+        assert "completed" in TASK_TRANSITIONS["running"]
+        assert TASK_TRANSITIONS["completed"] == []

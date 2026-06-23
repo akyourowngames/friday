@@ -94,3 +94,34 @@ class AppConfig(BaseModel):
     task_executor_max_turns: int = 10
     task_executor_max_cost_usd: float = 0.10
     agent_max_iterations: int = 20
+    context_compact_threshold: float = 0.90
+    context_protected_tail: int = 20
+    tool_output_max_chars: int = 500
+    memory_dedup_threshold: float = 0.3
+    memory_stale_days: int = 90
+    memory_extract_enabled: bool = True
+    memory_cleanup_enabled: bool = True
+
+
+# ── v2: Task States ──────────────────────────────────────────
+
+
+class TaskState(str, Enum):
+    QUEUED = "queued"
+    PLANNING = "planning"
+    RUNNING = "running"
+    RETRYING = "retrying"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+TASK_TRANSITIONS = {
+    "queued":      ["planning", "cancelled"],
+    "planning":    ["running", "failed", "cancelled"],
+    "running":     ["completed", "retrying", "failed", "cancelled"],
+    "retrying":    ["running", "failed", "cancelled"],
+    "completed":   [],
+    "failed":      ["queued"],
+    "cancelled":   ["queued"],
+}
