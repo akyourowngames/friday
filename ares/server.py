@@ -24,14 +24,16 @@ except ImportError:  # pragma: no cover
 
 from ares.agent import Agent
 from ares.config import load_config, save_config
+from ares.context_manager import ContextManager
 from ares.task_executor import TaskExecutor
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 
 
 TOOL_TOKEN_RE = re.compile(r"^\[tool:([^:]+):(.*)\]$", re.DOTALL)
+MAX_CONTEXT_MESSAGES = 40
 
 
 def parse_tool_token(token: str) -> tuple[str, str] | None:
@@ -40,6 +42,24 @@ def parse_tool_token(token: str) -> tuple[str, str] | None:
     if not match:
         return None
     return match.group(1), match.group(2)
+
+
+def _trim_history(history: list[dict], max_messages: int = MAX_CONTEXT_MESSAGES) -> list[dict]:
+    """Trim conversation history to fit within context limits.
+
+    Keeps the system prompt (first message), then the most recent messages.
+    Strips tool call details from older messages to save tokens.
+    """
+    if len(history) <= max_messages:
+        return history
+
+    trimmed = history[-max_messages:]
+
+    for msg in trimmed[:-6]:
+        if msg.get("tool_calls"):
+            msg = dict(msg)
+            msg["tool_calls"] = None
+    return trimmed
 
 
 def _as_jsonable(value: Any) -> Any:
@@ -107,16 +127,35 @@ class AresServer:
         if hasattr(self.agent, "tool_executor"):
             self.agent.tool_executor.task_executor = self.task_executor
         self.task_executor.status_callback = self._push_status_to_clients
+
+        # v2: Wire planner, LLM, and tool executor
+        from ares.planner import TaskPlanner
+        from ares.llm import LLMClient
+        llm = LLMClient(
+            api_key=self.config.api_key,
+            base_url=self.config.api_base_url,
+            model=self.config.model,
+        )
+        self.task_executor.planner = TaskPlanner(llm)
+        self.task_executor.llm = llm
+        self.task_executor.tool_executor = self.agent.tool_executor
+        self.agent.tool_executor.task_executor_ref = self.task_executor
+
         self._connected_websockets: list = []
         self.conversation_id = None
         self.conversation_store.delete_empty_conversations()
         self._server = None
+        self.context_manager = ContextManager(
+            config=self.config,
+            llm_client=self.agent.llm,
+            memory_store=self.memory_store,
+        )
         self._terminal_output_buffer: dict[str, str] = {}
         self._terminal_command_events: dict[str, asyncio.Event] = {}
 
-        # Wire terminal_exec callback to ToolExecutor (sync wrapper)
+        # Wire terminal display callback to ToolExecutor
         if hasattr(self.agent, "tool_executor"):
-            self.agent.tool_executor._terminal_exec_callback = self._terminal_exec_sync
+            self.agent.tool_executor._terminal_display_callback = self._terminal_display_only
 
     async def _execute_task_in_background(self, prompt: str, max_turns: int) -> dict:
         """Run an isolated agent loop for background task execution."""
@@ -136,9 +175,14 @@ class AresServer:
             messages = [{"role": "user", "content": prompt}]
             summary_parts = []
 
-            for _ in range(max_turns):
+            for turn_idx in range(max_turns):
                 response = await llm.chat(messages, tools=allowed_defs)
                 if response.get("tool_calls"):
+                    # Ensure every tool call has a non-empty id
+                    for i, tc in enumerate(response["tool_calls"]):
+                        if not tc.get("id"):
+                            tc["id"] = f"call_{turn_idx}_{i}"
+
                     messages.append({
                         "role": "assistant",
                         "content": response.get("content") or "",
@@ -149,12 +193,12 @@ class AresServer:
                         task_store=self.task_store,
                         conversation_store=self.conversation_store,
                     )
-                    for call in response["tool_calls"]:
+                    for i, call in enumerate(response["tool_calls"]):
                         fn = call["function"]
                         args = _json.loads(fn.get("arguments") or "{}")
                         result = executor.execute(fn["name"], args)
                         messages.append({
-                            "tool_call_id": call.get("id", ""),
+                            "tool_call_id": call.get("id") or f"call_{turn_idx}_{i}",
                             "role": "tool",
                             "content": result,
                         })
@@ -182,6 +226,15 @@ class AresServer:
             "status": status,
             "notes": notes,
         }
+
+        # Include completion report if available
+        updated_task = self.task_store.get(task_id) if task_id else None
+        if updated_task and updated_task.get("completion_report"):
+            try:
+                event["report"] = json.loads(updated_task["completion_report"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         ws_count = len(self._connected_websockets)
         print(f"[Server] Task #{task_id} complete ({status}), ws_count={ws_count}")
 
@@ -277,6 +330,21 @@ class AresServer:
                 if cmd_id in self._terminal_command_events:
                     self._terminal_output_buffer[cmd_id] = output
                     self._terminal_command_events[cmd_id].set()
+            elif msg_type == "task:resume":
+                task_id = message.get("task_id")
+                if task_id:
+                    result = self.agent.tool_executor.execute("resume_task", {"task_id": int(task_id)})
+                    await self._send(websocket, {"type": "task:resumed", "task_id": task_id, "message": result})
+            elif msg_type == "task:events":
+                task_id = message.get("task_id")
+                if task_id:
+                    events = self.task_store.get_events(int(task_id), limit=message.get("limit", 50))
+                    await self._send(websocket, {"type": "task:events", "task_id": task_id, "events": _as_jsonable(events)})
+            elif msg_type == "task:artifacts":
+                task_id = message.get("task_id")
+                if task_id:
+                    artifacts = self.task_store.get_artifacts(int(task_id))
+                    await self._send(websocket, {"type": "task:artifacts", "task_id": task_id, "artifacts": _as_jsonable(artifacts)})
             else:
                 await self._send_error(websocket, f"Unknown message type: {msg_type}")
         except Exception as exc:  # pragma: no cover - guardrail for desktop runtime
@@ -299,37 +367,63 @@ class AresServer:
             session_id = self.conversation_store.start_conversation()
         self.conversation_id = session_id
         history = self._conversation_history(session_id)
+        history = self._sanitize_history(history)
+        history = self.context_manager.before_send(history)
         response_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
 
-        async for chunk in self.agent.run_stream(content, conversation_history=history):
-            parsed = parse_tool_token(chunk)
-            if parsed:
-                tool_name, tool_content = parsed
-                payload = _safe_json_loads(tool_content)
-                args = self._tool_args(tool_name, payload)
-                tool_call = {
-                    "tool": tool_name,
-                    "args": args,
-                    "content": payload,
-                    "at": datetime.now(timezone.utc).isoformat(),
-                }
-                tool_calls.append(tool_call)
-                await self._send(
-                    websocket,
-                    {"type": "tool_start", "tool": tool_name, "args": args},
-                )
-                await self._send(
-                    websocket,
-                    {"type": "tool_result", "tool": tool_name, "content": payload},
-                )
-                continue
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                async for chunk in self.agent.run_stream(content, conversation_history=history):
+                    parsed = parse_tool_token(chunk)
+                    if parsed:
+                        tool_name, tool_content = parsed
+                        payload = _safe_json_loads(tool_content)
+                        args = self._tool_args(tool_name, payload)
+                        tool_call = {
+                            "tool": tool_name,
+                            "args": args,
+                            "content": payload,
+                            "at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        tool_calls.append(tool_call)
+                        await self._send(
+                            websocket,
+                            {"type": "tool_start", "tool": tool_name, "args": args},
+                        )
+                        await self._send(
+                            websocket,
+                            {"type": "tool_result", "tool": tool_name, "content": payload},
+                        )
+                        continue
 
-            response_parts.append(chunk)
-            await self._send(websocket, {"type": "content", "text": chunk})
+                    response_parts.append(chunk)
+                    await self._send(websocket, {"type": "content", "text": chunk})
+                break  # Success, exit retry loop
+            except Exception as exc:
+                error_str = str(exc)
+                is_context_error = (
+                    "400" in error_str
+                    or "too long" in error_str.lower()
+                    or "context" in error_str.lower()
+                    or "token" in error_str.lower()
+                    or "maximum" in error_str.lower()
+                )
+                if is_context_error and attempt < max_retries:
+                    keep = max(4, len(history) // (2 ** (attempt + 1)))
+                    history = history[:1] + history[-keep:]
+                    response_parts.clear()
+                    tool_calls.clear()
+                    continue
+                await self._send_error(websocket, error_str)
+                return
 
         full_response = "".join(response_parts).strip()
-        self.conversation_store.add_exchange(session_id, content, full_response)
+        import json as _json
+        tool_calls_json = _json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
+        self.conversation_store.add_exchange(session_id, content, full_response, tool_calls_json)
+
         await self._send(
             websocket,
             {
@@ -344,6 +438,12 @@ class AresServer:
         await self._send(websocket, self._status())
 
     async def _handle_new_session(self, websocket: Any) -> None:
+        if self.conversation_id:
+            try:
+                history = self._conversation_history(self.conversation_id)
+                self.context_manager.after_session(history)
+            except Exception:
+                pass
         self.conversation_id = None
         await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
@@ -408,6 +508,32 @@ class AresServer:
 
     def _status(self) -> dict[str, Any]:
         executor_stats = self.task_executor.stats
+        context_usage = {"used": 0, "total": 128000, "percent": 0, "breakdown": {}}
+        if self.conversation_id:
+            history = self._conversation_history(self.conversation_id)
+            from ares.context_blend import (
+                TokenEstimator,
+                estimate_token_breakdown,
+            )
+            est = TokenEstimator()
+            used = est.estimate_history(history)
+            total = est.estimate_context_window(self.config.model)
+
+            # Estimate token breakdown for UI display
+            system_prompt = ""
+            try:
+                from ares.prompts import SYSTEM_PROMPT
+                system_prompt = SYSTEM_PROMPT or ""
+            except Exception:
+                pass
+            breakdown = estimate_token_breakdown(system_prompt, history)
+
+            context_usage = {
+                "used": used,
+                "total": total,
+                "percent": round(used / total * 100, 1) if total > 0 else 0,
+                "breakdown": breakdown,
+            }
         return {
             "type": "status",
             "model": self.config.model,
@@ -419,6 +545,7 @@ class AresServer:
             "executor_tasks_completed": executor_stats["tasks_completed"],
             "executor_tasks_failed": executor_stats["tasks_failed"],
             "session_id": self.conversation_id,
+            "context_usage": context_usage,
         }
 
     def _conversation_history(self, session_id: int) -> list[dict[str, Any]]:
@@ -428,15 +555,29 @@ class AresServer:
             item = _as_jsonable(row)
             role = item.get("role") or item.get("speaker") or "assistant"
             content = item.get("content") or item.get("message") or item.get("text") or ""
-            history.append(
-                {
-                    "id": item.get("id"),
-                    "role": role,
-                    "content": content,
-                    "created_at": item.get("created_at") or item.get("timestamp"),
-                }
-            )
+            msg = {
+                "id": item.get("id"),
+                "role": role,
+                "content": content,
+                "created_at": item.get("created_at") or item.get("timestamp"),
+            }
+            if item.get("tool_calls"):
+                msg["tool_calls"] = item["tool_calls"]
+            history.append(msg)
         return history
+
+    def _sanitize_history(self, history: list[dict]) -> list[dict]:
+        """Clean conversation history to avoid API 400 errors."""
+        sanitized = []
+        for msg in history:
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            content = content.replace("\x00", "")
+            if len(content) > 50000:
+                content = content[:50000] + "\n... [truncated]"
+            sanitized.append({**msg, "content": content})
+        return sanitized
 
     def _sessions(self) -> list[dict[str, Any]]:
         self.conversation_store.delete_empty_conversations()
@@ -567,6 +708,24 @@ class AresServer:
             return f"Command sent to terminal: {command}"
 
         return "Error: No event loop available for terminal command."
+
+    def _terminal_display_only(self, command: str) -> None:
+        """Fire-and-forget: display a command in the visual terminal panel."""
+        if not self._connected_websockets:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            ws = self._connected_websockets[0]
+            asyncio.ensure_future(self._send(ws, {
+                "type": "terminal:exec",
+                "command": command,
+                "cmd_id": f"display-{id(command)}",
+            }))
 
     async def _send_error(self, websocket: Any, message: str) -> None:
         await self._send(websocket, {"type": "error", "message": message})
