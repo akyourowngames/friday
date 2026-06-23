@@ -6,7 +6,7 @@ import pytest
 
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 from ares.tools import ToolExecutor, get_tool_definitions
 
 
@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 41
+        assert len(tools) == 44
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -62,6 +62,9 @@ class TestToolDefinitions:
             "convert_image",
             "crop_image",
             "terminal_exec",
+            "resume_task",
+            "get_task_events",
+            "get_task_artifacts",
         }
 
     def test_tools_have_schemas(self):
@@ -215,7 +218,7 @@ class TestToolExecutor:
 
     def test_web_search_tool(self, executor, monkeypatch):
         """web_search tool returns structured JSON payload."""
-        monkeypatch.setattr("ares.tools.web_search_payload", lambda query, max_results=5, provider=None: {
+        monkeypatch.setattr("ares.tools.executor.web_search_payload", lambda query, max_results=5, provider=None: {
             "query": query,
             "provider": provider or "ddgs",
             "summary": "Summary",
@@ -230,7 +233,7 @@ class TestToolExecutor:
 
     def test_fetch_url_tool(self, executor, monkeypatch):
         """fetch_url returns structured page extraction payload."""
-        monkeypatch.setattr("ares.tools.fetch_url_tool", lambda args: json.dumps({
+        monkeypatch.setattr("ares.tools.executor.fetch_url_tool", lambda args: json.dumps({
             "url": args["url"],
             "title": "Example",
             "content": "Readable page text",
