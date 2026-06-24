@@ -22,7 +22,7 @@ ALLOWED_TOOLS = {
     "count_lines", "file_tree",
     "search_memory", "store_memory",
     "write_file", "edit_file", "create_directory",
-    "run_command",
+    "run_command", "run_code",
 }
 
 EXECUTOR_STATES = {
