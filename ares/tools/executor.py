@@ -50,8 +50,6 @@ class ToolExecutor:
         self.task_executor = task_executor
         self.task_executor_ref = None  # wired by server for resume support
         self.repl = PersistentREPL()
-        skill_dirs = list((config.skill_dirs if config else []) or [])
-        self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
 
     def close(self) -> None:
         """Clean up persistent sessions."""
@@ -281,9 +279,18 @@ class ToolExecutor:
 
     # ── Skills ─────────────────────────────────────────────────────
 
+    def _skill_manager(self) -> SkillManager:
+        manager = getattr(self, "skill_manager", None)
+        if manager is None:
+            skill_dirs = list((self.config.skill_dirs if self.config else []) or [])
+            manager = SkillManager(skill_dirs=skill_dirs or None)
+            self.skill_manager = manager
+        return manager
+
     def _list_skills_tool(self, args: dict | None = None) -> str:
         args = args or {}
-        skills = self.skill_manager.search(
+        manager = self._skill_manager()
+        skills = manager.search(
             query=args.get("query", ""),
             category=args.get("category", ""),
         )
@@ -291,13 +298,13 @@ class ToolExecutor:
             return "No matching skills found."
         lines = [f"Available skills ({len(skills)}):"]
         lines.extend(skill.summary_line() for skill in skills)
-        cats = self.skill_manager.list_categories()
+        cats = manager.list_categories()
         if cats:
             lines.append("Categories: " + ", ".join(f"{name} ({count})" for name, count in cats.items()))
         return "\n".join(lines)
 
     def _load_skill_tool(self, args: dict) -> str:
-        skill = self.skill_manager.get_skill(args["name"])
+        skill = self._skill_manager().get_skill(args["name"])
         if skill is None:
             return f"Skill '{args['name']}' was not found."
         files = ""
@@ -313,7 +320,7 @@ class ToolExecutor:
         )
 
     def _create_skill_tool(self, args: dict) -> str:
-        skill = self.skill_manager.create_skill(
+        skill = self._skill_manager().create_skill(
             name=args["name"],
             content=args["content"],
             category=args.get("category", "general"),
