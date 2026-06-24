@@ -174,7 +174,17 @@ class ToolExecutor:
         task = self.tasks.get(task_id)
         due_str = f" (due: {task['due']})" if task and task.get("due") else ""
         auto_str = " [auto]" if auto_exec == "yes" else ""
-        return f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
+        if auto_exec == "yes" and self.task_executor_ref is not None:
+            wake = getattr(self.task_executor_ref, "wake", None)
+            if callable(wake):
+                wake()
+        result = f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
+        if auto_exec == "yes":
+            result += (
+                "\nAuto-executable task queued for the background executor. "
+                "Do not execute it inline; the executor will plan, run, verify, and track artifacts."
+            )
+        return result
 
     def _format_task(self, task: dict) -> str:
         due = f" | due: {task['due']}" if task.get("due") else ""

@@ -60,6 +60,7 @@ class TaskExecutor:
         self.max_turns = max_turns
         self.enabled = enabled
         self._task: asyncio.Task | None = None
+        self._wake_event = asyncio.Event()
         self._state: str = "stopped"
         self._current_task_id: int | None = None
         self._current_task_title: str | None = None
@@ -515,7 +516,23 @@ class TaskExecutor:
                 self._last_error = str(e)
                 self._state = "idle"
                 logger.error("Executor loop error: %s", e)
-            await asyncio.sleep(self.poll_seconds)
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=self.poll_seconds)
+                self._wake_event.clear()
+            except asyncio.TimeoutError:
+                pass
+
+    def wake(self) -> None:
+        """Wake the executor so newly queued work is picked up promptly."""
+        if not self.enabled:
+            return
+        try:
+            if self._task is not None:
+                self._task.get_loop().call_soon_threadsafe(self._wake_event.set)
+            else:
+                self._wake_event.set()
+        except RuntimeError:
+            self._wake_event.set()
 
     def start(self) -> None:
         if self._task is not None:
