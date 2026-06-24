@@ -2,7 +2,7 @@
 
 import sys
 import pytest
-from ares.shell_execution import run_command
+from ares.tools.shell_execution import run_command
 
 
 class TestRunCommand:

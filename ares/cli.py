@@ -24,13 +24,13 @@ from ares.agent import Agent
 from ares.context import ProjectContext
 from ares.context_blend import build_context_prompt
 from ares.conversations import ConversationStore
-from ares.exporter import export_data, import_data
+from ares.tools.exporter import export_data, import_data
 from ares.memory import MemoryStore
 from ares.profile import ProfileManager, PROFILE_TEMPLATE
 from ares.reminders import DesktopNotifier, ReminderService
-from ares.renders import get_renderer, render_generic_tool
+from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 from ares.task_executor import TaskExecutor
 from ares.config import load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
@@ -45,7 +45,9 @@ COMPLETER = WordCompleter([
     "/help", "/tasks", "/memory", "/model", "/clear",
     "/forget", "/export", "/import", "/reset", "/exit",
     "/soul", "/profile", "/context",
-    "/tasks auto on", "/tasks auto off", "/tasks auto list", "/tasks history", "/tasks executor",
+    "/tasks auto on", "/tasks auto off", "/tasks auto list",
+    "/tasks history", "/tasks executor", "/tasks detail",
+    "/tasks events", "/tasks artifacts", "/tasks resume",
 ], ignore_case=True)
 
 
@@ -195,9 +197,14 @@ class AresCLI:
             messages = [{"role": "user", "content": prompt}]
             summary_parts = []
 
-            for _ in range(max_turns):
+            for turn_idx in range(max_turns):
                 response = await llm.chat(messages, tools=allowed_defs)
                 if response.get("tool_calls"):
+                    # Ensure every tool call has a non-empty id
+                    for i, tc in enumerate(response["tool_calls"]):
+                        if not tc.get("id"):
+                            tc["id"] = f"call_{turn_idx}_{i}"
+
                     messages.append({
                         "role": "assistant",
                         "content": response.get("content") or "",
@@ -208,12 +215,12 @@ class AresCLI:
                         task_store=self.task_store,
                         conversation_store=self.conversation_store,
                     )
-                    for call in response["tool_calls"]:
+                    for i, call in enumerate(response["tool_calls"]):
                         fn = call["function"]
                         args = __import__("json").loads(fn.get("arguments") or "{}")
                         result = executor.execute(fn["name"], args)
                         messages.append({
-                            "tool_call_id": call.get("id", ""),
+                            "tool_call_id": call.get("id") or f"call_{turn_idx}_{i}",
                             "role": "tool",
                             "content": result,
                         })
@@ -364,6 +371,10 @@ class AresCLI:
             table.add_row("/tasks auto list", "Show auto-executable tasks")
             table.add_row("/tasks history", "Show recently auto-executed tasks")
             table.add_row("/tasks executor", "Show executor status and stats")
+            table.add_row("/tasks detail ID", "Show full task detail with plan and report")
+            table.add_row("/tasks events ID", "Show execution log for a task")
+            table.add_row("/tasks artifacts ID", "Show files created/modified by a task")
+            table.add_row("/tasks resume ID", "Resume a failed task from where it left off")
             table.add_row("/memory [search|edit|delete]", "Review and manage memories")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
@@ -450,8 +461,109 @@ class AresCLI:
                             t.get("executed_at") or "—",
                         )
                     self.console.print(table)
+            elif arg.startswith("detail "):
+                task_id = int(arg.split(maxsplit=1)[1])
+                task = self.task_store.get(task_id)
+                if not task:
+                    self.console.print(f"[red]Task #{task_id} not found.[/red]")
+                else:
+                    state = task.get("state") or task.get("status", "pending")
+                    parts = [
+                        f"[bold]Task #{task_id}[/bold]: {task['title']}",
+                        f"[cyan]State:[/cyan] {state}",
+                        f"[cyan]Priority:[/cyan] {task.get('priority', 'medium')}",
+                    ]
+                    if task.get("due"):
+                        parts.append(f"[cyan]Due:[/cyan] {task['due']}")
+                    if task.get("auto_executable") == "yes":
+                        parts.append(f"[cyan]Auto-executable:[/cyan] yes")
+                    if task.get("plan"):
+                        import json
+                        try:
+                            plan = json.loads(task["plan"])
+                            steps_str = " → ".join(f"{s['step']}. {s['title']}" for s in plan)
+                            parts.append(f"[cyan]Plan ({len(plan)} steps):[/cyan] {steps_str}")
+                            if task.get("current_step"):
+                                parts.append(f"[cyan]Current step:[/cyan] {task['current_step']}/{task.get('total_steps', '?')}")
+                            if task.get("completed_steps"):
+                                completed = json.loads(task["completed_steps"])
+                                parts.append(f"[cyan]Completed steps:[/cyan] {completed}")
+                        except Exception:
+                            pass
+                    if task.get("attempt"):
+                        parts.append(f"[cyan]Attempt:[/cyan] {task['attempt']}/{task.get('max_attempts', 3)}")
+                    if task.get("retry_reason"):
+                        parts.append(f"[cyan]Retry reason:[/cyan] {task['retry_reason']}")
+                    if task.get("completion_report"):
+                        import json
+                        try:
+                            report = json.loads(task["completion_report"])
+                            parts.append(f"\n[bold green]Completion Report[/bold green]")
+                            if report.get("summary"):
+                                parts.append(report["summary"])
+                            if report.get("key_results"):
+                                for r in report["key_results"]:
+                                    parts.append(f"  • {r}")
+                            if report.get("files_created"):
+                                parts.append(f"  Files created: {', '.join(report['files_created'])}")
+                        except Exception:
+                            pass
+                    self.console.print(Panel("\n".join(parts), border_style="yellow", padding=(0, 1)))
+            elif arg.startswith("events "):
+                task_id = int(arg.split(maxsplit=1)[1])
+                events = self.task_store.get_events(task_id)
+                if not events:
+                    self.console.print(f"[dim]No events for task #{task_id}.[/dim]")
+                else:
+                    table = Table(title=f"Events — Task #{task_id}", border_style="yellow")
+                    table.add_column("Step", style="dim", width=6)
+                    table.add_column("Level", width=8)
+                    table.add_column("Message")
+                    table.add_column("Time", style="dim")
+                    for ev in events:
+                        level_color = {"success": "green", "error": "red", "warning": "yellow"}.get(ev.get("level", ""), "cyan")
+                        table.add_row(
+                            str(ev.get("step") or "—"),
+                            f"[{level_color}]{ev.get('level', 'info')}[/{level_color}]",
+                            ev.get("message", ""),
+                            ev.get("created_at") or "—",
+                        )
+                    self.console.print(table)
+            elif arg.startswith("artifacts "):
+                task_id = int(arg.split(maxsplit=1)[1])
+                artifacts = self.task_store.get_artifacts(task_id)
+                if not artifacts:
+                    self.console.print(f"[dim]No artifacts for task #{task_id}.[/dim]")
+                else:
+                    table = Table(title=f"Artifacts — Task #{task_id}", border_style="yellow")
+                    table.add_column("Step", style="dim", width=6)
+                    table.add_column("Type", width=14)
+                    table.add_column("Path")
+                    table.add_column("Size", style="dim")
+                    table.add_column("Description", style="dim")
+                    for art in artifacts:
+                        table.add_row(
+                            str(art.get("step") or "—"),
+                            art.get("artifact_type", "unknown"),
+                            art.get("path", ""),
+                            art.get("size_human", "—"),
+                            (art.get("description") or "")[:50],
+                        )
+                    self.console.print(table)
+            elif arg.startswith("resume "):
+                task_id = int(arg.split(maxsplit=1)[1])
+                task = self.task_store.get(task_id)
+                if not task:
+                    self.console.print(f"[red]Task #{task_id} not found.[/red]")
+                else:
+                    state = task.get("state") or task.get("status", "pending")
+                    if state != "failed":
+                        self.console.print(f"[red]Task #{task_id} is not in failed state (current: {state}).[/red]")
+                    else:
+                        self.task_executor.enqueue_resume(task_id)
+                        self.console.print(f"[green]Task #{task_id} queued for resume on next poll cycle.[/green]")
             else:
-                self.console.print("[red]Usage: /tasks [all|search QUERY|complete ID|cancel ID|auto on|off|list|history|executor][/red]")
+                self.console.print("[red]Usage: /tasks [all|search QUERY|complete ID|cancel ID|auto on|off|list|history|executor|detail ID|events ID|artifacts ID|resume ID][/red]")
 
         elif command == "/memory":
             if not arg:

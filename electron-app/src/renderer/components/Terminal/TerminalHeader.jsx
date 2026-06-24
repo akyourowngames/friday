@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Trash2, Copy, X, Check } from "lucide-react";
-import useTerminalStore from "../stores/terminalStore";
+import useTerminalStore from "../../stores/terminalStore";
 
 /**
  * Terminal panel header bar with status indicator and clean action buttons.

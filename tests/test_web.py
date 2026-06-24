@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from ares.models import AppConfig
-from ares.web import (
+from ares.tools.web import (
     format_results,
     summarize_results,
     tavily_search,
@@ -37,7 +37,7 @@ class TestWebSearch:
         assert "[1] First useful sentence." in summary
         assert "[2] Second useful sentence." in summary
 
-    @patch("ares.web.DDGS")
+    @patch("ares.tools.web.DDGS")
     def test_web_search_returns_results(self, mock_ddgs_cls):
         mock_ddgs = MagicMock()
         mock_ddgs_cls.return_value = mock_ddgs
@@ -51,14 +51,14 @@ class TestWebSearch:
             {"title": "Test", "url": "https://example.com", "snippet": "A test result"},
         ]
 
-    @patch("ares.web.DDGS")
+    @patch("ares.tools.web.DDGS")
     def test_web_search_empty_results(self, mock_ddgs_cls):
         mock_ddgs = MagicMock()
         mock_ddgs_cls.return_value = mock_ddgs
         mock_ddgs.text.return_value = []
         assert web_search("nonexistent query") == []
 
-    @patch("ares.web.DDGS")
+    @patch("ares.tools.web.DDGS")
     def test_web_search_failover_on_ratelimit(self, mock_ddgs_cls):
         from ddgs.exceptions import RatelimitException
 
@@ -74,7 +74,7 @@ class TestWebSearch:
         assert len(results) == 1
         assert results[0]["title"] == "Fallback"
 
-    @patch("ares.web.DDGS")
+    @patch("ares.tools.web.DDGS")
     def test_web_search_all_backends_fail(self, mock_ddgs_cls):
         from ddgs.exceptions import RatelimitException
 
@@ -83,11 +83,11 @@ class TestWebSearch:
         mock_ddgs.text.side_effect = RatelimitException("always fail")
         assert web_search("test query") == []
 
-    @patch("ares.web.ddgs_search")
-    @patch("ares.web.tavily_search")
+    @patch("ares.tools.web.ddgs_search")
+    @patch("ares.tools.web.tavily_search")
     def test_web_search_payload_auto_without_key_uses_ddgs_quietly(self, mock_tavily, mock_ddgs, monkeypatch):
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-        monkeypatch.setattr("ares.web.load_config", lambda: AppConfig())
+        monkeypatch.setattr("ares.tools.web.load_config", lambda: AppConfig())
         mock_ddgs.return_value = ([
             {"title": "Fallback", "url": "https://example.com", "snippet": "Fallback snippet."}
         ], [])
@@ -100,11 +100,11 @@ class TestWebSearch:
         assert payload["errors"] == []
         assert payload["results"][0]["title"] == "Fallback"
 
-    @patch("ares.web.ddgs_search")
-    @patch("ares.web.tavily_search")
+    @patch("ares.tools.web.ddgs_search")
+    @patch("ares.tools.web.tavily_search")
     def test_web_search_payload_auto_falls_back_when_tavily_fails(self, mock_tavily, mock_ddgs, monkeypatch):
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-        monkeypatch.setattr("ares.web.load_config", lambda: AppConfig(tavily_api_key="tvly-key"))
+        monkeypatch.setattr("ares.tools.web.load_config", lambda: AppConfig(tavily_api_key="tvly-key"))
         mock_tavily.return_value = ([], "", ["tavily failed"])
         mock_ddgs.return_value = ([
             {"title": "Fallback", "url": "https://example.com", "snippet": "Fallback snippet."}
@@ -116,7 +116,7 @@ class TestWebSearch:
         assert "tavily failed" in payload["errors"]
         assert payload["results"][0]["title"] == "Fallback"
 
-    @patch("ares.web.httpx.Client")
+    @patch("ares.tools.web.httpx.Client")
     def test_tavily_search_request_shape(self, mock_client_cls, monkeypatch):
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
         response = MagicMock()

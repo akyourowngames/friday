@@ -24,7 +24,11 @@ function ToolContent({ tool, args, content }) {
   if (tool.includes("file") || tool.includes("read") || tool.includes("list")) {
     return <FileCard args={args} content={content} />;
   }
-  return <pre className="file-preview">{JSON.stringify(content ?? args, null, 2)}</pre>;
+  if (tool === "run_command" || tool === "terminal_exec" || tool === "run_code") {
+    const text = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+    return <pre className="file-preview">{text}</pre>;
+  }
+  return <pre className="file-preview">{typeof content === "string" ? content : JSON.stringify(content ?? args, null, 2)}</pre>;
 }
 
 export function ToolCard({ call }) {

@@ -4,7 +4,7 @@ import os
 import pytest
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.memory import MemoryStore
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 
 
 @pytest.fixture

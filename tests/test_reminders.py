@@ -3,7 +3,7 @@
 import pytest
 
 from ares.reminders import DesktopNotifier, ReminderService
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 
 
 class RecordingNotifier(DesktopNotifier):

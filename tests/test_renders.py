@@ -4,7 +4,7 @@ import json
 
 from rich.console import Console
 
-from ares.renders import (
+from ares.tools.renders import (
     get_renderer,
     render_directory,
     render_file_content,

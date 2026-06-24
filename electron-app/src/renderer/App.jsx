@@ -5,12 +5,12 @@ import { SettingsPanel } from "./components/Settings/SettingsPanel.jsx";
 import { Sidebar } from "./components/Sidebar/Sidebar.jsx";
 import { StatusBar } from "./components/common/StatusBar.jsx";
 import { TaskNotification } from "./components/common/TaskNotification.jsx";
-import TerminalPanel from "./components/TerminalPanel.jsx";
-import TerminalHeader from "./components/TerminalHeader.jsx";
+import TerminalPanel from "./components/Terminal/TerminalPanel.jsx";
+import TerminalHeader from "./components/Terminal/TerminalHeader.jsx";
 import useTerminalStore from "./stores/terminalStore.js";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 import { useSettingsStore } from "./stores/settingsStore.js";
-import { useChatStore } from "./stores/chatStore.js";
+import { aresSocket } from "./lib/websocket.js";
 
 export default function App() {
   const connection = useWebSocket();
@@ -62,23 +62,11 @@ export default function App() {
 
   // Wire WebSocket terminal:exec messages to terminal
   useEffect(() => {
-    const handleWsMessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === "terminal:exec") {
-          const store = useTerminalStore.getState();
-          store.handleExecCommand(msg.command, msg.cmd_id);
-        }
-      } catch (err) {
-        // Not JSON or not our message
-      }
-    };
-
-    const ws = useChatStore.getState()?.websocket;
-    if (ws) {
-      ws.addEventListener("message", handleWsMessage);
-      return () => ws.removeEventListener("message", handleWsMessage);
-    }
+    const off = aresSocket.on("terminal:exec", (msg) => {
+      const store = useTerminalStore.getState();
+      store.handleExecCommand(msg.command, msg.cmd_id, aresSocket.ws);
+    });
+    return off;
   }, []);
 
   useEffect(() => {

@@ -14,10 +14,16 @@ class FakeSocket:
         self.messages.append(json.loads(payload))
 
 
+class FakeLLM:
+    async def chat(self, messages, tools=None):
+        return {"content": "Summary of conversation."}
+
+
 class FakeAgent:
     def __init__(self):
         self.model = "deepseek-v4-flash-free"
         self.tool_executor = type("ToolExecutor", (), {"task_executor": None})()
+        self.llm = FakeLLM()
 
     async def run_stream(self, message, conversation_history=None):
         assert message == "search bitcoin"
@@ -39,6 +45,21 @@ class FakeAgent:
 class FakeMemoryStore:
     def get_recent(self, limit=100):
         return [{"id": 1, "content": "User's name is Krish", "kind": "fact"}]
+
+    def list_all(self):
+        return []
+
+    def search(self, query, limit=5):
+        return []
+
+    def delete(self, fact_id):
+        return True
+
+    def update(self, fact_id, **kwargs):
+        return True
+
+    def store(self, fact_text, category="note", confidence=1.0, importance=0.5, source="conversation"):
+        return 1
 
     def close(self):
         pass
@@ -68,7 +89,7 @@ class FakeConversationStore:
     def list_conversations(self):
         return [{"id": 1, "summary": "", "started_at": "now", "ended_at": None}]
 
-    def add_exchange(self, conversation_id, user_message, assistant_message):
+    def add_exchange(self, conversation_id, user_message, assistant_message, tool_calls=None):
         self.exchanges.append((conversation_id, user_message, assistant_message))
 
     def delete_empty_conversations(self):

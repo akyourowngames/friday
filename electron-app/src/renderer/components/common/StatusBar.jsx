@@ -1,5 +1,6 @@
 import { Circle, Database, RefreshCw, Zap, Bot, Activity, AlertTriangle } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore.js";
+import { ContextBar } from "./ContextBar.jsx";
 
 const EXECUTOR_COLORS = {
   idle: "var(--text-faint)",
@@ -72,6 +73,7 @@ export function StatusBar({ onRetry }) {
           <span>{lastError}</span>
         </button>
       ) : null}
+      <ContextBar />
     </footer>
   );
 }

@@ -3,7 +3,7 @@
 import os
 import pytest
 from unittest.mock import patch, MagicMock
-from ares.image_generate import generate_image, IMAGES_DIR
+from ares.tools.image_generate import generate_image, IMAGES_DIR
 
 
 class TestGenerateImage:

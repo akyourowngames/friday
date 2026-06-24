@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from ares.filesystem import list_directory, read_file, resolve_path, search_files
+from ares.tools.filesystem import list_directory, read_file, resolve_path, search_files
 
 
 class TestResolvePath:
@@ -164,7 +164,7 @@ class TestListDirectory:
 
 
 def test_get_file_info_regular_file(tmp_path):
-    from ares.filesystem import get_file_info
+    from ares.tools.filesystem import get_file_info
     test_file = tmp_path / "hello.txt"
     test_file.write_text("hello world", encoding="utf-8")
 
@@ -176,19 +176,19 @@ def test_get_file_info_regular_file(tmp_path):
 
 
 def test_get_file_info_directory(tmp_path):
-    from ares.filesystem import get_file_info
+    from ares.tools.filesystem import get_file_info
     result = get_file_info(str(tmp_path))
     assert "Type: directory" in result
 
 
 def test_get_file_info_not_found():
-    from ares.filesystem import get_file_info
+    from ares.tools.filesystem import get_file_info
     result = get_file_info("/nonexistent/path/file.txt")
     assert "not found" in result.lower() or "not found" in result.lower()
 
 
 def test_get_file_info_binary(tmp_path):
-    from ares.filesystem import get_file_info
+    from ares.tools.filesystem import get_file_info
     bin_file = tmp_path / "data.bin"
     bin_file.write_bytes(b"\x00\x01\x02\x03\x04\x05")
 
@@ -197,7 +197,7 @@ def test_get_file_info_binary(tmp_path):
 
 
 def test_glob_pattern_basic(tmp_path):
-    from ares.filesystem import glob_pattern
+    from ares.tools.filesystem import glob_pattern
     (tmp_path / "a.py").write_text("x", encoding="utf-8")
     (tmp_path / "b.py").write_text("y", encoding="utf-8")
     (tmp_path / "c.txt").write_text("z", encoding="utf-8")
@@ -209,7 +209,7 @@ def test_glob_pattern_basic(tmp_path):
 
 
 def test_glob_pattern_recursive(tmp_path):
-    from ares.filesystem import glob_pattern
+    from ares.tools.filesystem import glob_pattern
     sub = tmp_path / "src"
     sub.mkdir()
     (sub / "main.py").write_text("x", encoding="utf-8")
@@ -221,7 +221,7 @@ def test_glob_pattern_recursive(tmp_path):
 
 
 def test_glob_pattern_no_matches(tmp_path):
-    from ares.filesystem import glob_pattern
+    from ares.tools.filesystem import glob_pattern
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")
 
     result = glob_pattern("*.py", path=str(tmp_path))
@@ -229,7 +229,7 @@ def test_glob_pattern_no_matches(tmp_path):
 
 
 def test_glob_pattern_skips_ignored_dirs(tmp_path):
-    from ares.filesystem import glob_pattern
+    from ares.tools.filesystem import glob_pattern
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     (git_dir / "config.py").write_text("secret", encoding="utf-8")

@@ -3,7 +3,7 @@
 import os
 import pytest
 from PIL import Image
-from ares.image_edit import (
+from ares.tools.image_edit import (
     image_info,
     resize_image,
     convert_image,

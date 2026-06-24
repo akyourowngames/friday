@@ -2,23 +2,208 @@
 
 from __future__ import annotations
 
+CONTEXT_WINDOWS: dict[str, int] = {
+    # OpenCode free tier
+    "deepseek-v4-flash-free": 128_000,
+    "deepseek-v4-flash": 128_000,
+    "deepseek-v4-pro": 128_000,
+    "mimo-v2.5-free": 128_000,
+    "qwen3.6-plus-free": 128_000,
+    "qwen3.6-plus": 128_000,
+    "minimax-m3-free": 128_000,
+    "nemotron-3-ultra-free": 128_000,
+    "north-mini-code-free": 128_000,
+    "big-pickle": 128_000,
+    # Claude
+    "claude-fable-5": 200_000,
+    "claude-opus-4-8": 200_000,
+    "claude-opus-4-7": 200_000,
+    "claude-opus-4-6": 200_000,
+    "claude-opus-4-5": 200_000,
+    "claude-opus-4-1": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-sonnet-4": 200_000,
+    "claude-haiku-4-5": 200_000,
+    # GPT
+    "gpt-5.5": 128_000,
+    "gpt-5.5-pro": 128_000,
+    "gpt-5.4": 128_000,
+    "gpt-5.4-pro": 128_000,
+    "gpt-5.4-mini": 128_000,
+    "gpt-5.4-nano": 128_000,
+    "gpt-5.3-codex-spark": 128_000,
+    "gpt-5.3-codex": 128_000,
+    "gpt-5.2": 128_000,
+    "gpt-5.2-codex": 128_000,
+    "gpt-5.1": 128_000,
+    "gpt-5.1-codex-max": 128_000,
+    "gpt-5.1-codex": 128_000,
+    "gpt-5.1-codex-mini": 128_000,
+    "gpt-5": 128_000,
+    "gpt-5-codex": 128_000,
+    "gpt-5-nano": 128_000,
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    # Gemini (large context)
+    "gemini-3.5-flash": 1_000_000,
+    "gemini-3-flash": 1_000_000,
+    "gemini-3.1-pro": 1_000_000,
+    # Grok
+    "grok-build-0.1": 128_000,
+    # GLM
+    "glm-5.1": 128_000,
+    "glm-5": 128_000,
+    # Moonshot
+    "kimi-k2.6": 128_000,
+    "kimi-k2.5": 128_000,
+    # MiniMax
+    "minimax-m2.7": 128_000,
+    "minimax-m2.5": 128_000,
+    # Qwen
+    "qwen3.5-plus": 128_000,
+}
+
+# Default context window for unknown models
+DEFAULT_CONTEXT_WINDOW = 128_000
+
+
+def get_model_budgets(model: str) -> dict[str, int]:
+    """Scale context budgets based on model's context window size.
+
+    Following Cline's pattern: smaller models get tighter budgets,
+    larger models get proportionally more resources.
+    """
+    window = CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
+
+    # Buffer: reserve for output tokens (model generates responses)
+    # Cline formula: max(contextWindow - 40_000, contextWindow * 0.8)
+    buffer = max(window - 40_000, int(window * 0.8))
+    usable = window - buffer
+
+    # Scale system prompt budget (soul + profile + project + memories + tasks)
+    # Small models (128k): ~4k tokens for context
+    # Medium models (200k): ~8k tokens
+    # Large models (1M+): ~32k tokens
+    if window >= 500_000:
+        context_token_budget = 32_000
+        max_memory_retrieval = 30
+    elif window >= 200_000:
+        context_token_budget = 8_000
+        max_memory_retrieval = 15
+    elif window >= 128_000:
+        context_token_budget = 4_000
+        max_memory_retrieval = 8
+    else:
+        context_token_budget = 2_000
+        max_memory_retrieval = 5
+
+    # Compaction threshold: compact when history exceeds 80% of usable window
+    compact_threshold = 0.80
+
+    # Max context messages: scale with window size
+    max_context_messages = min(max(window // 4_000, 10), 100)
+
+    return {
+        "context_window": window,
+        "usable_window": usable,
+        "buffer": buffer,
+        "context_token_budget": context_token_budget,
+        "max_memory_retrieval": max_memory_retrieval,
+        "compact_threshold": compact_threshold,
+        "max_context_messages": max_context_messages,
+    }
+
+
+def estimate_token_breakdown(
+    system_prompt: str,
+    history: list[dict],
+    tool_outputs: list[str] | None = None,
+) -> dict[str, int]:
+    """Estimate token breakdown for context bar display.
+
+    Returns dict with:
+      - system_prompt: tokens in blended system context
+      - history: tokens in conversation messages
+      - tool_output: tokens in tool call results
+      - total: sum of all parts
+    """
+    est = TokenEstimator()
+    sys_tokens = est.estimate_text(system_prompt)
+    hist_tokens = est.estimate_history(history)
+    tool_tokens = sum(est.estimate_text(t, "tool_output") for t in (tool_outputs or []))
+    return {
+        "system_prompt": sys_tokens,
+        "history": hist_tokens,
+        "tool_output": tool_tokens,
+        "total": sys_tokens + hist_tokens + tool_tokens,
+    }
+
+
+class TokenEstimator:
+    """Estimates token counts for messages and content types."""
+
+    WORD_RATIO = 1.3
+    CODE_RATIO = 1.5
+    TOOL_OUTPUT_RATIO = 1.8
+
+    def estimate_text(self, text: str, content_type: str = "text") -> int:
+        """Estimate tokens in a text string."""
+        if not text.strip():
+            return 0
+        ratio = {
+            "text": self.WORD_RATIO,
+            "code": self.CODE_RATIO,
+            "tool_output": self.TOOL_OUTPUT_RATIO,
+        }.get(content_type, self.WORD_RATIO)
+        return max(1, int(len(text.split()) * ratio))
+
+    def estimate_message(self, msg: dict) -> int:
+        """Estimate tokens in a single message dict."""
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        if not isinstance(content, str):
+            content = str(content)
+        content_type = "tool_output" if msg.get("role") == "tool" else "text"
+        tokens = self.estimate_text(content, content_type)
+        if msg.get("tool_calls"):
+            tokens += len(msg["tool_calls"]) * 50
+        return tokens + 4
+
+    def estimate_history(self, history: list[dict]) -> int:
+        """Estimate total tokens in conversation history."""
+        return sum(self.estimate_message(msg) for msg in history)
+
+    def estimate_context_window(self, model: str) -> int:
+        """Return the context window size for a model."""
+        return CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
+
+    def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Truncate text to fit a rough token budget."""
+        if max_tokens <= 0:
+            return ""
+        words = text.split()
+        max_words = max(1, int(max_tokens / self.WORD_RATIO))
+        if len(words) <= max_words:
+            return text
+        return " ".join(words[:max_words]) + "\n\n<!-- truncated to fit context budget -->"
+
+
+_estimator = TokenEstimator()
+
 
 def estimate_tokens(text: str) -> int:
     """Return a rough token estimate for context budgeting."""
-    if not text.strip():
-        return 0
-    return max(1, int(len(text.split()) * 1.3))
+    return _estimator.estimate_text(text)
 
 
 def truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Truncate text to fit a rough token budget."""
-    if max_tokens <= 0:
-        return ""
-    words = text.split()
-    max_words = max(1, int(max_tokens / 1.3))
-    if len(words) <= max_words:
-        return text
-    return " ".join(words[:max_words]) + "\n\n<!-- truncated to fit context budget -->"
+    return _estimator.truncate_to_tokens(text, max_tokens)
 
 
 def format_memories(memories: list[dict] | None, token_budget: int = 800) -> str:

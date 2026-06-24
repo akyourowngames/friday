@@ -15,6 +15,16 @@ from ares.tools.dates import now_local_iso
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_TOOLS = {
+    "web_search", "fetch_url",
+    "read_file", "search_files", "list_directory",
+    "glob_pattern", "get_file_info", "head_file", "tail_file",
+    "count_lines", "file_tree",
+    "search_memory", "store_memory",
+    "write_file", "edit_file", "create_directory",
+    "run_command",
+}
+
 EXECUTOR_STATES = {
     "stopped": "Executor is not running",
     "idle": "Waiting for tasks to execute",
@@ -292,7 +302,15 @@ class TaskExecutor:
             if response.get("tool_calls"):
                 for call in response["tool_calls"]:
                     tool_name = call.get("tool") or call.get("function", {}).get("name", "")
-                    tool_args = call.get("args") or call.get("function", {}).get("arguments", {})
+                    raw_args = call.get("args") or call.get("function", {}).get("arguments", "{}")
+                    # OpenAI API returns arguments as a JSON string — parse it
+                    if isinstance(raw_args, str):
+                        try:
+                            tool_args = json.loads(raw_args)
+                        except (json.JSONDecodeError, TypeError):
+                            tool_args = {}
+                    else:
+                        tool_args = raw_args
                     result = self.tool_executor.execute(tool_name, tool_args)
                     tool_call_count += 1
 

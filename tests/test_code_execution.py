@@ -2,7 +2,7 @@
 
 import sys
 import pytest
-from ares.code_execution import run_code
+from ares.tools.code_execution import run_code
 
 
 class TestRunCode:

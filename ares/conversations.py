@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from ares.config import get_db_path
-from ares.dates import now_local_iso
+from ares.tools.dates import now_local_iso
 from ares.sqlite_utils import connect_sqlite
 
 
@@ -36,10 +36,20 @@ class ConversationStore:
                 role            TEXT NOT NULL,
                 content         TEXT NOT NULL,
                 created_at      TEXT NOT NULL,
+                tool_calls      TEXT,
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id)
             )
         """)
         self.conn.commit()
+        self._ensure_tool_calls_column()
+
+    def _ensure_tool_calls_column(self) -> None:
+        """Add tool_calls column if missing (migration for existing DBs)."""
+        try:
+            self.conn.execute("SELECT tool_calls FROM conversation_messages LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE conversation_messages ADD COLUMN tool_calls TEXT")
+            self.conn.commit()
 
     def start_conversation(self) -> int:
         """Create and return a new conversation session ID."""
@@ -58,21 +68,21 @@ class ConversationStore:
         )
         self.conn.commit()
 
-    def add_message(self, conversation_id: int, role: str, content: str) -> int:
+    def add_message(self, conversation_id: int, role: str, content: str, tool_calls: str | None = None) -> int:
         """Persist one chat message."""
         cursor = self.conn.execute(
-            """INSERT INTO conversation_messages (conversation_id, role, content, created_at)
-               VALUES (?, ?, ?, ?)""",
-            (conversation_id, role, content, now_local_iso()),
+            """INSERT INTO conversation_messages (conversation_id, role, content, created_at, tool_calls)
+               VALUES (?, ?, ?, ?, ?)""",
+            (conversation_id, role, content, now_local_iso(), tool_calls),
         )
         self.conn.commit()
         return cursor.lastrowid
 
-    def add_exchange(self, conversation_id: int, user_input: str, assistant_response: str) -> None:
+    def add_exchange(self, conversation_id: int, user_input: str, assistant_response: str, tool_calls: str | None = None) -> None:
         """Persist a user/assistant turn."""
         self.add_message(conversation_id, "user", user_input)
-        if assistant_response.strip():
-            self.add_message(conversation_id, "assistant", assistant_response)
+        if assistant_response.strip() or tool_calls:
+            self.add_message(conversation_id, "assistant", assistant_response, tool_calls)
 
     def get_recent_messages(self, limit: int = 20) -> list[dict]:
         """Return recent chat messages in chronological order."""
@@ -91,7 +101,17 @@ class ConversationStore:
                ORDER BY id ASC""",
             (conversation_id,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for row in rows:
+            msg = dict(row)
+            if msg.get("tool_calls"):
+                import json
+                try:
+                    msg["tool_calls"] = json.loads(msg["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    msg["tool_calls"] = None
+            result.append(msg)
+        return result
 
     def list_conversations(self) -> list[dict]:
         """Return stored conversations newest first."""
@@ -127,6 +147,11 @@ class ConversationStore:
         if len(summary) > max_chars:
             summary = summary[: max_chars - 3].rstrip() + "..."
 
+        self.save_structured_summary(conversation_id, summary)
+        return summary
+
+    def save_structured_summary(self, conversation_id: int, summary: str) -> None:
+        """Save a structured LLM-generated summary."""
         self.conn.execute(
             """UPDATE conversations
                SET summary = ?, summarized_at = ?
@@ -134,7 +159,6 @@ class ConversationStore:
             (summary, now_local_iso(), conversation_id),
         )
         self.conn.commit()
-        return summary
 
     def summarize_ended_without_summary(self, min_messages: int = 2) -> int:
         """Summarize ended sessions that do not already have summaries."""

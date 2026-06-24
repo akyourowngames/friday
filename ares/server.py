@@ -131,14 +131,19 @@ class AresServer:
         # v2: Wire planner, LLM, and tool executor
         from ares.planner import TaskPlanner
         from ares.llm import LLMClient
+        from ares.tools import get_tool_definitions
+        from ares.task_executor import ALLOWED_TOOLS as _EXEC_ALLOWED
         llm = LLMClient(
             api_key=self.config.api_key,
             base_url=self.config.api_base_url,
             model=self.config.model,
         )
+        all_tools = get_tool_definitions()
+        allowed_tool_defs = [t for t in all_tools if t["function"]["name"] in _EXEC_ALLOWED]
         self.task_executor.planner = TaskPlanner(llm)
         self.task_executor.llm = llm
         self.task_executor.tool_executor = self.agent.tool_executor
+        self.task_executor.allowed_tools = allowed_tool_defs
         self.agent.tool_executor.task_executor_ref = self.task_executor
 
         self._connected_websockets: list = []

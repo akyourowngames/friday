@@ -333,6 +333,29 @@ class MemoryStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def bulk_delete(self, fact_ids: list[int]) -> int:
+        """Delete multiple facts by ID. Returns count deleted."""
+        if not fact_ids:
+            return 0
+        placeholders = ",".join("?" * len(fact_ids))
+        self.conn.execute(
+            f"DELETE FROM facts_meta WHERE fact_id IN ({placeholders})",
+            fact_ids,
+        )
+        for fid in fact_ids:
+            self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fid,))
+            self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fid,))
+        self.conn.commit()
+        return len(fact_ids)
+
+    def find_similar_to(self, fact_id: int, limit: int = 5) -> list[dict]:
+        """Find memories vector-similar to the given fact."""
+        target = self.get(fact_id)
+        if not target:
+            return []
+        results = self.search(target["fact_text"], limit=limit + 1)
+        return [r for r in results if r["fact_id"] != fact_id][:limit]
+
     def import_memories(self, memories: list[dict]) -> int:
         """Import memories, skipping exact text/category duplicates."""
         existing = {

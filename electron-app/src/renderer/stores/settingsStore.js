@@ -81,6 +81,38 @@ export const KNOWN_MODELS = Object.values(MODEL_REGISTRY).flatMap(
   (group) => group.models.map((m) => m.id)
 );
 
+// Context window sizes — mirrors backend context_blend.py CONTEXT_WINDOWS
+const CONTEXT_WINDOWS = {
+  "deepseek-v4-flash-free": 128000, "deepseek-v4-flash": 128000,
+  "deepseek-v4-pro": 128000, "mimo-v2.5-free": 128000,
+  "qwen3.6-plus-free": 128000, "qwen3.6-plus": 128000,
+  "minimax-m3-free": 128000, "nemotron-3-ultra-free": 128000,
+  "north-mini-code-free": 128000, "big-pickle": 128000,
+  "claude-fable-5": 200000, "claude-opus-4-8": 200000,
+  "claude-opus-4-7": 200000, "claude-opus-4-6": 200000,
+  "claude-opus-4-5": 200000, "claude-opus-4-1": 200000,
+  "claude-sonnet-4-6": 200000, "claude-sonnet-4-5": 200000,
+  "claude-sonnet-4": 200000, "claude-haiku-4-5": 200000,
+  "gpt-5.5": 128000, "gpt-5.5-pro": 128000, "gpt-5.4": 128000,
+  "gpt-5.4-pro": 128000, "gpt-5.4-mini": 128000, "gpt-5.4-nano": 128000,
+  "gpt-5.3-codex-spark": 128000, "gpt-5.3-codex": 128000,
+  "gpt-5.2": 128000, "gpt-5.2-codex": 128000,
+  "gpt-5.1": 128000, "gpt-5.1-codex-max": 128000,
+  "gpt-5.1-codex": 128000, "gpt-5.1-codex-mini": 128000,
+  "gpt-5": 128000, "gpt-5-codex": 128000, "gpt-5-nano": 128000,
+  "gpt-4o": 128000, "gpt-4o-mini": 128000,
+  "gemini-3.5-flash": 1000000, "gemini-3-flash": 1000000,
+  "gemini-3.1-pro": 1000000,
+  "grok-build-0.1": 128000, "glm-5.1": 128000, "glm-5": 128000,
+  "kimi-k2.6": 128000, "kimi-k2.5": 128000,
+  "minimax-m2.7": 128000, "minimax-m2.5": 128000, "qwen3.5-plus": 128000,
+};
+const DEFAULT_CONTEXT_WINDOW = 128000;
+
+export function getContextWindow(model) {
+  return CONTEXT_WINDOWS[model] || DEFAULT_CONTEXT_WINDOW;
+}
+
 export const useSettingsStore = create((set) => ({
   connected: false,
   serverUrl: "",
@@ -96,6 +128,7 @@ export const useSettingsStore = create((set) => ({
   executorCurrentTask: null,
   executorTasksCompleted: 0,
   executorTasksFailed: 0,
+  contextUsage: { used: 0, total: 128000, percent: 0 },
 
   setConnected(connected) {
     set({ connected });
@@ -106,15 +139,26 @@ export const useSettingsStore = create((set) => ({
   },
 
   setStatus(status) {
+    const model = status.model || "deepseek-v4-flash-free";
+    const total = status.context_usage?.total || getContextWindow(model);
+    const used = status.context_usage?.used || 0;
+    const percent = status.context_usage?.percent ||
+      (total > 0 ? Math.round(used / total * 1000) / 10 : 0);
     set({
-      model: status.model || "deepseek-v4-flash-free",
+      model,
       memoryCount: status.memory_count ?? 0,
       taskCount: status.task_count ?? 0,
       autoExecCount: status.auto_exec_count ?? 0,
       executorState: status.executor_state || "unknown",
       executorCurrentTask: status.executor_current_task || null,
       executorTasksCompleted: status.executor_tasks_completed ?? 0,
-      executorTasksFailed: status.executor_tasks_failed ?? 0
+      executorTasksFailed: status.executor_tasks_failed ?? 0,
+      contextUsage: {
+        used,
+        total,
+        percent,
+        breakdown: status.context_usage?.breakdown || {},
+      },
     });
   },
 

@@ -8,12 +8,13 @@ from ares.agent import Agent
 from ares.llm import LLMClient
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 
 
 class FakeStreamResponse:
-    def __init__(self, lines):
+    def __init__(self, lines, status_code=200):
         self.lines = lines
+        self.status_code = status_code
 
     async def __aenter__(self):
         return self
@@ -27,6 +28,13 @@ class FakeStreamResponse:
     async def aiter_lines(self):
         for line in self.lines:
             yield line
+
+    async def aiter_text(self):
+        for line in self.lines:
+            yield line
+
+    async def aread(self):
+        return b"".join(l.encode() for l in self.lines)
 
 
 class FakeHttpClient:

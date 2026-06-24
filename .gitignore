@@ -16,3 +16,8 @@ data/
 electron-app/node_modules/
 electron-app/dist/
 electron-app/release/
+build/
+dist/
+hello.py
+verification_result.txt
+test_terminal_loop.py

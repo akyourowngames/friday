@@ -100,9 +100,74 @@ class LLMClient:
         self.model = model or config.model
         self._client = httpx.AsyncClient(timeout=60.0)
 
+    @staticmethod
+    def _sanitize_tool_call_ids(messages: list[dict]) -> list[dict]:
+        """Ensure all messages are valid for the OpenAI-compatible API.
+
+        Fixes issues from conversation history loaded from DB:
+        - Assistant messages with malformed tool_calls (missing 'function',
+          missing 'id', server format like {"tool": ..., "args": ...}) → strip
+          the tool_calls and any following orphaned tool result messages
+        - Assistant messages with valid tool_calls but missing 'id' → generate one
+        - Orphaned tool result messages (no matching assistant) → strip
+        - Tool result messages with empty tool_call_id → generate one
+        """
+        # Step 1: validate each assistant message's tool_calls
+        #   valid = every entry has both "id" (non-empty) and "function"
+        msg_valid: list[bool | None] = [None] * len(messages)
+        for i, msg in enumerate(messages):
+            tcs = msg.get("tool_calls")
+            if tcs and isinstance(tcs, list):
+                msg_valid[i] = all(
+                    tc.get("id") and tc.get("function")
+                    for tc in tcs
+                )
+
+        # Step 2: build clean list — strip malformed tool_calls and orphans
+        result = []
+        global_idx = 0
+        pending_orphan_strip = False  # True right after stripping an assistant's tool_calls
+        for i, msg in enumerate(messages):
+            if msg_valid[i] is True:
+                # Valid tool_calls — just ensure all IDs are non-empty
+                pending_orphan_strip = False
+                msg = dict(msg)
+                fixed = []
+                for tc in msg["tool_calls"]:
+                    if not tc.get("id"):
+                        tc = dict(tc)
+                        tc["id"] = f"call_{global_idx}"
+                    fixed.append(tc)
+                    global_idx += 1
+                msg["tool_calls"] = fixed
+                result.append(msg)
+
+            elif msg_valid[i] is False:
+                # Malformed tool_calls — strip them, mark orphans for removal
+                pending_orphan_strip = True
+                msg = dict(msg)
+                msg.pop("tool_calls", None)
+                result.append(msg)
+
+            elif msg.get("role") == "tool":
+                if pending_orphan_strip:
+                    continue  # orphaned tool result — skip
+                if not msg.get("tool_call_id"):
+                    msg = dict(msg)
+                    msg["tool_call_id"] = f"call_{global_idx}"
+                    global_idx += 1
+                result.append(msg)
+
+            else:
+                pending_orphan_strip = False
+                result.append(msg)
+
+        return result
+
     async def chat(self, messages: list[dict], tools: list[dict] | None = None,
                    tool_choice: str = "auto") -> dict:
         """Send a chat completion request. Returns the full response dict."""
+        messages = self._sanitize_tool_call_ids(messages)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -121,12 +186,15 @@ class LLMClient:
             json=payload,
             headers=headers,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            body = resp.text[:1000]
+            raise Exception(f"LLM API error {resp.status_code}: {body}")
         data = resp.json()
         return data["choices"][0]["message"]
 
     async def chat_stream(self, messages: list[dict], tools: list[dict] | None = None) -> AsyncIterator[dict]:
         """Stream a chat completion and yield structured content/tool chunks."""
+        messages = self._sanitize_tool_call_ids(messages)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -147,7 +215,13 @@ class LLMClient:
             json=payload,
             headers=headers,
         ) as resp:
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                body = ""
+                async for chunk in resp.aiter_text():
+                    body += chunk
+                    if len(body) > 1000:
+                        break
+                raise Exception(f"LLM API error {resp.status_code}: {body}")
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue

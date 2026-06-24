@@ -7,7 +7,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 
 ReminderCallback = Callable[[dict], Any]
 

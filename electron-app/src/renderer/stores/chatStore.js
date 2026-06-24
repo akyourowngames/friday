@@ -4,13 +4,24 @@ function id(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function normalizeToolCall(call) {
+  return {
+    id: call.id || `tool-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    tool: call.tool || call.tool_name || "unknown",
+    args: call.args || {},
+    content: call.content ?? null,
+    status: call.status || "done",
+    opened: call.opened ?? false,
+  };
+}
+
 function normalizeMessage(message) {
   return {
     id: message.id || id(message.role || "message"),
     role: message.role || "assistant",
     content: message.content || "",
     createdAt: message.created_at || message.createdAt || new Date().toISOString(),
-    toolCalls: message.toolCalls || message.tool_calls || [],
+    toolCalls: (message.toolCalls || message.tool_calls || []).map(normalizeToolCall),
     status: message.status || "done"
   };
 }

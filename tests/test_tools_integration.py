@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from ares.memory import MemoryStore
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 from ares.tools import ToolExecutor, get_tool_definitions
 
 

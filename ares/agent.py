@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from ares.context import ProjectContext
-from ares.context_blend import build_context_prompt
+from ares.context_blend import build_context_prompt, get_model_budgets
 from ares.memory import MemoryStore
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.llm import LLMClient
@@ -80,13 +80,25 @@ class Agent:
         return messages
 
     def get_context(self, user_input: str) -> str:
-        """Build full context: soul + profile + project + memories + tasks."""
-        soul_ctx = self.soul_manager.get_context(token_budget=200)
-        profile_ctx = self.profile_manager.get_context(token_budget=400)
+        """Build full context: soul + profile + project + memories + tasks.
+
+        Budgets scale automatically with the model's context window.
+        """
+        budgets = get_model_budgets(self.config.model)
+        token_budget = budgets["context_token_budget"]
+        max_retrieval = budgets["max_memory_retrieval"]
+
+        # Scale sub-budgets proportionally
+        soul_budget = max(200, token_budget // 10)
+        profile_budget = max(400, token_budget // 5)
+        project_budget = max(400, token_budget // 5)
+
+        soul_ctx = self.soul_manager.get_context(token_budget=soul_budget)
+        profile_ctx = self.profile_manager.get_context(token_budget=profile_budget)
         project_ctx = ""
         if self.config.project_context_enabled:
-            project_ctx = self.project_context.get_context(token_budget=400)
-        memories = self.memory_store.search(user_input, limit=self.config.max_memory_retrieval)
+            project_ctx = self.project_context.get_context(token_budget=project_budget)
+        memories = self.memory_store.search(user_input, limit=max_retrieval)
         tasks = self.task_store.list_pending()
         summaries = []
         if self.conversation_store is not None:
@@ -98,7 +110,7 @@ class Agent:
             memories=memories,
             tasks=tasks,
             conversation_summaries=summaries,
-            token_budget=self.config.context_token_budget,
+            token_budget=token_budget,
         )
 
     def set_model(self, model: str) -> None:
@@ -109,7 +121,7 @@ class Agent:
     def process_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         """Execute tool calls locally and return results with local metadata."""
         results = []
-        for call in tool_calls:
+        for i, call in enumerate(tool_calls):
             tool_name = call.get("function", {}).get("name", "unknown")
             try:
                 fn = call["function"]
@@ -119,7 +131,7 @@ class Agent:
             except Exception as e:
                 result = f"Error: {e}"
             results.append({
-                "tool_call_id": call.get("id", ""),
+                "tool_call_id": call.get("id") or f"call_{i}",
                 "role": "tool",
                 "content": result,
                 "tool_name": tool_name,
@@ -150,6 +162,11 @@ class Agent:
 
             # Check for tool calls
             if response.get("tool_calls"):
+                # Ensure every tool call has a non-empty id
+                for i, tc in enumerate(response["tool_calls"]):
+                    if not tc.get("id"):
+                        tc["id"] = f"call_{iteration}_{i}"
+
                 # Add assistant message with tool calls
                 messages.append({
                     "role": "assistant",

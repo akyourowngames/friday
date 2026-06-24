@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from ares.dates import parse_user_datetime
+from ares.tools.dates import parse_user_datetime
 
 
 def test_parse_iso_datetime_preserves_time():

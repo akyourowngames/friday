@@ -113,6 +113,8 @@ const useTerminalStore = create((set, get) => ({
     let output = '';
     const startTime = Date.now();
     const maxWait = 30000;
+    let sent = false;
+    let completionCheckCount = 0;
 
     const aresDesktop = window.aresDesktop;
     if (!aresDesktop?.terminal) return;
@@ -123,7 +125,14 @@ const useTerminalStore = create((set, get) => ({
 
     const interval = setInterval(() => {
       const elapsed = Date.now() - startTime;
+      if (sent) {
+        clearInterval(interval);
+        unsub();
+        return;
+      }
+
       if (elapsed >= maxWait) {
+        sent = true;
         clearInterval(interval);
         unsub();
         if (websocket) {
@@ -133,20 +142,33 @@ const useTerminalStore = create((set, get) => ({
             output: output.slice(-50000),
           }));
         }
+        return;
       }
-    }, 500);
 
-    setTimeout(() => {
-      clearInterval(interval);
-      unsub();
-      if (websocket) {
-        websocket.send(JSON.stringify({
-          type: 'terminal:exec_result',
-          cmd_id: cmdId,
-          output: output.slice(-50000),
-        }));
+      if (output.length > 0) {
+        completionCheckCount++;
+        const trimmed = output.trimEnd();
+        const lastLine = trimmed.split('\n').pop() || '';
+        const isPrompt = lastLine.endsWith('>') ||
+          lastLine.endsWith('$') ||
+          lastLine.endsWith('#') ||
+          lastLine.endsWith('%') ||
+          lastLine.includes(':\\>') ||
+          lastLine.includes(':\\$');
+        if (isPrompt && completionCheckCount >= 5) {
+          sent = true;
+          clearInterval(interval);
+          unsub();
+          if (websocket) {
+            websocket.send(JSON.stringify({
+              type: 'terminal:exec_result',
+              cmd_id: cmdId,
+              output: output.slice(-50000),
+            }));
+          }
+        }
       }
-    }, 5000);
+    }, 100);
   },
 
   killTerminal: () => {

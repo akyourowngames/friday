@@ -6,7 +6,7 @@ from ares.conversations import ConversationStore
 from ares.exporter import export_data, import_data
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 
 
 def test_export_redacts_api_key_and_imports_data(tmp_path, fake_embedding_provider):

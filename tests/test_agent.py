@@ -6,7 +6,7 @@ import pytest
 from ares.agent import Agent
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.tasks import TaskStore
+from ares.tools.tasks import TaskStore
 
 
 @pytest.fixture
