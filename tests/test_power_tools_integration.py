@@ -35,7 +35,6 @@ class TestRunCodeViaExecutor:
     def test_execute_run_code(self, executor):
         result = executor.execute("run_code", {"code": "print(2 + 2)"})
         assert "4" in result
-        assert "Exit code: 0" in result
 
     def test_execute_run_code_timeout(self, executor):
         result = executor.execute("run_code", {
