@@ -49,9 +49,9 @@ class ToolExecutor:
         self.config = config
         self.task_executor = task_executor
         self.task_executor_ref = None  # wired by server for resume support
+        self.repl = PersistentREPL()
         skill_dirs = list((config.skill_dirs if config else []) or [])
         self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
-        self.repl = PersistentREPL()
 
     def close(self) -> None:
         """Clean up persistent sessions."""
