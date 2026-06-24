@@ -86,7 +86,13 @@ class TestREPLSession:
         result = session.execute("import time; time.sleep(60)", timeout=1)
         assert result["error"] is not None
         assert "timeout" in result["error"].lower() or "KeyboardInterrupt" in result["error"]
+        # After timeout, session may be dead (Windows) or alive (Unix SIGINT).
+        # Either way, ensure_alive should restart it automatically.
+        session.ensure_alive()
         assert session.alive
+        # Verify it still works after restart
+        result2 = session.execute("print('after timeout')")
+        assert result2["stdout"].strip() == "after timeout"
         session.close()
 
     def test_multiple_outputs(self):

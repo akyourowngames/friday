@@ -117,8 +117,12 @@ class REPLSession:
 
     def _execute_shell(self, command: str, uid: str, timeout: int) -> dict:
         sentinel = f"__ARES_SENTINEL_{uid}__"
+        if sys.platform == "win32":
+            sentinel_cmd = f"{command}\necho {sentinel}\n"
+        else:
+            sentinel_cmd = f"{command}\nprintf '%s\\n' '{sentinel}'\n"
         with self._lock:
-            if not self._write(f"{command}\nprintf '%s\\n' '{sentinel}'\n"):
+            if not self._write(sentinel_cmd):
                 return {"id": uid, "stdout": "", "stderr": "", "error": "REPL crashed and restarted"}
             stdout, stderr, timed_out = self._collect_until(self._stdout, sentinel, timeout)
             stderr += self._drain(self._stderr)

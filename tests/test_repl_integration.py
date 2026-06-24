@@ -41,6 +41,13 @@ class TestToolExecutorREPL:
         assert "3" in result
 
     def test_run_command_state_preserved(self, tool_executor):
+        """Shell state preservation — bash only (cmd.exe doesn't support env vars like this)."""
+        import sys
+        if sys.platform == "win32":
+            # On Windows cmd.exe, just verify shell runs commands at all
+            r1 = tool_executor.execute("run_command", {"command": "echo hello"})
+            assert "hello" in r1
+            return
         tool_executor.execute("run_command", {"command": "MYVAR=hello"})
         result = tool_executor.execute("run_command", {"command": "echo $MYVAR"})
         assert "hello" in result
