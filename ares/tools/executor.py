@@ -16,6 +16,7 @@ from ares.tools.filesystem import (
 )
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.skills import SkillManager
 from ares.tools.tasks import TaskStore
 from ares.tools.web import fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
@@ -48,6 +49,8 @@ class ToolExecutor:
         self.config = config
         self.task_executor = task_executor
         self.task_executor_ref = None  # wired by server for resume support
+        skill_dirs = list((config.skill_dirs if config else []) or [])
+        self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
         self.repl = PersistentREPL()
 
     def close(self) -> None:
@@ -69,6 +72,9 @@ class ToolExecutor:
             "get_due_soon": self._get_due_soon,
             "get_execution_status": self._get_execution_status,
             "get_executor_status": self._get_executor_status,
+            "list_skills": self._list_skills_tool,
+            "load_skill": self._load_skill_tool,
+            "create_skill": self._create_skill_tool,
             "export_data": self._export_data,
             "web_search": self._web_search,
             "fetch_url": self._fetch_url,
@@ -272,6 +278,47 @@ class ToolExecutor:
         if stats.get("started_at"):
             lines.append(f"Started at: {stats['started_at']}")
         return "\n".join(lines)
+
+    # ── Skills ─────────────────────────────────────────────────────
+
+    def _list_skills_tool(self, args: dict | None = None) -> str:
+        args = args or {}
+        skills = self.skill_manager.search(
+            query=args.get("query", ""),
+            category=args.get("category", ""),
+        )
+        if not skills:
+            return "No matching skills found."
+        lines = [f"Available skills ({len(skills)}):"]
+        lines.extend(skill.summary_line() for skill in skills)
+        cats = self.skill_manager.list_categories()
+        if cats:
+            lines.append("Categories: " + ", ".join(f"{name} ({count})" for name, count in cats.items()))
+        return "\n".join(lines)
+
+    def _load_skill_tool(self, args: dict) -> str:
+        skill = self.skill_manager.get_skill(args["name"])
+        if skill is None:
+            return f"Skill '{args['name']}' was not found."
+        files = ""
+        if skill.files:
+            rel_files = [str(path.relative_to(skill.root)) for path in skill.files[:20]]
+            files = "\n\nSupporting files:\n" + "\n".join(f"- {file}" for file in rel_files)
+        return (
+            f"# Skill: {skill.name}\n"
+            f"Category: {skill.category}\n"
+            f"Description: {skill.description}\n"
+            f"Version: {skill.version}\n\n"
+            f"{skill.content}{files}"
+        )
+
+    def _create_skill_tool(self, args: dict) -> str:
+        skill = self.skill_manager.create_skill(
+            name=args["name"],
+            content=args["content"],
+            category=args.get("category", "general"),
+        )
+        return f"Created skill '{skill.name}' in category '{skill.category}' at {skill.path}."
 
     # ── Export ─────────────────────────────────────────────────────
 
