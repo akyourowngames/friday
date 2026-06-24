@@ -15,6 +15,7 @@ from ares.models import AppConfig
 from ares.profile import ProfileManager
 from ares.prompts import SYSTEM_PROMPT
 from ares.soul import SoulManager
+from ares.skills import SkillManager
 
 
 class Agent:
@@ -38,6 +39,7 @@ class Agent:
             memory_store=memory_store,
             task_store=task_store,
             conversation_store=conversation_store,
+            config=config,
             task_executor=task_executor,
         )
         self.tools = get_tool_definitions()
@@ -66,11 +68,16 @@ class Agent:
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        skill_dirs = list(self.config.skill_dirs or [])
+        self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
+        self.tool_executor.skill_manager = self.skill_manager
 
     def build_messages(self, user_input: str, conversation_history: list[dict],
                        context: str = "") -> list[dict]:
         """Build the message list for the LLM."""
         system_content = SYSTEM_PROMPT
+        if self.config.skills_enabled:
+            system_content += f"\n\n{self.skill_manager.compact_index()}"
         if context:
             system_content += f"\n\n## Current Context\n{context}"
 

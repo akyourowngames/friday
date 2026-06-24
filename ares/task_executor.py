@@ -57,6 +57,7 @@ class TaskExecutor:
         self.agent_runner = agent_runner
         self.callback = callback
         self.status_callback: Callable[[], Any] | None = None
+        self.event_callback: Callable[[dict], Any] | None = None
         self.poll_seconds = max(1, poll_seconds)
         self.max_turns = max_turns
         self.enabled = enabled
@@ -126,11 +127,28 @@ class TaskExecutor:
     # ── Helpers ────────────────────────────────────────────────
 
     def _log_event(self, task_id: int, level: str, step: int | None, message: str):
-        """Insert a task event."""
+        """Insert a task event and broadcast it for live debugging."""
+        event_id = None
         try:
-            self.task_store.add_event(task_id, level=level, step=step, message=message)
+            event_id = self.task_store.add_event(task_id, level=level, step=step, message=message)
         except Exception as e:
             logger.warning("Failed to log event for task %d: %s", task_id, e)
+
+        if self.event_callback is not None:
+            payload = {
+                "id": event_id,
+                "task_id": task_id,
+                "level": level,
+                "step": step,
+                "message": message,
+                "timestamp": now_local_iso(),
+            }
+            try:
+                result = self.event_callback(payload)
+                if inspect.isawaitable(result):
+                    asyncio.ensure_future(result)
+            except Exception as e:
+                logger.warning("Failed to broadcast event for task %d: %s", task_id, e)
 
     def _set_state(self, task_id: int, state: str):
         """Update task state and log the transition."""
@@ -438,8 +456,10 @@ print("counter verification passed")
         report = await self._generate_completion_report(task, plan, tool_call_count)
         self.task_store.update(task_id,
             state="completed",
+            status="done",
             completion_report=json.dumps(report),
             executed_at=now_local_iso(),
+            retry_reason=None,
         )
         self._log_event(task_id, "success", None, "Task completed successfully")
 
@@ -536,6 +556,7 @@ print("counter verification passed")
         if attempt >= max_attempts:
             self._set_state(task_id, "failed")
             self.task_store.update(task_id,
+                status="partial",
                 execution_notes=f"Failed after {attempt} attempts. Last error: {reason}",
                 executed_at=now_local_iso(),
             )
@@ -569,6 +590,7 @@ print("counter verification passed")
 
         if next_step is None:
             self._set_state(task["id"], "completed")
+            self.task_store.update(task["id"], status="done", executed_at=now_local_iso())
             return
 
         self._log_event(task["id"], "info", None,

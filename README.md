@@ -105,7 +105,32 @@ Just type naturally:
 | `/profile` | Show your profile file |
 | `/profile edit` | Open or create `profile.md` for editing |
 | `/context` | Show the active blended context |
+| `/skills` | List available skills |
+| `/skills search QUERY` | Search skills |
+| `/skills load NAME` | Show a skill's full instructions |
+| `/skills categories` | Show skill category counts |
+| `/skill-name` | Load a skill directly by slash command |
 | `/exit` | Exit Ares |
+
+### Skills
+
+Ares supports local reusable skills/playbooks using the portable `SKILL.md` pattern:
+
+```text
+~/.ares/skills/<category>/<skill-name>/SKILL.md
+```
+
+Each skill starts with YAML frontmatter (`name`, `description`, optional `category` and `version`) followed by markdown instructions. Ares loads only a compact name/description index into the system prompt and loads full instructions on demand with `load_skill` or `/skills load NAME`.
+
+Built-in starter skills include `code-review`, `web-research`, `daily-planner`, `memory-consolidator`, `weekly-review`, `export-backup`, and `system-info`.
+
+| Command | Description |
+|---------|-------------|
+| `/skills` | List available skills |
+| `/skills search QUERY` | Search skill names, descriptions, categories, and bodies |
+| `/skills load NAME` | Show a skill's full instructions |
+| `/skills categories` | Show category counts |
+| `/skill-name` | Load a skill directly by slash command |
 
 ### Server Mode
 
@@ -158,7 +183,10 @@ Config is stored at `~/.ares/config.json`:
   "profile_path": "",
   "project_context_enabled": true,
   "context_token_budget": 2000,
-  "project_context_max_files": 2
+  "project_context_max_files": 2,
+  "skills_enabled": true,
+  "skill_dirs": ["~/.ares/skills"],
+  "skill_auto_suggest": true
 }
 ```
 

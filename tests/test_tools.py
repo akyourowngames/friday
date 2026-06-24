@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 44
+        assert len(tools) == 47
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -33,6 +33,9 @@ class TestToolDefinitions:
             "get_due_soon",
             "get_execution_status",
             "get_executor_status",
+            "list_skills",
+            "load_skill",
+            "create_skill",
             "export_data",
             "web_search",
             "fetch_url",

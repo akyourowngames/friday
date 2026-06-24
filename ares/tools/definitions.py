@@ -137,6 +137,33 @@ def get_tool_definitions() -> list[dict]:
             "Show the background task executor's current state: idle, running, stopped, disabled. Returns which task is being executed, error state, and completion stats.",
             {},
         ),
+
+        _tool(
+            "list_skills",
+            "List available reusable skills/playbooks with names, categories, and descriptions.",
+            {
+                "category": {"type": "string", "description": "Optional category filter."},
+                "query": {"type": "string", "description": "Optional search query."},
+            },
+        ),
+        _tool(
+            "load_skill",
+            "Load a skill's full SKILL.md instructions into context when relevant or explicitly requested.",
+            {
+                "name": {"type": "string", "description": "Skill name to load."},
+            },
+            ["name"],
+        ),
+        _tool(
+            "create_skill",
+            "Save a reusable workflow as a local Ares skill.",
+            {
+                "name": {"type": "string", "description": "Skill name in lowercase-hyphen form."},
+                "content": {"type": "string", "description": "Full SKILL.md content or markdown body."},
+                "category": {"type": "string", "description": "Skill category.", "default": "general"},
+            },
+            ["name", "content"],
+        ),
         _tool(
             "export_data",
             "Export local Ares memories, tasks, conversations, and config to JSON.",
