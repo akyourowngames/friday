@@ -23,8 +23,7 @@ from ares.tools.filesystem_write import edit_file as _edit_file_impl
 from ares.tools.filesystem_write import create_directory as _create_directory_impl
 from ares.tools.filesystem_write import delete_file as _delete_file_impl
 from ares.tools.filesystem_write import move_file as _move_file_impl
-from ares.tools.code_execution import run_code
-from ares.tools.shell_execution import run_command
+from ares.tools.repl import PersistentREPL
 from ares.tools.image_generate import generate_image
 from ares.tools.image_edit import image_info as _image_info
 from ares.tools.image_edit import resize_image as _resize_image
@@ -49,6 +48,11 @@ class ToolExecutor:
         self.config = config
         self.task_executor = task_executor
         self.task_executor_ref = None  # wired by server for resume support
+        self.repl = PersistentREPL()
+
+    def close(self) -> None:
+        """Clean up persistent sessions."""
+        self.repl.close()
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool by name with the given arguments. Returns a result string."""
@@ -170,7 +174,17 @@ class ToolExecutor:
         task = self.tasks.get(task_id)
         due_str = f" (due: {task['due']})" if task and task.get("due") else ""
         auto_str = " [auto]" if auto_exec == "yes" else ""
-        return f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
+        if auto_exec == "yes" and self.task_executor_ref is not None:
+            wake = getattr(self.task_executor_ref, "wake", None)
+            if callable(wake):
+                wake()
+        result = f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
+        if auto_exec == "yes":
+            result += (
+                "\nAuto-executable task queued for the background executor. "
+                "Do not execute it inline; the executor will plan, run, verify, and track artifacts."
+            )
+        return result
 
     def _format_task(self, task: dict) -> str:
         due = f" | due: {task['due']}" if task.get("due") else ""
@@ -454,13 +468,13 @@ class ToolExecutor:
         code = args["code"]
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
-        return run_code(code, timeout=timeout, cwd=cwd)
+        return self.repl.execute_python(code, timeout=timeout, cwd=cwd)
 
     def _run_command(self, args: dict) -> str:
         command = args["command"]
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
-        return run_command(command, timeout=timeout, cwd=cwd)
+        return self.repl.execute_shell(command, timeout=timeout, cwd=cwd)
 
     # ── Image tools ────────────────────────────────────────────────
 
@@ -507,7 +521,7 @@ class ToolExecutor:
     # ── Terminal ───────────────────────────────────────────────────
 
     def _terminal_exec(self, args: dict) -> str:
-        """Execute a shell command via subprocess for reliable output capture.
+        """Execute a shell command via persistent REPL for reliable output capture.
 
         Optionally displays the command in the visual terminal panel if connected.
         """
@@ -515,8 +529,8 @@ class ToolExecutor:
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
 
-        # Execute via subprocess for reliable output capture
-        result = run_command(command, timeout=timeout, cwd=cwd)
+        # Execute via REPL for reliable output capture
+        result = self.repl.execute_shell(command, timeout=timeout, cwd=cwd)
 
         # Also send to visual terminal if connected (best-effort display)
         if hasattr(self, '_terminal_display_callback') and self._terminal_display_callback:
