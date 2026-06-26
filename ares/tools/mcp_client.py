@@ -208,10 +208,11 @@ class MCPClientManager:
     """Connect to configured MCP servers and expose their tools to Ares."""
 
     def __init__(self, server_configs: list[dict[str, Any] | MCPServerConfig], data_dir: str = "~/.ares/data"):
-        self.servers = {
-            config.name: config if isinstance(config, MCPServerConfig) else MCPServerConfig(**config)
+        configs = [
+            config if isinstance(config, MCPServerConfig) else MCPServerConfig(**config)
             for config in server_configs
-        }
+        ]
+        self.servers = {c.name: c for c in configs}
         self.auth = MCPAuthProvider(data_dir=data_dir)
         self.sessions: dict[str, Any] = {}
         self._exit_stacks: dict[str, AsyncExitStack] = {}
