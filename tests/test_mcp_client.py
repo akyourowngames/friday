@@ -184,3 +184,28 @@ def test_call_tool_handles_cancelled_error_without_crashing():
     result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
 
     assert "was cancelled" in result
+
+
+
+def test_mcp_clear_current_task_cancellation_uncancels_all(monkeypatch):
+    from ares.tools import mcp_client
+
+    class FakeTask:
+        def __init__(self):
+            self.count = 2
+            self.uncancel_calls = 0
+
+        def cancelling(self):
+            return self.count
+
+        def uncancel(self):
+            self.uncancel_calls += 1
+            self.count -= 1
+
+    task = FakeTask()
+    monkeypatch.setattr(mcp_client.asyncio, "current_task", lambda: task)
+
+    mcp_client._clear_current_task_cancellation()
+
+    assert task.count == 0
+    assert task.uncancel_calls == 2

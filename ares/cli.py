@@ -67,6 +67,16 @@ def _supports_unicode_output() -> bool:
     return "utf" in encoding
 
 
+def _clear_current_task_cancellation() -> None:
+    """Clear asyncio cancellation state after a cancellation was intentionally handled."""
+    current_task = asyncio.current_task()
+    if current_task is None or not hasattr(current_task, "uncancel"):
+        return
+    while current_task.cancelling():
+        current_task.uncancel()
+
+
+
 class AresCLI:
     """The main CLI application for Ares."""
 
@@ -136,15 +146,23 @@ class AresCLI:
         self.agent.tool_executor.task_executor = self.task_executor
         self._reminder_task: asyncio.Task | None = None
         self._executor_task: asyncio.Task | None = None
-        self.session = None
-        if sys.stdin.isatty() and sys.stdout.isatty():
-            self.session = PromptSession(
-                history=FileHistory(_history_path()),
-                auto_suggest=AutoSuggestFromHistory(),
-                completer=COMPLETER,
-                complete_while_typing=True,
-                style=STYLE,
-            )
+        self.session = self._create_prompt_session()
+
+    def _create_prompt_session(self) -> PromptSession | None:
+        """Create an interactive prompt session when attached to a TTY."""
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return None
+        return PromptSession(
+            history=FileHistory(_history_path()),
+            auto_suggest=AutoSuggestFromHistory(),
+            completer=COMPLETER,
+            complete_while_typing=True,
+            style=STYLE,
+        )
+
+    def _reset_prompt_session(self) -> None:
+        """Recreate prompt_toolkit state after a handled cancellation."""
+        self.session = self._create_prompt_session()
 
     async def _prompt(self) -> str:
         """Read one prompt line from an interactive session or plain stdin."""
@@ -801,8 +819,8 @@ class AresCLI:
                         full_response += token
                         if full_response.strip():
                             live.update(Markdown(full_response))
-            except (Exception, asyncio.CancelledError) as exc:
-                full_response = f"Error: {exc}"
+            except Exception as e:
+                full_response = f"Error: {e}"
 
         # Show rendered tool results before the final assistant response.
         for renderable in tool_renderables:
@@ -887,6 +905,13 @@ class AresCLI:
                     continue
                 except EOFError:
                     break
+                except asyncio.CancelledError:
+                    _clear_current_task_cancellation()
+                    self._reset_prompt_session()
+                    self.console.print(
+                        "\n[dim yellow]A background operation cancelled the prompt; recovered. Try again or use /exit to quit.[/dim yellow]\n"
+                    )
+                    continue
         finally:
             if self._reminder_task is not None:
                 self._reminder_task.cancel()

@@ -51,10 +51,13 @@ def main():
     parser.add_argument("--port", type=int, default=8765, help="Server port for --server")
     args = parser.parse_args()
 
-    if args.server:
-        _run_coro(_run_server(args.host, args.port))
-    else:
-        _run_coro(_run_cli())
+    try:
+        if args.server:
+            _run_coro(_run_server(args.host, args.port))
+        else:
+            _run_coro(_run_cli())
+    except asyncio.CancelledError:
+        return
 
 
 if __name__ == "__main__":

@@ -28,6 +28,16 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 logger = logging.getLogger(__name__)
 
 
+def _clear_current_task_cancellation() -> None:
+    """Clear pending cancellation state after intentionally suppressing MCP cancellation."""
+    current_task = asyncio.current_task()
+    if current_task is None or not hasattr(current_task, "uncancel"):
+        return
+    while current_task.cancelling():
+        current_task.uncancel()
+
+
+
 def _optional_import(module_name: str, attr: str | None = None) -> Any:
     """Import an optional MCP SDK object without failing module import."""
     package = module_name.split(".", 1)[0]
@@ -392,7 +402,7 @@ class MCPClientManager:
                 ClientSession(read_stream, write_stream)
             )
             await asyncio.wait_for(session.initialize(), timeout=config.timeout_seconds)
-            tools_response = await asyncio.wait_for(
+            tools_response =             await asyncio.wait_for(
                 session.list_tools(), timeout=config.timeout_seconds
             )
         except asyncio.CancelledError as exc:
@@ -451,13 +461,11 @@ class MCPClientManager:
         except asyncio.TimeoutError:
             return f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s."
         except asyncio.CancelledError as exc:
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()
+            _clear_current_task_cancellation()
             logger.warning(
                 "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
             )
-            return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled."
+            return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. Check the MCP server logs or increase timeout_seconds."
         except Exception as exc:
             return f"Error calling MCP tool '{mcp_tool}' on '{server_name}': {exc}"
 
