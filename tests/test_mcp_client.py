@@ -29,15 +29,23 @@ def test_auth_provider_stores_expiry_and_detects_expiration(tmp_path):
     assert "expires_at" in stored
     assert auth._is_expired(stored) is False
 
-    expired = {"access_token": "old", "expires_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()}
+    expired = {
+        "access_token": "old",
+        "expires_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+    }
     assert auth._is_expired(expired) is True
 
 
 def test_discover_google_oauth_endpoints(tmp_path):
     auth = MCPAuthProvider(data_dir=str(tmp_path))
-    endpoints = asyncio.run(auth._discover_endpoints("https://calendar.googleapis.com/mcp"))
+    endpoints = asyncio.run(
+        auth._discover_endpoints("https://calendar.googleapis.com/mcp")
+    )
 
-    assert endpoints["authorization_endpoint"] == "https://accounts.google.com/o/oauth2/v2/auth"
+    assert (
+        endpoints["authorization_endpoint"]
+        == "https://accounts.google.com/o/oauth2/v2/auth"
+    )
     assert endpoints["token_endpoint"] == "https://oauth2.googleapis.com/token"
 
 
@@ -46,7 +54,10 @@ def test_manager_converts_mcp_tool_to_openai_schema():
     tool = SimpleNamespace(
         name="list_events",
         description="List calendar events",
-        inputSchema={"type": "object", "properties": {"calendar_id": {"type": "string"}}},
+        inputSchema={
+            "type": "object",
+            "properties": {"calendar_id": {"type": "string"}},
+        },
     )
 
     schema = manager._to_openai_schema("calendar", tool)
@@ -54,7 +65,10 @@ def test_manager_converts_mcp_tool_to_openai_schema():
     assert schema["type"] == "function"
     assert schema["function"]["name"] == "mcp__calendar__list_events"
     assert "[MCP:calendar]" in schema["function"]["description"]
-    assert schema["function"]["parameters"]["properties"]["calendar_id"]["type"] == "string"
+    assert (
+        schema["function"]["parameters"]["properties"]["calendar_id"]["type"]
+        == "string"
+    )
 
 
 def test_call_tool_rejects_invalid_name():
@@ -74,7 +88,12 @@ def test_call_tool_routes_to_session_and_renders_text():
         async def call_tool(self, tool_name, arguments):
             assert tool_name == "list_events"
             assert arguments == {"limit": 2}
-            return SimpleNamespace(content=[SimpleNamespace(text="event one"), SimpleNamespace(text="event two")])
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(text="event one"),
+                    SimpleNamespace(text="event two"),
+                ]
+            )
 
     manager = MCPClientManager([])
     manager.sessions["calendar"] = FakeSession()
@@ -107,15 +126,61 @@ def test_agent_refreshes_and_routes_mcp_tools():
     agent.tool_executor = None
     agent.refresh_tools()
 
-    assert any(tool["function"]["name"] == "mcp__calendar__list_events" for tool in agent.tools)
+    assert any(
+        tool["function"]["name"] == "mcp__calendar__list_events" for tool in agent.tools
+    )
 
-    results = asyncio.run(agent.process_tool_calls_async([
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "mcp__calendar__list_events", "arguments": '{"limit": 1}'},
-        }
-    ]))
+    results = asyncio.run(
+        agent.process_tool_calls_async(
+            [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__calendar__list_events",
+                        "arguments": '{"limit": 1}',
+                    },
+                }
+            ]
+        )
+    )
 
     assert results[0]["content"] == "mcp result"
     assert results[0]["tool_name"] == "mcp__calendar__list_events"
+
+
+def test_manager_accepts_mapping_style_mcp_config():
+    manager = MCPClientManager({"calendar": {"server_url": "https://example.com/mcp"}})
+
+    assert "calendar" in manager.servers
+    assert manager.servers["calendar"].endpoint == "https://example.com/mcp"
+
+
+def test_manager_accepts_single_key_config_entries():
+    manager = MCPClientManager(
+        [{"calendar": {"url": "https://example.com/mcp", "timeout_seconds": 12}}]
+    )
+
+    assert manager.servers["calendar"].server_url == "https://example.com/mcp"
+    assert manager.servers["calendar"].timeout_seconds == 12
+
+
+def test_stdio_config_infers_transport_from_command():
+    config = MCPServerConfig(name="files", command="python", args=["server.py"])
+
+    assert config.transport == "stdio"
+
+
+def test_call_tool_handles_cancelled_error_without_crashing():
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            raise asyncio.CancelledError("cancel scope")
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}]
+    )
+    manager.sessions["calendar"] = FakeSession()
+
+    result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
+
+    assert "was cancelled" in result
