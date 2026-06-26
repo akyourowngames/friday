@@ -24,6 +24,8 @@ from ares.tools.filesystem_write import edit_file as _edit_file_impl
 from ares.tools.filesystem_write import create_directory as _create_directory_impl
 from ares.tools.filesystem_write import delete_file as _delete_file_impl
 from ares.tools.filesystem_write import move_file as _move_file_impl
+from ares.tools.filesystem_write import batch_edit as _batch_edit_impl
+from ares.tools.filesystem_write import glob_apply as _glob_apply_impl
 from ares.tools.repl import PersistentREPL
 from ares.tools.image_generate import generate_image
 from ares.tools.image_edit import image_info as _image_info
@@ -86,6 +88,8 @@ class ToolExecutor:
             "create_directory": self._create_directory,
             "delete_file": self._delete_file,
             "move_file": self._move_file,
+            "batch_edit": self._batch_edit,
+            "glob_apply": self._glob_apply,
             "disk_usage": self._disk_usage,
             "checksum": self._checksum,
             "copy_file": self._copy_file,
@@ -462,6 +466,26 @@ class ToolExecutor:
             )
 
         return _move_file_impl(source, destination, dry_run=dry_run)
+
+    def _batch_edit(self, args: dict) -> str:
+        return _batch_edit_impl(
+            operations=args.get("operations", []),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm=bool(args.get("confirm", False)),
+            max_operations=int(args.get("max_operations", 100)),
+        )
+
+    def _glob_apply(self, args: dict) -> str:
+        return _glob_apply_impl(
+            pattern=args["pattern"],
+            action=args.get("action", "list"),
+            path=args.get("path", "."),
+            destination=args.get("destination", ""),
+            replacement=args.get("replacement", ""),
+            dry_run=bool(args.get("dry_run", True)),
+            confirm=bool(args.get("confirm", False)),
+            max_matches=int(args.get("max_matches", 100)),
+        )
 
     def _disk_usage(self, args: dict) -> str:
         return _disk_usage_impl(

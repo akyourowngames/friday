@@ -11,11 +11,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 try:  # websockets 13+
-    from websockets.asyncio.server import ServerConnection
+    from websockets.asyncio.server import ServerConnection, serve
 except ImportError:  # pragma: no cover
-    from websockets.server import WebSocketServerProtocol as ServerConnection
-
-from websockets.server import serve
+    from websockets.server import WebSocketServerProtocol as ServerConnection, serve
 
 try:
     from websockets.exceptions import ConnectionClosed
@@ -55,10 +53,9 @@ def _trim_history(history: list[dict], max_messages: int = MAX_CONTEXT_MESSAGES)
 
     trimmed = history[-max_messages:]
 
-    for msg in trimmed[:-6]:
+    for index, msg in enumerate(trimmed[:-6]):
         if msg.get("tool_calls"):
-            msg = dict(msg)
-            msg["tool_calls"] = None
+            trimmed[index] = {**msg, "tool_calls": None}
     return trimmed
 
 

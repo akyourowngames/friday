@@ -179,13 +179,13 @@ class TaskExecutor:
         if path and path.endswith(('.md', '.txt', '.py', '.js', '.json', '.yaml')):
             try:
                 with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                line_count = content.count('\n') + 1
-                for line in content.split('\n'):
-                    stripped = line.strip()
-                    if stripped and not stripped.startswith('#'):
-                        description = stripped[:80]
-                        break
+                    line_count = 0
+                    for line in f:
+                        line_count += 1
+                        if description is None and line_count <= 50:
+                            stripped = line.strip()
+                            if stripped and not stripped.startswith('#'):
+                                description = stripped[:80]
             except OSError:
                 pass
 

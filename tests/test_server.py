@@ -263,3 +263,15 @@ def test_notify_auto_complete_uses_llm_composed_chat_message():
     done = [m for m in socket.messages if m.get("type") == "response_done"][-1]
     assert done["content"] == "Hey Krish — I made the PDF and saved it in reports/out.pdf."
     assert "Background task" not in done["content"]
+
+
+def test_trim_history_strips_old_tool_calls():
+    from ares.server import _trim_history
+
+    history = [{"role": "user", "content": str(i), "tool_calls": [{"id": str(i)}]} for i in range(12)]
+    trimmed = _trim_history(history, max_messages=10)
+
+    assert len(trimmed) == 10
+    assert trimmed[0]["tool_calls"] is None
+    assert trimmed[3]["tool_calls"] is None
+    assert trimmed[-1]["tool_calls"] == [{"id": "11"}]

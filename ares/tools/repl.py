@@ -118,18 +118,19 @@ class REPLSession:
     def _execute_shell(self, command: str, uid: str, timeout: int) -> dict:
         sentinel = f"__ARES_SENTINEL_{uid}__"
         if sys.platform == "win32":
-            sentinel_cmd = f"{command}\necho {sentinel}\n"
+            sentinel_cmd = f"{command}\necho {sentinel}:%ERRORLEVEL%\n"
         else:
-            sentinel_cmd = f"{command}\nprintf '%s\\n' '{sentinel}'\n"
+            sentinel_cmd = f"{command}\n__ares_status=$?\nprintf '%s:%s\\n' '{sentinel}' \"$__ares_status\"\n"
         with self._lock:
             if not self._write(sentinel_cmd):
                 return {"id": uid, "stdout": "", "stderr": "", "error": "REPL crashed and restarted"}
-            stdout, stderr, timed_out = self._collect_until(self._stdout, sentinel, timeout)
+            stdout, stderr, timed_out, exit_code = self._collect_until(self._stdout, sentinel, timeout)
             stderr += self._drain(self._stderr)
             if timed_out:
                 self._interrupt()
-                return {"id": uid, "stdout": stdout, "stderr": stderr, "error": f"Timeout after {timeout}s"}
-            return {"id": uid, "stdout": stdout, "stderr": stderr, "error": None}
+                return {"id": uid, "stdout": stdout, "stderr": stderr, "error": f"Timeout after {timeout}s", "exit_code": exit_code}
+            error = None if exit_code in (None, 0) else f"Command exited with status {exit_code}"
+            return {"id": uid, "stdout": stdout, "stderr": stderr, "error": error, "exit_code": exit_code}
 
     def _write(self, text: str) -> bool:
         try:
@@ -180,13 +181,17 @@ class REPLSession:
             if line and (f'"id": "{uid}"' in line or f'"id":"{uid}"' in line):
                 try:
                     payload = json.loads(line.strip())
-                    payload["error"] = payload.get("error") or f"Timeout after {timeout}s"
+                    existing_error = payload.get("error")
+                    payload["error"] = (
+                        f"Timeout after {timeout}s"
+                        + (f"\n{existing_error}" if existing_error else "")
+                    )
                     return payload
                 except json.JSONDecodeError:
                     pass
         return {"id": uid, "stdout": "".join(stdout_prefix), "stderr": self._drain(self._stderr), "error": f"Timeout after {timeout}s"}
 
-    def _collect_until(self, q: queue.Queue[str | None], sentinel: str, timeout: int) -> tuple[str, str, bool]:
+    def _collect_until(self, q: queue.Queue[str | None], sentinel: str, timeout: int) -> tuple[str, str, bool, int | None]:
         deadline = time.monotonic() + timeout
         lines: list[str] = []
         while time.monotonic() < deadline:
@@ -199,9 +204,15 @@ class REPLSession:
             if line is None:
                 break
             if sentinel in line:
-                return "".join(lines), "", False
+                exit_code = None
+                marker = line.strip().split(sentinel, 1)[-1].lstrip(":")
+                try:
+                    exit_code = int(marker.split()[0])
+                except (ValueError, IndexError):
+                    pass
+                return "".join(lines), "", False, exit_code
             lines.append(line)
-        return "".join(lines), "", True
+        return "".join(lines), "", True, None
 
     @staticmethod
     def _drain(q: queue.Queue[str | None]) -> str:
@@ -275,6 +286,9 @@ class PersistentREPL:
         stdout = (result.get("stdout") or "").rstrip()
         stderr = (result.get("stderr") or "").rstrip()
         error = result.get("error")
+        exit_code = result.get("exit_code")
+        if exit_code is not None:
+            parts.append(f"Exit code: {exit_code}")
         if stdout:
             parts.append(stdout)
         if stderr:

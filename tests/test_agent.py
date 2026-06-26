@@ -224,3 +224,10 @@ class TestAgent:
             "role": "tool",
             "content": "Stored memory #1",
         }]
+
+
+def test_build_messages_without_skill_manager_does_not_crash(tmp_path):
+    agent = object.__new__(Agent)
+    agent.config = AppConfig(data_dir=str(tmp_path), skills_enabled=True)
+    messages = agent.build_messages("hello", [])
+    assert messages[-1] == {"role": "user", "content": "hello"}

@@ -305,6 +305,37 @@ def get_tool_definitions() -> list[dict]:
             },
             ["source", "destination"],
         ),
+
+        _tool(
+            "batch_edit",
+            "Execute multiple file operations in one structured call. Supports write, edit, delete, move, copy, and mkdir/create_directory actions with per-operation results.",
+            {
+                "operations": {
+                    "type": "array",
+                    "description": "List of operations. Each operation has action plus fields for that action.",
+                    "items": {"type": "object"},
+                },
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview all operations without changing files."},
+                "confirm": {"type": "boolean", "default": False, "description": "Confirm destructive operations and overwrites."},
+                "max_operations": {"type": "integer", "default": 100, "description": "Maximum operations to execute (1-500)."},
+            },
+            ["operations"],
+        ),
+        _tool(
+            "glob_apply",
+            "Apply a safe bulk action to files matching a glob pattern. Defaults to dry_run=true. Supports list, delete, move, and copy.",
+            {
+                "pattern": {"type": "string", "description": "Glob pattern such as *.tmp or **/*.log."},
+                "action": {"type": "string", "enum": ["list", "delete", "move", "copy"], "default": "list"},
+                "path": {"type": "string", "default": ".", "description": "Root directory to search from."},
+                "destination": {"type": "string", "description": "Destination directory for move/copy actions."},
+                "replacement": {"type": "string", "description": "Optional destination file name template using {name}, {stem}, {suffix}."},
+                "dry_run": {"type": "boolean", "default": True, "description": "Preview matching operations without changing files."},
+                "confirm": {"type": "boolean", "default": False, "description": "Required for destructive glob actions when dry_run=false."},
+                "max_matches": {"type": "integer", "default": 100, "description": "Maximum matches to act on (1-500)."},
+            },
+            ["pattern"],
+        ),
         _tool(
             "disk_usage",
             "Show disk usage for a directory tree with sizes and file counts (like du -sh).",

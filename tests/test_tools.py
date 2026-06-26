@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 47
+        assert len(tools) == 49
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -49,6 +49,8 @@ class TestToolDefinitions:
             "create_directory",
             "delete_file",
             "move_file",
+            "batch_edit",
+            "glob_apply",
             "disk_usage",
             "checksum",
             "copy_file",

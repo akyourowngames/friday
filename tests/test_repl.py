@@ -174,3 +174,16 @@ class TestPersistentREPL:
         result = repl.execute_python("print(counter)")
         assert "5" in result
         repl.close()
+
+
+def test_shell_result_includes_nonzero_exit_code():
+    from ares.tools.repl import PersistentREPL
+
+    repl = PersistentREPL()
+    try:
+        result = repl.execute_shell("python -c \"import sys; sys.exit(7)\"", timeout=5)
+    finally:
+        repl.close()
+
+    assert "Exit code: 7" in result
+    assert "Command exited with status 7" in result

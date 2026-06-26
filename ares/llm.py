@@ -1,5 +1,6 @@
 """LLM API client for OpenCode Zen (OpenAI-compatible)."""
 
+import asyncio
 import json
 from typing import Any, AsyncIterator
 
@@ -92,8 +93,8 @@ class LLMClient:
     """Async client for calling OpenCode Zen or any OpenAI-compatible API."""
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None,
-                 model: str | None = None):
-        config = load_config()
+                 model: str | None = None, config: Any | None = None):
+        config = config or load_config()
         self.config = config
         self.api_key = api_key or config.api_key
         self.base_url = (base_url or config.api_base_url).rstrip("/")
@@ -164,6 +165,14 @@ class LLMClient:
 
         return result
 
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        return status_code == 429 or 500 <= status_code < 600
+
+    @staticmethod
+    def _retry_delay(attempt: int) -> float:
+        return min(4.0, 0.5 * (2 ** attempt))
+
     async def chat(self, messages: list[dict], tools: list[dict] | None = None,
                    tool_choice: str = "auto") -> dict:
         """Send a chat completion request. Returns the full response dict."""
@@ -181,16 +190,27 @@ class LLMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        resp = await self._client.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            body = resp.text[:1000]
-            raise Exception(f"LLM API error {resp.status_code}: {body}")
-        data = resp.json()
-        return data["choices"][0]["message"]
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = await self._client.post(
+                    f"{self.base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["choices"][0]["message"]
+                body = resp.text[:1000]
+                last_error = Exception(f"LLM API error {resp.status_code}: {body}")
+                if not self._is_retryable_status(resp.status_code) or attempt == 2:
+                    raise last_error
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_error = exc
+                if attempt == 2:
+                    raise Exception(f"LLM API transport error: {exc}") from exc
+            await asyncio.sleep(self._retry_delay(attempt))
+        raise last_error or Exception("LLM API error")
 
     async def chat_stream(self, messages: list[dict], tools: list[dict] | None = None) -> AsyncIterator[dict]:
         """Stream a chat completion and yield structured content/tool chunks."""
@@ -209,53 +229,63 @@ class LLMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        async with self._client.stream(
-            "POST",
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-        ) as resp:
-            if resp.status_code != 200:
-                body = ""
-                async for chunk in resp.aiter_text():
-                    body += chunk
-                    if len(body) > 1000:
-                        break
-                raise Exception(f"LLM API error {resp.status_code}: {body}")
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:]
-                if data_str.strip() == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                    delta = chunk["choices"][0].get("delta", {})
+        for attempt in range(3):
+            try:
+                async with self._client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = ""
+                        async for chunk in resp.aiter_text():
+                            body += chunk
+                            if len(body) > 1000:
+                                break
+                        if self._is_retryable_status(resp.status_code) and attempt < 2:
+                            await asyncio.sleep(self._retry_delay(attempt))
+                            continue
+                        raise Exception(f"LLM API error {resp.status_code}: {body}")
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            delta = chunk["choices"][0].get("delta", {})
 
-                    content = delta.get("content")
-                    if content:
-                        yield {"type": "content", "text": content}
+                            content = delta.get("content")
+                            if content:
+                                yield {"type": "content", "text": content}
 
-                    if "tool_calls" in delta:
-                        for tool_call in delta["tool_calls"]:
-                            index = tool_call.get("index", 0)
-                            fn = tool_call.get("function", {})
-                            if tool_call.get("id") or fn.get("name"):
-                                yield {
-                                    "type": "tool_call",
-                                    "index": index,
-                                    "id": tool_call.get("id", ""),
-                                    "name": fn.get("name", ""),
-                                }
-                            if fn.get("arguments"):
-                                yield {
-                                    "type": "tool_call_delta",
-                                    "index": index,
-                                    "arguments": fn["arguments"],
-                                }
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            yield {"type": "done"}
+                            if "tool_calls" in delta:
+                                for tool_call in delta["tool_calls"]:
+                                    index = tool_call.get("index", 0)
+                                    fn = tool_call.get("function", {})
+                                    if tool_call.get("id") or fn.get("name"):
+                                        yield {
+                                            "type": "tool_call",
+                                            "index": index,
+                                            "id": tool_call.get("id", ""),
+                                            "name": fn.get("name", ""),
+                                        }
+                                    if fn.get("arguments"):
+                                        yield {
+                                            "type": "tool_call_delta",
+                                            "index": index,
+                                            "arguments": fn["arguments"],
+                                        }
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            continue
+                    yield {"type": "done"}
+                    return
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt == 2:
+                    raise Exception(f"LLM API transport error: {exc}") from exc
+                await asyncio.sleep(self._retry_delay(attempt))
 
     async def close(self):
         """Close the HTTP client."""

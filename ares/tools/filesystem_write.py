@@ -241,3 +241,145 @@ def move_file(source: str, destination: str, dry_run: bool = False) -> str:
     if dst_exists:
         return f"Moved {_display_path(src)}{src_info} → {_display_path(dst)} (overwrote existing)"
     return f"Moved {_display_path(src)}{src_info} → {_display_path(dst)}"
+
+
+def batch_edit(operations: list[dict], dry_run: bool = False, confirm: bool = False, max_operations: int = 100) -> str:
+    """Execute multiple file operations sequentially with per-operation reporting.
+
+    Supported actions: write, edit, delete, move, copy, mkdir/create_directory.
+    Destructive actions (delete, overwrite writes/moves/copies) require confirm=true
+    unless dry_run=true.
+    """
+    if not isinstance(operations, list):
+        return "operations must be a list."
+    bounded = max(1, min(int(max_operations), 500))
+    if len(operations) > bounded:
+        return f"Too many operations: {len(operations)} requested, max is {bounded}."
+
+    results: list[str] = []
+    errors = 0
+    for index, operation in enumerate(operations, 1):
+        if not isinstance(operation, dict):
+            errors += 1
+            results.append(f"{index}. Error: operation must be an object")
+            continue
+        action = str(operation.get("action", "")).lower().strip()
+        op_dry_run = bool(operation.get("dry_run", dry_run))
+        try:
+            if action == "write":
+                path = operation["path"]
+                content = operation.get("content", "")
+                target = resolve_write_path(path)
+                if target.exists() and not confirm and not op_dry_run:
+                    raise ValueError(f"confirm=true required to overwrite {_display_path(target)}")
+                result = write_file(path, content, dry_run=op_dry_run)
+            elif action == "edit":
+                result = edit_file(
+                    operation["path"],
+                    operation["old_text"],
+                    operation["new_text"],
+                    dry_run=op_dry_run,
+                )
+            elif action == "delete":
+                if not confirm and not op_dry_run:
+                    raise ValueError("confirm=true required for delete")
+                result = delete_file(operation["path"], dry_run=op_dry_run)
+            elif action == "move":
+                dst = resolve_write_path(operation["destination"])
+                if dst.exists() and not confirm and not op_dry_run:
+                    raise ValueError(f"confirm=true required to overwrite {_display_path(dst)}")
+                result = move_file(operation["source"], operation["destination"], dry_run=op_dry_run)
+            elif action == "copy":
+                src = resolve_write_path(operation["source"])
+                dst = resolve_write_path(operation["destination"])
+                if not src.exists():
+                    raise FileNotFoundError(f"Source not found: {operation['source']}")
+                if dst.exists() and not confirm and not op_dry_run:
+                    raise ValueError(f"confirm=true required to overwrite {_display_path(dst)}")
+                preview = f"Copy {_display_path(src)} → {_display_path(dst)}"
+                if op_dry_run:
+                    result = f"[DRY RUN] Would {preview.lower()}"
+                else:
+                    import shutil
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if src.is_dir():
+                        shutil.copytree(src, dst, dirs_exist_ok=confirm)
+                    else:
+                        shutil.copy2(src, dst)
+                    result = preview
+            elif action in {"mkdir", "create_directory"}:
+                result = create_directory(operation["path"], dry_run=op_dry_run)
+            else:
+                raise ValueError(f"Unsupported action: {action or '<missing>'}")
+            results.append(f"{index}. {result}")
+        except Exception as exc:
+            errors += 1
+            results.append(f"{index}. Error: {exc}")
+
+    status = "completed" if errors == 0 else f"completed with {errors} error(s)"
+    return f"Batch edit {status}: {len(operations)} operation(s)\n" + "\n".join(results)
+
+
+def glob_apply(
+    pattern: str,
+    action: str = "list",
+    path: str = ".",
+    destination: str = "",
+    replacement: str = "",
+    dry_run: bool = True,
+    confirm: bool = False,
+    max_matches: int = 100,
+) -> str:
+    """Apply a bulk action to files matching a glob pattern.
+
+    Supported actions: list, delete, move, copy. Destructive actions require
+    confirm=true; dry_run defaults to true for safety.
+    """
+    root = resolve_write_path(path)
+    if not root.exists():
+        return f"Directory not found: {path}"
+    if not root.is_dir():
+        return f"Not a directory: {path}"
+
+    bounded = max(1, min(int(max_matches), 500))
+    matches: list[Path] = []
+    try:
+        for match in root.rglob(pattern):
+            parts = match.relative_to(root).parts
+            if any(part in SKIP_DIRS for part in parts):
+                continue
+            matches.append(match)
+            if len(matches) >= bounded:
+                break
+    except (OSError, PermissionError) as exc:
+        return f"Error searching: {exc}"
+
+    matches.sort(key=lambda p: str(p).lower())
+    if not matches:
+        return f"No matches for '{pattern}' in {_display_path(root)}"
+
+    action = action.lower().strip()
+    if action == "list":
+        lines = [f"Found {len(matches)} match(es) for '{pattern}':"]
+        lines.extend(f"  {_display_path(match)}" for match in matches)
+        return "\n".join(lines)
+
+    if action in {"delete", "move", "copy"} and not (confirm or dry_run):
+        return f"confirm=true required for glob {action}; re-run with dry_run=true to preview."
+
+    operations: list[dict] = []
+    for match in matches:
+        if action == "delete":
+            operations.append({"action": "delete", "path": str(match)})
+        elif action in {"move", "copy"}:
+            if not destination:
+                return f"destination is required for glob {action}."
+            dest_root = resolve_write_path(destination)
+            dest = dest_root / match.relative_to(root)
+            if replacement:
+                dest = dest_root / replacement.format(name=match.name, stem=match.stem, suffix=match.suffix)
+            operations.append({"action": action, "source": str(match), "destination": str(dest)})
+        else:
+            return f"Unsupported glob action: {action}"
+
+    return batch_edit(operations, dry_run=dry_run, confirm=confirm, max_operations=bounded)

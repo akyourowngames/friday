@@ -76,8 +76,9 @@ class Agent:
                        context: str = "") -> list[dict]:
         """Build the message list for the LLM."""
         system_content = SYSTEM_PROMPT
-        if self.config.skills_enabled:
-            system_content += f"\n\n{self.skill_manager.compact_index()}"
+        skill_manager = getattr(self, "skill_manager", None)
+        if getattr(self.config, "skills_enabled", True) and skill_manager is not None:
+            system_content += f"\n\n{skill_manager.compact_index()}"
         if context:
             system_content += f"\n\n## Current Context\n{context}"
 

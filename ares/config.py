@@ -1,9 +1,14 @@
 """Configuration management for Ares."""
 
 import json
+import logging
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from ares.models import AppConfig
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DATA_DIR = Path("~/.ares/data").expanduser()
 CONFIG_PATH = Path("~/.ares/config.json").expanduser()
@@ -22,11 +27,18 @@ def get_db_path(data_dir: Path | None = None) -> Path:
 
 
 def load_config() -> AppConfig:
-    """Load config from ~/.ares/config.json, or return defaults."""
+    """Load config from ~/.ares/config.json, or return defaults.
+
+    Invalid or partially-written config files should not prevent Ares from
+    starting; log the problem and continue with safe defaults.
+    """
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            data = json.load(f)
-        return AppConfig(**data)
+        try:
+            with open(CONFIG_PATH) as f:
+                data = json.load(f)
+            return AppConfig(**data)
+        except (OSError, json.JSONDecodeError, TypeError, ValidationError) as exc:
+            logger.warning("Failed to load config from %s; using defaults: %s", CONFIG_PATH, exc)
     return AppConfig()
 
 
