@@ -28,6 +28,19 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 logger = logging.getLogger(__name__)
 
 
+def _uncancel_task() -> None:
+    """Clear asyncio cancellation state after intentionally handling CancelledError.
+
+    Python 3.11+ keeps the task's cancellation flag active even after the
+    CancelledError is caught.  Every subsequent await re-raises it until
+    uncancel() is called the same number of times the task was cancelled.
+    """
+    task = asyncio.current_task()
+    if task is not None and hasattr(task, "uncancel"):
+        while task.cancelling():
+            task.uncancel()
+
+
 def _clear_current_task_cancellation() -> None:
     """Clear pending cancellation state after intentionally suppressing MCP cancellation."""
     current_task = asyncio.current_task()
@@ -272,6 +285,10 @@ class MCPAuthProvider:
                 refreshed = response.json()
             refreshed.setdefault("refresh_token", token.get("refresh_token"))
             return self._store_token(config.name, refreshed)
+        except asyncio.CancelledError:
+            _uncancel_task()
+            logger.warning("MCP token refresh cancelled for %s", config.name)
+            return None
         except Exception as exc:  # pragma: no cover - network failure path.
             logger.warning("MCP token refresh failed for %s: %s", config.name, exc)
             return None
@@ -326,21 +343,32 @@ class MCPClientManager:
             return None
 
     async def start(self) -> None:
+        """Connect to all configured MCP servers.
+
+        Failures are logged per server and do not block others.  The asyncio
+        CancelledError that the MCP SDK can raise is fully consumed so it never
+        leaks into the caller's event loop.
+        """
         if self.sessions or self._exit_stacks or self._http_clients:
             await self.close()
         self.tool_definitions = []
         for name, config in self.servers.items():
             try:
                 await self._connect_server(name, config)
-            except (Exception, asyncio.CancelledError) as exc:
-                logger.warning("Failed to connect MCP server %s: %s", name, exc)
+            except BaseException:
+                logger.warning(
+                    "Failed to connect MCP server '%s' — check config and network",
+                    name,
+                )
+            finally:
+                _uncancel_task()
 
     async def close(self) -> None:
         for stack in list(self._exit_stacks.values()):
-            with suppress(Exception, asyncio.CancelledError):
+            with suppress(Exception):
                 await stack.aclose()
         for client in list(self._http_clients.values()):
-            with suppress(Exception, asyncio.CancelledError):
+            with suppress(Exception):
                 await client.aclose()
         self.sessions.clear()
         self._exit_stacks.clear()
@@ -405,16 +433,12 @@ class MCPClientManager:
             tools_response =             await asyncio.wait_for(
                 session.list_tools(), timeout=config.timeout_seconds
             )
-        except asyncio.CancelledError as exc:
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()
+        except asyncio.CancelledError:
+            _uncancel_task()
             await stack.aclose()
             if http_client is not None:
                 await http_client.aclose()
-            raise RuntimeError(
-                f"MCP connection cancelled for {name}: {exc}"
-            ) from exc
+            return
         except Exception:
             await stack.aclose()
             if http_client is not None:

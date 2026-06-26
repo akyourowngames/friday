@@ -874,7 +874,10 @@ class AresCLI:
     async def run(self):
         """Main CLI loop."""
         if self.mcp_manager is not None:
-            await self.mcp_manager.start()
+            try:
+                await self.mcp_manager.start()
+            except BaseException:
+                _clear_current_task_cancellation()
             self.agent.refresh_tools()
         self._reminder_task = asyncio.create_task(self.reminder_service.run())
         self._executor_task = asyncio.create_task(self.task_executor.run())
