@@ -184,7 +184,7 @@ class Agent:
                     result = "Error: MCP manager is not configured."
                 else:
                     result = await self.mcp_manager.call_tool(tool_name, args)
-            except Exception as exc:
+            except BaseException as exc:
                 result = f"Error: {exc}"
             mcp_results[i] = result
         return self._process_tool_calls_core(tool_calls, mcp_results=mcp_results)

@@ -801,8 +801,8 @@ class AresCLI:
                         full_response += token
                         if full_response.strip():
                             live.update(Markdown(full_response))
-            except Exception as e:
-                full_response = f"Error: {e}"
+            except (Exception, asyncio.CancelledError) as exc:
+                full_response = f"Error: {exc}"
 
         # Show rendered tool results before the final assistant response.
         for renderable in tool_renderables:

@@ -322,7 +322,7 @@ class MCPClientManager:
         for name, config in self.servers.items():
             try:
                 await self._connect_server(name, config)
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 logger.warning("Failed to connect MCP server %s: %s", name, exc)
 
     async def close(self) -> None:
@@ -395,6 +395,16 @@ class MCPClientManager:
             tools_response = await asyncio.wait_for(
                 session.list_tools(), timeout=config.timeout_seconds
             )
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            await stack.aclose()
+            if http_client is not None:
+                await http_client.aclose()
+            raise RuntimeError(
+                f"MCP connection cancelled for {name}: {exc}"
+            ) from exc
         except Exception:
             await stack.aclose()
             if http_client is not None:
@@ -441,10 +451,13 @@ class MCPClientManager:
         except asyncio.TimeoutError:
             return f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s."
         except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
             logger.warning(
                 "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
             )
-            return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. Check the MCP server logs or increase timeout_seconds."
+            return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled."
         except Exception as exc:
             return f"Error calling MCP tool '{mcp_tool}' on '{server_name}': {exc}"
 
