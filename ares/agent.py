@@ -81,7 +81,6 @@ class Agent:
         self.tools = get_tool_definitions()
         if self.mcp_manager is not None:
             self.tools.extend(getattr(self.mcp_manager, "tool_definitions", []))
-
     def build_messages(self, user_input: str, conversation_history: list[dict],
                        context: str = "") -> list[dict]:
         """Build the message list for the LLM."""
