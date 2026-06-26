@@ -1,0 +1,121 @@
+"""Tests for MCP client configuration, OAuth storage, and tool routing."""
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import asyncio
+
+from ares.agent import Agent
+from ares.models import AppConfig
+from ares.tools.mcp_client import MCPAuthProvider, MCPClientManager, MCPServerConfig
+
+
+def test_app_config_exposes_mcp_servers_default():
+    config = AppConfig()
+    assert config.mcp_servers == []
+
+
+def test_mcp_server_config_defaults():
+    config = MCPServerConfig(name="calendar", server_url="https://example.com/mcp")
+    assert config.oauth_client_id == ""
+    assert config.oauth_scopes == []
+
+
+def test_auth_provider_stores_expiry_and_detects_expiration(tmp_path):
+    auth = MCPAuthProvider(data_dir=str(tmp_path))
+    stored = auth._store_token("calendar", {"access_token": "abc", "expires_in": 3600})
+
+    assert (tmp_path / "mcp_tokens" / "calendar.json").exists()
+    assert "expires_at" in stored
+    assert auth._is_expired(stored) is False
+
+    expired = {"access_token": "old", "expires_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()}
+    assert auth._is_expired(expired) is True
+
+
+def test_discover_google_oauth_endpoints(tmp_path):
+    auth = MCPAuthProvider(data_dir=str(tmp_path))
+    endpoints = asyncio.run(auth._discover_endpoints("https://calendar.googleapis.com/mcp"))
+
+    assert endpoints["authorization_endpoint"] == "https://accounts.google.com/o/oauth2/v2/auth"
+    assert endpoints["token_endpoint"] == "https://oauth2.googleapis.com/token"
+
+
+def test_manager_converts_mcp_tool_to_openai_schema():
+    manager = MCPClientManager([])
+    tool = SimpleNamespace(
+        name="list_events",
+        description="List calendar events",
+        inputSchema={"type": "object", "properties": {"calendar_id": {"type": "string"}}},
+    )
+
+    schema = manager._to_openai_schema("calendar", tool)
+
+    assert schema["type"] == "function"
+    assert schema["function"]["name"] == "mcp__calendar__list_events"
+    assert "[MCP:calendar]" in schema["function"]["description"]
+    assert schema["function"]["parameters"]["properties"]["calendar_id"]["type"] == "string"
+
+
+def test_call_tool_rejects_invalid_name():
+    manager = MCPClientManager([])
+    result = asyncio.run(manager.call_tool("not_mcp", {}))
+    assert result.startswith("Error: Invalid MCP tool name")
+
+
+def test_call_tool_returns_disconnected_error():
+    manager = MCPClientManager([])
+    result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
+    assert "not connected" in result
+
+
+def test_call_tool_routes_to_session_and_renders_text():
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            assert tool_name == "list_events"
+            assert arguments == {"limit": 2}
+            return SimpleNamespace(content=[SimpleNamespace(text="event one"), SimpleNamespace(text="event two")])
+
+    manager = MCPClientManager([])
+    manager.sessions["calendar"] = FakeSession()
+
+    result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {"limit": 2}))
+
+    assert result == "event one\nevent two"
+
+
+def test_agent_refreshes_and_routes_mcp_tools():
+    class FakeMCPManager:
+        tool_definitions = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__calendar__list_events",
+                    "description": "List events",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        async def call_tool(self, tool_name, arguments):
+            assert tool_name == "mcp__calendar__list_events"
+            assert arguments == {"limit": 1}
+            return "mcp result"
+
+    agent = Agent.__new__(Agent)
+    agent.mcp_manager = FakeMCPManager()
+    agent.tool_executor = None
+    agent.refresh_tools()
+
+    assert any(tool["function"]["name"] == "mcp__calendar__list_events" for tool in agent.tools)
+
+    results = asyncio.run(agent.process_tool_calls_async([
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "mcp__calendar__list_events", "arguments": '{"limit": 1}'},
+        }
+    ]))
+
+    assert results[0]["content"] == "mcp result"
+    assert results[0]["tool_name"] == "mcp__calendar__list_events"

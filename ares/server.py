@@ -28,6 +28,7 @@ from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.tools.tasks import TaskStore
+from ares.tools.mcp_client import MCPClientManager
 
 
 TOOL_TOKEN_RE = re.compile(r"^\[tool:([^:]+):(.*)\]$", re.DOTALL)
@@ -108,10 +109,16 @@ class AresServer:
         self.memory_store = memory_store or MemoryStore()
         self.task_store = task_store or TaskStore()
         self.conversation_store = conversation_store or ConversationStore()
+        self.mcp_manager = (
+            MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
+            if self.config.mcp_servers
+            else None
+        )
         self.agent = agent or Agent(
             config=self.config,
             memory_store=self.memory_store,
             task_store=self.task_store,
+            mcp_manager=self.mcp_manager,
         )
         self.task_executor = TaskExecutor(
             self.task_store,
@@ -332,6 +339,10 @@ class AresServer:
 
     async def run_forever(self) -> None:
         """Start the WebSocket server and block until cancelled."""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.start()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
         self.task_executor.start()
         async with serve(self.handle_client, self.host, self.port) as ws_server:
             self._server = ws_server
@@ -815,21 +826,25 @@ class AresServer:
 
     async def _send(self, websocket: Any, payload: dict[str, Any]) -> None:
         await websocket.send(json.dumps(payload, ensure_ascii=False))
+
     async def close(self) -> None:
-            """Shut down stores."""
-            await self.task_executor.stop()
-            for obj in (
-                self.agent,
-                self.conversation_store,
-                self.memory_store,
-                self.task_store,
-            ):
-                close = getattr(obj, "close", None)
-                if close:
-                    with suppress(Exception):
-                        result = close()
-                        if result is not None:
-                            await result
+        """Shut down stores."""
+        await self.task_executor.stop()
+        if self.mcp_manager is not None:
+            with suppress(Exception):
+                await self.mcp_manager.close()
+        for obj in (
+            self.agent,
+            self.conversation_store,
+            self.memory_store,
+            self.task_store,
+        ):
+            close = getattr(obj, "close", None)
+            if close:
+                with suppress(Exception):
+                    result = close()
+                    if result is not None:
+                        await result
 
 
 async def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:

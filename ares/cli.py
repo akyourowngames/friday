@@ -36,6 +36,7 @@ from ares.config import load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
+from ares.tools.mcp_client import MCPClientManager
 
 # ── Styles ────────────────────────────────────────────────────
 STYLE = Style.from_dict({
@@ -95,6 +96,11 @@ class AresCLI:
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
         self.skill_manager = SkillManager(skill_dirs=list(self.config.skill_dirs or []) or None)
+        self.mcp_manager = (
+            MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
+            if self.config.mcp_servers
+            else None
+        )
         self.conversation_store = ConversationStore()
         self.conversation_id = self.conversation_store.start_conversation()
         self.conversation_store.summarize_ended_without_summary(
@@ -108,6 +114,7 @@ class AresCLI:
             base_url=self.config.api_base_url,
             model=self.config.model,
             config=self.config,
+            mcp_manager=self.mcp_manager,
         )
         self.conversation_history: list[dict] = self.conversation_store.get_recent_messages(
             limit=self.config.max_context_messages
@@ -848,6 +855,9 @@ class AresCLI:
 
     async def run(self):
         """Main CLI loop."""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.start()
+            self.agent.refresh_tools()
         self._reminder_task = asyncio.create_task(self.reminder_service.run())
         self._executor_task = asyncio.create_task(self.task_executor.run())
         self._show_banner()
@@ -888,6 +898,11 @@ class AresCLI:
                     await self._executor_task
 
             # Cleanup
+            if self.mcp_manager is not None:
+                try:
+                    await self.mcp_manager.close()
+                except Exception as exc:
+                    self.console.print(f"[dim yellow]Shutdown warning (MCP): {exc}[/dim yellow]")
             try:
                 await self.agent.close()
             except Exception as exc:
