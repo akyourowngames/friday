@@ -57,8 +57,6 @@ def main():
         else:
             _run_coro(_run_cli())
     except asyncio.CancelledError:
-        # prompt_toolkit/AnyIO cancellation can surface during shutdown; do not
-        # print a traceback after the CLI has already cleaned up.
         return
 
 

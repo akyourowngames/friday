@@ -241,6 +241,7 @@ async def test_process_input_routes_tool_tokens_to_renderers():
     assert app.conversation_history[-1]["content"] == "Done."
 
 
+
 def test_cli_clear_current_task_cancellation_uncancels_all(monkeypatch):
     class FakeTask:
         def __init__(self):

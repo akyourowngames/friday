@@ -37,6 +37,7 @@ def _clear_current_task_cancellation() -> None:
         current_task.uncancel()
 
 
+
 def _optional_import(module_name: str, attr: str | None = None) -> Any:
     """Import an optional MCP SDK object without failing module import."""
     package = module_name.split(".", 1)[0]
@@ -331,7 +332,7 @@ class MCPClientManager:
         for name, config in self.servers.items():
             try:
                 await self._connect_server(name, config)
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 logger.warning("Failed to connect MCP server %s: %s", name, exc)
 
     async def close(self) -> None:
@@ -401,9 +402,19 @@ class MCPClientManager:
                 ClientSession(read_stream, write_stream)
             )
             await asyncio.wait_for(session.initialize(), timeout=config.timeout_seconds)
-            tools_response = await asyncio.wait_for(
+            tools_response =             await asyncio.wait_for(
                 session.list_tools(), timeout=config.timeout_seconds
             )
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            await stack.aclose()
+            if http_client is not None:
+                await http_client.aclose()
+            raise RuntimeError(
+                f"MCP connection cancelled for {name}: {exc}"
+            ) from exc
         except Exception:
             await stack.aclose()
             if http_client is not None:

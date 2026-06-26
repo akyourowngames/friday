@@ -186,6 +186,7 @@ def test_call_tool_handles_cancelled_error_without_crashing():
     assert "was cancelled" in result
 
 
+
 def test_mcp_clear_current_task_cancellation_uncancels_all(monkeypatch):
     from ares.tools import mcp_client
 

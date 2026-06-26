@@ -602,7 +602,6 @@ class ToolExecutor:
 
     def _safe_path_status(self, args: dict) -> str:
         return _safe_path_status_impl(args["path"])
-
     def _disk_usage(self, args: dict) -> str:
         return _disk_usage_impl(
             path=args.get("path", "."),

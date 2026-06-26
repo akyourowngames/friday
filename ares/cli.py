@@ -76,6 +76,7 @@ def _clear_current_task_cancellation() -> None:
         current_task.uncancel()
 
 
+
 class AresCLI:
     """The main CLI application for Ares."""
 

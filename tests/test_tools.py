@@ -338,3 +338,4 @@ class TestToolExecutor:
         assert "CONFIRM" in result
         assert path.exists()  # unchanged
 
+
