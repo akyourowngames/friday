@@ -208,6 +208,8 @@ class MCPAuthProvider:
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
+            "access_type": "offline",
+            "prompt": "consent",
         }
         webbrowser.open(f"{endpoints['authorization_endpoint']}?{urlencode(params)}")
         code = await self._wait_for_callback(state)
