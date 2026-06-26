@@ -12,9 +12,9 @@ export function TaskNotification() {
   return (
     <div className="task-notification-container">
       {notifications.map((n) => {
-        const isDone = n.status === "done";
+        const isDone = n.status === "done" || n.status === "completed";
         const Icon = isDone ? CheckCircle : AlertTriangle;
-        const label = isDone ? "Completed" : "Partial";
+        const label = isDone ? "Completed" : "Needs attention";
         const snippet = n.notes
           ? n.notes.replace(/\*\*/g, "").replace(/#+\s/g, "").slice(0, 120) + (n.notes.length > 120 ? "..." : "")
           : "";

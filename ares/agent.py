@@ -15,6 +15,7 @@ from ares.models import AppConfig
 from ares.profile import ProfileManager
 from ares.prompts import SYSTEM_PROMPT
 from ares.soul import SoulManager
+from ares.skills import SkillManager
 
 
 class Agent:
@@ -38,6 +39,7 @@ class Agent:
             memory_store=memory_store,
             task_store=task_store,
             conversation_store=conversation_store,
+            config=config,
             task_executor=task_executor,
         )
         self.tools = get_tool_definitions()
@@ -66,11 +68,17 @@ class Agent:
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        skill_dirs = list(self.config.skill_dirs or [])
+        self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
+        self.tool_executor.skill_manager = self.skill_manager
 
     def build_messages(self, user_input: str, conversation_history: list[dict],
                        context: str = "") -> list[dict]:
         """Build the message list for the LLM."""
         system_content = SYSTEM_PROMPT
+        skill_manager = getattr(self, "skill_manager", None)
+        if getattr(self.config, "skills_enabled", True) and skill_manager is not None:
+            system_content += f"\n\n{skill_manager.compact_index()}"
         if context:
             system_content += f"\n\n## Current Context\n{context}"
 
@@ -118,23 +126,63 @@ class Agent:
         self.llm.model = model
         self.llm.config.model = model
 
+    @staticmethod
+    def _tool_call_args(call: dict) -> dict:
+        """Parse tool call arguments into a dict."""
+        raw_args = call.get("function", {}).get("arguments") or "{}"
+        if isinstance(raw_args, str):
+            return json.loads(raw_args)
+        return raw_args or {}
+
+    @staticmethod
+    def _auto_task_final_message(tool_results: list[dict]) -> str:
+        """Build the final chat response after queueing an auto task."""
+        for result in tool_results:
+            if result.get("auto_task_created"):
+                first_line = str(result.get("content", "")).splitlines()[0]
+                return f"{first_line}. The background executor will handle it and track events/artifacts."
+        return "Auto-executable task queued. The background executor will handle it and track events/artifacts."
+
     def process_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         """Execute tool calls locally and return results with local metadata."""
         results = []
+        auto_task_created = False
         for i, call in enumerate(tool_calls):
             tool_name = call.get("function", {}).get("name", "unknown")
+
+            if auto_task_created:
+                result = (
+                    "Skipped: an auto-executable task was just queued. "
+                    "The background TaskExecutor must perform the work so events and artifacts are tracked."
+                )
+                results.append({
+                    "tool_call_id": call.get("id") or f"call_{i}",
+                    "role": "tool",
+                    "content": result,
+                    "tool_name": tool_name,
+                    "skipped_after_auto_task": True,
+                })
+                continue
+
             try:
                 fn = call["function"]
                 tool_name = fn["name"]
-                args = json.loads(fn.get("arguments") or "{}")
+                args = self._tool_call_args(call)
                 result = self.tool_executor.execute(tool_name, args)
             except Exception as e:
                 result = f"Error: {e}"
+                args = {}
+
+            is_auto_task = tool_name == "create_task" and bool(args.get("auto_executable", False)) and not str(result).lower().startswith("error:")
+            if is_auto_task:
+                auto_task_created = True
+
             results.append({
                 "tool_call_id": call.get("id") or f"call_{i}",
                 "role": "tool",
                 "content": result,
                 "tool_name": tool_name,
+                "auto_task_created": is_auto_task,
             })
         return results
 
@@ -177,6 +225,10 @@ class Agent:
                 # Execute tools
                 tool_results = self.process_tool_calls(response["tool_calls"])
                 messages.extend(self._tool_messages(tool_results))
+
+                if any(result.get("auto_task_created") for result in tool_results):
+                    yield self._auto_task_final_message(tool_results)
+                    return
 
                 # Let LLM process tool results and continue
                 continue
@@ -256,6 +308,13 @@ class Agent:
                 for tr in tool_results:
                     yield f"[tool:{tr['tool_name']}:{tr['content']}]"
                 messages.extend(self._tool_messages(tool_results))
+
+                if any(result.get("auto_task_created") for result in tool_results):
+                    final_message = self._auto_task_final_message(tool_results)
+                    self.last_messages = messages
+                    yield final_message
+                    return
+
                 continue
 
             # Save messages for conversation history before returning

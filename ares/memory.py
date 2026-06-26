@@ -1,6 +1,8 @@
 """Memory system: SQLite + sqlite-vec for vector search + FTS5 for keyword search."""
 
 from datetime import datetime, timezone
+import logging
+import re
 import sqlite3
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from ares.sqlite_utils import connect_sqlite
 EMBEDDING_MODEL_NAME = DEFAULT_EMBEDDING_MODEL
 
 _default_provider: EmbeddingProvider | None = None
+logger = logging.getLogger(__name__)
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _get_default_provider() -> EmbeddingProvider:
@@ -39,6 +43,13 @@ def _embed(text: str) -> bytes:
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """Add a trusted schema column if missing.
+
+    SQLite does not support binding identifiers. Validate table/column names
+    before interpolation; `definition` is an internal migration string only.
+    """
+    if not _IDENTIFIER_RE.match(table) or not _IDENTIFIER_RE.match(column):
+        raise ValueError("Invalid SQLite identifier for schema migration")
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -77,20 +88,36 @@ class MemoryStore:
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = connect_sqlite(self.db_path)
+        self.vector_enabled = False
         self._init_db()
 
     def _init_db(self):
         """Initialize database tables if they don't exist."""
-        self.conn.enable_load_extension(True)
-        sqlite_vec.load(self.conn)
-        self.conn.enable_load_extension(False)
+        try:
+            enable_load_extension = getattr(self.conn, "enable_load_extension")
+            enable_load_extension(True)
+            sqlite_vec.load(self.conn)
+            enable_load_extension(False)
+            self.vector_enabled = True
+        except Exception as exc:
+            self.vector_enabled = False
+            logger.warning("sqlite-vec unavailable; memory search will use FTS only: %s", exc)
 
-        # Vector table for semantic search
-        self.conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS user_facts USING vec0(
-                embedding float[384]
-            )
-        """)
+        # Vector table for semantic search. If sqlite-vec is unavailable, create
+        # a plain compatibility table so insert/delete paths remain harmless.
+        if self.vector_enabled:
+            self.conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS user_facts USING vec0(
+                    embedding float[384]
+                )
+            """)
+        else:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_facts (
+                    rowid INTEGER PRIMARY KEY,
+                    embedding BLOB
+                )
+            """)
 
         # Metadata table
         self.conn.execute("""
@@ -143,12 +170,13 @@ class MemoryStore:
         )
         fact_id = cursor.lastrowid
 
-        # Insert embedding into vec0
-        embedding = self._embed(fact_text)
-        self.conn.execute(
-            "INSERT INTO user_facts (rowid, embedding) VALUES (?, ?)",
-            (fact_id, embedding),
-        )
+        # Insert embedding when vector search is available.
+        if self.vector_enabled:
+            embedding = self._embed(fact_text)
+            self.conn.execute(
+                "INSERT INTO user_facts (rowid, embedding) VALUES (?, ?)",
+                (fact_id, embedding),
+            )
 
         # Insert into FTS5
         self.conn.execute(
@@ -205,12 +233,13 @@ class MemoryStore:
         )
 
         if new_text != existing["fact_text"]:
-            embedding = self._embed(new_text)
-            self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fact_id,))
-            self.conn.execute(
-                "INSERT INTO user_facts (rowid, embedding) VALUES (?, ?)",
-                (fact_id, embedding),
-            )
+            if self.vector_enabled:
+                embedding = self._embed(new_text)
+                self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fact_id,))
+                self.conn.execute(
+                    "INSERT INTO user_facts (rowid, embedding) VALUES (?, ?)",
+                    (fact_id, embedding),
+                )
             self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fact_id,))
             self.conn.execute(
                 "INSERT INTO facts_fts (rowid, fact_text) VALUES (?, ?)",
@@ -230,30 +259,33 @@ class MemoryStore:
         if created:
             age_days = max((datetime.now(timezone.utc) - created.astimezone(timezone.utc)).days, 0)
 
-        age_penalty = min(age_days, 365) / 365 * (1.0 - importance) * 0.05
+        # Lower scores rank first. Older, low-importance memories get a small
+        # positive age term; importance/confidence/access subtract from score.
+        age_term = min(age_days, 365) / 365 * (1.0 - importance) * 0.05
         access_boost = min(access_count, 20) * 0.002
         importance_boost = importance * 0.05
         confidence_boost = confidence * 0.02
-        return base_score + age_penalty - importance_boost - confidence_boost - access_boost
+        return base_score + age_term - importance_boost - confidence_boost - access_boost
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
         """Hybrid search: vector similarity + FTS5 keyword match, merged."""
         results = {}
 
         # 1. Vector search (semantic)
-        try:
-            query_vec = self._embed(query)
-            vec_rows = self.conn.execute(
-                """
-                SELECT rowid, distance FROM user_facts
-                WHERE embedding MATCH ? ORDER BY distance LIMIT ?
-                """,
-                (query_vec, limit * 2),
-            ).fetchall()
-            for row in vec_rows:
-                results[row["rowid"]] = {"distance": row["distance"], "source": "vector"}
-        except Exception:
-            pass  # vec0 may fail on empty table
+        if self.vector_enabled:
+            try:
+                query_vec = self._embed(query)
+                vec_rows = self.conn.execute(
+                    """
+                    SELECT rowid, distance FROM user_facts
+                    WHERE embedding MATCH ? ORDER BY distance LIMIT ?
+                    """,
+                    (query_vec, limit * 2),
+                ).fetchall()
+                for row in vec_rows:
+                    results[row["rowid"]] = {"distance": row["distance"], "source": "vector"}
+            except Exception as exc:
+                logger.debug("Vector memory search failed; falling back to FTS only: %s", exc)
 
         # 2. FTS5 keyword search
         try:
@@ -271,8 +303,8 @@ class MemoryStore:
                     results[rid]["source"] = "both"
                 else:
                     results[rid] = {"fts_rank": row["rank"], "source": "fts"}
-        except Exception:
-            pass  # FTS may fail on empty table or bad query
+        except Exception as exc:
+            logger.debug("FTS memory search failed; using vector results only: %s", exc)
 
         if not results:
             return []

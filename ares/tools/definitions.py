@@ -137,6 +137,33 @@ def get_tool_definitions() -> list[dict]:
             "Show the background task executor's current state: idle, running, stopped, disabled. Returns which task is being executed, error state, and completion stats.",
             {},
         ),
+
+        _tool(
+            "list_skills",
+            "List available reusable skills/playbooks with names, categories, and descriptions.",
+            {
+                "category": {"type": "string", "description": "Optional category filter."},
+                "query": {"type": "string", "description": "Optional search query."},
+            },
+        ),
+        _tool(
+            "load_skill",
+            "Load a skill's full SKILL.md instructions into context when relevant or explicitly requested.",
+            {
+                "name": {"type": "string", "description": "Skill name to load."},
+            },
+            ["name"],
+        ),
+        _tool(
+            "create_skill",
+            "Save a reusable workflow as a local Ares skill.",
+            {
+                "name": {"type": "string", "description": "Skill name in lowercase-hyphen form."},
+                "content": {"type": "string", "description": "Full SKILL.md content or markdown body."},
+                "category": {"type": "string", "description": "Skill category.", "default": "general"},
+            },
+            ["name", "content"],
+        ),
         _tool(
             "export_data",
             "Export local Ares memories, tasks, conversations, and config to JSON.",
@@ -277,6 +304,37 @@ def get_tool_definitions() -> list[dict]:
                 "dry_run": {"type": "boolean", "default": False, "description": "Preview without moving."},
             },
             ["source", "destination"],
+        ),
+
+        _tool(
+            "batch_edit",
+            "Execute multiple file operations in one structured call. Supports write, edit, delete, move, copy, and mkdir/create_directory actions with per-operation results.",
+            {
+                "operations": {
+                    "type": "array",
+                    "description": "List of operations. Each operation has action plus fields for that action.",
+                    "items": {"type": "object"},
+                },
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview all operations without changing files."},
+                "confirm": {"type": "boolean", "default": False, "description": "Confirm destructive operations and overwrites."},
+                "max_operations": {"type": "integer", "default": 100, "description": "Maximum operations to execute (1-500)."},
+            },
+            ["operations"],
+        ),
+        _tool(
+            "glob_apply",
+            "Apply a safe bulk action to files matching a glob pattern. Defaults to dry_run=true. Supports list, delete, move, and copy.",
+            {
+                "pattern": {"type": "string", "description": "Glob pattern such as *.tmp or **/*.log."},
+                "action": {"type": "string", "enum": ["list", "delete", "move", "copy"], "default": "list"},
+                "path": {"type": "string", "default": ".", "description": "Root directory to search from."},
+                "destination": {"type": "string", "description": "Destination directory for move/copy actions."},
+                "replacement": {"type": "string", "description": "Optional destination file name template using {name}, {stem}, {suffix}."},
+                "dry_run": {"type": "boolean", "default": True, "description": "Preview matching operations without changing files."},
+                "confirm": {"type": "boolean", "default": False, "description": "Required for destructive glob actions when dry_run=false."},
+                "max_matches": {"type": "integer", "default": 100, "description": "Maximum matches to act on (1-500)."},
+            },
+            ["pattern"],
         ),
         _tool(
             "disk_usage",

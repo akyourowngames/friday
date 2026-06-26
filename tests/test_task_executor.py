@@ -139,6 +139,60 @@ class TestExecuteStep:
         assert result["artifacts"][0]["path"] == "/tmp/test.md"
 
 
+class TestTemplateFallbackExecution:
+    def test_execute_step_uses_calculator_template_after_429(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store, title="Build a small Python calculator")
+        store.update(task_id, max_turns=5, total_steps=1)
+        task = store.get(task_id)
+
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=Exception("LLM API error 429: Too many requests"))
+        mock_tool = MagicMock()
+        mock_tool.execute = MagicMock(side_effect=[
+            "Wrote calculator.py",
+            "calculator verification passed",
+        ])
+        executor = _make_executor(store, mock_llm, mock_tool)
+        step = {"step": 1, "title": "Build calculator", "description": "write and verify calculator", "status": "pending"}
+
+        with patch("ares.task_executor.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+            result = asyncio.run(executor._execute_step(task, step))
+
+        assert result["status"] == "success"
+        assert result["artifacts"] == [{"path": "calculator.py", "type": "write_file", "timestamp": result["artifacts"][0]["timestamp"]}]
+        assert result["tool_calls"] == 2
+        assert mock_tool.execute.call_args_list[0].args[0] == "write_file"
+        assert mock_tool.execute.call_args_list[1].args[0] == "run_code"
+        assert sleep_mock.await_count == 1
+
+    def test_process_task_completes_calculator_template_when_llm_is_rate_limited(self, tmp_path):
+        store = _make_store(tmp_path)
+        task_id = _make_task(store, title="Build a small Python calculator")
+        store.update(task_id, max_turns=5, max_attempts=3)
+        task = store.get(task_id)
+
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=Exception("LLM API error 429: Too many requests"))
+        mock_tool = MagicMock()
+        mock_tool.execute = MagicMock(side_effect=[
+            "Wrote calculator.py",
+            "calculator verification passed",
+        ])
+        executor = _make_executor(store, mock_llm, mock_tool)
+
+        with patch("ares.task_executor.asyncio.sleep", new_callable=AsyncMock):
+            asyncio.run(executor._process_task(task))
+
+        updated = store.get(task_id)
+        artifacts = store.get_artifacts(task_id)
+        assert updated["state"] == "completed"
+        assert len(artifacts) == 1
+        assert artifacts[0]["path"] == "calculator.py"
+        assert executor.callback.call_args.args[0]["status"] == "completed"
+        assert "calculator.py" in (updated.get("completion_report") or "")
+
+
 class TestHandleFailure:
     @pytest.mark.asyncio
     async def test_retry_on_first_failure(self, tmp_path):
