@@ -51,10 +51,15 @@ def main():
     parser.add_argument("--port", type=int, default=8765, help="Server port for --server")
     args = parser.parse_args()
 
-    if args.server:
-        _run_coro(_run_server(args.host, args.port))
-    else:
-        _run_coro(_run_cli())
+    try:
+        if args.server:
+            _run_coro(_run_server(args.host, args.port))
+        else:
+            _run_coro(_run_cli())
+    except asyncio.CancelledError:
+        # prompt_toolkit/AnyIO cancellation can surface during shutdown; do not
+        # print a traceback after the CLI has already cleaned up.
+        return
 
 
 if __name__ == "__main__":

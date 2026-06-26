@@ -239,3 +239,25 @@ async def test_process_input_routes_tool_tokens_to_renderers():
     assert "Bitcoin price today" in output
     assert "Done." in output
     assert app.conversation_history[-1]["content"] == "Done."
+
+
+def test_cli_clear_current_task_cancellation_uncancels_all(monkeypatch):
+    class FakeTask:
+        def __init__(self):
+            self.count = 3
+            self.uncancel_calls = 0
+
+        def cancelling(self):
+            return self.count
+
+        def uncancel(self):
+            self.uncancel_calls += 1
+            self.count -= 1
+
+    task = FakeTask()
+    monkeypatch.setattr(cli_module.asyncio, "current_task", lambda: task)
+
+    cli_module._clear_current_task_cancellation()
+
+    assert task.count == 0
+    assert task.uncancel_calls == 3

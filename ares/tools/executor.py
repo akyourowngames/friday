@@ -26,6 +26,20 @@ from ares.tools.filesystem_write import delete_file as _delete_file_impl
 from ares.tools.filesystem_write import move_file as _move_file_impl
 from ares.tools.filesystem_write import batch_edit as _batch_edit_impl
 from ares.tools.filesystem_write import glob_apply as _glob_apply_impl
+from ares.tools.filesystem_write import show_file_with_line_numbers as _show_file_with_line_numbers_impl
+from ares.tools.filesystem_write import insert_line as _insert_line_impl
+from ares.tools.filesystem_write import replace_lines as _replace_lines_impl
+from ares.tools.filesystem_write import delete_lines as _delete_lines_impl
+from ares.tools.filesystem_write import preview_diff as _preview_diff_impl
+from ares.tools.filesystem_write import backup_file as _backup_file_impl
+from ares.tools.filesystem_write import undo_last_edit as _undo_last_edit_impl
+from ares.tools.filesystem_write import batch_file_ops as _batch_file_ops_impl
+from ares.tools.filesystem_write import find_text as _find_text_impl
+from ares.tools.filesystem_write import append_to_file as _append_to_file_impl
+from ares.tools.filesystem_write import prepend_to_file as _prepend_to_file_impl
+from ares.tools.filesystem_write import compare_files as _compare_files_impl
+from ares.tools.filesystem_write import create_file_from_template as _create_file_from_template_impl
+from ares.tools.filesystem_write import safe_path_status as _safe_path_status_impl
 from ares.tools.repl import PersistentREPL
 from ares.tools.image_generate import generate_image
 from ares.tools.image_edit import image_info as _image_info
@@ -90,6 +104,20 @@ class ToolExecutor:
             "move_file": self._move_file,
             "batch_edit": self._batch_edit,
             "glob_apply": self._glob_apply,
+            "show_file_with_line_numbers": self._show_file_with_line_numbers,
+            "insert_line": self._insert_line,
+            "replace_lines": self._replace_lines,
+            "delete_lines": self._delete_lines,
+            "preview_diff": self._preview_diff,
+            "backup_file": self._backup_file,
+            "undo_last_edit": self._undo_last_edit,
+            "batch_file_ops": self._batch_file_ops,
+            "find_text": self._find_text,
+            "append_to_file": self._append_to_file,
+            "prepend_to_file": self._prepend_to_file,
+            "compare_files": self._compare_files,
+            "create_file_from_template": self._create_file_from_template,
+            "safe_path_status": self._safe_path_status,
             "disk_usage": self._disk_usage,
             "checksum": self._checksum,
             "copy_file": self._copy_file,
@@ -486,6 +514,94 @@ class ToolExecutor:
             confirm=bool(args.get("confirm", False)),
             max_matches=int(args.get("max_matches", 100)),
         )
+
+    def _show_file_with_line_numbers(self, args: dict) -> str:
+        return _show_file_with_line_numbers_impl(args["path"], args.get("start"), args.get("end"))
+
+    def _insert_line(self, args: dict) -> str:
+        return _insert_line_impl(
+            args["path"],
+            int(args["line"]),
+            args.get("text", ""),
+            position=args.get("position", "after"),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm_dangerous=bool(args.get("confirm_dangerous", False)),
+        )
+
+    def _replace_lines(self, args: dict) -> str:
+        return _replace_lines_impl(
+            args["path"],
+            int(args["start"]),
+            int(args["end"]),
+            args.get("new_text", ""),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm_dangerous=bool(args.get("confirm_dangerous", False)),
+        )
+
+    def _delete_lines(self, args: dict) -> str:
+        return _delete_lines_impl(
+            args["path"],
+            int(args["start"]),
+            int(args["end"]),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm_dangerous=bool(args.get("confirm_dangerous", False)),
+        )
+
+    def _preview_diff(self, args: dict) -> str:
+        return _preview_diff_impl(args["path"], args.get("new_content", ""))
+
+    def _backup_file(self, args: dict) -> str:
+        return _backup_file_impl(args["path"], label=args.get("label", ""))
+
+    def _undo_last_edit(self, args: dict) -> str:
+        return _undo_last_edit_impl(args["path"], dry_run=bool(args.get("dry_run", False)))
+
+    def _batch_file_ops(self, args: dict) -> str:
+        return _batch_file_ops_impl(
+            args.get("ops", []),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm_dangerous=bool(args.get("confirm_dangerous", False)),
+            max_operations=int(args.get("max_operations", 100)),
+        )
+
+    def _find_text(self, args: dict) -> str:
+        return _find_text_impl(
+            args["path"],
+            args["query"],
+            context=int(args.get("context", 2)),
+            max_results=int(args.get("max_results", 20)),
+        )
+
+    def _append_to_file(self, args: dict) -> str:
+        return _append_to_file_impl(
+            args["path"],
+            args.get("text", ""),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm_dangerous=bool(args.get("confirm_dangerous", False)),
+        )
+
+    def _prepend_to_file(self, args: dict) -> str:
+        return _prepend_to_file_impl(
+            args["path"],
+            args.get("text", ""),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm_dangerous=bool(args.get("confirm_dangerous", False)),
+        )
+
+    def _compare_files(self, args: dict) -> str:
+        return _compare_files_impl(args["left"], args["right"])
+
+    def _create_file_from_template(self, args: dict) -> str:
+        return _create_file_from_template_impl(
+            args["path"],
+            template=args.get("template", "notes"),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm=bool(args.get("confirm", False)),
+            confirm_dangerous=bool(args.get("confirm_dangerous", False)),
+        )
+
+    def _safe_path_status(self, args: dict) -> str:
+        return _safe_path_status_impl(args["path"])
 
     def _disk_usage(self, args: dict) -> str:
         return _disk_usage_impl(

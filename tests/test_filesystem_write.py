@@ -404,3 +404,98 @@ def test_glob_apply_move_preserves_relative_paths(tmp_path):
     assert "Batch edit completed" in result
     assert not (src / "nested" / "a.log").exists()
     assert (dest / "nested" / "a.log").read_text(encoding="utf-8") == "log"
+
+
+def test_show_file_with_line_numbers_range(tmp_path):
+    from ares.tools.filesystem_write import show_file_with_line_numbers
+    target = tmp_path / "essay.txt"
+    target.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+
+    result = show_file_with_line_numbers(str(target), start=2, end=3)
+
+    assert "     2\ttwo" in result
+    assert "     3\tthree" in result
+    assert "four" not in result
+
+
+def test_insert_line_creates_backup_and_supports_undo(tmp_path):
+    from ares.tools.filesystem_write import insert_line, undo_last_edit
+    target = tmp_path / "essay.txt"
+    target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+    result = insert_line(str(target), line=2, text="inserted", position="after")
+
+    assert "Updated" in result
+    assert target.read_text(encoding="utf-8") == "one\ntwo\ninserted\nthree\n"
+    assert list((tmp_path / ".ares_backups").glob("essay.txt.*.bak"))
+
+    undo = undo_last_edit(str(target))
+    assert "Restored" in undo
+    assert target.read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+
+
+def test_replace_and_delete_lines_dry_run(tmp_path):
+    from ares.tools.filesystem_write import delete_lines, replace_lines
+    target = tmp_path / "notes.txt"
+    target.write_text("a\nb\nc\nd\n", encoding="utf-8")
+
+    dry = replace_lines(str(target), 2, 3, "B\nC", dry_run=True)
+    assert "DRY RUN" in dry
+    assert "+B" in dry
+    assert target.read_text(encoding="utf-8") == "a\nb\nc\nd\n"
+
+    result = delete_lines(str(target), 2, 3)
+    assert "Updated" in result
+    assert target.read_text(encoding="utf-8") == "a\nd\n"
+
+
+def test_find_text_and_compare_files(tmp_path):
+    from ares.tools.filesystem_write import compare_files, find_text
+    left = tmp_path / "left.txt"
+    right = tmp_path / "right.txt"
+    left.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    right.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+
+    found = find_text(str(left), "beta", context=1)
+    assert "line 2" in found
+    assert ">     2\tbeta" in found
+
+    diff = compare_files(str(left), str(right))
+    assert "-beta" in diff
+    assert "+BETA" in diff
+
+
+def test_append_prepend_and_template(tmp_path):
+    from ares.tools.filesystem_write import append_to_file, create_file_from_template, prepend_to_file
+    target = tmp_path / "todo.txt"
+
+    assert "Updated" in append_to_file(str(target), "middle")
+    assert "Updated" in prepend_to_file(str(target), "top")
+    assert target.read_text(encoding="utf-8") == "top\nmiddle\n"
+
+    templated = tmp_path / "README.md"
+    result = create_file_from_template(str(templated), template="readme")
+    assert "Updated" in result
+    assert "# Project" in templated.read_text(encoding="utf-8")
+
+
+def test_batch_file_ops_rolls_back_on_failure(tmp_path):
+    from ares.tools.filesystem_write import batch_file_ops
+    target = tmp_path / "batch.txt"
+    target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+    result = batch_file_ops([
+        {"op": "insert_line", "path": str(target), "line": 1, "text": "ok"},
+        {"op": "delete_lines", "path": str(target), "start": 99, "end": 100},
+    ])
+
+    assert "rolled back" in result.lower()
+    assert target.read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+
+
+def test_safe_path_status_blocks_system_path():
+    from ares.tools.filesystem_write import safe_path_status
+
+    result = safe_path_status("/etc/passwd")
+
+    assert "Blocked dangerous path" in result

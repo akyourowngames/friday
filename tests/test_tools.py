@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 49
+        assert len(tools) == 63
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -51,6 +51,20 @@ class TestToolDefinitions:
             "move_file",
             "batch_edit",
             "glob_apply",
+            "show_file_with_line_numbers",
+            "insert_line",
+            "replace_lines",
+            "delete_lines",
+            "preview_diff",
+            "backup_file",
+            "undo_last_edit",
+            "batch_file_ops",
+            "find_text",
+            "append_to_file",
+            "prepend_to_file",
+            "compare_files",
+            "create_file_from_template",
+            "safe_path_status",
             "disk_usage",
             "checksum",
             "copy_file",
@@ -323,5 +337,4 @@ class TestToolExecutor:
         result = executor.execute("delete_file", {"path": str(path)})
         assert "CONFIRM" in result
         assert path.exists()  # unchanged
-
 
