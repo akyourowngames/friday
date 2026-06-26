@@ -1,6 +1,9 @@
 """Tests for the agent loop."""
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from ares.agent import Agent
@@ -85,6 +88,104 @@ class TestAgent:
         assert results[0]["tool_name"] == "create_task"
         assert "milk" in results[0]["content"]
 
+
+    def _auto_task_agent(self, tmp_path):
+        """Build a minimal Agent instance without constructing MemoryStore."""
+        from ares.tools import ToolExecutor
+
+        task_store = TaskStore(db_path=tmp_path / "tasks.db")
+        agent = object.__new__(Agent)
+        agent.memory_store = SimpleNamespace(search=lambda query, limit=5: [])
+        agent.task_store = task_store
+        agent.conversation_store = None
+        agent.config = AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False)
+        agent.tool_executor = ToolExecutor(
+            memory_store=agent.memory_store,
+            task_store=task_store,
+            conversation_store=None,
+        )
+        agent.tools = []
+        agent.get_context = lambda user_input: ""
+        return agent
+
+    def test_process_tool_calls_auto_task_skips_inline_followups(self, tmp_path):
+        """Auto-executable task creation prevents same-turn inline execution."""
+        agent = self._auto_task_agent(tmp_path)
+        tool_calls = [
+            {
+                "id": "call_task",
+                "function": {
+                    "name": "create_task",
+                    "arguments": json.dumps({"title": "Write script", "auto_executable": True}),
+                },
+            },
+            {
+                "id": "call_inline",
+                "function": {
+                    "name": "run_command",
+                    "arguments": json.dumps({"command": "echo should-not-run"}),
+                },
+            },
+        ]
+
+        results = agent.process_tool_calls(tool_calls)
+
+        assert results[0]["tool_name"] == "create_task"
+        assert results[0]["auto_task_created"] is True
+        assert "background executor" in results[0]["content"].lower()
+        assert results[1]["tool_name"] == "run_command"
+        assert results[1]["skipped_after_auto_task"] is True
+        assert "Skipped" in results[1]["content"]
+
+    def test_run_stops_after_auto_executable_task_creation(self, tmp_path):
+        """The main agent loop does not let the LLM execute an auto-task inline."""
+        import asyncio
+
+        agent = self._auto_task_agent(tmp_path)
+
+        class FakeLLM:
+            config = agent.config
+
+            def __init__(self):
+                self.calls = 0
+
+            async def chat(self, messages, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_task",
+                            "function": {
+                                "name": "create_task",
+                                "arguments": json.dumps({"title": "Write script", "auto_executable": True}),
+                            },
+                        }],
+                    }
+                return {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_inline",
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo should-not-run"}),
+                        },
+                    }],
+                }
+
+            async def close(self):
+                pass
+
+        agent.llm = FakeLLM()
+
+        async def collect():
+            return [chunk async for chunk in agent.run("create an auto task", [])]
+
+        chunks = asyncio.run(collect())
+
+        assert agent.llm.calls == 1
+        assert "background executor" in "".join(chunks).lower()
+
     def test_process_tool_calls_list_tasks(self, agent):
         """Processing list_tasks returns task list."""
         agent.task_store.create("Existing task")
@@ -123,3 +224,10 @@ class TestAgent:
             "role": "tool",
             "content": "Stored memory #1",
         }]
+
+
+def test_build_messages_without_skill_manager_does_not_crash(tmp_path):
+    agent = object.__new__(Agent)
+    agent.config = AppConfig(data_dir=str(tmp_path), skills_enabled=True)
+    messages = agent.build_messages("hello", [])
+    assert messages[-1] == {"role": "user", "content": "hello"}

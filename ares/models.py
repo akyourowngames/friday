@@ -101,6 +101,13 @@ class AppConfig(BaseModel):
     memory_stale_days: int = 90
     memory_extract_enabled: bool = True
     memory_cleanup_enabled: bool = True
+    skills_enabled: bool = True
+    skill_dirs: list[str] = Field(default_factory=lambda: ["~/.ares/skills"])
+    skill_auto_suggest: bool = True
+    mcp_servers: list[dict] = Field(
+        default_factory=list,
+        description="MCP server configurations for remote Model Context Protocol tools.",
+    )
 
 
 # ── v2: Task States ──────────────────────────────────────────

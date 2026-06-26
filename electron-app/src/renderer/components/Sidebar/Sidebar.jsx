@@ -17,6 +17,8 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSessio
   const setSearch = useSessionStore((state) => state.setSearch);
   const memoryCount = useSettingsStore((state) => state.memoryCount);
   const taskCount = useSettingsStore((state) => state.taskCount);
+  const totalTaskCount = useSettingsStore((state) => state.totalTaskCount);
+  const completedTaskCount = useSettingsStore((state) => state.completedTaskCount);
   const isStreaming = useChatStore((state) => state.isStreaming);
   const collapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const toggleSidebar = useSettingsStore((state) => state.toggleSidebar);
@@ -81,6 +83,7 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSessio
             <div className="task-pill">
               <CalendarClock size={14} />
               <span>{taskCount} pending tasks</span>
+              {totalTaskCount ? <small>{completedTaskCount} completed · {totalTaskCount} total</small> : null}
             </div>
             <div className="task-pill">
               <Bot size={14} />

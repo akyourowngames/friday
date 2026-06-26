@@ -165,3 +165,113 @@ async def test_session_messages(server):
     assert socket.messages[0]["sessions"][0]["title"] == "New session"
     assert socket.messages[1] == {"type": "session_history", "session_id": 1, "messages": []}
     assert socket.messages[2]["type"] == "session_info"
+
+
+def test_status_counts_pending_tasks_not_completed():
+    class CountTaskStore(FakeTaskStore):
+        def list_all(self):
+            return [
+                {"id": 1, "title": "Queued", "status": "pending", "state": "queued"},
+                {"id": 2, "title": "Done", "status": "done", "state": "completed"},
+                {"id": 3, "title": "Failed", "status": "partial", "state": "failed"},
+            ]
+
+        def get_auto_executable(self):
+            return [{"id": 1, "title": "Queued", "status": "pending", "state": "queued"}]
+
+    server = AresServer(
+        config=AppConfig(model="deepseek-v4-flash-free"),
+        agent=FakeAgent(),
+        memory_store=FakeMemoryStore(),
+        task_store=CountTaskStore(),
+        conversation_store=FakeConversationStore(),
+    )
+
+    status = server._status()
+
+    assert status["task_count"] == 1
+    assert status["total_task_count"] == 3
+    assert status["completed_task_count"] == 1
+    assert status["auto_exec_count"] == 1
+
+
+def test_task_event_callback_pushes_debug_event():
+    import asyncio
+
+    socket = FakeSocket()
+    server = AresServer(
+        config=AppConfig(model="deepseek-v4-flash-free"),
+        agent=FakeAgent(),
+        memory_store=FakeMemoryStore(),
+        task_store=FakeTaskStore(),
+        conversation_store=FakeConversationStore(),
+    )
+    server._connected_websockets.append(socket)
+
+    asyncio.run(server._push_task_event_to_clients({
+        "task_id": 42,
+        "level": "info",
+        "step": 1,
+        "message": "Starting step",
+    }))
+
+    assert socket.messages[0]["type"] == "task_event"
+    assert socket.messages[0]["event"]["message"] == "Starting step"
+    assert socket.messages[1]["type"] == "status"
+
+
+def test_notify_auto_complete_uses_llm_composed_chat_message():
+    import asyncio
+
+    class NotifyLLM:
+        async def chat(self, messages, tools=None):
+            return {"content": "Hey Krish — I made the PDF and saved it in reports/out.pdf."}
+
+    class NotifyAgent(FakeAgent):
+        def __init__(self):
+            super().__init__()
+            self.llm = NotifyLLM()
+
+    class NotifyTaskStore(FakeTaskStore):
+        def get(self, task_id):
+            return {
+                "id": task_id,
+                "title": "Make a PDF",
+                "completion_report": json.dumps({"summary": "PDF created successfully."}),
+            }
+
+        def get_artifacts(self, task_id):
+            return [{"path": "reports/out.pdf"}]
+
+    socket = FakeSocket()
+    server = AresServer(
+        config=AppConfig(model="deepseek-v4-flash-free"),
+        agent=NotifyAgent(),
+        memory_store=FakeMemoryStore(),
+        task_store=NotifyTaskStore(),
+        conversation_store=FakeConversationStore(),
+    )
+    server._connected_websockets.append(socket)
+
+    asyncio.run(server._notify_auto_complete({
+        "id": 42,
+        "title": "Make a PDF",
+        "status": "completed",
+        "notes": "PDF created successfully.",
+    }))
+
+    done = [m for m in socket.messages if m.get("type") == "response_done"][-1]
+    assert done["content"] == "Hey Krish — I made the PDF and saved it in reports/out.pdf."
+    assert "Background task" not in done["content"]
+
+
+def test_trim_history_strips_old_tool_calls():
+    from ares.server import _trim_history
+
+    history = [{"role": "user", "content": str(i), "tool_calls": [{"id": str(i)}]} for i in range(12)]
+    trimmed = _trim_history(history, max_messages=10)
+
+    assert len(trimmed) == 10
+    assert trimmed[0]["tool_calls"] is None
+    assert trimmed[3]["tool_calls"] is None
+    assert trimmed[-1]["tool_calls"] == [{"id": "11"}]

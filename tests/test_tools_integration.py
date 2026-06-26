@@ -307,6 +307,8 @@ class TestToolDefinitions:
             "create_directory",
             "delete_file",
             "move_file",
+            "batch_edit",
+            "glob_apply",
         ]
 
         for req in required:
@@ -342,7 +344,7 @@ class TestToolDefinitions:
     def test_all_write_tools_have_dry_run(self):
         """All write tools should have dry_run parameter."""
         tools = get_tool_definitions()
-        write_tools = ["write_file", "edit_file", "create_directory", "delete_file", "move_file"]
+        write_tools = ["write_file", "edit_file", "create_directory", "delete_file", "move_file", "batch_edit", "glob_apply"]
 
         for tool_name in write_tools:
             tool = next(t for t in tools if t["function"]["name"] == tool_name)
@@ -469,3 +471,35 @@ class TestEndToEndWorkflows:
         )
         assert "main.py" in result
         assert "test_main.py" in result
+
+
+def test_batch_edit_via_executor(tmp_path):
+    from types import SimpleNamespace
+
+    executor = ToolExecutor(SimpleNamespace(), SimpleNamespace())
+    target = tmp_path / "bulk.txt"
+    result = executor.execute("batch_edit", {
+        "operations": [
+            {"action": "write", "path": str(target), "content": "alpha"},
+            {"action": "edit", "path": str(target), "old_text": "alpha", "new_text": "beta"},
+        ],
+        "confirm": True,
+    })
+    assert "Batch edit completed" in result
+    assert target.read_text() == "beta"
+
+
+def test_glob_apply_via_executor_requires_confirm(tmp_path):
+    from types import SimpleNamespace
+
+    executor = ToolExecutor(SimpleNamespace(), SimpleNamespace())
+    target = tmp_path / "remove.tmp"
+    target.write_text("x")
+    result = executor.execute("glob_apply", {
+        "pattern": "*.tmp",
+        "path": str(tmp_path),
+        "action": "delete",
+        "dry_run": False,
+    })
+    assert "confirm=true required" in result
+    assert target.exists()

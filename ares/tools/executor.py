@@ -16,6 +16,7 @@ from ares.tools.filesystem import (
 )
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.skills import SkillManager
 from ares.tools.tasks import TaskStore
 from ares.tools.web import fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
@@ -23,8 +24,9 @@ from ares.tools.filesystem_write import edit_file as _edit_file_impl
 from ares.tools.filesystem_write import create_directory as _create_directory_impl
 from ares.tools.filesystem_write import delete_file as _delete_file_impl
 from ares.tools.filesystem_write import move_file as _move_file_impl
-from ares.tools.code_execution import run_code
-from ares.tools.shell_execution import run_command
+from ares.tools.filesystem_write import batch_edit as _batch_edit_impl
+from ares.tools.filesystem_write import glob_apply as _glob_apply_impl
+from ares.tools.repl import PersistentREPL
 from ares.tools.image_generate import generate_image
 from ares.tools.image_edit import image_info as _image_info
 from ares.tools.image_edit import resize_image as _resize_image
@@ -49,6 +51,11 @@ class ToolExecutor:
         self.config = config
         self.task_executor = task_executor
         self.task_executor_ref = None  # wired by server for resume support
+        self.repl = PersistentREPL()
+
+    def close(self) -> None:
+        """Clean up persistent sessions."""
+        self.repl.close()
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool by name with the given arguments. Returns a result string."""
@@ -65,6 +72,9 @@ class ToolExecutor:
             "get_due_soon": self._get_due_soon,
             "get_execution_status": self._get_execution_status,
             "get_executor_status": self._get_executor_status,
+            "list_skills": self._list_skills_tool,
+            "load_skill": self._load_skill_tool,
+            "create_skill": self._create_skill_tool,
             "export_data": self._export_data,
             "web_search": self._web_search,
             "fetch_url": self._fetch_url,
@@ -78,6 +88,8 @@ class ToolExecutor:
             "create_directory": self._create_directory,
             "delete_file": self._delete_file,
             "move_file": self._move_file,
+            "batch_edit": self._batch_edit,
+            "glob_apply": self._glob_apply,
             "disk_usage": self._disk_usage,
             "checksum": self._checksum,
             "copy_file": self._copy_file,
@@ -170,7 +182,17 @@ class ToolExecutor:
         task = self.tasks.get(task_id)
         due_str = f" (due: {task['due']})" if task and task.get("due") else ""
         auto_str = " [auto]" if auto_exec == "yes" else ""
-        return f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
+        if auto_exec == "yes" and self.task_executor_ref is not None:
+            wake = getattr(self.task_executor_ref, "wake", None)
+            if callable(wake):
+                wake()
+        result = f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
+        if auto_exec == "yes":
+            result += (
+                "\nAuto-executable task queued for the background executor. "
+                "Do not execute it inline; the executor will plan, run, verify, and track artifacts."
+            )
+        return result
 
     def _format_task(self, task: dict) -> str:
         due = f" | due: {task['due']}" if task.get("due") else ""
@@ -258,6 +280,56 @@ class ToolExecutor:
         if stats.get("started_at"):
             lines.append(f"Started at: {stats['started_at']}")
         return "\n".join(lines)
+
+    # ── Skills ─────────────────────────────────────────────────────
+
+    def _skill_manager(self) -> SkillManager:
+        manager = getattr(self, "skill_manager", None)
+        if manager is None:
+            skill_dirs = list((self.config.skill_dirs if self.config else []) or [])
+            manager = SkillManager(skill_dirs=skill_dirs or None)
+            self.skill_manager = manager
+        return manager
+
+    def _list_skills_tool(self, args: dict | None = None) -> str:
+        args = args or {}
+        manager = self._skill_manager()
+        skills = manager.search(
+            query=args.get("query", ""),
+            category=args.get("category", ""),
+        )
+        if not skills:
+            return "No matching skills found."
+        lines = [f"Available skills ({len(skills)}):"]
+        lines.extend(skill.summary_line() for skill in skills)
+        cats = manager.list_categories()
+        if cats:
+            lines.append("Categories: " + ", ".join(f"{name} ({count})" for name, count in cats.items()))
+        return "\n".join(lines)
+
+    def _load_skill_tool(self, args: dict) -> str:
+        skill = self._skill_manager().get_skill(args["name"])
+        if skill is None:
+            return f"Skill '{args['name']}' was not found."
+        files = ""
+        if skill.files:
+            rel_files = [str(path.relative_to(skill.root)) for path in skill.files[:20]]
+            files = "\n\nSupporting files:\n" + "\n".join(f"- {file}" for file in rel_files)
+        return (
+            f"# Skill: {skill.name}\n"
+            f"Category: {skill.category}\n"
+            f"Description: {skill.description}\n"
+            f"Version: {skill.version}\n\n"
+            f"{skill.content}{files}"
+        )
+
+    def _create_skill_tool(self, args: dict) -> str:
+        skill = self._skill_manager().create_skill(
+            name=args["name"],
+            content=args["content"],
+            category=args.get("category", "general"),
+        )
+        return f"Created skill '{skill.name}' in category '{skill.category}' at {skill.path}."
 
     # ── Export ─────────────────────────────────────────────────────
 
@@ -395,6 +467,26 @@ class ToolExecutor:
 
         return _move_file_impl(source, destination, dry_run=dry_run)
 
+    def _batch_edit(self, args: dict) -> str:
+        return _batch_edit_impl(
+            operations=args.get("operations", []),
+            dry_run=bool(args.get("dry_run", False)),
+            confirm=bool(args.get("confirm", False)),
+            max_operations=int(args.get("max_operations", 100)),
+        )
+
+    def _glob_apply(self, args: dict) -> str:
+        return _glob_apply_impl(
+            pattern=args["pattern"],
+            action=args.get("action", "list"),
+            path=args.get("path", "."),
+            destination=args.get("destination", ""),
+            replacement=args.get("replacement", ""),
+            dry_run=bool(args.get("dry_run", True)),
+            confirm=bool(args.get("confirm", False)),
+            max_matches=int(args.get("max_matches", 100)),
+        )
+
     def _disk_usage(self, args: dict) -> str:
         return _disk_usage_impl(
             path=args.get("path", "."),
@@ -454,13 +546,13 @@ class ToolExecutor:
         code = args["code"]
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
-        return run_code(code, timeout=timeout, cwd=cwd)
+        return self.repl.execute_python(code, timeout=timeout, cwd=cwd)
 
     def _run_command(self, args: dict) -> str:
         command = args["command"]
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
-        return run_command(command, timeout=timeout, cwd=cwd)
+        return self.repl.execute_shell(command, timeout=timeout, cwd=cwd)
 
     # ── Image tools ────────────────────────────────────────────────
 
@@ -507,7 +599,7 @@ class ToolExecutor:
     # ── Terminal ───────────────────────────────────────────────────
 
     def _terminal_exec(self, args: dict) -> str:
-        """Execute a shell command via subprocess for reliable output capture.
+        """Execute a shell command via persistent REPL for reliable output capture.
 
         Optionally displays the command in the visual terminal panel if connected.
         """
@@ -515,8 +607,8 @@ class ToolExecutor:
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
 
-        # Execute via subprocess for reliable output capture
-        result = run_command(command, timeout=timeout, cwd=cwd)
+        # Execute via REPL for reliable output capture
+        result = self.repl.execute_shell(command, timeout=timeout, cwd=cwd)
 
         # Also send to visual terminal if connected (best-effort display)
         if hasattr(self, '_terminal_display_callback') and self._terminal_display_callback:

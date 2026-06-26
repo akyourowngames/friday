@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 44
+        assert len(tools) == 49
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -33,6 +33,9 @@ class TestToolDefinitions:
             "get_due_soon",
             "get_execution_status",
             "get_executor_status",
+            "list_skills",
+            "load_skill",
+            "create_skill",
             "export_data",
             "web_search",
             "fetch_url",
@@ -46,6 +49,8 @@ class TestToolDefinitions:
             "create_directory",
             "delete_file",
             "move_file",
+            "batch_edit",
+            "glob_apply",
             "disk_usage",
             "checksum",
             "copy_file",
@@ -124,6 +129,33 @@ def test_move_file_tool_definition():
     names = [d["function"]["name"] for d in defs]
     assert "move_file" in names
 
+
+def test_create_auto_task_wakes_executor_and_instructs_background(tmp_path):
+    """Auto-executable task creation wakes the executor and discourages inline work."""
+    from types import SimpleNamespace
+
+    class FakeExecutor:
+        def __init__(self):
+            self.wake_calls = 0
+
+        def wake(self):
+            self.wake_calls += 1
+
+    task_store = TaskStore(db_path=tmp_path / "tasks.db")
+    executor = ToolExecutor(memory_store=SimpleNamespace(), task_store=task_store)
+    fake = FakeExecutor()
+    executor.task_executor_ref = fake
+
+    result = executor.execute("create_task", {
+        "title": "Write and run counter script",
+        "auto_executable": True,
+    })
+
+    assert fake.wake_calls == 1
+    assert "[auto]" in result
+    assert "background executor" in result.lower()
+    assert "do not execute it inline" in result.lower()
+
 class TestToolExecutor:
     @pytest.fixture
     def executor(self, tmp_path, fake_embedding_provider):
@@ -180,6 +212,7 @@ class TestToolExecutor:
             "priority": "medium",
         })
         assert "Created" in result or "task" in result.lower()
+
 
     def test_list_tasks_empty(self, executor):
         """list_tasks with no tasks returns informative message."""

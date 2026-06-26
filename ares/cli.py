@@ -35,6 +35,8 @@ from ares.task_executor import TaskExecutor
 from ares.config import load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
+from ares.skills import SkillManager
+from ares.tools.mcp_client import MCPClientManager
 
 # ── Styles ────────────────────────────────────────────────────
 STYLE = Style.from_dict({
@@ -45,6 +47,7 @@ COMPLETER = WordCompleter([
     "/help", "/tasks", "/memory", "/model", "/clear",
     "/forget", "/export", "/import", "/reset", "/exit",
     "/soul", "/profile", "/context",
+    "/skills", "/skills search", "/skills categories", "/skills load",
     "/tasks auto on", "/tasks auto off", "/tasks auto list",
     "/tasks history", "/tasks executor", "/tasks detail",
     "/tasks events", "/tasks artifacts", "/tasks resume",
@@ -92,6 +95,12 @@ class AresCLI:
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        self.skill_manager = SkillManager(skill_dirs=list(self.config.skill_dirs or []) or None)
+        self.mcp_manager = (
+            MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
+            if self.config.mcp_servers
+            else None
+        )
         self.conversation_store = ConversationStore()
         self.conversation_id = self.conversation_store.start_conversation()
         self.conversation_store.summarize_ended_without_summary(
@@ -105,6 +114,7 @@ class AresCLI:
             base_url=self.config.api_base_url,
             model=self.config.model,
             config=self.config,
+            mcp_manager=self.mcp_manager,
         )
         self.conversation_history: list[dict] = self.conversation_store.get_recent_messages(
             limit=self.config.max_context_messages
@@ -385,6 +395,8 @@ class AresCLI:
             table.add_row("/soul [show|edit]", "View or edit Ares' personality")
             table.add_row("/profile [show|edit]", "View or edit your profile")
             table.add_row("/context", "Show active context for this session")
+            table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
+            table.add_row("/skill-name", "Load a skill directly by slash command")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
 
@@ -701,11 +713,60 @@ class AresCLI:
             else:
                 self.console.print("[dim]No context active.[/dim]")
 
+
+        elif command == "/skills":
+            if not arg:
+                skills = self.skill_manager.list_all()
+                table = Table(title="Skills", border_style="magenta")
+                table.add_column("Name", style="cyan")
+                table.add_column("Category")
+                table.add_column("Description")
+                for skill in skills:
+                    table.add_row(skill.name, skill.category, skill.description)
+                self.console.print(table if skills else "[dim]No skills installed.[/dim]")
+            elif arg == "categories":
+                cats = self.skill_manager.list_categories()
+                for category, count in cats.items():
+                    self.console.print(f"[cyan]{category}[/cyan]: {count}")
+            elif arg.startswith("search "):
+                query = arg.split(maxsplit=1)[1]
+                skills = self.skill_manager.search(query=query)
+                if not skills:
+                    self.console.print("[dim]No matching skills found.[/dim]")
+                else:
+                    for skill in skills:
+                        self.console.print(f"[cyan]{skill.name}[/cyan] [{skill.category}] — {skill.description}")
+            elif arg.startswith("load "):
+                name = arg.split(maxsplit=1)[1]
+                skill = self.skill_manager.get_skill(name)
+                if skill is None:
+                    self.console.print(f"[red]Skill '{name}' not found.[/red]")
+                else:
+                    self.console.print(Panel(
+                        Markdown(skill.content),
+                        title=f"Skill: {skill.name}",
+                        subtitle=skill.description,
+                        border_style="magenta",
+                        padding=(0, 1),
+                    ))
+            else:
+                self.console.print("[red]Usage: /skills [search QUERY|load NAME|categories][/red]")
+
         elif command == "/exit":
             return False
 
         else:
-            self.console.print(f"[red]Unknown command: {command}. Type /help for available commands.[/red]")
+            skill = self.skill_manager.get_skill(command[1:]) if command.startswith("/") else None
+            if skill is not None:
+                self.console.print(Panel(
+                    Markdown(skill.content),
+                    title=f"Skill: {skill.name}",
+                    subtitle=skill.description,
+                    border_style="magenta",
+                    padding=(0, 1),
+                ))
+            else:
+                self.console.print(f"[red]Unknown command: {command}. Type /help for available commands.[/red]")
 
         return True
 
@@ -794,6 +855,9 @@ class AresCLI:
 
     async def run(self):
         """Main CLI loop."""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.start()
+            self.agent.refresh_tools()
         self._reminder_task = asyncio.create_task(self.reminder_service.run())
         self._executor_task = asyncio.create_task(self.task_executor.run())
         self._show_banner()
@@ -834,6 +898,11 @@ class AresCLI:
                     await self._executor_task
 
             # Cleanup
+            if self.mcp_manager is not None:
+                try:
+                    await self.mcp_manager.close()
+                except Exception as exc:
+                    self.console.print(f"[dim yellow]Shutdown warning (MCP): {exc}[/dim yellow]")
             try:
                 await self.agent.close()
             except Exception as exc:

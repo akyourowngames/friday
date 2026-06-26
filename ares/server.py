@@ -11,11 +11,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 try:  # websockets 13+
-    from websockets.asyncio.server import ServerConnection
+    from websockets.asyncio.server import ServerConnection, serve
 except ImportError:  # pragma: no cover
-    from websockets.server import WebSocketServerProtocol as ServerConnection
-
-from websockets.server import serve
+    from websockets.server import WebSocketServerProtocol as ServerConnection, serve
 
 try:
     from websockets.exceptions import ConnectionClosed
@@ -30,6 +28,7 @@ from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.tools.tasks import TaskStore
+from ares.tools.mcp_client import MCPClientManager
 
 
 TOOL_TOKEN_RE = re.compile(r"^\[tool:([^:]+):(.*)\]$", re.DOTALL)
@@ -55,10 +54,9 @@ def _trim_history(history: list[dict], max_messages: int = MAX_CONTEXT_MESSAGES)
 
     trimmed = history[-max_messages:]
 
-    for msg in trimmed[:-6]:
+    for index, msg in enumerate(trimmed[:-6]):
         if msg.get("tool_calls"):
-            msg = dict(msg)
-            msg["tool_calls"] = None
+            trimmed[index] = {**msg, "tool_calls": None}
     return trimmed
 
 
@@ -111,10 +109,16 @@ class AresServer:
         self.memory_store = memory_store or MemoryStore()
         self.task_store = task_store or TaskStore()
         self.conversation_store = conversation_store or ConversationStore()
+        self.mcp_manager = (
+            MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
+            if self.config.mcp_servers
+            else None
+        )
         self.agent = agent or Agent(
             config=self.config,
             memory_store=self.memory_store,
             task_store=self.task_store,
+            mcp_manager=self.mcp_manager,
         )
         self.task_executor = TaskExecutor(
             self.task_store,
@@ -127,6 +131,7 @@ class AresServer:
         if hasattr(self.agent, "tool_executor"):
             self.agent.tool_executor.task_executor = self.task_executor
         self.task_executor.status_callback = self._push_status_to_clients
+        self.task_executor.event_callback = self._push_task_event_to_clients
 
         # v2: Wire planner, LLM, and tool executor
         from ares.planner import TaskPlanner
@@ -250,9 +255,13 @@ class AresServer:
             except Exception as e:
                 print(f"[Server] Failed to send task_auto_complete: {e}")
 
-        status_label = "completed" if status == "done" else "partially completed"
-        summary = notes[:2000] if notes else "No details available."
-        chat_msg = f"**Background task {status_label}:** {title}\n\n{summary}"
+        chat_msg = await self._compose_task_completion_message(
+            task_id=task_id,
+            title=title or "Untitled task",
+            status=status or "unknown",
+            notes=notes or "",
+            report=event.get("report"),
+        )
         for ws in list(self._connected_websockets):
             try:
                 await self._send(ws, {"type": "content", "text": chat_msg})
@@ -260,6 +269,64 @@ class AresServer:
                 print(f"[Server] Result injected into chat")
             except Exception as e:
                 print(f"[Server] Failed to inject chat: {e}")
+
+
+    async def _compose_task_completion_message(
+        self,
+        *,
+        task_id: int | None,
+        title: str,
+        status: str,
+        notes: str,
+        report: dict | None = None,
+    ) -> str:
+        """Compose a natural chat update for a background task."""
+        is_done = status in {"done", "completed"}
+        get_artifacts = getattr(self.task_store, "get_artifacts", None)
+        artifacts = get_artifacts(task_id) if task_id and callable(get_artifacts) else []
+        artifact_paths = [a.get("path") for a in artifacts if a.get("path")]
+        report = report or {}
+        summary = report.get("summary") or notes or "Task finished."
+
+        prompt = (
+            "Write a short, natural, first-person completion message to Krish for a background task. "
+            "Do not sound like a generic system notification. Mention concrete files/artifacts if present. "
+            "Keep it to 2-4 sentences and use casual but clear language.\n\n"
+            f"Task id: {task_id}\n"
+            f"Task title: {title}\n"
+            f"Status: {'completed' if is_done else 'needs attention'}\n"
+            f"Summary: {summary}\n"
+            f"Artifacts: {artifact_paths}\n"
+            f"Key results: {report.get('key_results', [])}\n"
+        )
+        try:
+            response = await self.agent.llm.chat([{"role": "user", "content": prompt}])
+            content = str(response.get("content") or "").strip()
+            if content:
+                return content
+        except Exception as exc:
+            print(f"[Server][TaskDebug] Failed to compose task #{task_id} LLM message: {exc}")
+
+        status_phrase = "done" if is_done else "partially done"
+        artifact_text = f" I saved: {', '.join(artifact_paths)}." if artifact_paths else ""
+        return f"Hey Krish — task #{task_id} is {status_phrase}: {title}. {summary}{artifact_text}"
+
+    async def _push_task_event_to_clients(self, event: dict[str, Any]) -> None:
+        """Print and push live task execution events for debugging."""
+        print(
+            "[Server][TaskDebug] "
+            f"task=#{event.get('task_id')} "
+            f"level={event.get('level')} "
+            f"step={event.get('step')} "
+            f"message={event.get('message')}"
+        )
+        payload = {"type": "task_event", "event": _as_jsonable(event)}
+        for ws in list(self._connected_websockets):
+            try:
+                await self._send(ws, payload)
+            except Exception as exc:
+                print(f"[Server][TaskDebug] Failed to send task event: {exc}")
+        await self._push_status_to_clients()
 
     async def _push_status_to_clients(self) -> None:
         """Push updated status to all connected websockets."""
@@ -272,6 +339,10 @@ class AresServer:
 
     async def run_forever(self) -> None:
         """Start the WebSocket server and block until cancelled."""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.start()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
         self.task_executor.start()
         async with serve(self.handle_client, self.host, self.port) as ws_server:
             self._server = ws_server
@@ -543,7 +614,9 @@ class AresServer:
             "type": "status",
             "model": self.config.model,
             "memory_count": len(self._memories()),
-            "task_count": len(self._tasks()),
+            "task_count": len(self._pending_tasks()),
+            "total_task_count": len(self._tasks()),
+            "completed_task_count": len(self._completed_tasks()),
             "auto_exec_count": len(self.task_store.get_auto_executable()),
             "executor_state": executor_stats["state"],
             "executor_current_task": executor_stats["current_task_title"],
@@ -626,6 +699,22 @@ class AresServer:
         if hasattr(self.task_store, "list_tasks"):
             return [_as_jsonable(item) for item in self.task_store.list_tasks()]
         return []
+
+
+    def _pending_tasks(self) -> list[dict[str, Any]]:
+        tasks = self._tasks()
+        return [
+            task for task in tasks
+            if (task.get("state") or task.get("status") or "pending") not in {"completed", "failed", "cancelled"}
+            and task.get("status") not in {"done", "partial", "cancelled"}
+        ]
+
+    def _completed_tasks(self) -> list[dict[str, Any]]:
+        tasks = self._tasks()
+        return [
+            task for task in tasks
+            if (task.get("state") == "completed") or task.get("status") == "done"
+        ]
 
     def _tool_args(self, tool_name: str, payload: Any) -> dict[str, Any]:
         if isinstance(payload, dict):
@@ -737,21 +826,25 @@ class AresServer:
 
     async def _send(self, websocket: Any, payload: dict[str, Any]) -> None:
         await websocket.send(json.dumps(payload, ensure_ascii=False))
+
     async def close(self) -> None:
-            """Shut down stores."""
-            await self.task_executor.stop()
-            for obj in (
-                self.agent,
-                self.conversation_store,
-                self.memory_store,
-                self.task_store,
-            ):
-                close = getattr(obj, "close", None)
-                if close:
-                    with suppress(Exception):
-                        result = close()
-                        if result is not None:
-                            await result
+        """Shut down stores."""
+        await self.task_executor.stop()
+        if self.mcp_manager is not None:
+            with suppress(Exception):
+                await self.mcp_manager.close()
+        for obj in (
+            self.agent,
+            self.conversation_store,
+            self.memory_store,
+            self.task_store,
+        ):
+            close = getattr(obj, "close", None)
+            if close:
+                with suppress(Exception):
+                    result = close()
+                    if result is not None:
+                        await result
 
 
 async def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:

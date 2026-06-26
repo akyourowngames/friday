@@ -323,3 +323,84 @@ def test_full_workflow_create_edit_delete(tmp_path, monkeypatch):
     result = delete_file(path)
     assert "Deleted" in result
     assert not (tmp_path / "project" / "main.py").exists()
+
+
+def test_batch_edit_write_edit_mkdir_copy_move_delete(tmp_path):
+    from ares.tools.filesystem_write import batch_edit
+
+    src = tmp_path / "src.txt"
+    delete_me = tmp_path / "delete.tmp"
+    src.write_text("hello", encoding="utf-8")
+    delete_me.write_text("bye", encoding="utf-8")
+
+    result = batch_edit([
+        {"action": "mkdir", "path": str(tmp_path / "nested")},
+        {"action": "edit", "path": str(src), "old_text": "hello", "new_text": "world"},
+        {"action": "copy", "source": str(src), "destination": str(tmp_path / "copy.txt")},
+        {"action": "move", "source": str(tmp_path / "copy.txt"), "destination": str(tmp_path / "nested" / "moved.txt")},
+        {"action": "delete", "path": str(delete_me)},
+    ], confirm=True)
+
+    assert "Batch edit completed" in result
+    assert src.read_text(encoding="utf-8") == "world"
+    assert (tmp_path / "nested" / "moved.txt").read_text(encoding="utf-8") == "world"
+    assert not delete_me.exists()
+
+
+def test_batch_edit_dry_run_does_not_mutate(tmp_path):
+    from ares.tools.filesystem_write import batch_edit
+
+    target = tmp_path / "a.txt"
+    target.write_text("old", encoding="utf-8")
+    result = batch_edit([
+        {"action": "edit", "path": str(target), "old_text": "old", "new_text": "new"},
+        {"action": "delete", "path": str(target)},
+    ], dry_run=True)
+
+    assert "Batch edit completed" in result
+    assert "[DRY RUN]" in result
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_batch_edit_requires_confirm_for_delete(tmp_path):
+    from ares.tools.filesystem_write import batch_edit
+
+    target = tmp_path / "a.txt"
+    target.write_text("old", encoding="utf-8")
+    result = batch_edit([{"action": "delete", "path": str(target)}])
+
+    assert "confirm=true required" in result
+    assert target.exists()
+
+
+def test_glob_apply_delete_dry_run_and_confirm(tmp_path):
+    from ares.tools.filesystem_write import glob_apply
+
+    (tmp_path / "a.tmp").write_text("a", encoding="utf-8")
+    (tmp_path / "b.tmp").write_text("b", encoding="utf-8")
+    (tmp_path / "keep.txt").write_text("k", encoding="utf-8")
+
+    preview = glob_apply("*.tmp", action="delete", path=str(tmp_path), dry_run=True)
+    assert "Batch edit completed" in preview
+    assert (tmp_path / "a.tmp").exists()
+
+    result = glob_apply("*.tmp", action="delete", path=str(tmp_path), dry_run=False, confirm=True)
+    assert "Batch edit completed" in result
+    assert not (tmp_path / "a.tmp").exists()
+    assert not (tmp_path / "b.tmp").exists()
+    assert (tmp_path / "keep.txt").exists()
+
+
+def test_glob_apply_move_preserves_relative_paths(tmp_path):
+    from ares.tools.filesystem_write import glob_apply
+
+    src = tmp_path / "src"
+    dest = tmp_path / "archive"
+    (src / "nested").mkdir(parents=True)
+    (src / "nested" / "a.log").write_text("log", encoding="utf-8")
+
+    result = glob_apply("**/*.log", action="move", path=str(src), destination=str(dest), dry_run=False, confirm=True)
+
+    assert "Batch edit completed" in result
+    assert not (src / "nested" / "a.log").exists()
+    assert (dest / "nested" / "a.log").read_text(encoding="utf-8") == "log"
