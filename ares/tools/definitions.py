@@ -255,7 +255,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "write_file",
-            "Create a new file or overwrite an existing one. If overwriting, confirm=true is required.",
+            "Create a NEW file or FULLY OVERWRITE an existing one. NEVER use for adding/inserting text into an existing file. For adding/inserting: use edit_file (find+replace), insert_line (by line number), append_to_file (end), prepend_to_file (start), or batch_file_ops. If overwriting, confirm=true is required.",
             {
                 "path": {"type": "string", "description": "File path to write."},
                 "content": {"type": "string", "description": "File content to write."},
@@ -266,7 +266,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "edit_file",
-            "Edit a file by searching and replacing text. old_text must match uniquely. If no match, returns the closest content as a suggestion.",
+            "Edit a file by searching and replacing (or adding around) text. Great for adding text before/after a unique line, inserting between paragraphs, or making targeted changes without touching the rest of the file. old_text must match uniquely. If no match, returns the closest content as a suggestion.",
             {
                 "path": {"type": "string", "description": "File path."},
                 "old_text": {"type": "string", "description": "Text to find (must match uniquely in the file)."},
