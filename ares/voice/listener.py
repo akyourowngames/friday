@@ -32,27 +32,37 @@ class PushToTalkService:
         self._stt = STTEngine(self.config.stt_model)
 
     def start(self) -> None:
-        """Start the global hotkey listener."""
-        from pynput import keyboard
+        """Start the global hotkey listener (pynput) with fallback logging."""
+        try:
+            from pynput import keyboard
 
-        self._loop = asyncio.get_running_loop()
-        key_name = self.config.hotkey.lower()
+            self._loop = asyncio.get_running_loop()
+            key_name = self.config.hotkey.lower()
 
-        def matches(key) -> bool:
-            if key_name == "space":
-                return key == keyboard.Key.space
-            return getattr(key, "char", None) == key_name
+            def matches(key) -> bool:
+                if key_name == "space":
+                    return key == keyboard.Key.space
+                return getattr(key, "char", None) == key_name
 
-        def on_press(key) -> None:
-            if matches(key):
-                self._start_recording()
+            def on_press(key) -> None:
+                if matches(key):
+                    self._start_recording()
 
-        def on_release(key) -> None:
-            if matches(key):
-                self._stop_recording()
+            def on_release(key) -> None:
+                if matches(key):
+                    self._stop_recording()
 
-        self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self._listener.start()
+            self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self._listener.daemon = True
+            self._listener.start()
+        except Exception as exc:
+            # pynput may not work in all terminal environments; log and continue
+            # Voice capture via CLI prompt fallback is handled elsewhere.
+            import logging
+            logging.getLogger(__name__).warning(
+                "pynput hotkey listener failed to start: %s. "
+                "Use the CLI prompt to send voice commands instead.", exc,
+            )
 
     def close(self) -> None:
         if self._listener is not None:

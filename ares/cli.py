@@ -37,6 +37,7 @@ from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager
+from ares.voice.tts import create_tts_provider, voice_config_from_env
 
 # ── Styles ────────────────────────────────────────────────────
 STYLE = Style.from_dict({
@@ -457,6 +458,7 @@ class AresCLI:
             table.add_row("/context", "Show active context for this session")
             table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
             table.add_row("/skill-name", "Load a skill directly by slash command")
+            table.add_row("/voice [on|off|test]", "Voice: toggle push-to-talk, test TTS")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
 
@@ -811,6 +813,46 @@ class AresCLI:
                     ))
             else:
                 self.console.print("[red]Usage: /skills [search QUERY|load NAME|categories][/red]")
+
+        elif command == "/voice":
+            from ares.voice.tts import create_tts_provider, voice_config_from_env
+            if not arg or arg == "test":
+                # Test TTS with a sample sentence
+                voice_config = voice_config_from_env(self.config.voice)
+                self.console.print(f"[dim]Testing TTS: provider={voice_config.tts_provider}, voice={voice_config.tts_voice}[/dim]")
+                try:
+                    provider = create_tts_provider(voice_config)
+                    test_text = "Hello! This is Ares speaking. Voice test successful!"
+                    self.console.print(f"[dim]Generating speech for: '{test_text}'...[/dim]")
+
+                    async def _do_voice_test():
+                        audio = await provider.speak(test_text)
+                        if audio:
+                            self.console.print(f"[green]Got {len(audio)} bytes of audio. Playing...[/green]")
+                            from ares.voice.player import play_audio_bytes
+                            await play_audio_bytes(audio)
+                            self.console.print("[green]TTS test complete![/green]")
+                        else:
+                            self.console.print("[red]TTS returned no audio.[/red]")
+
+                    import asyncio
+                    asyncio.ensure_future(_do_voice_test())
+                except Exception as e:
+                    self.console.print(f"[red]TTS test failed: {e}[/red]")
+            elif arg == "on":
+                self.config.voice.enabled = True
+                save_config(self.config)
+                self.console.print("[green]Voice enabled.[/green]")
+                asyncio.ensure_future(self._start_voice_features())
+            elif arg == "off":
+                self.config.voice.enabled = False
+                save_config(self.config)
+                if self._voice_service is not None:
+                    self._voice_service.close()
+                    self._voice_service = None
+                self.console.print("[yellow]Voice disabled.[/yellow]")
+            else:
+                self.console.print("[red]Usage: /voice [on|off|test][/red]")
 
         elif command == "/exit":
             return False

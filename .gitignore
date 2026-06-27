@@ -21,3 +21,5 @@ dist/
 hello.py
 verification_result.txt
 test_terminal_loop.py
+.env
+uv.lock
