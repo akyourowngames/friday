@@ -1,4 +1,9 @@
-"""Continuous LiveKit voice agent entry point."""
+"""Continuous voice mode entry point.
+
+This module validates LiveKit configuration and starts the LiveKit worker when the
+optional dependency is installed. The detailed LLM/STT/TTS pipeline is kept small
+here so normal Ares installs remain text-first and lightweight.
+"""
 
 from __future__ import annotations
 
