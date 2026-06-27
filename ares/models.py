@@ -67,6 +67,22 @@ class ConversationMessage(BaseModel):
     timestamp: Optional[str] = None
 
 
+class VoiceConfig(BaseModel):
+    """Voice input/output settings for push-to-talk and continuous voice mode."""
+
+    enabled: bool = False
+    tts_provider: str = "edge_tts"
+    tts_voice: str = ""
+    hotkey: str = "space"
+    stt_model: str = "tiny"
+    sarvam_api_key: str = ""
+    sarvam_tts_model: str = "bulbul:v2"
+    sarvam_language_code: str = "hi-IN"
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+
+
 class AppConfig(BaseModel):
     model: str = "deepseek-v4-flash-free"
     api_key: str = ""
@@ -108,6 +124,7 @@ class AppConfig(BaseModel):
         default_factory=list,
         description="MCP server configurations for remote Model Context Protocol tools.",
     )
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
 
 
 # ── v2: Task States ──────────────────────────────────────────

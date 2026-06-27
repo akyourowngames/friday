@@ -14,6 +14,12 @@ async def _run_cli() -> None:
     await cli.run()
 
 
+async def _run_voice() -> None:
+    from ares.voice.agent import run_voice_agent
+
+    await run_voice_agent()
+
+
 def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
     """Run a coroutine from sync code, even if this thread already has a loop."""
     try:
@@ -47,6 +53,7 @@ async def _run_server(host: str, port: int) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Ares personal AI assistant")
     parser.add_argument("--server", action="store_true", help="Run the desktop WebSocket server")
+    parser.add_argument("--voice", action="store_true", help="Run continuous LiveKit voice mode")
     parser.add_argument("--host", default="127.0.0.1", help="Server host for --server")
     parser.add_argument("--port", type=int, default=8765, help="Server port for --server")
     args = parser.parse_args()
@@ -54,6 +61,8 @@ def main():
     try:
         if args.server:
             _run_coro(_run_server(args.host, args.port))
+        elif args.voice:
+            _run_coro(_run_voice())
         else:
             _run_coro(_run_cli())
     except asyncio.CancelledError:
