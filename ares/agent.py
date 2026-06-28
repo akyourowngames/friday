@@ -30,6 +30,7 @@ class Agent:
         model: str = "",
         config: AppConfig | None = None,
         mcp_manager: Any | None = None,
+        is_cron_session: bool = False,
     ):
         self.memory_store = memory_store
         self.conversation_store = conversation_store
@@ -39,6 +40,7 @@ class Agent:
             config=config,
         )
         self.mcp_manager = mcp_manager
+        self.is_cron_session = is_cron_session
         self.refresh_tools()
         self.last_messages: list[dict] = []
 
@@ -73,6 +75,9 @@ class Agent:
     def refresh_tools(self) -> None:
         """Refresh the advertised tool list, including connected MCP tools."""
         self.tools = get_tool_definitions()
+        if getattr(self, "is_cron_session", False):
+            cron_names = {"create_cron_job", "list_cron_jobs", "get_cron_job", "update_cron_job", "delete_cron_job", "run_cron_job_now", "get_cron_logs"}
+            self.tools = [tool for tool in self.tools if tool.get("function", {}).get("name") not in cron_names]
         if self.mcp_manager is not None:
             self.tools.extend(getattr(self.mcp_manager, "tool_definitions", []))
     def build_messages(self, user_input: str, conversation_history: list[dict],

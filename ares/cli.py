@@ -35,6 +35,7 @@ from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager
+from ares.cron import CronScheduler, CronStore
 
 # ── Styles ────────────────────────────────────────────────────
 STYLE = Style.from_dict({
@@ -122,6 +123,13 @@ class AresCLI:
             limit=self.config.max_context_messages
         )
         self.notifier = DesktopNotifier(enabled=self.config.enable_desktop_notifications)
+        cron_root = Path(self.config.data_dir).expanduser().parent
+        self.cron_store = CronStore(cron_root)
+        self.cron_scheduler = CronScheduler(
+            self.cron_store,
+            tick_seconds=self.config.cron_tick_seconds,
+            max_concurrent=self.config.cron_max_concurrent,
+        ) if self.config.cron_enabled else None
         self.session = self._create_prompt_session()
 
     def _create_prompt_session(self) -> PromptSession | None:
@@ -138,6 +146,13 @@ class AresCLI:
 
     def _reset_prompt_session(self) -> None:
         """Recreate prompt_toolkit state after a handled cancellation."""
+        cron_root = Path(self.config.data_dir).expanduser().parent
+        self.cron_store = CronStore(cron_root)
+        self.cron_scheduler = CronScheduler(
+            self.cron_store,
+            tick_seconds=self.config.cron_tick_seconds,
+            max_concurrent=self.config.cron_max_concurrent,
+        ) if self.config.cron_enabled else None
         self.session = self._create_prompt_session()
 
     async def _prompt(self) -> str:
@@ -550,6 +565,8 @@ class AresCLI:
             except BaseException:
                 _clear_current_task_cancellation()
             self.agent.refresh_tools()
+        if self.cron_scheduler is not None:
+            await self.cron_scheduler.start()
         self._show_banner()
 
         try:
@@ -586,6 +603,11 @@ class AresCLI:
                     continue
         finally:
             # Cleanup
+            if self.cron_scheduler is not None:
+                try:
+                    await self.cron_scheduler.stop()
+                except Exception as exc:
+                    self.console.print(f"[dim yellow]Shutdown warning (cron): {exc}[/dim yellow]")
             if self.mcp_manager is not None:
                 try:
                     await self.mcp_manager.close()

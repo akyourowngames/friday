@@ -91,6 +91,11 @@ class AppConfig(BaseModel):
         description="MCP server configurations for remote Model Context Protocol tools.",
     )
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    cron_enabled: bool = True
+    cron_tick_seconds: int = 60
+    cron_max_concurrent: int = 3
+    cron_max_iterations: int = 10
+    cron_log_retention_days: int = 90
 
 
 # ── v2: Task States ──────────────────────────────────────────

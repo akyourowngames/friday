@@ -547,4 +547,17 @@ def get_tool_definitions() -> list[dict]:
             },
             required=["command"],
         ),
+
+        _tool(
+            "create_cron_job",
+            "Create a recurring scheduled job that runs a fresh Ares agent session.",
+            {"name": {"type": "string"}, "prompt": {"type": "string"}, "cron": {"type": "string", "description": "Five-field cron expression or supported natural phrase."}, "timezone": {"type": "string", "default": "UTC"}, "enabled": {"type": "boolean", "default": True}, "max_iterations": {"type": "integer"}},
+            ["name", "prompt", "cron"],
+        ),
+        _tool("list_cron_jobs", "List scheduled cron jobs and their status.", {"include_disabled": {"type": "boolean", "default": True}}),
+        _tool("get_cron_job", "Get details for a scheduled cron job.", {"job_id": {"type": "string"}}, ["job_id"]),
+        _tool("update_cron_job", "Update a scheduled cron job fields.", {"job_id": {"type": "string"}, "name": {"type": "string"}, "prompt": {"type": "string"}, "cron": {"type": "string"}, "timezone": {"type": "string"}, "enabled": {"type": "boolean"}, "state": {"type": "string"}, "max_iterations": {"type": "integer"}}, ["job_id"]),
+        _tool("delete_cron_job", "Delete a cron job while retaining logs.", {"job_id": {"type": "string"}}, ["job_id"]),
+        _tool("run_cron_job_now", "Trigger a cron job immediately.", {"job_id": {"type": "string"}}, ["job_id"]),
+        _tool("get_cron_logs", "Read recent markdown logs for a cron job.", {"job_id": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, ["job_id"]),
     ]

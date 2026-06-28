@@ -13,7 +13,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 52
+        assert len(tools) == 59
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -72,6 +72,13 @@ class TestToolDefinitions:
             "convert_image",
             "crop_image",
             "terminal_exec",
+            "create_cron_job",
+            "list_cron_jobs",
+            "get_cron_job",
+            "update_cron_job",
+            "delete_cron_job",
+            "run_cron_job_now",
+            "get_cron_logs",
         }
 
     def test_tools_have_schemas(self):
