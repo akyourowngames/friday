@@ -47,6 +47,8 @@ from ares.tools.image_edit import image_info as _image_info
 from ares.tools.image_edit import resize_image as _resize_image
 from ares.tools.image_edit import convert_image as _convert_image
 from ares.tools.image_edit import crop_image as _crop_image
+from ares.cron.store import CronStore
+from ares.cron.tools import CronToolHandlers
 
 
 class ToolExecutor:
@@ -62,6 +64,11 @@ class ToolExecutor:
         self.conversations = conversation_store
         self.config = config
         self.repl = PersistentREPL()
+        data_root = None
+        if config is not None:
+            from pathlib import Path
+            data_root = Path(config.data_dir).expanduser().parent
+        self.cron = CronToolHandlers(CronStore(data_root))
 
     def close(self) -> None:
         """Clean up persistent sessions."""
@@ -122,6 +129,13 @@ class ToolExecutor:
             "convert_image": self._convert_image,
             "crop_image": self._crop_image,
             "terminal_exec": self._terminal_exec,
+            "create_cron_job": self.cron.create_cron_job,
+            "list_cron_jobs": self.cron.list_cron_jobs,
+            "get_cron_job": self.cron.get_cron_job,
+            "update_cron_job": self.cron.update_cron_job,
+            "delete_cron_job": self.cron.delete_cron_job,
+            "run_cron_job_now": self.cron.run_cron_job_now,
+            "get_cron_logs": self.cron.get_cron_logs,
         }
         try:
             handler = handlers[tool_name]

@@ -170,7 +170,7 @@ def create_tts_provider(config: VoiceConfig) -> TTSProvider:
         return EdgeTTS(voice=config.tts_voice or "en-US-JennyNeural")
     if provider == "sarvam":
         return SarvamTTS(
-            api_key=config.sarvam_api_key,
+            api_key=config.sarvam_api_key or os.environ.get("SARVAM_API_KEY", ""),
             voice=config.tts_voice or "anushka",
             model=config.sarvam_tts_model,
             language_code=config.sarvam_language_code,
