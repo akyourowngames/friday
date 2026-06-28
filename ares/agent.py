@@ -308,8 +308,21 @@ class Agent:
                 if chunk_type == "content":
                     text = chunk.get("text", "")
                     if text:
-                        content_parts.append(text)
-                        yield text
+                        # Some proxies return accumulated text (full response)
+                        # instead of deltas. Detect and yield only the new part.
+                        so_far = "".join(content_parts)
+                        if text.startswith(so_far) and len(text) > len(so_far):
+                            # True delta — accumulated text grew
+                            delta = text[len(so_far):]
+                            content_parts.append(delta)
+                            yield delta
+                        elif so_far.startswith(text):
+                            # Already accumulated this — skip (duplicate)
+                            pass
+                        else:
+                            # Fresh chunk or non-accumulated token
+                            content_parts.append(text)
+                            yield text
 
                 elif chunk_type == "tool_call":
                     has_tool_calls = True
