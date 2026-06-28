@@ -181,10 +181,9 @@ class ContinuousVoiceAgent:
                     self.console.print(f"[bold]You:[/bold] {text}")
 
                     self.console.print("[yellow]Thinking…[/yellow]")
-                    response = await self._get_agent_response(text)
+                    response = await self._stream_agent_response(text)
                     if not response or not response.strip():
                         continue
-                    self.console.print(f"[bold green]Ares:[/bold green] {response}")
 
                     self.console.print("[yellow]Speaking…[/yellow]")
                     audio_bytes = await self.tts.speak(response, self.voice_config.tts_voice)
@@ -279,6 +278,43 @@ class ContinuousVoiceAgent:
 
         except Exception as e:
             self.console.print(f"[red]Agent error: {e}[/red]")
+            return f"Sorry, I encountered an error: {e}"
+
+    async def _stream_agent_response(self, text: str) -> str:
+        """Stream agent response tokens to console in real-time."""
+        try:
+            from ares.agent import Agent
+            from ares.memory import MemoryStore
+            from ares.tools.tasks import TaskStore
+            from ares.conversations import ConversationStore
+
+            agent = Agent(
+                memory_store=MemoryStore(),
+                task_store=TaskStore(),
+                conversation_store=ConversationStore(),
+                api_key=self.config.api_key,
+                base_url=self.config.api_base_url,
+                model=self.config.model,
+                config=self.config,
+            )
+
+            full = ""
+            first_token = True
+            async for token in agent.run_stream(text, []):
+                if token.startswith("[tool:"):
+                    continue
+                if first_token:
+                    self.console.print(f"[bold green]Ares:[/bold green] ", end="")
+                    first_token = False
+                self.console.print(token, end="", highlight=False)
+                full += token
+
+            if not first_token:
+                self.console.print()  # newline after streaming
+            return full
+
+        except Exception as e:
+            self.console.print(f"\n[red]Agent error: {e}[/red]")
             return f"Sorry, I encountered an error: {e}"
 
 
