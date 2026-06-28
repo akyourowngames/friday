@@ -14,10 +14,10 @@ async def _run_cli() -> None:
     await cli.run()
 
 
-async def _run_voice() -> None:
+async def _run_voice(tts_provider: str | None = None) -> None:
     from ares.voice.agent import run_voice_agent
 
-    await run_voice_agent()
+    await run_voice_agent(tts_provider)
 
 
 def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
@@ -53,7 +53,8 @@ async def _run_server(host: str, port: int) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Ares personal AI assistant")
     parser.add_argument("--server", action="store_true", help="Run the desktop WebSocket server")
-    parser.add_argument("--voice", action="store_true", help="Run continuous LiveKit voice mode")
+    parser.add_argument("--voice", action="store_true", help="Run continuous voice mode (always listening)")
+    parser.add_argument("--tts", choices=["sarvam", "edge"], default=None, help="TTS provider for --voice (default: from config)")
     parser.add_argument("--host", default="127.0.0.1", help="Server host for --server")
     parser.add_argument("--port", type=int, default=8765, help="Server port for --server")
     args = parser.parse_args()
@@ -62,7 +63,7 @@ def main():
         if args.server:
             _run_coro(_run_server(args.host, args.port))
         elif args.voice:
-            _run_coro(_run_voice())
+            _run_coro(_run_voice(tts_provider=args.tts))
         else:
             _run_coro(_run_cli())
     except asyncio.CancelledError:

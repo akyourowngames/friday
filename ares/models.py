@@ -68,7 +68,7 @@ class ConversationMessage(BaseModel):
 
 
 class VoiceConfig(BaseModel):
-    """Voice input/output settings for push-to-talk and continuous voice mode."""
+    """Voice settings for continuous voice mode."""
 
     enabled: bool = False
     tts_provider: str = "edge_tts"
@@ -78,9 +78,6 @@ class VoiceConfig(BaseModel):
     sarvam_api_key: str = ""
     sarvam_tts_model: str = "bulbul:v2"
     sarvam_language_code: str = "hi-IN"
-    livekit_url: str = ""
-    livekit_api_key: str = ""
-    livekit_api_secret: str = ""
 
 
 class AppConfig(BaseModel):

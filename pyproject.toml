@@ -33,10 +33,6 @@ voice = [
     "soundfile>=0.12",
     "webrtcvad>=2.0",
 ]
-livekit = [
-    "livekit-agents[voice-pipeline]>=1.0",
-    "livekit-plugins-openai>=1.0",
-]
 sarvam = [
     "httpx>=0.27",
 ]

@@ -96,11 +96,45 @@ class SarvamTTS(TTSProvider):
 
     async def list_voices(self) -> list[dict[str, Any]]:
         return [
-            {"name": "anushka", "gender": "female", "language": "hi-IN"},
-            {"name": "abhilash", "gender": "male", "language": "hi-IN"},
-            {"name": "manisha", "gender": "female", "language": "hi-IN"},
-            {"name": "vidya", "gender": "female", "language": "ta-IN"},
-            {"name": "arya", "gender": "female", "language": "en-IN"},
+            {"name": "shubh", "gender": "male", "language": "hi-IN"},
+            {"name": "aditya", "gender": "male", "language": "hi-IN"},
+            {"name": "rahul", "gender": "male", "language": "hi-IN"},
+            {"name": "rohan", "gender": "male", "language": "hi-IN"},
+            {"name": "amit", "gender": "male", "language": "hi-IN"},
+            {"name": "dev", "gender": "male", "language": "hi-IN"},
+            {"name": "ratan", "gender": "male", "language": "hi-IN"},
+            {"name": "varun", "gender": "male", "language": "hi-IN"},
+            {"name": "manan", "gender": "male", "language": "hi-IN"},
+            {"name": "sumit", "gender": "male", "language": "hi-IN"},
+            {"name": "kabir", "gender": "male", "language": "hi-IN"},
+            {"name": "aayan", "gender": "male", "language": "hi-IN"},
+            {"name": "ashutosh", "gender": "male", "language": "hi-IN"},
+            {"name": "advait", "gender": "male", "language": "hi-IN"},
+            {"name": "anand", "gender": "male", "language": "hi-IN"},
+            {"name": "tarun", "gender": "male", "language": "hi-IN"},
+            {"name": "sunny", "gender": "male", "language": "hi-IN"},
+            {"name": "mani", "gender": "male", "language": "hi-IN"},
+            {"name": "gokul", "gender": "male", "language": "hi-IN"},
+            {"name": "vijay", "gender": "male", "language": "hi-IN"},
+            {"name": "mohit", "gender": "male", "language": "hi-IN"},
+            {"name": "rehan", "gender": "male", "language": "hi-IN"},
+            {"name": "soham", "gender": "male", "language": "hi-IN"},
+            {"name": "ritu", "gender": "female", "language": "hi-IN"},
+            {"name": "priya", "gender": "female", "language": "hi-IN"},
+            {"name": "neha", "gender": "female", "language": "hi-IN"},
+            {"name": "pooja", "gender": "female", "language": "hi-IN"},
+            {"name": "simran", "gender": "female", "language": "hi-IN"},
+            {"name": "kavya", "gender": "female", "language": "hi-IN"},
+            {"name": "ishita", "gender": "female", "language": "hi-IN"},
+            {"name": "shreya", "gender": "female", "language": "hi-IN"},
+            {"name": "roopa", "gender": "female", "language": "hi-IN"},
+            {"name": "amelia", "gender": "female", "language": "hi-IN"},
+            {"name": "sophia", "gender": "female", "language": "hi-IN"},
+            {"name": "tanya", "gender": "female", "language": "hi-IN"},
+            {"name": "shruti", "gender": "female", "language": "hi-IN"},
+            {"name": "suhani", "gender": "female", "language": "hi-IN"},
+            {"name": "kavitha", "gender": "female", "language": "hi-IN"},
+            {"name": "rupali", "gender": "female", "language": "hi-IN"},
         ]
 
 
@@ -116,9 +150,6 @@ def voice_config_from_env(config: VoiceConfig) -> VoiceConfig:
         "SARVAM_API_KEY": ("sarvam_api_key", str),
         "SARVAM_TTS_MODEL": ("sarvam_tts_model", str),
         "SARVAM_LANGUAGE_CODE": ("sarvam_language_code", str),
-        "LIVEKIT_URL": ("livekit_url", str),
-        "LIVEKIT_API_KEY": ("livekit_api_key", str),
-        "LIVEKIT_API_SECRET": ("livekit_api_secret", str),
     }
     for env_name, (field, caster) in mapping.items():
         value = os.environ.get(env_name)
@@ -128,16 +159,20 @@ def voice_config_from_env(config: VoiceConfig) -> VoiceConfig:
 
 
 def create_tts_provider(config: VoiceConfig) -> TTSProvider:
-    """Create the configured TTS provider, honoring environment overrides."""
-    resolved = voice_config_from_env(config)
-    provider = resolved.tts_provider.lower().replace("-", "_")
+    """Create the configured TTS provider.
+
+    The config passed in should already have env overrides applied
+    (via voice_config_from_env). This function does NOT re-read env vars
+    so that CLI arguments like --tts edge are respected.
+    """
+    provider = config.tts_provider.lower().replace("-", "_")
     if provider in {"edge", "edge_tts"}:
-        return EdgeTTS(voice=resolved.tts_voice or "en-US-JennyNeural")
+        return EdgeTTS(voice=config.tts_voice or "en-US-JennyNeural")
     if provider == "sarvam":
         return SarvamTTS(
-            api_key=resolved.sarvam_api_key,
-            voice=resolved.tts_voice or "anushka",
-            model=resolved.sarvam_tts_model,
-            language_code=resolved.sarvam_language_code,
+            api_key=config.sarvam_api_key,
+            voice=config.tts_voice or "anushka",
+            model=config.sarvam_tts_model,
+            language_code=config.sarvam_language_code,
         )
-    raise ValueError(f"Unsupported TTS provider: {resolved.tts_provider}")
+    raise ValueError(f"Unsupported TTS provider: {config.tts_provider}")

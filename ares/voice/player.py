@@ -8,12 +8,13 @@ import tempfile
 from pathlib import Path
 
 
-def _play_with_sounddevice(audio: bytes) -> None:
+def _play_with_sounddevice(audio: bytes, speed: float = 1.0) -> None:
     import sounddevice as sd
     import soundfile as sf
 
     data, sample_rate = sf.read(io.BytesIO(audio), dtype="float32")
-    sd.play(data, sample_rate)
+    # Speed up by playing at a higher effective sample rate
+    sd.play(data, int(sample_rate * speed))
     sd.wait()
 
 
@@ -30,11 +31,16 @@ def _play_with_pydub(audio: bytes) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-async def play_audio_bytes(audio: bytes) -> None:
-    """Play encoded audio bytes without blocking the event loop."""
+async def play_audio_bytes(audio: bytes, speed: float = 1.0) -> None:
+    """Play encoded audio bytes without blocking the event loop.
+
+    Args:
+        audio: Encoded audio bytes (MP3, WAV, etc.)
+        speed: Playback speed multiplier (1.0 = normal, 1.2 = 20% faster)
+    """
     if not audio:
         return
     try:
-        await asyncio.to_thread(_play_with_sounddevice, audio)
+        await asyncio.to_thread(_play_with_sounddevice, audio, speed)
     except Exception:
         await asyncio.to_thread(_play_with_pydub, audio)

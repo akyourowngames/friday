@@ -37,7 +37,6 @@ from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager
-from ares.voice.tts import create_tts_provider, voice_config_from_env
 
 # ── Styles ────────────────────────────────────────────────────
 STYLE = Style.from_dict({
@@ -147,8 +146,6 @@ class AresCLI:
         self.agent.tool_executor.task_executor = self.task_executor
         self._reminder_task: asyncio.Task | None = None
         self._executor_task: asyncio.Task | None = None
-        self._voice_service = None
-        self._tts_provider = None
         self.session = self._create_prompt_session()
 
     def _create_prompt_session(self) -> PromptSession | None:
@@ -358,46 +355,6 @@ class AresCLI:
         except Exception as exc:
             self.console.print(f"[dim yellow]Shutdown warning ({label}): {exc}[/dim yellow]")
 
-    async def _start_voice_features(self) -> None:
-        """Enable push-to-talk and speech output when configured."""
-        from ares.voice.listener import PushToTalkService
-        from ares.voice.tts import create_tts_provider, voice_config_from_env
-
-        voice_config = voice_config_from_env(self.config.voice)
-        if not voice_config.enabled:
-            return
-        try:
-            self._tts_provider = create_tts_provider(voice_config)
-        except Exception as exc:
-            self.console.print(f"[dim yellow]Voice TTS disabled: {exc}[/dim yellow]")
-        try:
-            self._voice_service = PushToTalkService(voice_config, self._handle_voice_transcript)
-            self._voice_service.start()
-            self.console.print(
-                f"[dim green]Voice enabled: hold {voice_config.hotkey} to speak; "
-                f"TTS provider={voice_config.tts_provider}.[/dim green]"
-            )
-        except Exception as exc:
-            self._voice_service = None
-            self.console.print(f"[dim yellow]Push-to-talk disabled: {exc}[/dim yellow]")
-
-    async def _handle_voice_transcript(self, text: str) -> None:
-        """Route a push-to-talk transcript through the normal agent loop."""
-        self.console.print(f"[cyan]Voice:[/cyan] {text}")
-        await self._process_input(text)
-
-    async def _speak_response(self, text: str) -> None:
-        """Speak an assistant response, logging failures without crashing CLI."""
-        if getattr(self, "_tts_provider", None) is None or not text.strip():
-            return
-        try:
-            from ares.voice.player import play_audio_bytes
-
-            audio = await self._tts_provider.speak(text)
-            await play_audio_bytes(audio)
-        except Exception as exc:
-            self.console.print(f"[dim yellow]Voice playback skipped: {exc}[/dim yellow]")
-
     def _edit_file(self, file_path: Path, name: str) -> None:
         """Open a context file in the user's editor, or print its path."""
         import os
@@ -458,7 +415,6 @@ class AresCLI:
             table.add_row("/context", "Show active context for this session")
             table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
             table.add_row("/skill-name", "Load a skill directly by slash command")
-            table.add_row("/voice [on|off|test]", "Voice: toggle push-to-talk, test TTS")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
 
@@ -814,46 +770,6 @@ class AresCLI:
             else:
                 self.console.print("[red]Usage: /skills [search QUERY|load NAME|categories][/red]")
 
-        elif command == "/voice":
-            from ares.voice.tts import create_tts_provider, voice_config_from_env
-            if not arg or arg == "test":
-                # Test TTS with a sample sentence
-                voice_config = voice_config_from_env(self.config.voice)
-                self.console.print(f"[dim]Testing TTS: provider={voice_config.tts_provider}, voice={voice_config.tts_voice}[/dim]")
-                try:
-                    provider = create_tts_provider(voice_config)
-                    test_text = "Hello! This is Ares speaking. Voice test successful!"
-                    self.console.print(f"[dim]Generating speech for: '{test_text}'...[/dim]")
-
-                    async def _do_voice_test():
-                        audio = await provider.speak(test_text)
-                        if audio:
-                            self.console.print(f"[green]Got {len(audio)} bytes of audio. Playing...[/green]")
-                            from ares.voice.player import play_audio_bytes
-                            await play_audio_bytes(audio)
-                            self.console.print("[green]TTS test complete![/green]")
-                        else:
-                            self.console.print("[red]TTS returned no audio.[/red]")
-
-                    import asyncio
-                    asyncio.ensure_future(_do_voice_test())
-                except Exception as e:
-                    self.console.print(f"[red]TTS test failed: {e}[/red]")
-            elif arg == "on":
-                self.config.voice.enabled = True
-                save_config(self.config)
-                self.console.print("[green]Voice enabled.[/green]")
-                asyncio.ensure_future(self._start_voice_features())
-            elif arg == "off":
-                self.config.voice.enabled = False
-                save_config(self.config)
-                if self._voice_service is not None:
-                    self._voice_service.close()
-                    self._voice_service = None
-                self.console.print("[yellow]Voice disabled.[/yellow]")
-            else:
-                self.console.print("[red]Usage: /voice [on|off|test][/red]")
-
         elif command == "/exit":
             return False
 
@@ -948,7 +864,6 @@ class AresCLI:
 
         self.conversation_store.add_exchange(self.conversation_id, user_input, full_response)
 
-        await self._speak_response(full_response)
 
         # Trim conversation history
         max_msgs = self.config.max_context_messages
@@ -968,7 +883,6 @@ class AresCLI:
         self._reminder_task = asyncio.create_task(self.reminder_service.run())
         self._executor_task = asyncio.create_task(self.task_executor.run())
         self._show_banner()
-        await self._start_voice_features()
 
         try:
             while True:
@@ -1011,11 +925,6 @@ class AresCLI:
                 self._executor_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self._executor_task
-            if self._voice_service is not None:
-                self._voice_service.close()
-            if self._tts_provider is not None:
-                with suppress(Exception):
-                    await self._tts_provider.close()
 
             # Cleanup
             if self.mcp_manager is not None:
