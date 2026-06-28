@@ -6,7 +6,6 @@ import pytest
 
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
-from ares.tools.tasks import TaskStore
 from ares.tools import ToolExecutor, get_tool_definitions
 
 
@@ -14,7 +13,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 63
+        assert len(tools) == 52
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -25,14 +24,6 @@ class TestToolDefinitions:
             "search_memory",
             "update_memory",
             "delete_memory",
-            "create_task",
-            "list_tasks",
-            "search_tasks",
-            "complete_task",
-            "cancel_task",
-            "get_due_soon",
-            "get_execution_status",
-            "get_executor_status",
             "list_skills",
             "load_skill",
             "create_skill",
@@ -81,9 +72,6 @@ class TestToolDefinitions:
             "convert_image",
             "crop_image",
             "terminal_exec",
-            "resume_task",
-            "get_task_events",
-            "get_task_artifacts",
         }
 
     def test_tools_have_schemas(self):
@@ -144,32 +132,6 @@ def test_move_file_tool_definition():
     assert "move_file" in names
 
 
-def test_create_auto_task_wakes_executor_and_instructs_background(tmp_path):
-    """Auto-executable task creation wakes the executor and discourages inline work."""
-    from types import SimpleNamespace
-
-    class FakeExecutor:
-        def __init__(self):
-            self.wake_calls = 0
-
-        def wake(self):
-            self.wake_calls += 1
-
-    task_store = TaskStore(db_path=tmp_path / "tasks.db")
-    executor = ToolExecutor(memory_store=SimpleNamespace(), task_store=task_store)
-    fake = FakeExecutor()
-    executor.task_executor_ref = fake
-
-    result = executor.execute("create_task", {
-        "title": "Write and run counter script",
-        "auto_executable": True,
-    })
-
-    assert fake.wake_calls == 1
-    assert "[auto]" in result
-    assert "background executor" in result.lower()
-    assert "do not execute it inline" in result.lower()
-
 class TestToolExecutor:
     @pytest.fixture
     def executor(self, tmp_path, fake_embedding_provider):
@@ -177,11 +139,9 @@ class TestToolExecutor:
             db_path=tmp_path / "mem.db",
             embedding_provider=fake_embedding_provider,
         )
-        task_store = TaskStore(db_path=tmp_path / "tasks.db")
         conversation_store = ConversationStore(db_path=tmp_path / "convo.db")
         return ToolExecutor(
             memory_store=mem_store,
-            task_store=task_store,
             conversation_store=conversation_store,
         )
 
@@ -217,44 +177,6 @@ class TestToolExecutor:
         """search_memory with no matches returns informative message."""
         result = executor.execute("search_memory", {"query": "xyznonexistent"})
         assert "no matching" in result.lower() or "found" in result.lower()
-
-    def test_create_task(self, executor):
-        """create_task tool creates a task and returns confirmation."""
-        result = executor.execute("create_task", {
-            "title": "Call dentist",
-            "due": "2026-06-19T14:00:00",
-            "priority": "medium",
-        })
-        assert "Created" in result or "task" in result.lower()
-
-
-    def test_list_tasks_empty(self, executor):
-        """list_tasks with no tasks returns informative message."""
-        result = executor.execute("list_tasks", {})
-        assert "no" in result.lower() or "empty" in result.lower()
-
-    def test_list_tasks_with_items(self, executor):
-        """list_tasks shows pending tasks."""
-        executor.execute("create_task", {"title": "Buy milk"})
-        executor.execute("create_task", {"title": "Walk dog"})
-        result = executor.execute("list_tasks", {})
-        assert "milk" in result.lower() or "dog" in result.lower()
-
-    def test_task_management_tools(self, executor):
-        """Task tools can search, complete, cancel, and report due soon."""
-        create_result = executor.execute("create_task", {
-            "title": "Submit taxes",
-            "due": "2099-01-01T12:00:00+00:00",
-            "priority": "high",
-        })
-        task_id = int(create_result.split("#", 1)[1].split(":", 1)[0])
-        assert "taxes" in executor.execute("search_tasks", {"query": "taxes"}).lower()
-        assert "No tasks due" in executor.execute("get_due_soon", {"hours": 1})
-        assert "Completed" in executor.execute("complete_task", {"task_id": task_id})
-
-        second = executor.execute("create_task", {"title": "Cancel me"})
-        second_id = int(second.split("#", 1)[1].split(":", 1)[0])
-        assert "Cancelled" in executor.execute("cancel_task", {"task_id": second_id})
 
     def test_export_data_tool(self, executor, tmp_path):
         """export_data writes a JSON backup."""

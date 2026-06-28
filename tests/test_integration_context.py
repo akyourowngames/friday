@@ -34,13 +34,11 @@ def test_full_context_pipeline(tmp_path):
             {"fact_id": 1, "fact_text": "Alice likes coffee", "category": "preference", "importance": 0.8},
             {"fact_id": 2, "fact_text": "Works on Ares project", "category": "project", "importance": 0.6},
         ],
-        tasks=[{"title": "Write implementation plan", "due": "2026-06-19"}],
     )
 
     assert "Alice" in context
     assert "coffee" in context
     assert "My Project" in context
-    assert "Write implementation plan" in context
     assert "Personality" in context
     assert context.index("Personality") < context.index("Alice") < context.index("My Project")
 

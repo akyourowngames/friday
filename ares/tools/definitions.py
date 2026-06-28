@@ -65,80 +65,6 @@ def get_tool_definitions() -> list[dict]:
             ["fact_id"],
         ),
         _tool(
-            "create_task",
-            "Create a reminder, to-do, or task.",
-            {
-                "title": {"type": "string", "description": "The task title."},
-                "description": {"type": "string"},
-                "due": {"type": "string", "description": "ISO or natural-language due date."},
-                "reminder_at": {"type": "string", "description": "ISO or natural-language reminder time."},
-                "priority": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high"],
-                    "default": "medium",
-                },
-                "auto_executable": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "If true, Ares will try to auto-complete this task in the background.",
-                },
-                "max_turns": {
-                    "type": "integer",
-                    "default": 10,
-                    "description": "Max tool-use turns for auto-execution (default 10).",
-                },
-                "max_attempts": {
-                    "type": "integer",
-                    "default": 3,
-                    "description": "Max retry attempts on failure (default 3).",
-                },
-            },
-            ["title"],
-        ),
-        _tool(
-            "list_tasks",
-            "Show pending tasks and reminders.",
-            {"limit": {"type": "integer", "default": 50}},
-        ),
-        _tool(
-            "search_tasks",
-            "Search tasks by title or description.",
-            {
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "default": 10},
-                "include_done": {"type": "boolean", "default": False},
-            },
-            ["query"],
-        ),
-        _tool(
-            "complete_task",
-            "Mark a pending task as done.",
-            {"task_id": {"type": "integer"}},
-            ["task_id"],
-        ),
-        _tool(
-            "cancel_task",
-            "Cancel a task.",
-            {"task_id": {"type": "integer"}},
-            ["task_id"],
-        ),
-        _tool(
-            "get_due_soon",
-            "Show pending tasks due within the next N hours.",
-            {"hours": {"type": "integer", "default": 24}},
-        ),
-        _tool(
-            "get_execution_status",
-            "Show recently auto-completed tasks with execution notes.",
-            {"limit": {"type": "integer", "default": 10}},
-        ),
-        _tool(
-            "get_executor_status",
-            "Show the background task executor's current state: idle, running, stopped, disabled. Returns which task is being executed, error state, and completion stats.",
-            {},
-        ),
-
-        _tool(
             "list_skills",
             "List available reusable skills/playbooks with names, categories, and descriptions.",
             {
@@ -166,7 +92,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "export_data",
-            "Export local Ares memories, tasks, conversations, and config to JSON.",
+            "Export local Ares memories, conversations, and config to JSON.",
             {"path": {"type": "string", "description": "Optional output JSON path."}},
         ),
         _tool(
@@ -620,30 +546,5 @@ def get_tool_definitions() -> list[dict]:
                 "cwd": {"type": "string", "description": "Working directory for the command"},
             },
             required=["command"],
-        ),
-        _tool(
-            "resume_task",
-            "Resume a failed task from where it left off. Only works on tasks with state='failed'. Re-executes from the first uncompleted step.",
-            {
-                "task_id": {"type": "integer", "description": "ID of the failed task to resume"},
-            },
-            required=["task_id"],
-        ),
-        _tool(
-            "get_task_events",
-            "Get the execution log for a task. Shows all state changes, step progress, and events with timestamps.",
-            {
-                "task_id": {"type": "integer", "description": "ID of the task"},
-                "limit": {"type": "integer", "description": "Max events to return (default 50)"},
-            },
-            required=["task_id"],
-        ),
-        _tool(
-            "get_task_artifacts",
-            "Get all files created or modified by a task. Shows file paths, sizes, and which step created them.",
-            {
-                "task_id": {"type": "integer", "description": "ID of the task"},
-            },
-            required=["task_id"],
         ),
     ]

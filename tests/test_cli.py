@@ -73,11 +73,6 @@ class DummyMemoryStore:
         return self.memories.pop(fact_id, None) is not None
 
 
-class DummyTaskStore:
-    def list_pending(self):
-        return [{"title": "Buy milk", "due": None}]
-
-
 class DummySoulManager:
     soul_path = Path("soul.md")
 
@@ -118,7 +113,6 @@ def make_cli():
     app.config = AppConfig()
     app.agent = DummyAgent()
     app.memory_store = DummyMemoryStore()
-    app.task_store = DummyTaskStore()
     app.soul_manager = DummySoulManager()
     app.profile_manager = DummyProfileManager()
     app.project_context = DummyProjectContext()
@@ -194,7 +188,6 @@ def test_export_command_calls_exporter(monkeypatch, tmp_path):
     assert app._handle_command(f"/export {tmp_path / 'out.json'}")
 
     assert called["memory_store"] is app.memory_store
-    assert called["task_store"] is app.task_store
     assert called["path"] == str(tmp_path / "out.json")
 
 
@@ -209,7 +202,6 @@ def test_soul_profile_and_context_commands_render():
     assert "Ares Personality" in output or "Soul" in output
     assert "Alice" in output
     assert "Current Project Context" in output
-    assert "Buy milk" in output
 
 
 def test_cleanup_step_reports_sqlite_lock_without_crashing():

@@ -8,7 +8,6 @@ from ares.context_blend import (
     estimate_tokens,
     format_memories,
     format_summaries,
-    format_tasks,
     get_model_budgets,
     truncate_to_tokens,
 )
@@ -50,14 +49,6 @@ class TestFormatters:
         assert "likes tea" in result
         assert "preference" in result
 
-    def test_format_tasks_empty(self):
-        assert format_tasks([]) == ""
-
-    def test_format_tasks_with_due_date(self):
-        result = format_tasks([{"title": "Call mom", "due": "2026-06-20T14:00:00"}])
-        assert "Call mom" in result
-        assert "2026-06-20" in result
-
     def test_format_summaries_empty(self):
         assert format_summaries([]) == ""
 
@@ -78,20 +69,13 @@ class TestBuildContextPrompt:
             project_context="PROJECT HERE",
             conversation_summaries=["SUMMARY HERE"],
             memories=[{"fact_id": 1, "fact_text": "fact1", "category": "note"}],
-            tasks=[{"title": "TASK HERE"}],
         )
         assert result.index("SOUL") < result.index("PROFILE") < result.index("PROJECT")
-        assert result.index("SUMMARY") < result.index("fact1") < result.index("TASK")
 
     def test_token_budget_respected_for_large_profile(self):
         result = build_context_prompt(profile_context="x " * 500, token_budget=100)
         assert len(result.split()) < 200
         assert "truncated" in result.lower()
-
-    def test_tasks_are_included_at_end(self):
-        result = build_context_prompt(tasks=[{"title": "Buy milk", "due": None}])
-        assert result.endswith("- Buy milk")
-
 
 class TestGetModelBudgets:
     """Test model-aware context budget scaling."""

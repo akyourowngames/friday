@@ -16,20 +16,6 @@ class FactCategory(str, Enum):
     NOTE = "note"
 
 
-class TaskPriority(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
-class TaskStatus(str, Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    DONE = "done"
-    PARTIAL = "partial"
-    CANCELLED = "cancelled"
-
-
 class Memory(BaseModel):
     fact_id: Optional[int] = None
     fact_text: str
@@ -42,19 +28,6 @@ class Memory(BaseModel):
     last_accessed: Optional[str] = None
     access_count: int = 0
     superseded_by: Optional[int] = None
-
-
-class Task(BaseModel):
-    id: Optional[int] = None
-    title: str
-    description: Optional[str] = None
-    due: Optional[str] = None
-    priority: TaskPriority = TaskPriority.MEDIUM
-    status: TaskStatus = TaskStatus.PENDING
-    created_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    reminder_at: Optional[str] = None
-    reminder_sent_at: Optional[str] = None
 
 
 class ConversationMessage(BaseModel):
@@ -102,10 +75,6 @@ class AppConfig(BaseModel):
     project_context_enabled: bool = True
     context_token_budget: int = 2000
     project_context_max_files: int = 2
-    task_executor_enabled: bool = True
-    task_executor_poll_seconds: int = 5
-    task_executor_max_turns: int = 10
-    task_executor_max_cost_usd: float = 0.10
     agent_max_iterations: int = 20
     context_compact_threshold: float = 0.90
     context_protected_tail: int = 20

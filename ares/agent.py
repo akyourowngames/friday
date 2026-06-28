@@ -8,7 +8,6 @@ from typing import Any, AsyncIterator
 from ares.context import ProjectContext
 from ares.context_blend import build_context_prompt, get_model_budgets
 from ares.memory import MemoryStore
-from ares.tools.tasks import TaskStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.llm import LLMClient
@@ -25,24 +24,19 @@ class Agent:
     def __init__(
         self,
         memory_store: MemoryStore,
-        task_store: TaskStore,
         conversation_store: ConversationStore | None = None,
         api_key: str = "",
         base_url: str = "",
         model: str = "",
         config: AppConfig | None = None,
-        task_executor: Any | None = None,
         mcp_manager: Any | None = None,
     ):
         self.memory_store = memory_store
-        self.task_store = task_store
         self.conversation_store = conversation_store
         self.tool_executor = ToolExecutor(
             memory_store=memory_store,
-            task_store=task_store,
             conversation_store=conversation_store,
             config=config,
-            task_executor=task_executor,
         )
         self.mcp_manager = mcp_manager
         self.refresh_tools()
@@ -97,7 +91,7 @@ class Agent:
         return messages
 
     def get_context(self, user_input: str) -> str:
-        """Build full context: soul + profile + project + memories + tasks.
+        """Build full context: soul + profile + project + memories.
 
         Budgets scale automatically with the model's context window.
         """
@@ -116,7 +110,6 @@ class Agent:
         if self.config.project_context_enabled:
             project_ctx = self.project_context.get_context(token_budget=project_budget)
         memories = self.memory_store.search(user_input, limit=max_retrieval)
-        tasks = self.task_store.list_pending()
         summaries = []
         if self.conversation_store is not None:
             summaries = self.conversation_store.get_recent_summaries(limit=5)
@@ -125,7 +118,6 @@ class Agent:
             profile_context=profile_ctx,
             project_context=project_ctx,
             memories=memories,
-            tasks=tasks,
             conversation_summaries=summaries,
             token_budget=token_budget,
         )
@@ -142,15 +134,6 @@ class Agent:
         if isinstance(raw_args, str):
             return json.loads(raw_args)
         return raw_args or {}
-
-    @staticmethod
-    def _auto_task_final_message(tool_results: list[dict]) -> str:
-        """Build the final chat response after queueing an auto task."""
-        for result in tool_results:
-            if result.get("auto_task_created"):
-                first_line = str(result.get("content", "")).splitlines()[0]
-                return f"{first_line}. The background executor will handle it and track events/artifacts."
-        return "Auto-executable task queued. The background executor will handle it and track events/artifacts."
 
     def process_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         """Execute tool calls from synchronous callers.
@@ -190,25 +173,10 @@ class Agent:
         return self._process_tool_calls_core(tool_calls, mcp_results=mcp_results)
 
     def _process_tool_calls_core(self, tool_calls: list[dict], mcp_results: dict[int, str] | None) -> list[dict]:
-        """Execute/assemble tool results, preserving auto-task short-circuit logic."""
+        """Execute/assemble tool results."""
         results = []
-        auto_task_created = False
         for i, call in enumerate(tool_calls):
             tool_name = call.get("function", {}).get("name", "unknown")
-
-            if auto_task_created:
-                result = (
-                    "Skipped: an auto-executable task was just queued. "
-                    "The background TaskExecutor must perform the work so events and artifacts are tracked."
-                )
-                results.append({
-                    "tool_call_id": call.get("id") or f"call_{i}",
-                    "role": "tool",
-                    "content": result,
-                    "tool_name": tool_name,
-                    "skipped_after_auto_task": True,
-                })
-                continue
 
             try:
                 fn = call["function"]
@@ -220,18 +188,12 @@ class Agent:
                     result = self.tool_executor.execute(tool_name, args)
             except Exception as e:
                 result = f"Error: {e}"
-                args = {}
-
-            is_auto_task = tool_name == "create_task" and bool(args.get("auto_executable", False)) and not str(result).lower().startswith("error:")
-            if is_auto_task:
-                auto_task_created = True
 
             results.append({
                 "tool_call_id": call.get("id") or f"call_{i}",
                 "role": "tool",
                 "content": result,
                 "tool_name": tool_name,
-                "auto_task_created": is_auto_task,
             })
         return results
 
@@ -274,10 +236,6 @@ class Agent:
                 # Execute tools
                 tool_results = await self.process_tool_calls_async(response["tool_calls"])
                 messages.extend(self._tool_messages(tool_results))
-
-                if any(result.get("auto_task_created") for result in tool_results):
-                    yield self._auto_task_final_message(tool_results)
-                    return
 
                 # Let LLM process tool results and continue
                 continue
@@ -370,12 +328,6 @@ class Agent:
                 for tr in tool_results:
                     yield f"[tool:{tr['tool_name']}:{tr['content']}]"
                 messages.extend(self._tool_messages(tool_results))
-
-                if any(result.get("auto_task_created") for result in tool_results):
-                    final_message = self._auto_task_final_message(tool_results)
-                    self.last_messages = messages
-                    yield final_message
-                    return
 
                 continue
 

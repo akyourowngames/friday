@@ -8,7 +8,6 @@ from ares.agent import Agent
 from ares.llm import LLMClient
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.tools.tasks import TaskStore
 
 
 class FakeStreamResponse:
@@ -71,10 +70,8 @@ async def test_llm_chat_stream_yields_structured_content_and_tool_chunks():
 @pytest.mark.asyncio
 async def test_agent_run_stream_no_tools_uses_streaming_only(tmp_path, fake_embedding_provider):
     mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
-    task_store = TaskStore(db_path=tmp_path / "tasks.db")
     agent = Agent(
         memory_store=mem_store,
-        task_store=task_store,
         api_key="test-key",
         config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
     )
@@ -99,10 +96,8 @@ async def test_agent_run_stream_no_tools_uses_streaming_only(tmp_path, fake_embe
 @pytest.mark.asyncio
 async def test_agent_run_stream_detects_and_executes_tool_call(tmp_path, fake_embedding_provider):
     mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
-    task_store = TaskStore(db_path=tmp_path / "tasks.db")
     agent = Agent(
         memory_store=mem_store,
-        task_store=task_store,
         api_key="test-key",
         config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
     )

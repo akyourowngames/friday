@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ares.conversations import ConversationStore
 
 from ares.config import CONFIG_PATH, load_config, save_config
-from ares.conversations import ConversationStore
 from ares.tools.dates import now_local, now_local_iso
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.tools.tasks import TaskStore
 
 
 def default_export_path() -> Path:
@@ -23,7 +24,6 @@ def default_export_path() -> Path:
 def export_data(
     *,
     memory_store: MemoryStore,
-    task_store: TaskStore,
     conversation_store: ConversationStore | None = None,
     config: AppConfig | None = None,
     path: str | Path | None = None,
@@ -38,7 +38,6 @@ def export_data(
         "config": app_config.model_dump(exclude={"api_key", "tavily_api_key"}),
         "secrets_redacted": ["api_key", "tavily_api_key"],
         "memories": memory_store.list_all(),
-        "tasks": task_store.list_all(include_done=True),
         "conversations": [],
         "conversation_messages": [],
     }
@@ -55,7 +54,6 @@ def import_data(
     path: str | Path,
     *,
     memory_store: MemoryStore,
-    task_store: TaskStore,
     conversation_store: ConversationStore | None = None,
     import_config: bool = False,
 ) -> dict[str, int]:
@@ -66,7 +64,6 @@ def import_data(
 
     counts = {
         "memories": memory_store.import_memories(payload.get("memories", [])),
-        "tasks": task_store.import_tasks(payload.get("tasks", [])),
         "conversations": 0,
         "config": 0,
     }

@@ -257,12 +257,10 @@ class ContinuousVoiceAgent:
         try:
             from ares.agent import Agent
             from ares.memory import MemoryStore
-            from ares.tools.tasks import TaskStore
             from ares.conversations import ConversationStore
 
             agent = Agent(
                 memory_store=MemoryStore(),
-                task_store=TaskStore(),
                 conversation_store=ConversationStore(),
                 api_key=self.config.api_key,
                 base_url=self.config.api_base_url,
@@ -285,12 +283,10 @@ class ContinuousVoiceAgent:
         try:
             from ares.agent import Agent
             from ares.memory import MemoryStore
-            from ares.tools.tasks import TaskStore
             from ares.conversations import ConversationStore
 
             agent = Agent(
                 memory_store=MemoryStore(),
-                task_store=TaskStore(),
                 conversation_store=ConversationStore(),
                 api_key=self.config.api_key,
                 base_url=self.config.api_base_url,

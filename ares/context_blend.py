@@ -81,7 +81,7 @@ def get_model_budgets(model: str) -> dict[str, int]:
     buffer = max(window - 40_000, int(window * 0.8))
     usable = window - buffer
 
-    # Scale system prompt budget (soul + profile + project + memories + tasks)
+    # Scale system prompt budget (soul + profile + project + memories)
     # Small models (128k): ~4k tokens for context
     # Medium models (200k): ~8k tokens
     # Large models (1M+): ~32k tokens
@@ -221,17 +221,6 @@ def format_memories(memories: list[dict] | None, token_budget: int = 800) -> str
     return truncate_to_tokens("\n".join(lines), token_budget)
 
 
-def format_tasks(tasks: list[dict] | None) -> str:
-    """Format pending tasks for context injection."""
-    if not tasks:
-        return ""
-    lines = ["## Your pending tasks:"]
-    for task in tasks[:5]:
-        due = f" (due: {task['due']})" if task.get("due") else ""
-        lines.append(f"- {task['title']}{due}")
-    return "\n".join(lines)
-
-
 def format_summaries(summaries: list[str] | None) -> str:
     """Format recent conversation summaries for context injection."""
     if not summaries:
@@ -258,7 +247,6 @@ def build_context_prompt(
     profile_context: str = "",
     project_context: str = "",
     memories: list[dict] | None = None,
-    tasks: list[dict] | None = None,
     conversation_summaries: list[str] | None = None,
     token_budget: int = 2000,
 ) -> str:
@@ -279,9 +267,5 @@ def build_context_prompt(
     if memories and remaining > 100:
         memory_section = format_memories(memories, token_budget=remaining)
         remaining = _append_section(sections, memory_section, remaining)
-
-    task_section = format_tasks(tasks)
-    if task_section:
-        sections.append(task_section)
 
     return "\n\n".join(sections)

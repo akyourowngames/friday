@@ -5,7 +5,6 @@ import tempfile
 from pathlib import Path
 
 from ares.memory import MemoryStore
-from ares.tools.tasks import TaskStore
 from ares.tools import ToolExecutor, get_tool_definitions
 
 
@@ -18,10 +17,8 @@ class TestToolExecutorFileTools:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "test.db"
             mem_store = MemoryStore(db_path)
-            task_store = TaskStore(db_path)
-            yield ToolExecutor(mem_store, task_store)
+            yield ToolExecutor(mem_store)
             mem_store.close()
-            task_store.close()
 
     @pytest.fixture
     def temp_home(self, monkeypatch):
@@ -386,10 +383,8 @@ class TestEndToEndWorkflows:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "test.db"
             mem_store = MemoryStore(db_path)
-            task_store = TaskStore(db_path)
-            yield ToolExecutor(mem_store, task_store)
+            yield ToolExecutor(mem_store)
             mem_store.close()
-            task_store.close()
 
     @pytest.fixture
     def temp_home(self, monkeypatch):
@@ -476,7 +471,7 @@ class TestEndToEndWorkflows:
 def test_batch_edit_via_executor(tmp_path):
     from types import SimpleNamespace
 
-    executor = ToolExecutor(SimpleNamespace(), SimpleNamespace())
+    executor = ToolExecutor(SimpleNamespace())
     target = tmp_path / "bulk.txt"
     result = executor.execute("batch_edit", {
         "operations": [
@@ -492,7 +487,7 @@ def test_batch_edit_via_executor(tmp_path):
 def test_glob_apply_via_executor_requires_confirm(tmp_path):
     from types import SimpleNamespace
 
-    executor = ToolExecutor(SimpleNamespace(), SimpleNamespace())
+    executor = ToolExecutor(SimpleNamespace())
     target = tmp_path / "remove.tmp"
     target.write_text("x")
     result = executor.execute("glob_apply", {

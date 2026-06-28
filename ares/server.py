@@ -23,11 +23,9 @@ except ImportError:  # pragma: no cover
 from ares.agent import Agent
 from ares.config import load_config, save_config
 from ares.context_manager import ContextManager
-from ares.task_executor import TaskExecutor
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.tools.tasks import TaskStore
 from ares.tools.mcp_client import MCPClientManager
 
 
@@ -100,14 +98,12 @@ class AresServer:
         config: AppConfig | None = None,
         agent: Agent | None = None,
         memory_store: MemoryStore | None = None,
-        task_store: TaskStore | None = None,
         conversation_store: ConversationStore | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.config = config or load_config()
         self.memory_store = memory_store or MemoryStore()
-        self.task_store = task_store or TaskStore()
         self.conversation_store = conversation_store or ConversationStore()
         self.mcp_manager = (
             MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
@@ -117,39 +113,8 @@ class AresServer:
         self.agent = agent or Agent(
             config=self.config,
             memory_store=self.memory_store,
-            task_store=self.task_store,
             mcp_manager=self.mcp_manager,
         )
-        self.task_executor = TaskExecutor(
-            self.task_store,
-            self._execute_task_in_background,
-            self._notify_auto_complete,
-            poll_seconds=self.config.task_executor_poll_seconds,
-            max_turns=self.config.task_executor_max_turns,
-            enabled=self.config.task_executor_enabled,
-        )
-        if hasattr(self.agent, "tool_executor"):
-            self.agent.tool_executor.task_executor = self.task_executor
-        self.task_executor.status_callback = self._push_status_to_clients
-        self.task_executor.event_callback = self._push_task_event_to_clients
-
-        # v2: Wire planner, LLM, and tool executor
-        from ares.planner import TaskPlanner
-        from ares.llm import LLMClient
-        from ares.tools import get_tool_definitions
-        from ares.task_executor import ALLOWED_TOOLS as _EXEC_ALLOWED
-        llm = LLMClient(
-            api_key=self.config.api_key,
-            base_url=self.config.api_base_url,
-            model=self.config.model,
-        )
-        all_tools = get_tool_definitions()
-        allowed_tool_defs = [t for t in all_tools if t["function"]["name"] in _EXEC_ALLOWED]
-        self.task_executor.planner = TaskPlanner(llm)
-        self.task_executor.llm = llm
-        self.task_executor.tool_executor = self.agent.tool_executor
-        self.task_executor.allowed_tools = allowed_tool_defs
-        self.agent.tool_executor.task_executor_ref = self.task_executor
 
         self._connected_websockets: list = []
         self.conversation_id = None
@@ -167,167 +132,6 @@ class AresServer:
         if hasattr(self.agent, "tool_executor"):
             self.agent.tool_executor._terminal_display_callback = self._terminal_display_only
 
-    async def _execute_task_in_background(self, prompt: str, max_turns: int) -> dict:
-        """Run an isolated agent loop for background task execution."""
-        from ares.llm import LLMClient
-        from ares.tools import get_tool_definitions, ToolExecutor
-        from ares.task_executor import ALLOWED_TOOLS
-        import json as _json
-
-        llm = LLMClient(
-            api_key=self.config.api_key,
-            base_url=self.config.api_base_url,
-            model=self.config.model,
-        )
-        try:
-            tools = get_tool_definitions()
-            allowed_defs = [t for t in tools if t["function"]["name"] in ALLOWED_TOOLS]
-            messages = [{"role": "user", "content": prompt}]
-            summary_parts = []
-
-            for turn_idx in range(max_turns):
-                response = await llm.chat(messages, tools=allowed_defs)
-                if response.get("tool_calls"):
-                    # Ensure every tool call has a non-empty id
-                    for i, tc in enumerate(response["tool_calls"]):
-                        if not tc.get("id"):
-                            tc["id"] = f"call_{turn_idx}_{i}"
-
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.get("content") or "",
-                        "tool_calls": response["tool_calls"],
-                    })
-                    executor = ToolExecutor(
-                        memory_store=self.memory_store,
-                        task_store=self.task_store,
-                        conversation_store=self.conversation_store,
-                    )
-                    for i, call in enumerate(response["tool_calls"]):
-                        fn = call["function"]
-                        args = _json.loads(fn.get("arguments") or "{}")
-                        result = executor.execute(fn["name"], args)
-                        messages.append({
-                            "tool_call_id": call.get("id") or f"call_{turn_idx}_{i}",
-                            "role": "tool",
-                            "content": result,
-                        })
-                        summary_parts.append(f"{fn['name']}: {result[:200]}")
-                else:
-                    content = response.get("content", "")
-                    if content:
-                        summary_parts.append(content)
-                    break
-            return {"summary": "\n".join(summary_parts) if summary_parts else "Task completed."}
-        finally:
-            await llm.close()
-
-    async def _notify_auto_complete(self, task_info: dict) -> None:
-        """Send task_auto_complete event and inject result into chat."""
-        task_id = task_info.get("id")
-        title = task_info.get("title")
-        status = task_info.get("status")
-        notes = task_info.get("notes", "")
-
-        event = {
-            "type": "task_auto_complete",
-            "task_id": task_id,
-            "title": title,
-            "status": status,
-            "notes": notes,
-        }
-
-        # Include completion report if available
-        updated_task = self.task_store.get(task_id) if task_id else None
-        if updated_task and updated_task.get("completion_report"):
-            try:
-                event["report"] = json.loads(updated_task["completion_report"])
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        ws_count = len(self._connected_websockets)
-        print(f"[Server] Task #{task_id} complete ({status}), ws_count={ws_count}")
-
-        for ws in list(self._connected_websockets):
-            try:
-                await self._send(ws, event)
-                print(f"[Server] task_auto_complete sent")
-            except Exception as e:
-                print(f"[Server] Failed to send task_auto_complete: {e}")
-
-        chat_msg = await self._compose_task_completion_message(
-            task_id=task_id,
-            title=title or "Untitled task",
-            status=status or "unknown",
-            notes=notes or "",
-            report=event.get("report"),
-        )
-        for ws in list(self._connected_websockets):
-            try:
-                await self._send(ws, {"type": "content", "text": chat_msg})
-                await self._send(ws, {"type": "response_done", "content": chat_msg, "tool_calls": []})
-                print(f"[Server] Result injected into chat")
-            except Exception as e:
-                print(f"[Server] Failed to inject chat: {e}")
-
-
-    async def _compose_task_completion_message(
-        self,
-        *,
-        task_id: int | None,
-        title: str,
-        status: str,
-        notes: str,
-        report: dict | None = None,
-    ) -> str:
-        """Compose a natural chat update for a background task."""
-        is_done = status in {"done", "completed"}
-        get_artifacts = getattr(self.task_store, "get_artifacts", None)
-        artifacts = get_artifacts(task_id) if task_id and callable(get_artifacts) else []
-        artifact_paths = [a.get("path") for a in artifacts if a.get("path")]
-        report = report or {}
-        summary = report.get("summary") or notes or "Task finished."
-
-        prompt = (
-            "Write a short, natural, first-person completion message to Krish for a background task. "
-            "Do not sound like a generic system notification. Mention concrete files/artifacts if present. "
-            "Keep it to 2-4 sentences and use casual but clear language.\n\n"
-            f"Task id: {task_id}\n"
-            f"Task title: {title}\n"
-            f"Status: {'completed' if is_done else 'needs attention'}\n"
-            f"Summary: {summary}\n"
-            f"Artifacts: {artifact_paths}\n"
-            f"Key results: {report.get('key_results', [])}\n"
-        )
-        try:
-            response = await self.agent.llm.chat([{"role": "user", "content": prompt}])
-            content = str(response.get("content") or "").strip()
-            if content:
-                return content
-        except Exception as exc:
-            print(f"[Server][TaskDebug] Failed to compose task #{task_id} LLM message: {exc}")
-
-        status_phrase = "done" if is_done else "partially done"
-        artifact_text = f" I saved: {', '.join(artifact_paths)}." if artifact_paths else ""
-        return f"Hey Krish — task #{task_id} is {status_phrase}: {title}. {summary}{artifact_text}"
-
-    async def _push_task_event_to_clients(self, event: dict[str, Any]) -> None:
-        """Print and push live task execution events for debugging."""
-        print(
-            "[Server][TaskDebug] "
-            f"task=#{event.get('task_id')} "
-            f"level={event.get('level')} "
-            f"step={event.get('step')} "
-            f"message={event.get('message')}"
-        )
-        payload = {"type": "task_event", "event": _as_jsonable(event)}
-        for ws in list(self._connected_websockets):
-            try:
-                await self._send(ws, payload)
-            except Exception as exc:
-                print(f"[Server][TaskDebug] Failed to send task event: {exc}")
-        await self._push_status_to_clients()
-
     async def _push_status_to_clients(self) -> None:
         """Push updated status to all connected websockets."""
         status = self._status()
@@ -343,7 +147,6 @@ class AresServer:
             await self.mcp_manager.start()
             if hasattr(self.agent, "refresh_tools"):
                 self.agent.refresh_tools()
-        self.task_executor.start()
         async with serve(self.handle_client, self.host, self.port) as ws_server:
             self._server = ws_server
             print(f"Ares desktop server listening on ws://{self.host}:{self.port}")
@@ -390,8 +193,6 @@ class AresServer:
                 )
             elif msg_type == "get_memories":
                 await self._send(websocket, {"type": "memories", "memories": self._memories()})
-            elif msg_type == "get_tasks":
-                await self._send(websocket, {"type": "tasks", "tasks": self._tasks()})
             elif msg_type == "get_status":
                 await self._send(websocket, self._status())
             elif msg_type == "rename_session":
@@ -406,21 +207,6 @@ class AresServer:
                 if cmd_id in self._terminal_command_events:
                     self._terminal_output_buffer[cmd_id] = output
                     self._terminal_command_events[cmd_id].set()
-            elif msg_type == "task:resume":
-                task_id = message.get("task_id")
-                if task_id:
-                    result = self.agent.tool_executor.execute("resume_task", {"task_id": int(task_id)})
-                    await self._send(websocket, {"type": "task:resumed", "task_id": task_id, "message": result})
-            elif msg_type == "task:events":
-                task_id = message.get("task_id")
-                if task_id:
-                    events = self.task_store.get_events(int(task_id), limit=message.get("limit", 50))
-                    await self._send(websocket, {"type": "task:events", "task_id": task_id, "events": _as_jsonable(events)})
-            elif msg_type == "task:artifacts":
-                task_id = message.get("task_id")
-                if task_id:
-                    artifacts = self.task_store.get_artifacts(int(task_id))
-                    await self._send(websocket, {"type": "task:artifacts", "task_id": task_id, "artifacts": _as_jsonable(artifacts)})
             else:
                 await self._send_error(websocket, f"Unknown message type: {msg_type}")
         except Exception as exc:  # pragma: no cover - guardrail for desktop runtime
@@ -583,7 +369,6 @@ class AresServer:
         return row is not None
 
     def _status(self) -> dict[str, Any]:
-        executor_stats = self.task_executor.stats
         context_usage = {"used": 0, "total": 128000, "percent": 0, "breakdown": {}}
         if self.conversation_id:
             history = self._conversation_history(self.conversation_id)
@@ -614,14 +399,6 @@ class AresServer:
             "type": "status",
             "model": self.config.model,
             "memory_count": len(self._memories()),
-            "task_count": len(self._pending_tasks()),
-            "total_task_count": len(self._tasks()),
-            "completed_task_count": len(self._completed_tasks()),
-            "auto_exec_count": len(self.task_store.get_auto_executable()),
-            "executor_state": executor_stats["state"],
-            "executor_current_task": executor_stats["current_task_title"],
-            "executor_tasks_completed": executor_stats["tasks_completed"],
-            "executor_tasks_failed": executor_stats["tasks_failed"],
             "session_id": self.conversation_id,
             "context_usage": context_usage,
         }
@@ -690,31 +467,6 @@ class AresServer:
         with suppress(TypeError):
             return [_as_jsonable(item) for item in self.memory_store.get_recent(limit=100)]
         return [_as_jsonable(item) for item in self.memory_store.get_recent()]
-
-    def _tasks(self) -> list[dict[str, Any]]:
-        if hasattr(self.task_store, "list_all"):
-            return [_as_jsonable(item) for item in self.task_store.list_all()]
-        if hasattr(self.task_store, "list_pending"):
-            return [_as_jsonable(item) for item in self.task_store.list_pending()]
-        if hasattr(self.task_store, "list_tasks"):
-            return [_as_jsonable(item) for item in self.task_store.list_tasks()]
-        return []
-
-
-    def _pending_tasks(self) -> list[dict[str, Any]]:
-        tasks = self._tasks()
-        return [
-            task for task in tasks
-            if (task.get("state") or task.get("status") or "pending") not in {"completed", "failed", "cancelled"}
-            and task.get("status") not in {"done", "partial", "cancelled"}
-        ]
-
-    def _completed_tasks(self) -> list[dict[str, Any]]:
-        tasks = self._tasks()
-        return [
-            task for task in tasks
-            if (task.get("state") == "completed") or task.get("status") == "done"
-        ]
 
     def _tool_args(self, tool_name: str, payload: Any) -> dict[str, Any]:
         if isinstance(payload, dict):
@@ -829,7 +581,6 @@ class AresServer:
 
     async def close(self) -> None:
         """Shut down stores."""
-        await self.task_executor.stop()
         if self.mcp_manager is not None:
             with suppress(Exception):
                 await self.mcp_manager.close()
@@ -837,7 +588,6 @@ class AresServer:
             self.agent,
             self.conversation_store,
             self.memory_store,
-            self.task_store,
         ):
             close = getattr(obj, "close", None)
             if close:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ares.conversations import ConversationStore
+if TYPE_CHECKING:
+    from ares.conversations import ConversationStore
+
 from ares.tools.exporter import export_data
 from ares.tools.filesystem import (
     list_directory, read_file, search_files, get_file_info as _get_file_info_impl,
@@ -17,7 +19,6 @@ from ares.tools.filesystem import (
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.skills import SkillManager
-from ares.tools.tasks import TaskStore
 from ares.tools.web import fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
 from ares.tools.filesystem_write import edit_file as _edit_file_impl
@@ -54,17 +55,12 @@ class ToolExecutor:
     def __init__(
         self,
         memory_store: MemoryStore,
-        task_store: TaskStore,
         conversation_store: ConversationStore | None = None,
         config: AppConfig | None = None,
-        task_executor: Any | None = None,
     ):
         self.memory = memory_store
-        self.tasks = task_store
         self.conversations = conversation_store
         self.config = config
-        self.task_executor = task_executor
-        self.task_executor_ref = None  # wired by server for resume support
         self.repl = PersistentREPL()
 
     def close(self) -> None:
@@ -78,14 +74,6 @@ class ToolExecutor:
             "search_memory": self._search_memory,
             "update_memory": self._update_memory,
             "delete_memory": self._delete_memory,
-            "create_task": self._create_task,
-            "list_tasks": self._list_tasks,
-            "search_tasks": self._search_tasks,
-            "complete_task": self._complete_task,
-            "cancel_task": self._cancel_task,
-            "get_due_soon": self._get_due_soon,
-            "get_execution_status": self._get_execution_status,
-            "get_executor_status": self._get_executor_status,
             "list_skills": self._list_skills_tool,
             "load_skill": self._load_skill_tool,
             "create_skill": self._create_skill_tool,
@@ -134,9 +122,6 @@ class ToolExecutor:
             "convert_image": self._convert_image,
             "crop_image": self._crop_image,
             "terminal_exec": self._terminal_exec,
-            "resume_task": self._resume_task,
-            "get_task_events": self._get_task_events,
-            "get_task_artifacts": self._get_task_artifacts,
         }
         try:
             handler = handlers[tool_name]
@@ -189,125 +174,6 @@ class ToolExecutor:
         if self.memory.delete(fact_id):
             return f"Forgot memory #{fact_id}."
         return f"Memory #{fact_id} was not found."
-
-    # ── Task tools ────────────────────────────────────────────────
-
-    def _create_task(self, args: dict) -> str:
-        auto_exec = "yes" if args.get("auto_executable", False) else "no"
-        max_turns = int(args.get("max_turns", 10))
-        max_attempts = int(args.get("max_attempts", 3))
-        task_id = self.tasks.create(
-            args["title"],
-            description=args.get("description"),
-            due=args.get("due"),
-            priority=args.get("priority", "medium"),
-            reminder_at=args.get("reminder_at"),
-            auto_executable=auto_exec,
-            max_turns=max_turns,
-        )
-        # Set v2 state
-        self.tasks.update(task_id, state="queued", max_attempts=max_attempts)
-        task = self.tasks.get(task_id)
-        due_str = f" (due: {task['due']})" if task and task.get("due") else ""
-        auto_str = " [auto]" if auto_exec == "yes" else ""
-        if auto_exec == "yes" and self.task_executor_ref is not None:
-            wake = getattr(self.task_executor_ref, "wake", None)
-            if callable(wake):
-                wake()
-        result = f"Created task #{task_id}: {args['title']}{due_str}{auto_str}"
-        if auto_exec == "yes":
-            result += (
-                "\nAuto-executable task queued for the background executor. "
-                "Do not execute it inline; the executor will plan, run, verify, and track artifacts."
-            )
-        return result
-
-    def _format_task(self, task: dict) -> str:
-        due = f" | due: {task['due']}" if task.get("due") else ""
-        status = f" | {task['status']}" if task.get("status") != "pending" else ""
-        return f"- #{task['id']} [{task['priority']}] {task['title']}{due}{status}"
-
-    def _list_tasks(self, args: dict | None = None) -> str:
-        limit = int((args or {}).get("limit", 50))
-        pending = self.tasks.list_pending(limit=limit)
-        if not pending:
-            return "No pending tasks."
-        return "\n".join([f"You have {len(pending)} pending task(s):"] + [
-            self._format_task(t) for t in pending
-        ])
-
-    def _search_tasks(self, args: dict) -> str:
-        results = self.tasks.search(
-            args["query"],
-            limit=int(args.get("limit", 10)),
-            include_done=bool(args.get("include_done", False)),
-        )
-        if not results:
-            return f"No matching tasks found for '{args['query']}'."
-        return "\n".join([f"Found {len(results)} task(s):"] + [
-            self._format_task(t) for t in results
-        ])
-
-    def _complete_task(self, args: dict) -> str:
-        task_id = int(args["task_id"])
-        # Set v2 state alongside old status
-        self.tasks.update(task_id, state="completed")
-        if self.tasks.complete(task_id):
-            return f"Completed task #{task_id}."
-        return f"Task #{task_id} was not found or is not pending."
-
-    def _cancel_task(self, args: dict) -> str:
-        task_id = int(args["task_id"])
-        # Set v2 state alongside old status
-        self.tasks.update(task_id, state="cancelled")
-        if self.tasks.cancel(task_id):
-            return f"Cancelled task #{task_id}."
-        return f"Task #{task_id} was not found."
-
-    def _get_due_soon(self, args: dict) -> str:
-        hours = int(args.get("hours", 24))
-        tasks = self.tasks.get_due_soon(hours=hours)
-        if not tasks:
-            return f"No tasks due in the next {hours} hour(s)."
-        return "\n".join([f"Due in the next {hours} hour(s):"] + [
-            self._format_task(t) for t in tasks
-        ])
-
-    def _get_execution_status(self, args: dict) -> str:
-        limit = int(args.get("limit", 10))
-        tasks = self.tasks.get_recently_executed(limit=limit)
-        if not tasks:
-            return "No tasks have been auto-executed yet."
-        lines = [f"Recently executed ({len(tasks)} task(s)):"]
-        for t in tasks:
-            status_icon = "✅" if t["status"] == "done" else "⚠️"
-            lines.append(
-                f"  {status_icon} #{t['id']} {t['title']} [{t['status']}]"
-            )
-            if t.get("execution_notes"):
-                lines.append(f"     Notes: {t['execution_notes']}")
-            if t.get("executed_at"):
-                lines.append(f"     At: {t['executed_at']}")
-        return "\n".join(lines)
-
-    def _get_executor_status(self, args: dict) -> str:
-        if self.task_executor is None:
-            return "Executor not available (no reference configured)."
-        stats = self.task_executor.stats if hasattr(self.task_executor, "stats") else {}
-        lines = [f"Executor state: {stats.get('state', 'unknown')}"]
-        if stats.get("enabled") is not None:
-            lines.append(f"Enabled: {'yes' if stats['enabled'] else 'no'}")
-        if stats.get("current_task_title"):
-            lines.append(f"Currently executing: #{stats['current_task_id']} \"{stats['current_task_title']}\"")
-        if stats.get("last_error"):
-            lines.append(f"Last error: {stats['last_error']}")
-        if stats.get("tasks_completed") is not None:
-            lines.append(f"Tasks completed: {stats['tasks_completed']}")
-        if stats.get("tasks_failed") is not None:
-            lines.append(f"Tasks failed: {stats['tasks_failed']}")
-        if stats.get("started_at"):
-            lines.append(f"Started at: {stats['started_at']}")
-        return "\n".join(lines)
 
     # ── Skills ─────────────────────────────────────────────────────
 
@@ -364,7 +230,6 @@ class ToolExecutor:
     def _export_data(self, args: dict) -> str:
         path = export_data(
             memory_store=self.memory,
-            task_store=self.tasks,
             conversation_store=self.conversations,
             config=self.config,
             path=args.get("path"),
@@ -733,68 +598,3 @@ class ToolExecutor:
                 pass  # display is optional
 
         return result
-
-    # ── v2 Task Tools ──────────────────────────────────────────
-
-    def _resume_task(self, args: dict) -> str:
-        """Resume a failed task from where it left off."""
-        task_id = int(args["task_id"])
-        task = self.tasks.get(task_id)
-
-        if not task:
-            return f"Task #{task_id} not found."
-
-        state = task.get("state") or task.get("status", "pending")
-        if state not in ("failed", "cancelled"):
-            return f"Task #{task_id} cannot be resumed (state: {state})."
-
-        if not task.get("plan"):
-            return f"Task #{task_id} has no execution plan. Cannot resume."
-
-        if self.task_executor_ref:
-            self.task_executor_ref.enqueue_resume(task_id)
-            return f"Task #{task_id} queued for resume."
-        else:
-            return "Task executor not available."
-
-    def _get_task_events(self, args: dict) -> str:
-        """Get the execution log for a task."""
-        task_id = int(args["task_id"])
-        limit = int(args.get("limit", 50))
-        events = self.tasks.get_events(task_id, limit=limit)
-
-        if not events:
-            return f"No events found for task #{task_id}."
-
-        lines = [f"Execution Log — Task #{task_id}:"]
-        for event in events:
-            ts = event.get("timestamp", "?")
-            level = event.get("level", "info")
-            step = event.get("step")
-            msg = event.get("message", "")
-
-            icon = {"info": "→", "success": "✓", "warning": "⚠", "error": "✗"}.get(level, "·")
-            step_prefix = f"Step {step}: " if step else ""
-
-            lines.append(f"  {icon} {ts}  {step_prefix}{msg}")
-
-        return "\n".join(lines)
-
-    def _get_task_artifacts(self, args: dict) -> str:
-        """Get all files created or modified by a task."""
-        task_id = int(args["task_id"])
-        artifacts = self.tasks.get_artifacts(task_id)
-
-        if not artifacts:
-            return f"No artifacts found for task #{task_id}."
-
-        lines = [f"Artifacts — Task #{task_id}:"]
-        for a in artifacts:
-            icon = "📄" if a["artifact_type"] == "write_file" else "📝" if a["artifact_type"] == "edit_file" else "📁"
-            step = a.get("step", "?")
-            size = a.get("size_human", "?")
-            lines.append(f"  {icon} {a['path']}")
-            lines.append(f"     {size}" + (f" · {a['line_count']} lines" if a.get('line_count') else ""))
-            lines.append(f"     Step {step}")
-
-        return "\n".join(lines)

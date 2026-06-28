@@ -1,18 +1,15 @@
 """Integration tests for persistent REPL through ToolExecutor."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ares.tools.executor import ToolExecutor
-from ares.tools.tasks import TaskStore
 
 
 @pytest.fixture
 def tool_executor():
-    tasks = TaskStore(db_path=Path(":memory:"))
-    executor = ToolExecutor(memory_store=SimpleNamespace(), task_store=tasks)
+    executor = ToolExecutor(memory_store=SimpleNamespace())
     yield executor
     executor.close()
 

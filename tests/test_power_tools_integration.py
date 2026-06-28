@@ -4,14 +4,12 @@ import os
 import pytest
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.memory import MemoryStore
-from ares.tools.tasks import TaskStore
 
 
 @pytest.fixture
 def executor():
     memory = MemoryStore()
-    tasks = TaskStore()
-    return ToolExecutor(memory_store=memory, task_store=tasks)
+    return ToolExecutor(memory_store=memory)
 
 
 class TestToolDefinitions:
