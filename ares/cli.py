@@ -28,6 +28,7 @@ from ares.conversations import ConversationStore
 from ares.tools.exporter import export_data, import_data
 from ares.memory import MemoryStore
 from ares.profile import ProfileManager, PROFILE_TEMPLATE
+from ares.onboarding import OnboardingWizard
 from ares.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
@@ -51,6 +52,7 @@ COMPLETER = WordCompleter([
     "/forget", "/export", "/import", "/reset", "/exit",
     "/soul", "/profile", "/context",
     "/skills", "/skills search", "/skills categories", "/skills load",
+    "/setup",
 ], ignore_case=True)
 
 
@@ -103,6 +105,13 @@ class AresCLI:
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        if sys.stdin.isatty() and sys.stdout.isatty() and not self.profile_manager.is_populated():
+            OnboardingWizard(
+                console=self.console,
+                config=self.config,
+                profile_manager=self.profile_manager,
+                soul_manager=self.soul_manager,
+            ).run(re_run=False)
         self.skill_manager = SkillManager(skill_dirs=list(self.config.skill_dirs or []) or None)
         self.mcp_manager = (
             MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
@@ -290,6 +299,7 @@ class AresCLI:
             table.add_row("/profile [show|edit]", "View or edit your profile")
             table.add_row("/context", "Show active context for this session")
             table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
+            table.add_row("/setup", "Run the onboarding wizard again")
             table.add_row("/skill-name", "Load a skill directly by slash command")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
@@ -339,6 +349,16 @@ class AresCLI:
 
         elif command == "/clear":
             self.console.clear()
+
+        elif command == "/setup":
+            completed = OnboardingWizard(
+                console=self.console,
+                config=self.config,
+                profile_manager=self.profile_manager,
+                soul_manager=self.soul_manager,
+            ).run(re_run=True)
+            if completed:
+                self.agent.set_model(self.config.model)
 
         elif command == "/export":
             path = export_data(

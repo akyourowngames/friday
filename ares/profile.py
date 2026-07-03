@@ -50,6 +50,23 @@ class ProfileManager:
         except (OSError, UnicodeDecodeError):
             return ""
 
+    def is_populated(self) -> bool:
+        """Return True if the profile has been filled in with a non-empty name."""
+        content = self.read()
+        if not content:
+            return False
+        in_identity = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped == "## Identity":
+                in_identity = True
+                continue
+            if in_identity and stripped.startswith("## "):
+                break
+            if in_identity and stripped.startswith("- Name:"):
+                return bool(stripped.split(":", 1)[1].strip())
+        return False
+
     def _resolve_ref_path(self, raw_path: str) -> Path:
         ref_path = Path(raw_path).expanduser()
         if not ref_path.is_absolute():
