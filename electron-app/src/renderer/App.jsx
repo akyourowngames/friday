@@ -4,7 +4,6 @@ import { ChatArea } from "./components/Chat/ChatArea.jsx";
 import { SettingsPanel } from "./components/Settings/SettingsPanel.jsx";
 import { Sidebar } from "./components/Sidebar/Sidebar.jsx";
 import { StatusBar } from "./components/common/StatusBar.jsx";
-import { TaskNotification } from "./components/common/TaskNotification.jsx";
 import TerminalPanel from "./components/Terminal/TerminalPanel.jsx";
 import TerminalHeader from "./components/Terminal/TerminalHeader.jsx";
 import useTerminalStore from "./stores/terminalStore.js";
@@ -111,7 +110,6 @@ export default function App() {
           <div className="terminal-split-layout">
             <div className="chat-panel" style={{ width: `${splitPos}%` }}>
               <ChatArea onSend={connection.sendMessage} />
-              <TaskNotification />
             </div>
             <div
               className="split-divider"
@@ -125,7 +123,6 @@ export default function App() {
         ) : (
           <>
             <ChatArea onSend={connection.sendMessage} />
-            <TaskNotification />
           </>
         )}
         <StatusBar onRetry={connection.reconnect} />

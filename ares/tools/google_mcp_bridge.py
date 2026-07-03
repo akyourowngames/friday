@@ -70,7 +70,23 @@ def _get_credentials(token_name: str) -> Credentials:
     )
     if creds.expired and creds.refresh_token:
         creds.refresh(AuthRequest())
+        _store_refreshed_credentials(token_name, data, creds)
     return creds
+
+
+def _store_refreshed_credentials(
+    token_name: str, existing_data: dict[str, Any], creds: Credentials
+) -> None:
+    """Persist refreshed Google OAuth credentials back to the MCP token file."""
+    token_path = TOKEN_DIR / f"{token_name}.json"
+    updated = dict(existing_data)
+    if creds.token:
+        updated["access_token"] = creds.token
+    if creds.refresh_token:
+        updated["refresh_token"] = creds.refresh_token
+    if creds.expiry:
+        updated["expires_at"] = creds.expiry.astimezone(timezone.utc).isoformat()
+    token_path.write_text(json.dumps(updated, indent=2), encoding="utf-8")
 
 
 def _get_service(service_name: str, version: str, token_name: str):
@@ -85,7 +101,16 @@ def _get_service(service_name: str, version: str, token_name: str):
 
 
 def _maybe_refresh_token_on_401(token_name: str) -> None:
-    """Force-refresh cached service for token_name on 401 errors."""
+    """Force-refresh credentials and clear cached services for token_name on 401 errors."""
+    try:
+        token_path = TOKEN_DIR / f"{token_name}.json"
+        data = json.loads(token_path.read_text())
+        creds = _get_credentials(token_name)
+        if creds.refresh_token:
+            creds.refresh(AuthRequest())
+            _store_refreshed_credentials(token_name, data, creds)
+    except Exception as exc:
+        logger.warning("Google token refresh failed for %s after 401: %s", token_name, exc)
     for key in list(_service_cache.keys()):
         if key.endswith(f":{token_name}"):
             del _service_cache[key]

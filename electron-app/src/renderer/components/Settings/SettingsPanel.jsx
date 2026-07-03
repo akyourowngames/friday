@@ -5,7 +5,6 @@ import { ModelSelector } from "./ModelSelector.jsx";
 export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
   const model = useSettingsStore((s) => s.model);
   const memoryCount = useSettingsStore((s) => s.memoryCount);
-  const taskCount = useSettingsStore((s) => s.taskCount);
   const serverUrl = useSettingsStore((s) => s.serverUrl);
 
   return (
@@ -50,10 +49,6 @@ export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
               <div className="settings-stat">
                 <span className="settings-stat-label">Memories</span>
                 <span className="settings-stat-value">{memoryCount}</span>
-              </div>
-              <div className="settings-stat">
-                <span className="settings-stat-label">Tasks</span>
-                <span className="settings-stat-value">{taskCount}</span>
               </div>
               <div className="settings-stat">
                 <span className="settings-stat-label">Model</span>

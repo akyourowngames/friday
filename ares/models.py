@@ -113,27 +113,3 @@ class AppConfig(BaseModel):
     cron_max_concurrent: int = 3
     cron_max_iterations: int = 10
     cron_log_retention_days: int = 90
-
-
-# ── v2: Task States ──────────────────────────────────────────
-
-
-class TaskState(str, Enum):
-    QUEUED = "queued"
-    PLANNING = "planning"
-    RUNNING = "running"
-    RETRYING = "retrying"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-TASK_TRANSITIONS = {
-    "queued":      ["planning", "cancelled"],
-    "planning":    ["running", "failed", "cancelled"],
-    "running":     ["completed", "retrying", "failed", "cancelled"],
-    "retrying":    ["running", "failed", "cancelled"],
-    "completed":   [],
-    "failed":      ["queued"],
-    "cancelled":   ["queued"],
-}
