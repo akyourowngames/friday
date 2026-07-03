@@ -78,3 +78,35 @@ class TestProfileManager:
     def test_template_is_valid_markdown(self):
         assert "# About Me" in PROFILE_TEMPLATE
         assert "## Preferences" in PROFILE_TEMPLATE
+
+    def test_is_populated_returns_false_for_empty_template(self, tmp_path):
+        manager = ProfileManager(data_dir=tmp_path)
+        manager.ensure_exists()
+        assert manager.is_populated() is False
+
+    def test_is_populated_returns_true_when_name_set(self, tmp_path):
+        path = tmp_path / "profile.md"
+        path.write_text(
+            "# About Me\n\n## Identity\n- Name: Alice\n- Pronouns: she/her\n",
+            encoding="utf-8",
+        )
+        assert ProfileManager(data_dir=tmp_path).is_populated() is True
+
+    def test_is_populated_returns_false_for_missing_file(self, tmp_path):
+        assert ProfileManager(data_dir=tmp_path).is_populated() is False
+
+    def test_is_populated_returns_false_for_empty_name(self, tmp_path):
+        path = tmp_path / "profile.md"
+        path.write_text(
+            "# About Me\n\n## Identity\n- Name: \n- Pronouns: \n",
+            encoding="utf-8",
+        )
+        assert ProfileManager(data_dir=tmp_path).is_populated() is False
+
+    def test_is_populated_returns_true_when_only_name(self, tmp_path):
+        path = tmp_path / "profile.md"
+        path.write_text(
+            "# About Me\n\n## Identity\n- Name: Bob\n",
+            encoding="utf-8",
+        )
+        assert ProfileManager(data_dir=tmp_path).is_populated() is True

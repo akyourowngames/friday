@@ -237,6 +237,29 @@ async def test_process_input_routes_tool_tokens_to_renderers():
     assert app.conversation_history[-1]["content"] == "Done."
 
 
+def test_setup_command_runs_onboarding_and_refreshes_agent_model(monkeypatch):
+    app = make_cli()
+    calls = []
+
+    class DummyWizard:
+        def __init__(self, **kwargs):
+            assert kwargs["console"] is app.console
+            assert kwargs["config"] is app.config
+            assert kwargs["profile_manager"] is app.profile_manager
+            assert kwargs["soul_manager"] is app.soul_manager
+
+        def run(self, re_run=False):
+            calls.append(re_run)
+            app.config.model = "mimo-v2.5-free"
+            return True
+
+    monkeypatch.setattr(cli_module, "OnboardingWizard", DummyWizard)
+
+    assert app._handle_command("/setup")
+
+    assert calls == [True]
+    assert app.agent.model == "mimo-v2.5-free"
+
 
 def test_cli_clear_current_task_cancellation_uncancels_all(monkeypatch):
     class FakeTask:
