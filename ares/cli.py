@@ -12,6 +12,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.styles import Style
+from prompt_toolkit.patch_stdout import patch_stdout
 
 from rich.console import Console
 from rich.panel import Panel
@@ -36,6 +37,9 @@ from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager
 from ares.cron import CronScheduler, CronStore
+from ares.cron.toast import CronToastManager
+from ares.session import SessionManager
+from ares.sessions import SessionStore
 
 # ── Styles ────────────────────────────────────────────────────
 STYLE = Style.from_dict({
@@ -110,6 +114,8 @@ class AresCLI:
         self.conversation_store.summarize_ended_without_summary(
             min_messages=self.config.session_summary_messages
         )
+        self.session_manager = SessionManager()
+        self.session_store = SessionStore(data_dir=data_dir)
         self.agent = Agent(
             memory_store=self.memory_store,
             conversation_store=self.conversation_store,
@@ -118,6 +124,8 @@ class AresCLI:
             model=self.config.model,
             config=self.config,
             mcp_manager=self.mcp_manager,
+            session_store=self.session_store,
+            session_id=self.session_manager.get_id(),
         )
         self.conversation_history: list[dict] = self.conversation_store.get_recent_messages(
             limit=self.config.max_context_messages
@@ -125,10 +133,12 @@ class AresCLI:
         self.notifier = DesktopNotifier(enabled=self.config.enable_desktop_notifications)
         cron_root = Path(self.config.data_dir).expanduser().parent
         self.cron_store = CronStore(cron_root)
+        self.toast_manager = CronToastManager(self.console)
         self.cron_scheduler = CronScheduler(
             self.cron_store,
             tick_seconds=self.config.cron_tick_seconds,
             max_concurrent=self.config.cron_max_concurrent,
+            on_complete=self.toast_manager,
         ) if self.config.cron_enabled else None
         self.session = self._create_prompt_session()
 
@@ -152,6 +162,7 @@ class AresCLI:
             self.cron_store,
             tick_seconds=self.config.cron_tick_seconds,
             max_concurrent=self.config.cron_max_concurrent,
+            on_complete=self.toast_manager,
         ) if self.config.cron_enabled else None
         self.session = self._create_prompt_session()
 
@@ -549,6 +560,11 @@ class AresCLI:
 
         self.conversation_store.add_exchange(self.conversation_id, user_input, full_response)
 
+        # Dual-write to per-session JSONL
+        session_id = self.session_manager.get_id()
+        self.session_store.write_message(session_id, "user", user_input)
+        self.session_store.write_message(session_id, "assistant", full_response)
+
 
         # Trim conversation history
         max_msgs = self.config.max_context_messages
@@ -570,37 +586,38 @@ class AresCLI:
         self._show_banner()
 
         try:
-            while True:
-                try:
-                    user_input = await self._prompt()
+            with patch_stdout():
+                while True:
+                    try:
+                        user_input = await self._prompt()
 
-                    if not user_input.strip():
+                        if not user_input.strip():
+                            continue
+
+                        if user_input.strip().startswith("/"):
+                            try:
+                                should_continue = self._handle_command(user_input.strip())
+                            except Exception as e:
+                                self.console.print(f"[red]Command error: {e}[/red]")
+                                should_continue = True
+                            if not should_continue:
+                                break
+                            continue
+
+                        await self._process_input(user_input)
+
+                    except KeyboardInterrupt:
+                        self.console.print("\n[dim]Interrupted. Press /exit to quit.[/dim]\n")
                         continue
-
-                    if user_input.strip().startswith("/"):
-                        try:
-                            should_continue = self._handle_command(user_input.strip())
-                        except Exception as e:
-                            self.console.print(f"[red]Command error: {e}[/red]")
-                            should_continue = True
-                        if not should_continue:
-                            break
+                    except EOFError:
+                        break
+                    except asyncio.CancelledError:
+                        _clear_current_task_cancellation()
+                        self._reset_prompt_session()
+                        self.console.print(
+                            "\n[dim yellow]A background operation cancelled the prompt; recovered. Try again or use /exit to quit.[/dim yellow]\n"
+                        )
                         continue
-
-                    await self._process_input(user_input)
-
-                except KeyboardInterrupt:
-                    self.console.print("\n[dim]Interrupted. Press /exit to quit.[/dim]\n")
-                    continue
-                except EOFError:
-                    break
-                except asyncio.CancelledError:
-                    _clear_current_task_cancellation()
-                    self._reset_prompt_session()
-                    self.console.print(
-                        "\n[dim yellow]A background operation cancelled the prompt; recovered. Try again or use /exit to quit.[/dim yellow]\n"
-                    )
-                    continue
         finally:
             # Cleanup
             if self.cron_scheduler is not None:
@@ -618,13 +635,20 @@ class AresCLI:
             except Exception as exc:
                 self.console.print(f"[dim yellow]Shutdown warning (agent): {exc}[/dim yellow]")
             self._cleanup_step("memory store", self.memory_store.close)
+            # Generate session summary, write to JSONL
+            try:
+                summary = self.conversation_store.summarize_conversation(
+                    self.conversation_id
+                )
+                if summary:
+                    self.session_store.write_summary(
+                        self.session_manager.get_id(), summary
+                    )
+            except Exception as exc:
+                self.console.print(f"[dim yellow]Shutdown warning (summary): {exc}[/dim yellow]")
             self._cleanup_step(
                 "end conversation",
                 lambda: self.conversation_store.end_conversation(self.conversation_id),
-            )
-            self._cleanup_step(
-                "summarize conversation",
-                lambda: self.conversation_store.summarize_conversation(self.conversation_id),
             )
             self._cleanup_step("conversation store", self.conversation_store.close)
             self.console.print(f"\n[dim]Goodbye! {self.icons['bye']}[/dim]\n")

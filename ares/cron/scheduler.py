@@ -8,8 +8,8 @@ from ares.cron.runner import CronRunner
 from ares.cron.store import CronStore
 
 class CronScheduler:
-    def __init__(self, store: CronStore, runner: CronRunner | None = None, tick_seconds: int = 60, max_concurrent: int = 3):
-        self.store=store; self.runner=runner or CronRunner(store=store); self.tick_seconds=tick_seconds; self.sem=asyncio.Semaphore(max_concurrent); self._task=None; self._running={}
+    def __init__(self, store: CronStore, runner: CronRunner | None = None, tick_seconds: int = 60, max_concurrent: int = 3, on_complete=None):
+        self.store=store; self.runner=runner or CronRunner(store=store, on_complete=on_complete); self.tick_seconds=tick_seconds; self.sem=asyncio.Semaphore(max_concurrent); self._task=None; self._running={}; self.on_complete=on_complete
     async def start(self):
         if self._task is None or self._task.done(): self._task=asyncio.create_task(self._loop())
     async def stop(self):

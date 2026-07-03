@@ -49,6 +49,7 @@ from ares.tools.image_edit import convert_image as _convert_image
 from ares.tools.image_edit import crop_image as _crop_image
 from ares.cron.store import CronStore
 from ares.cron.tools import CronToolHandlers
+from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
 
 
 class ToolExecutor:
@@ -136,6 +137,7 @@ class ToolExecutor:
             "delete_cron_job": self.cron.delete_cron_job,
             "run_cron_job_now": self.cron.run_cron_job_now,
             "get_cron_logs": self.cron.get_cron_logs,
+            "get_current_datetime": self._get_current_datetime,
         }
         try:
             handler = handlers[tool_name]
@@ -612,3 +614,11 @@ class ToolExecutor:
                 pass  # display is optional
 
         return result
+
+    # ── DateTime tool ─────────────────────────────────────────────
+
+    def _get_current_datetime(self, args: dict) -> str:
+        """Get the current date and time."""
+        import json
+        result = _get_current_datetime_impl(timezone_name=args.get("timezone"))
+        return json.dumps(result, indent=2)

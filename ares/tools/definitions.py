@@ -560,4 +560,14 @@ def get_tool_definitions() -> list[dict]:
         _tool("delete_cron_job", "Delete a cron job while retaining logs.", {"job_id": {"type": "string"}}, ["job_id"]),
         _tool("run_cron_job_now", "Trigger a cron job immediately.", {"job_id": {"type": "string"}}, ["job_id"]),
         _tool("get_cron_logs", "Read recent markdown logs for a cron job.", {"job_id": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, ["job_id"]),
+        _tool(
+            "get_current_datetime",
+            "Get the current date and time. Returns datetime, date, time, timezone, day of week, and unix timestamp.",
+            {
+                "timezone": {
+                    "type": "string",
+                    "description": "Optional IANA timezone (e.g. 'America/New_York'). Defaults to system timezone.",
+                },
+            },
+        ),
     ]

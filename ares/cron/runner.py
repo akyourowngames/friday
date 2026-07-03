@@ -1,6 +1,7 @@
 """Cron job runner that executes each run in a fresh Agent session."""
 from __future__ import annotations
 
+import re
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,9 +12,10 @@ from ares.cron.schedule_utils import next_run_utc
 from ares.cron.store import CronStore, utc_now
 
 class CronRunner:
-    def __init__(self, store: CronStore | None = None, config=None):
+    def __init__(self, store: CronStore | None = None, config=None, on_complete=None):
         self.config = config or load_config()
         self.store = store or CronStore(Path(self.config.data_dir).expanduser().parent)
+        self.on_complete = on_complete
     def latest_summary(self, job_id: str) -> str:
         logs=self.store.recent_logs(job_id, 1)
         if not logs: return ""
@@ -53,9 +55,14 @@ class CronRunner:
         log=self._write_log(job, started, status, duration, output, err)
         updates={"state":"scheduled","last_run_at":started,"run_count":int(job.get('run_count') or 0)+1,"last_status":status,"next_run_at":next_run_utc(job['cron'], job.get('timezone','UTC'), datetime.now(timezone.utc))}
         self.store.update_job(job_id, **updates)
+        if self.on_complete:
+            clean = re.sub(r'\[tool:[^\]]*\]', '', output).strip()
+            summary_text = (clean.split('\n\n')[0] if clean else ('Run failed.' if status == 'failed' else 'No output.'))
+            self.on_complete(job['name'], summary_text, status, duration)
         return log
     def _write_log(self, job: dict, started: str, status: str, duration: float, output: str, err: str='') -> Path:
         path=self.store.log_dir(job['id']) / (started.replace(':','-') + '.md')
-        summary=(output.strip().split('\n\n')[0] if output.strip() else ('Run failed.' if status=='failed' else 'No output.'))
+        clean = re.sub(r'\[tool:[^\]]*\]', '', output).strip()
+        summary=(clean.split('\n\n')[0] if clean else ('Run failed.' if status=='failed' else 'No output.'))
         path.write_text(f"# Cron Run: {job['name']}\n**Job:** {job['id']}\n**Run:** {started}\n**Status:** {status}\n**Duration:** {duration:.1f}s\n\n## Prompt\n{job['prompt']}\n\n## Agent Output\n{output}\n\n## Summary\n{summary}\n\n## Run Metadata\n- Model: {getattr(self.config,'model','')}\n", encoding='utf-8')
         return path

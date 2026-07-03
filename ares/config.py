@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from ares.models import AppConfig
+from ares.models import AppConfig, DEFAULT_MCP_SERVERS
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,13 @@ def get_db_path(data_dir: Path | None = None) -> Path:
     return ensure_data_dir(data_dir) / "ares.db"
 
 
+def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
+    """Inject default MCP servers if the user hasn't configured any."""
+    if not config.mcp_servers:
+        config.mcp_servers = [s.copy() for s in DEFAULT_MCP_SERVERS]
+    return config
+
+
 def load_config() -> AppConfig:
     """Load config from ~/.ares/config.json, or return defaults.
 
@@ -36,7 +43,8 @@ def load_config() -> AppConfig:
         try:
             with open(CONFIG_PATH) as f:
                 data = json.load(f)
-            return AppConfig(**data)
+            config = AppConfig(**data)
+            return _ensure_mcp_defaults(config)
         except (OSError, json.JSONDecodeError, TypeError, ValidationError) as exc:
             logger.warning("Failed to load config from %s; using defaults: %s", CONFIG_PATH, exc)
     return AppConfig()

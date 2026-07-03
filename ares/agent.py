@@ -31,9 +31,13 @@ class Agent:
         config: AppConfig | None = None,
         mcp_manager: Any | None = None,
         is_cron_session: bool = False,
+        session_store: Any | None = None,
+        session_id: str | None = None,
     ):
         self.memory_store = memory_store
         self.conversation_store = conversation_store
+        self._session_store = session_store
+        self._session_id = session_id
         self.tool_executor = ToolExecutor(
             memory_store=memory_store,
             conversation_store=conversation_store,
@@ -114,16 +118,31 @@ class Agent:
         project_ctx = ""
         if self.config.project_context_enabled:
             project_ctx = self.project_context.get_context(token_budget=project_budget)
-        memories = self.memory_store.search(user_input, limit=max_retrieval)
+
+        # Session-scoped memory search
+        search_scope = "session" if self._session_id else "all"
+        memories = self.memory_store.search(
+            user_input, limit=max_retrieval,
+            scope=search_scope, session_id=self._session_id,
+            recent_sessions=getattr(self.config, "memory_session_scope", 3),
+        )
+
         summaries = []
         if self.conversation_store is not None:
             summaries = self.conversation_store.get_recent_summaries(limit=5)
+
+        # Read previous session summary from JSONL
+        prev_summary = None
+        if self._session_id and self._session_store:
+            prev_summary = self._session_store.get_previous_summary(self._session_id)
+
         return build_context_prompt(
             soul_context=soul_ctx,
             profile_context=profile_ctx,
             project_context=project_ctx,
             memories=memories,
             conversation_summaries=summaries,
+            previous_session_summary=prev_summary,
             token_budget=token_budget,
         )
 

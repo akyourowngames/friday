@@ -40,6 +40,22 @@ class ConversationMessage(BaseModel):
     timestamp: Optional[str] = None
 
 
+DEFAULT_MCP_SERVERS: list[dict] = [
+    {
+        "name": "playwright",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+            "@playwright/mcp@latest",
+            "--browser", "chrome",
+            "--caps", "vision,devtools",
+            "--user-data-dir", "~/.ares/data/playwright-profile",
+            "--viewport-size", "1280x720",
+        ],
+    },
+]
+
+
 class VoiceConfig(BaseModel):
     """Voice settings for continuous voice mode."""
 
@@ -81,13 +97,14 @@ class AppConfig(BaseModel):
     tool_output_max_chars: int = 500
     memory_dedup_threshold: float = 0.3
     memory_stale_days: int = 90
+    memory_session_scope: int = 3  # Search current + N recent sessions
     memory_extract_enabled: bool = True
     memory_cleanup_enabled: bool = True
     skills_enabled: bool = True
     skill_dirs: list[str] = Field(default_factory=lambda: ["~/.ares/skills"])
     skill_auto_suggest: bool = True
     mcp_servers: list[dict] = Field(
-        default_factory=list,
+        default_factory=lambda: [s.copy() for s in DEFAULT_MCP_SERVERS],
         description="MCP server configurations for remote Model Context Protocol tools.",
     )
     voice: VoiceConfig = Field(default_factory=VoiceConfig)

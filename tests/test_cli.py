@@ -107,6 +107,8 @@ class DummyConversationStore:
 
 
 def make_cli():
+    from ares.session import SessionManager
+    from ares.sessions import SessionStore
     app = AresCLI.__new__(AresCLI)
     app.console_file = StringIO()
     app.console = Console(file=app.console_file, force_terminal=False, width=120)
@@ -120,6 +122,8 @@ def make_cli():
     app.conversation_id = 1
     app.conversation_history = []
     app.icons = {"current": " < current"}
+    app.session_manager = SessionManager()
+    app.session_store = SessionStore(data_dir=Path(app.config.data_dir).expanduser())
     return app
 
 

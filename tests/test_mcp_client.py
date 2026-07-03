@@ -12,7 +12,9 @@ from ares.tools.mcp_client import MCPAuthProvider, MCPClientManager, MCPServerCo
 
 def test_app_config_exposes_mcp_servers_default():
     config = AppConfig()
-    assert config.mcp_servers == []
+    # Default includes Playwright MCP server out of the box
+    assert len(config.mcp_servers) >= 1
+    assert config.mcp_servers[0]["name"] == "playwright"
 
 
 def test_mcp_server_config_defaults():

@@ -248,6 +248,7 @@ def build_context_prompt(
     project_context: str = "",
     memories: list[dict] | None = None,
     conversation_summaries: list[str] | None = None,
+    previous_session_summary: str | None = None,
     token_budget: int = 2000,
 ) -> str:
     """Build a priority-ordered context string within a shared token budget."""
@@ -260,6 +261,11 @@ def build_context_prompt(
     remaining = _append_section(sections, soul_context, remaining)
     remaining = _append_section(sections, profile_context, remaining)
     remaining = _append_section(sections, project_context, remaining)
+
+    # Inject previous session summary (high priority — recent context)
+    if previous_session_summary and remaining > 0:
+        summary_section = f"## Previous Session Summary\n{previous_session_summary}"
+        remaining = _append_section(sections, summary_section, remaining)
 
     summary_text = format_summaries(conversation_summaries)
     remaining = _append_section(sections, summary_text, remaining)

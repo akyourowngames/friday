@@ -138,6 +138,8 @@ class MemoryStore:
         _ensure_column(self.conn, "facts_meta", "importance", "REAL DEFAULT 0.5")
         _ensure_column(self.conn, "facts_meta", "source", "TEXT DEFAULT 'conversation'")
         _ensure_column(self.conn, "facts_meta", "updated_at", "TEXT")
+        _ensure_column(self.conn, "facts_meta", "session_id", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "session_id", "TEXT DEFAULT NULL")
 
         # FTS5 for keyword search
         self.conn.execute("""
@@ -160,13 +162,14 @@ class MemoryStore:
         confidence: float = 1.0,
         importance: float = 0.5,
         source: str = "conversation",
+        session_id: str | None = None,
     ) -> int:
         """Store a new fact. Returns the fact_id."""
         # Insert metadata
         cursor = self.conn.execute(
-            """INSERT INTO facts_meta (fact_text, category, confidence, importance, source)
-               VALUES (?, ?, ?, ?, ?)""",
-            (fact_text, category, confidence, importance, source),
+            """INSERT INTO facts_meta (fact_text, category, confidence, importance, source, session_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (fact_text, category, confidence, importance, source, session_id),
         )
         fact_id = cursor.lastrowid
 
@@ -267,9 +270,31 @@ class MemoryStore:
         confidence_boost = confidence * 0.02
         return base_score + age_term - importance_boost - confidence_boost - access_boost
 
-    def search(self, query: str, limit: int = 5) -> list[dict]:
-        """Hybrid search: vector similarity + FTS5 keyword match, merged."""
+    def search(self, query: str, limit: int = 5, scope: str = "all",
+               session_id: str | None = None, recent_sessions: int = 3) -> list[dict]:
+        """Hybrid search: vector similarity + FTS5 keyword match, merged.
+
+        Args:
+            query: Search text.
+            limit: Max results.
+            scope: "session" to search current + recent N, "all" for everything.
+            session_id: Current session ID (required when scope="session").
+            recent_sessions: Number of recent sessions to include (default 3).
+        """
         results = {}
+
+        # Build session filter for scoped search
+        session_filter = ""
+        session_params: list = []
+        if scope == "session" and session_id:
+            session_filter = """AND (session_id = ? OR session_id IS NULL
+                OR session_id IN (
+                    SELECT DISTINCT session_id FROM facts_meta
+                    WHERE session_id IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                ))"""
+            session_params = [session_id, recent_sessions]
 
         # 1. Vector search (semantic)
         if self.vector_enabled:
@@ -282,6 +307,15 @@ class MemoryStore:
                     """,
                     (query_vec, limit * 2),
                 ).fetchall()
+                # Filter by session scope after vector search
+                if session_filter:
+                    valid_ids = set()
+                    meta_rows = self.conn.execute(
+                        f"SELECT fact_id FROM facts_meta WHERE fact_id IN ({','.join('?' for _ in vec_rows)}) {session_filter}",
+                        [r["rowid"] for r in vec_rows] + session_params,
+                    ).fetchall()
+                    valid_ids = {r["fact_id"] for r in meta_rows}
+                    vec_rows = [r for r in vec_rows if r["rowid"] in valid_ids]
                 for row in vec_rows:
                     results[row["rowid"]] = {"distance": row["distance"], "source": "vector"}
             except Exception as exc:
@@ -296,6 +330,15 @@ class MemoryStore:
                 """,
                 (query, limit * 2),
             ).fetchall()
+            # Filter by session scope after FTS search
+            if session_filter:
+                valid_ids = set()
+                meta_rows = self.conn.execute(
+                    f"SELECT fact_id FROM facts_meta WHERE fact_id IN ({','.join('?' for _ in fts_rows)}) {session_filter}",
+                    [r["rowid"] for r in fts_rows] + session_params,
+                ).fetchall()
+                valid_ids = {r["fact_id"] for r in meta_rows}
+                fts_rows = [r for r in fts_rows if r["rowid"] in valid_ids]
             for row in fts_rows:
                 rid = row["rowid"]
                 if rid in results:

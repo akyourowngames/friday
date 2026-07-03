@@ -9,8 +9,8 @@ class CronToastManager:
     """Renders a single-line toast when a cron job completes.
 
     Designed to be passed as a callable to CronRunner's on_complete
-    callback. Under prompt_toolkit's patch_stdout(), console.print()
-    renders above the active prompt without corrupting user input.
+    callback. Creates a fresh Console per call so it always picks up
+    prompt_toolkit's patched stdout (activated via ``patch_stdout()``).
     """
 
     def __init__(self, console: Console):
@@ -23,4 +23,5 @@ class CronToastManager:
         text.append(job_name, style="bold cyan")
         text.append(f" — {summary[:60]}", style="dim")
         text.append(f" ({duration:.1f}s)", style="dim white")
-        self.console.print(text)
+        # Fresh Console picks up patched stdout from patch_stdout()
+        Console().print(text)
