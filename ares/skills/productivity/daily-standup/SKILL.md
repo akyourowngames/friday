@@ -1,6 +1,6 @@
 ---
 name: daily-standup
-description: Compile a daily status — review pending tasks, due-soon items, recent conversations, active projects, and store a memory snapshot. Use for "my daily standup", "what's on my plate", "daily summary", "status update".
+description: Compile a daily status — review recent conversations, active projects, calendar context if available, and store a memory snapshot. Use for "my daily standup", "what's on my plate", "daily summary", "status update".
 category: productivity
 version: 1.0.0
 ---
@@ -9,25 +9,17 @@ version: 1.0.0
 
 ## Procedure
 
-1. **Review tasks** — Call:
-   - `list_tasks` to see all pending items
-   - `get_due_soon(hours=48)` for what's coming up
-   - `search_tasks(query="", include_done=True)` limited to recently completed (check executed_at dates)
+1. **Review memories** — Call `search_memory(query="")` with a broad query to surface recent context. Optionally search for project names the user mentions.
 
-2. **Review memories** — Call `search_memory(query="")` with a broad query to surface recent context. Optionally search for project names the user mentions.
+2. **Review conversations** — If the user has asked about specific sessions, use `search_memory` and session context to find related context.
 
-3. **Review conversations** — If the user has asked about specific sessions, use `search_tasks` and `search_memory` cross-reference to find related context.
-
-4. **Compile report** — Present a clear summary:
-   - ## Pending Tasks (grouped by priority)
-   - ## Due Soon (next 48 hours)
-   - ## Recently Completed
+3. **Compile report** — Present a clear summary:
    - ## Active Context (memories/projects relevant today)
+   - ## Recent Progress
    - ## Recommended Actions (what to focus on)
 
-5. **Offer to snapshot** — Ask if they want to `store_memory` with today's status for future reference.
+4. **Offer to snapshot** — Ask if they want to `store_memory` with today's status for future reference.
 
 ## Rules
 - Keep it scannable — use bullet points, not paragraphs.
 - Highlight urgent items (due < 24h or high priority).
-- If there are no pending tasks, say so — don't fabricate.

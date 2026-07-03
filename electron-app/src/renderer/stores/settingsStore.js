@@ -118,19 +118,9 @@ export const useSettingsStore = create((set) => ({
   serverUrl: "",
   model: "deepseek-v4-flash-free",
   memoryCount: 0,
-  taskCount: 0,
-  totalTaskCount: 0,
-  completedTaskCount: 0,
-  autoExecCount: 0,
-  taskDebugEvents: [],
   settingsOpen: false,
   sidebarCollapsed: false,
   lastError: "",
-  taskNotifications: [],
-  executorState: "unknown",
-  executorCurrentTask: null,
-  executorTasksCompleted: 0,
-  executorTasksFailed: 0,
   contextUsage: { used: 0, total: 128000, percent: 0 },
 
   setConnected(connected) {
@@ -150,14 +140,6 @@ export const useSettingsStore = create((set) => ({
     set({
       model,
       memoryCount: status.memory_count ?? 0,
-      taskCount: status.task_count ?? 0,
-      totalTaskCount: status.total_task_count ?? status.task_count ?? 0,
-      completedTaskCount: status.completed_task_count ?? 0,
-      autoExecCount: status.auto_exec_count ?? 0,
-      executorState: status.executor_state || "unknown",
-      executorCurrentTask: status.executor_current_task || null,
-      executorTasksCompleted: status.executor_tasks_completed ?? 0,
-      executorTasksFailed: status.executor_tasks_failed ?? 0,
       contextUsage: {
         used,
         total,
@@ -165,30 +147,6 @@ export const useSettingsStore = create((set) => ({
         breakdown: status.context_usage?.breakdown || {},
       },
     });
-  },
-
-  addTaskNotification(notification) {
-    const id = `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    set((state) => ({
-      taskNotifications: [...state.taskNotifications, { ...notification, id }]
-    }));
-    setTimeout(() => {
-      set((state) => ({
-        taskNotifications: state.taskNotifications.filter((n) => n.id !== id)
-      }));
-    }, 12000);
-  },
-
-  dismissTaskNotification(id) {
-    set((state) => ({
-      taskNotifications: state.taskNotifications.filter((n) => n.id !== id)
-    }));
-  },
-
-  addTaskDebugEvent(event) {
-    set((state) => ({
-      taskDebugEvents: [...state.taskDebugEvents.slice(-49), event]
-    }));
   },
 
   setModel(model) {

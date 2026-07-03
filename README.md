@@ -1,13 +1,12 @@
 # Ares — Personal AI Assistant
 
-A terminal-based personal AI assistant that remembers everything about you and helps with daily tasks. Think Jarvis from Iron Man, but in your terminal.
+A terminal-based personal AI assistant that remembers everything about you and helps with daily work. Think Jarvis from Iron Man, but in your terminal.
 
 ## Features
 
 - **Natural language interaction** — just talk to it like a friend
 - **Memory system** — remembers facts, preferences, and context about you with vector + FTS search
 - **Memory control** — search, edit, and forget stored memories by ID
-- **Task management** — create reminders and to-dos naturally
 - **Runtime reminder engine** — checks due reminders while Ares is running and can send desktop notifications
 - **Conversation persistence** — stores chat turns and session summaries in SQLite
 - **Conversation compaction** — 4-phase history compression to fit long sessions in context
@@ -25,7 +24,7 @@ A terminal-based personal AI assistant that remembers everything about you and h
 - **REPL sessions** — persistent Python and Shell subprocess REPLs with sentinel-based output framing
 - **Image generation** — free AI image generation via Pollinations.ai
 - **Image editing** — info, resize, convert, crop via Pillow
-- **Export/import** — JSON backup and restore for memories, tasks, conversations, and non-secret config
+- **Export/import** — JSON backup and restore for memories, conversations, and non-secret config
 - **Skills system** — portable SKILL.md playbooks with YAML frontmatter, 12 built-in skills across 5 categories
 - **MCP client** — connect external MCP servers for extended tool capabilities
 - **Google Workspace** — Gmail and Calendar integration via OAuth
@@ -182,7 +181,7 @@ Portable `SKILL.md` playbook pattern. Each skill has YAML frontmatter (name, des
   - Settings: model selector, config panel
   - Tools: WebSearchCard, FileCard, MemoryCard, ToolCard
   - Terminal: xterm.js PTY terminal panel
-  - Common: CodeBlock, StatusBar, ContextBar, TaskNotification
+  - Common: CodeBlock, StatusBar, ContextBar
 
 ### Persistence
 
@@ -231,7 +230,7 @@ cd electron-app
 npm run dev:vite
 ```
 
-Open `http://127.0.0.1:5173` for the browser-hosted renderer. The Electron app and CLI share the same Ares backend, config, memories, tasks, conversations, `soul.md`, and `profile.md`.
+Open `http://127.0.0.1:5173` for the browser-hosted renderer. The Electron app and CLI share the same Ares backend, config, memories, conversations, `soul.md`, and `profile.md`.
 
 ### Voice Mode
 
@@ -260,8 +259,6 @@ On first run, Ares will:
 Just type naturally:
 - "remember that I prefer dark mode"
 - "what do you know about me?"
-- "remind me to call the dentist tomorrow at 2pm"
-- "what tasks do I have?"
 - "show my active context"
 - "search the web for Python 3.13 release notes"
 - "use Tavily to search for today's AI news"
@@ -276,11 +273,6 @@ Just type naturally:
 | Command | Description |
 |---------|-------------|
 | `/help` | Show available commands |
-| `/tasks` | List all pending tasks |
-| `/tasks all` | List all tasks, including done/cancelled |
-| `/tasks search QUERY` | Search tasks |
-| `/tasks complete ID` | Mark a task done |
-| `/tasks cancel ID` | Cancel a task |
 | `/memory` | Show recent memories |
 | `/memory search QUERY` | Search stored memories |
 | `/memory edit ID NEW_TEXT` | Edit a memory and refresh its indexes |
@@ -291,7 +283,7 @@ Just type naturally:
 | `/clear` | Clear terminal screen |
 | `/export` | Export data to JSON |
 | `/export PATH` | Export data to a specific JSON path |
-| `/import PATH` | Import memories, tasks, and conversations from JSON |
+| `/import PATH` | Import memories and conversations from JSON |
 | `/import PATH --config` | Import data and non-secret config |
 | `/reset` | Reset conversation context |
 | `/soul` | Show Ares' personality file |
@@ -333,9 +325,6 @@ Natural prompts that trigger local tools:
 - "remember that I prefer dark mode"
 - "forget memory 12"
 - "update memory 12 to say I prefer coffee"
-- "remind me to call the dentist tomorrow at 2pm"
-- "mark task 4 done"
-- "what is due in the next 24 hours?"
 - "export my data"
 - "search the web for today's AI news"
 - "search Tavily for current Bitcoin price"
@@ -393,7 +382,6 @@ If the Sentence Transformers/ONNX/Torch stack fails to import or load, Ares fall
 Stored across sessions:
 
 - Memories, memory metadata, embeddings, and FTS search index in `~/.ares/data/ares.db`
-- Tasks, due dates, reminder timestamps, and sent-reminder state in `~/.ares/data/ares.db`
 - Conversation sessions, chat turns, and compact session summaries in `~/.ares/data/ares.db`
 - Cron job definitions and execution logs in `~/.ares/data/ares.db`
 - Config in `~/.ares/config.json`
@@ -411,7 +399,7 @@ Not stored:
 
 ## Privacy
 
-- All data (memories, tasks, conversations) stored locally in SQLite
+- All data (memories, conversations, and cron jobs) stored locally in SQLite
 - No telemetry, no analytics, no phone-home
 - Free models may log data for improvement — switch to paid models for privacy
 - Web search sends the search query to Tavily or external `ddgs` backends
