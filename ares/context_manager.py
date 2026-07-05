@@ -19,7 +19,7 @@ class ContextManager:
         self.estimator = TokenEstimator()
         self.compactor = ContextCompactor(llm_client, config)
         self.truncator = ToolTruncator(max_chars=config.tool_output_max_chars)
-        self.memory_extractor = MemoryExtractor(llm_client, memory_store)
+        self.memory_extractor = MemoryExtractor(llm_client, memory_store, config=config)
         self.memory_cleaner = MemoryCleaner(
             memory_store, stale_days=config.memory_stale_days
         )
