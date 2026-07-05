@@ -88,7 +88,40 @@ def call_number(number: str, confirm: bool = False) -> str:
 
 def phone_status() -> str:
     kde = kdeconnect_bridge.status()
+
     adb_present = bool(_adb())
     devices = connected_devices()
-    battery = json.loads(get_battery_status()) if devices else {}
-    return _json({"ok": bool(kde.get("ok")) and bool(devices), "kdeconnect": kde, "adb": {"ok": bool(devices), "installed": adb_present, "connected": bool(devices), "devices": devices, "configured_device": _configured_device(), "battery": battery.get("battery", {}) if battery.get("ok") else {}, "error": "" if devices else ("adb not found. Install Android platform-tools." if not adb_present else "No authorized ADB device connected.")}})
+    adb_ok = bool(devices)
+
+    battery_fields: dict[str, Any] = {}
+    if adb_ok:
+        proc = _run([*_base_args(), "shell", "dumpsys", "battery"])
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                if ":" in line:
+                    key, value = line.strip().split(":", 1)
+                    battery_fields[key.strip()] = value.strip()
+
+    adb_error = ""
+    if not adb_ok:
+        adb_error = (
+            "adb not found. Install Android platform-tools."
+            if not adb_present
+            else "No authorized ADB device connected."
+        )
+
+    return _json(
+        {
+            "ok": bool(kde.get("ok")) and adb_ok,
+            "kdeconnect": kde,
+            "adb": {
+                "ok": adb_ok,
+                "installed": adb_present,
+                "connected": adb_ok,
+                "devices": devices,
+                "configured_device": _configured_device(),
+                "battery": battery_fields,
+                "error": adb_error,
+            },
+        }
+    )
