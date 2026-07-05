@@ -53,6 +53,19 @@ DEFAULT_MCP_SERVERS: list[dict] = [
             "--viewport-size", "1280x720",
         ],
     },
+    {
+        "name": "github",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": ""},
+    },
+    {
+        "name": "fetch",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+    },
 ]
 
 
