@@ -29,7 +29,7 @@ def test_phone_config_defaults():
 
 
 def test_phone_call_requires_confirm():
-    executor = ToolExecutor(Store(), config=AppConfig())
+    executor = ToolExecutor(Store(), config=AppConfig(phone=PhoneConfig(enabled=True)))
     payload = json.loads(executor.execute("phone_call_number", {"number": "+15555550123"}))
     assert payload["confirm_required"] is True
     assert payload["dialed"] is False

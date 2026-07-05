@@ -625,19 +625,32 @@ class ToolExecutor:
 
     # ── Phone tools ───────────────────────────────────────────────
 
+    def _phone_disabled(self) -> str:
+        return '{"ok": false, "error": "Phone bridge is disabled. Set phone.enabled=true in config."}'
+
     def _phone_status(self, args: dict) -> str:
+        if not self.config or not self.config.phone.enabled:
+            return self._phone_disabled()
         return _adb_bridge.phone_status()
 
     def _phone_get_notifications(self, args: dict) -> str:
+        if not self.config or not self.config.phone.enabled:
+            return self._phone_disabled()
         return _kdeconnect_bridge.get_recent_notifications(limit=int(args.get("limit", 20)))
 
     def _phone_search_contact(self, args: dict) -> str:
+        if not self.config or not self.config.phone.enabled:
+            return self._phone_disabled()
         return _kdeconnect_bridge.search_contacts(args["query"])
 
     def _phone_send_sms(self, args: dict) -> str:
+        if not self.config or not self.config.phone.enabled:
+            return self._phone_disabled()
         return _kdeconnect_bridge.send_sms(args["number"], args["message"])
 
     def _phone_call_number(self, args: dict) -> str:
+        if not self.config or not self.config.phone.enabled:
+            return self._phone_disabled()
         return _adb_bridge.call_number(args["number"], confirm=bool(args.get("confirm", False)))
 
     # ── DateTime tool ─────────────────────────────────────────────

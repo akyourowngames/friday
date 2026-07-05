@@ -491,6 +491,8 @@ class AresCLI:
         elif command == "/phone":
             if arg and arg != "status":
                 self.console.print("[red]Usage: /phone status[/red]")
+            elif not self.config.phone.enabled:
+                self.console.print("[red]Phone bridge is disabled. Set phone.enabled=true in config.[/red]")
             else:
                 import json
                 payload = json.loads(get_phone_status())

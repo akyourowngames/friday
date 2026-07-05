@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 from typing import Any
-from urllib.parse import quote
+
 
 from ares.config import load_config
 from ares.tools import kdeconnect_bridge
@@ -81,7 +81,7 @@ def call_number(number: str, confirm: bool = False) -> str:
         return _json({"ok": False, "dialed": False, "error": "No authorized ADB device connected."})
 
     normalized = re.sub(r"[ ()-]", "", number)
-    uri = "tel:" + quote(normalized, safe="+0123456789")
+    uri = "tel:" + normalized
     proc = _run([*_base_args(), "shell", "am", "start", "-a", "android.intent.action.CALL", "-d", uri], timeout=20)
     return _json({"ok": proc.returncode == 0, "dialed": proc.returncode == 0, "manual_phone_confirmation_may_be_required": True, "number": number, "error": "" if proc.returncode == 0 else (proc.stderr or proc.stdout).strip()})
 

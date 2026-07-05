@@ -31,6 +31,16 @@ def _device_config_id() -> str:
         return ""
 
 
+def _parse_device_id(output: str) -> str:
+    """Extract device id from kdeconnect-cli -l output."""
+    for line in output.splitlines():
+        # Typical: "- Pixel 8: abcdef... (paired and reachable)"
+        match = re.search(r":\s*([A-Za-z0-9_-]{6,})\s*\(", line)
+        if match:
+            return match.group(1)
+    return ""
+
+
 @lru_cache(maxsize=1)
 def get_device_id() -> str:
     """Resolve the paired KDE Connect device id from config or kdeconnect-cli."""
@@ -42,12 +52,7 @@ def get_device_id() -> str:
     proc = _run(["kdeconnect-cli", "-l"])
     if proc.returncode != 0:
         return ""
-    for line in proc.stdout.splitlines():
-        # Typical: "- Pixel 8: abcdef... (paired and reachable)"
-        match = re.search(r":\s*([A-Za-z0-9_-]{6,})\s*\(", line)
-        if match:
-            return match.group(1)
-    return ""
+    return _parse_device_id(proc.stdout)
 
 
 def status() -> dict[str, Any]:
@@ -57,15 +62,7 @@ def status() -> dict[str, Any]:
     proc = _run(["kdeconnect-cli", "-l"])
     output = (proc.stdout + proc.stderr).strip()
 
-    device_id = _device_config_id()
-    if not device_id and proc.returncode == 0:
-        for line in proc.stdout.splitlines():
-            if "paired" not in line.lower():
-                continue
-            match = re.search(r":\s*([A-Za-z0-9_-]{6,})\s*\(", line)
-            if match:
-                device_id = match.group(1)
-                break
+    device_id = _device_config_id() or (_parse_device_id(proc.stdout) if proc.returncode == 0 else "")
 
     paired = bool(device_id)
     reachable = paired and ("reachable" in output.lower())
