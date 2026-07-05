@@ -56,9 +56,19 @@ def status() -> dict[str, Any]:
         return {"ok": False, "paired": False, "reachable": False, "error": err}
     proc = _run(["kdeconnect-cli", "-l"])
     output = (proc.stdout + proc.stderr).strip()
-    device_id = get_device_id()
-    reachable = "reachable" in output.lower() or bool(device_id and proc.returncode == 0)
-    paired = bool(device_id) or "paired" in output.lower()
+
+    device_id = _device_config_id()
+    if not device_id and proc.returncode == 0:
+        for line in proc.stdout.splitlines():
+            if "paired" not in line.lower():
+                continue
+            match = re.search(r":\s*([A-Za-z0-9_-]{6,})\s*\(", line)
+            if match:
+                device_id = match.group(1)
+                break
+
+    paired = bool(device_id)
+    reachable = paired and ("reachable" in output.lower())
     return {
         "ok": proc.returncode == 0 and paired,
         "paired": paired,
