@@ -2,7 +2,65 @@
 
 import sys
 import pytest
-from ares.tools.shell_execution import run_command
+from ares.tools.shell_execution import run_command, _translate_to_powershell
+
+
+class TestTranslateToPowershell:
+    """Tests for Unix → PowerShell command translation."""
+
+    def test_ls_translates(self):
+        result = _translate_to_powershell("ls -la ~/Desktop")
+        assert "Get-ChildItem" in result
+        assert "powershell" in result
+
+    def test_cat_translates(self):
+        result = _translate_to_powershell("cat file.txt")
+        assert "Get-Content" in result
+
+    def test_pwd_translates(self):
+        result = _translate_to_powershell("pwd")
+        assert "Get-Location" in result
+
+    def test_grep_translates(self):
+        result = _translate_to_powershell("grep pattern file.txt")
+        assert "Select-String" in result
+
+    def test_mkdir_p_translates(self):
+        result = _translate_to_powershell("mkdir -p /tmp/newdir")
+        assert "New-Item" in result
+
+    def test_rm_rf_translates(self):
+        result = _translate_to_powershell("rm -rf /tmp/dir")
+        assert "Remove-Item" in result
+
+    def test_cp_translates(self):
+        result = _translate_to_powershell("cp file1.txt file2.txt")
+        assert "Copy-Item" in result
+
+    def test_mv_translates(self):
+        result = _translate_to_powershell("mv old.txt new.txt")
+        assert "Move-Item" in result
+
+    def test_which_translates(self):
+        result = _translate_to_powershell("which python")
+        assert "Get-Command" in result
+
+    def test_powershell_command_passthrough(self):
+        cmd = "Get-ChildItem -Recurse"
+        result = _translate_to_powershell(cmd)
+        assert result == cmd
+
+    def test_windows_cmd_passthrough(self):
+        cmd = "dir /s"
+        result = _translate_to_powershell(cmd)
+        assert result == cmd
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+    def test_ls_actually_works_on_windows(self):
+        import os
+        home = os.path.expanduser("~")
+        result = run_command(f"ls {home}")
+        assert "Exit code: 0" in result
 
 
 class TestRunCommand:

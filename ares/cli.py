@@ -17,7 +17,6 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
-from rich.live import Live
 from rich.text import Text
 from rich.table import Table
 
@@ -541,34 +540,34 @@ class AresCLI:
         tool_renderables = []
 
         self.console.print()
-
-        with Live(console=self.console, refresh_per_second=10, transient=True) as live:
-            live.update(Panel(
+        self.console.print(
+            Panel(
                 Text(f"{self.icons['thinking']} Thinking...", style="bold italic dim"),
                 border_style="dim blue",
-            ))
+            )
+        )
 
-            full_response = ""
-            try:
-                async for token in self.agent.run_stream(user_input, self.conversation_history):
-                    if token.startswith("[tool:"):
-                        tool_name, tool_content = self._parse_tool_token(token)
-                        status, color = self._tool_status(tool_name)
-                        live.update(Panel(
+        full_response = ""
+        try:
+            async for token in self.agent.run_stream(user_input, self.conversation_history):
+                if token.startswith("[tool:"):
+                    tool_name, tool_content = self._parse_tool_token(token)
+                    status, color = self._tool_status(tool_name)
+                    self.console.print(
+                        Panel(
                             Text(status, style=f"bold {color}"),
                             border_style=color,
-                        ))
-                        try:
-                            renderer = get_renderer(tool_name)
-                            tool_renderables.append(renderer(tool_content))
-                        except Exception:
-                            tool_renderables.append(render_generic_tool(tool_content))
-                    else:
-                        full_response += token
-                        if full_response.strip():
-                            live.update(Markdown(full_response))
-            except Exception as e:
-                full_response = f"Error: {e}"
+                        )
+                    )
+                    try:
+                        renderer = get_renderer(tool_name)
+                        tool_renderables.append(renderer(tool_content))
+                    except Exception:
+                        tool_renderables.append(render_generic_tool(tool_content))
+                else:
+                    full_response += token
+        except Exception as e:
+            full_response = f"Error: {e}"
 
         # Show rendered tool results before the final assistant response.
         for renderable in tool_renderables:

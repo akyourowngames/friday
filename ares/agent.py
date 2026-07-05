@@ -279,6 +279,7 @@ class Agent:
         messages = self.build_messages(user_input, conversation_history, context)
 
         max_iterations = self.config.agent_max_iterations
+        total_yielded = ""  # Accumulate all yielded text across iterations
         for iteration in range(max_iterations):
             tool_calls: dict[int, dict] = {}
             content_parts: list[str] = []
@@ -297,14 +298,21 @@ class Agent:
                             # True delta — accumulated text grew
                             delta = text[len(so_far):]
                             content_parts.append(delta)
-                            yield delta
+                            # Dedup: skip if the full response text is a prefix
+                            # of what we already yielded (model repeating itself
+                            # across tool-call iterations)
+                            if delta and not total_yielded.startswith(text):
+                                total_yielded += delta
+                                yield delta
                         elif so_far.startswith(text):
                             # Already accumulated this — skip (duplicate)
                             pass
                         else:
                             # Fresh chunk or non-accumulated token
                             content_parts.append(text)
-                            yield text
+                            if text and not total_yielded.startswith(text):
+                                total_yielded += text
+                                yield text
 
                 elif chunk_type == "tool_call":
                     has_tool_calls = True
