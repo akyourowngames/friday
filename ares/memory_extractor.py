@@ -12,14 +12,16 @@ from typing import Any
 class MemoryExtractor:
     """Extracts new facts and preferences from conversations."""
 
-    def __init__(self, llm_client: Any, memory_store: Any):
+    def __init__(self, llm_client: Any, memory_store: Any, config: Any | None = None):
         self.llm = llm_client
         self.memory_store = memory_store
+        self.config = config
 
     def extract_and_store(self, history: list[dict]) -> list[dict]:
         """Extract new memories from conversation and store them."""
+        filtered_history = self._filter_private_phone_tool_output(history)
         user_messages = [
-            msg for msg in history
+            msg for msg in filtered_history
             if msg.get("role") == "user" and msg.get("content")
         ][-10:]
 
@@ -55,6 +57,26 @@ class MemoryExtractor:
             return self._parse_and_store(result)
         except Exception:
             return []
+
+    def _filter_private_phone_tool_output(self, history: list[dict]) -> list[dict]:
+        """Drop phone notification/SMS tool output from memory extraction unless explicitly enabled."""
+        phone_cfg = getattr(self.config, "phone", None)
+        if bool(getattr(phone_cfg, "store_notification_content", False)):
+            return history
+
+        private_call_ids: set[str] = set()
+        filtered: list[dict] = []
+        for msg in history:
+            for call in msg.get("tool_calls") or []:
+                function = call.get("function") or {}
+                if function.get("name") in {"phone_get_notifications", "phone_get_recent_sms"}:
+                    call_id = call.get("id")
+                    if call_id:
+                        private_call_ids.add(call_id)
+            if msg.get("role") == "tool" and msg.get("tool_call_id") in private_call_ids:
+                continue
+            filtered.append(msg)
+        return filtered
 
     def _call_llm_sync(self, prompt: str) -> str:
         """Call the LLM synchronously."""

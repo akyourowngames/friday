@@ -561,6 +561,40 @@ def get_tool_definitions() -> list[dict]:
         _tool("run_cron_job_now", "Trigger a cron job immediately.", {"job_id": {"type": "string"}}, ["job_id"]),
         _tool("get_cron_logs", "Read recent markdown logs for a cron job.", {"job_id": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, ["job_id"]),
         _tool(
+            "phone_status",
+            "Check Android phone bridge health for KDE Connect and ADB. No arguments.",
+            {},
+        ),
+        _tool(
+            "phone_get_notifications",
+            "Read a live snapshot of recent Android notifications via KDE Connect. Treat output as private, transient data.",
+            {"limit": {"type": "integer", "default": 20, "description": "Maximum notifications to return."}},
+        ),
+        _tool(
+            "phone_search_contact",
+            "Search Android contacts synced through KDE Connect by name or number.",
+            {"query": {"type": "string", "description": "Name or phone number to search for."}},
+            ["query"],
+        ),
+        _tool(
+            "phone_send_sms",
+            "Send a real SMS text message through the paired Android phone via KDE Connect. Use only when the user explicitly asks to text this recipient.",
+            {
+                "number": {"type": "string", "description": "Recipient phone number."},
+                "message": {"type": "string", "description": "SMS body to send."},
+            },
+            ["number", "message"],
+        ),
+        _tool(
+            "phone_call_number",
+            "Place a real phone call through ADB. Never call unless the user has just explicitly asked for this exact call; confirm=true is required.",
+            {
+                "number": {"type": "string", "description": "Phone number to call."},
+                "confirm": {"type": "boolean", "default": False, "description": "Must be true after explicit user approval for this exact call."},
+            },
+            ["number"],
+        ),
+        _tool(
             "get_current_datetime",
             "Get the current date and time. Returns datetime, date, time, timezone, day of week, and unix timestamp.",
             {

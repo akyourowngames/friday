@@ -82,6 +82,15 @@ class VoiceConfig(BaseModel):
     sarvam_language_code: str = "hi-IN"
 
 
+class PhoneConfig(BaseModel):
+    """Android phone bridge settings."""
+
+    enabled: bool = False
+    kdeconnect_device_id: str = ""
+    adb_device_address: str = ""
+    store_notification_content: bool = False
+
+
 class AppConfig(BaseModel):
     model: str = "deepseek-v4-flash-free"
     api_key: str = ""
@@ -121,6 +130,7 @@ class AppConfig(BaseModel):
         description="MCP server configurations for remote Model Context Protocol tools.",
     )
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    phone: PhoneConfig = Field(default_factory=PhoneConfig)
     cron_enabled: bool = True
     cron_tick_seconds: int = 60
     cron_max_concurrent: int = 3

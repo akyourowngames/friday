@@ -50,6 +50,8 @@ from ares.tools.image_edit import crop_image as _crop_image
 from ares.cron.store import CronStore
 from ares.cron.tools import CronToolHandlers
 from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
+from ares.tools import adb_bridge as _adb_bridge
+from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
 
 
 class ToolExecutor:
@@ -137,6 +139,11 @@ class ToolExecutor:
             "delete_cron_job": self.cron.delete_cron_job,
             "run_cron_job_now": self.cron.run_cron_job_now,
             "get_cron_logs": self.cron.get_cron_logs,
+            "phone_status": self._phone_status,
+            "phone_get_notifications": self._phone_get_notifications,
+            "phone_search_contact": self._phone_search_contact,
+            "phone_send_sms": self._phone_send_sms,
+            "phone_call_number": self._phone_call_number,
             "get_current_datetime": self._get_current_datetime,
         }
         try:
@@ -614,6 +621,24 @@ class ToolExecutor:
                 pass  # display is optional
 
         return result
+
+
+    # ── Phone tools ───────────────────────────────────────────────
+
+    def _phone_status(self, args: dict) -> str:
+        return _adb_bridge.phone_status()
+
+    def _phone_get_notifications(self, args: dict) -> str:
+        return _kdeconnect_bridge.get_recent_notifications(limit=int(args.get("limit", 20)))
+
+    def _phone_search_contact(self, args: dict) -> str:
+        return _kdeconnect_bridge.search_contacts(args["query"])
+
+    def _phone_send_sms(self, args: dict) -> str:
+        return _kdeconnect_bridge.send_sms(args["number"], args["message"])
+
+    def _phone_call_number(self, args: dict) -> str:
+        return _adb_bridge.call_number(args["number"], confirm=bool(args.get("confirm", False)))
 
     # ── DateTime tool ─────────────────────────────────────────────
 

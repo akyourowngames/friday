@@ -37,6 +37,7 @@ from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager
+from ares.tools.adb_bridge import phone_status as get_phone_status
 from ares.cron import CronScheduler, CronStore
 from ares.cron.toast import CronToastManager
 from ares.session import SessionManager
@@ -52,7 +53,7 @@ COMPLETER = WordCompleter([
     "/forget", "/export", "/import", "/reset", "/exit",
     "/soul", "/profile", "/context",
     "/skills", "/skills search", "/skills categories", "/skills load",
-    "/setup",
+    "/setup", "/phone", "/phone status",
 ], ignore_case=True)
 
 
@@ -300,6 +301,7 @@ class AresCLI:
             table.add_row("/context", "Show active context for this session")
             table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
             table.add_row("/setup", "Run the onboarding wizard again")
+            table.add_row("/phone status", "Check Android phone bridge pairing health")
             table.add_row("/skill-name", "Load a skill directly by slash command")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
@@ -485,6 +487,34 @@ class AresCLI:
                     ))
             else:
                 self.console.print("[red]Usage: /skills [search QUERY|load NAME|categories][/red]")
+
+        elif command == "/phone":
+            if arg and arg != "status":
+                self.console.print("[red]Usage: /phone status[/red]")
+            else:
+                import json
+                payload = json.loads(get_phone_status())
+                table = Table(title="📱 Phone Bridge", border_style="bright_cyan")
+                table.add_column("Bridge", style="cyan")
+                table.add_column("Status")
+                table.add_column("Details", style="dim")
+                kde = payload.get("kdeconnect", {})
+                adb = payload.get("adb", {})
+                table.add_row(
+                    "KDE Connect",
+                    "[green]PASS[/green]" if kde.get("ok") else "[red]FAIL[/red]",
+                    kde.get("device_id") or kde.get("error") or "paired",
+                )
+                battery = adb.get("battery") or {}
+                details = ", ".join(adb.get("devices") or []) or adb.get("error") or "connected"
+                if battery.get("level"):
+                    details += f" · battery {battery['level']}%"
+                table.add_row(
+                    "ADB",
+                    "[green]PASS[/green]" if adb.get("ok") else "[red]FAIL[/red]",
+                    details,
+                )
+                self.console.print(table)
 
         elif command == "/exit":
             return False
