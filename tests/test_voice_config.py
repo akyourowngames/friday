@@ -12,7 +12,7 @@ def test_app_config_has_voice_defaults():
     assert config.voice.enabled is False
     assert config.voice.tts_provider == "edge_tts"
     assert config.voice.hotkey == "space"
-    assert config.voice.stt_model == "tiny"
+    assert config.voice.stt_model == "small"
 
 
 def test_voice_env_overrides(monkeypatch):

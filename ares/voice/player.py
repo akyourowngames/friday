@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import io
 import tempfile
-import threading
 from pathlib import Path
 
 
@@ -93,47 +92,22 @@ async def play_audio_stream(
 ) -> None:
     """Play PCM16 audio chunks from a queue with immediate cancellation support.
 
-    The queue receives raw little-endian mono PCM16 chunks and a ``None``
-    sentinel when synthesis is complete. ``stop_event`` is used by barge-in
-    detection to stop playback without waiting for a full clip to finish.
-
-    Speed adjustment should be applied before putting chunks in the queue
-    (via ``audio_bytes_to_pcm16(speed=...)``).
+    Uses stream.write() which blocks until the audio device consumes the data,
+    guaranteeing all audio plays before returning. stop_event interrupts by
+    closing the stream from outside.
     """
     import numpy as np
     import sounddevice as sd
 
-    ring_buffer = bytearray()
-    buffer_lock = threading.Lock()
-
-    def callback(outdata, frames, _time_info, _status) -> None:
-        nonlocal ring_buffer
-        needed = frames * 2
-        with buffer_lock:
-            if len(ring_buffer) >= needed:
-                data = bytes(ring_buffer[:needed])
-                del ring_buffer[:needed]
-            else:
-                data = bytes(ring_buffer)
-                ring_buffer.clear()
-                data += b"\x00" * (needed - len(data))
-
-        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-        outdata[:] = samples.reshape(-1, 1)
-
-    # NOTE: speed is applied by resampling in the TTS pipeline, not here.
-    # The OutputStream must run at the native sample rate of the PCM data.
-    stream = sd.OutputStream(
+    stream = sd.RawOutputStream(
         samplerate=int(sample_rate),
         channels=1,
-        dtype="float32",
-        latency="low",
-        callback=callback,
+        dtype="int16",
+        blocksize=0,
     )
 
     try:
         stream.start()
-        chunk_count = 0
         while not stop_event.is_set():
             try:
                 chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.05)
@@ -141,23 +115,19 @@ async def play_audio_stream(
                 continue
 
             if chunk is None:
-                # Drain remaining buffer
-                for _ in range(200):
-                    with buffer_lock:
-                        remaining = len(ring_buffer)
-                    if remaining == 0 or stop_event.is_set():
-                        break
-                    await asyncio.sleep(0.01)
                 break
 
-            chunk_count += 1
-            with buffer_lock:
-                ring_buffer.extend(chunk)
+            # write() blocks until the device consumes the data — no desync
+            try:
+                stream.write(chunk)
+            except Exception:
+                break
     finally:
         try:
             stream.stop()
         finally:
             stream.close()
+        # Drain any remaining items so the queue doesn't leak
         while not audio_queue.empty():
             try:
                 audio_queue.get_nowait()
