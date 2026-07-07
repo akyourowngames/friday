@@ -273,7 +273,6 @@ class ContinuousVoiceAgent:
         buffer = ""
         full_response = ""
         first_token = True
-        sentence_count = 0
 
         async for token in agent.run_stream(text, history):
             if token.startswith("[tool:"):
@@ -286,16 +285,12 @@ class ContinuousVoiceAgent:
             full_response += token
 
             if self._sentence_ready(buffer):
-                sentence_count += 1
-                self.console.print(f"\n[dim]  [sentence {sentence_count}: {len(buffer.strip())} chars][/dim]", end="")
                 await sentence_q.put(buffer.strip())
                 buffer = ""
 
         if buffer.strip():
-            sentence_count += 1
             await sentence_q.put(buffer.strip())
         await sentence_q.put(None)
-        self.console.print(f"\n[dim]  [total: {sentence_count} sentences][/dim]")
         if not first_token:
             self.console.print()
         return full_response
@@ -304,49 +299,49 @@ class ContinuousVoiceAgent:
         stripped = text.rstrip()
         return len(stripped) >= _MAX_SENTENCE_CHARS or stripped.endswith(('.', '!', '?', '\n'))
 
-    async def _tts_play_pipeline(self, sentence_q: asyncio.Queue[str | None], stop_event: asyncio.Event) -> None:
+    async def _tts_play_pipeline(self, sentence_q: asyncio.Queue[str | None], stop_event: asyncio.Event, playback_started: asyncio.Event) -> None:
         """Convert sentence chunks to audio and play them as soon as they are ready."""
         audio_q: asyncio.Queue[bytes | None] = asyncio.Queue()
         play_task = asyncio.create_task(
             play_audio_stream(audio_q, stop_event, sample_rate=_TTS_SAMPLE_RATE)
         )
-        self.console.print("[dim]TTS pipeline started[/dim]")
         try:
             while not stop_event.is_set():
                 sentence = await sentence_q.get()
                 if sentence is None:
-                    self.console.print("[dim]TTS: end of stream[/dim]")
                     await audio_q.put(None)
                     break
-                self.console.print(f"[dim]TTS: got sentence ({len(sentence)} chars)[/dim]")
                 encoded = bytearray()
                 async for chunk in self.tts.speak_stream(sentence, self.voice_config.tts_voice):
                     if stop_event.is_set():
                         break
                     encoded.extend(chunk)
-                self.console.print(f"[dim]TTS: encoded {len(encoded)} bytes[/dim]")
                 if encoded and not stop_event.is_set():
                     pcm = audio_bytes_to_pcm16(bytes(encoded), sample_rate=_TTS_SAMPLE_RATE, speed=1.2)
-                    self.console.print(f"[dim]TTS: PCM {len(pcm)} bytes, putting in queue[/dim]")
                     await audio_q.put(pcm)
+                    playback_started.set()  # Signal that audio is now playing
         finally:
             if stop_event.is_set():
-                self.console.print("[dim]TTS: cancelled (barge-in)[/dim]")
                 play_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await play_task
             else:
-                self.console.print("[dim]TTS: waiting for playback to finish[/dim]")
                 await play_task
 
-    async def _barge_in_watcher(self, stop_event: asyncio.Event, play_start: float) -> None:
-        """Watch mic frames during playback and stop speech when the user talks."""
-        self.console.print("[dim]Barge-in: waiting 500ms...[/dim]")
-        while asyncio.get_event_loop().time() - play_start < 0.5:
+    async def _barge_in_watcher(self, stop_event: asyncio.Event, playback_started: asyncio.Event) -> None:
+        """Watch mic frames during playback and stop speech when the user talks.
+
+        Only starts monitoring after playback_started signals that audio is
+        actually playing, then waits 500ms before checking for speech.
+        """
+        # Wait until audio is actually playing
+        while not playback_started.is_set():
             if stop_event.is_set():
                 return
             await asyncio.sleep(0.05)
-        self.console.print("[dim]Barge-in: monitoring active[/dim]")
+
+        # Wait 500ms after playback starts to avoid feedback
+        await asyncio.sleep(0.5)
 
         consecutive_speech = 0
         while not stop_event.is_set():
@@ -357,7 +352,6 @@ class ContinuousVoiceAgent:
             if self._is_speech(frames[0]):
                 consecutive_speech += 1
                 if consecutive_speech >= 2:
-                    self.console.print("[yellow]>>> Barge-in detected[/yellow]")
                     stop_event.set()
                     self._drain()
                     return
@@ -368,18 +362,16 @@ class ContinuousVoiceAgent:
         """Run LLM streaming, sentence TTS, playback, and barge-in concurrently."""
         sentence_q: asyncio.Queue[str | None] = asyncio.Queue()
         stop_event = asyncio.Event()
-        self.console.print("[dim]Respond: starting pipeline[/dim]")
+        playback_started = asyncio.Event()
         stream_task = asyncio.create_task(self._stream_to_sentences(text, sentence_q))
-        tts_task = asyncio.create_task(self._tts_play_pipeline(sentence_q, stop_event))
-        barge_task = asyncio.create_task(self._barge_in_watcher(stop_event, asyncio.get_event_loop().time()))
+        tts_task = asyncio.create_task(self._tts_play_pipeline(sentence_q, stop_event, playback_started))
+        barge_task = asyncio.create_task(self._barge_in_watcher(stop_event, playback_started))
         try:
             full_response = await stream_task
-            self.console.print(f"[dim]Respond: stream done, barge={stop_event.is_set()}[/dim]")
             if stop_event.is_set():
                 tts_task.cancel()
                 return full_response
             await tts_task
-            self.console.print("[dim]Respond: playback done[/dim]")
             return full_response
         finally:
             barge_task.cancel()
