@@ -163,7 +163,7 @@ class ContinuousVoiceAgent:
             self._stop_event.set()
             return
 
-        self.console.print(f"[dim green]Mic OK — {n} frames so far[/dim green]")
+        self.console.print("[dim green]Mic OK[/dim green]")
 
         try:
             while True:
@@ -175,8 +175,6 @@ class ContinuousVoiceAgent:
 
                     audio = np.concatenate(speech)
                     audio = trim_silence_pcm16(audio, _TARGET_SR)
-                    duration = len(audio) / _TARGET_SR
-                    self.console.print(f"[dim]Captured {duration:.1f}s[/dim]")
 
                     if duration < 0.3:
                         continue
@@ -206,24 +204,11 @@ class ContinuousVoiceAgent:
 
     async def _wait_for_speech(self) -> list[np.ndarray] | None:
         # Phase 1: wait for speech onset
-        poll = 0
         while True:
             frames = self._read_frames(1)
             if frames:
-                frame = frames[0]
-                is_sp = self._is_speech(frame)
-                poll += 1
-                if poll <= 10 or poll % 50 == 0:
-                    energy = float(np.mean(frame ** 2))
-                    with self._lock:
-                        q = len(self._frame_q)
-                        total = self._total_frames
-                    self.console.print(
-                        f"[dim]#{poll} energy={energy:.8f} speech={is_sp} queue={q} total={total}[/dim]"
-                    )
-                if is_sp:
+                if self._is_speech(frames[0]):
                     speech_buf = list(frames)
-                    self.console.print(f"[green]>>> Speech detected at frame #{poll}[/green]")
                     break
             else:
                 await asyncio.sleep(0.01)
@@ -246,8 +231,6 @@ class ContinuousVoiceAgent:
                 silence += 1
                 speech_buf.append(frame)
                 if silence >= max_silence and len(speech_buf) >= min_frames:
-                    dur = len(speech_buf) * _FRAME_MS / 1000
-                    self.console.print(f"[green]>>> Utterance: {len(speech_buf)} frames, {dur:.1f}s[/green]")
                     self._drain()
                     return speech_buf
 
