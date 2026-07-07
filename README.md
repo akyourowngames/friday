@@ -1,344 +1,246 @@
 # Ares — Personal AI Assistant
 
-A terminal-based personal AI assistant that remembers everything about you and helps with daily work. Think Jarvis from Iron Man, but in your terminal.
+Ares is a terminal-first personal AI assistant with local memory, local project context, tool calling, skills, cron jobs, voice mode, a WebSocket backend, and an Electron desktop client. This README describes what is implemented in the repository today.
 
-## Features
+## Implemented Features
 
-- **Natural language interaction** — just talk to it like a friend
-- **Memory system** — remembers facts, preferences, and context about you with vector + FTS search
-- **Memory control** — search, edit, and forget stored memories by ID
-- **Runtime reminder engine** — checks due reminders while Ares is running and can send desktop notifications
-- **Conversation persistence** — stores chat turns and session summaries in SQLite
-- **Conversation compaction** — 4-phase history compression to fit long sessions in context
-- **Automatic memory extraction** — LLM extracts facts/preferences from conversations automatically
-- **Memory cleanup** — dedup, merge, and prune stale memories
-- **Proactive context** — loads a user-owned soul file, profile, and project context every turn
-- **Soul & Profile** — customizable personality definition and user identity with `@import` references
-- **Project context** — automatically reads CLAUDE.md, AGENTS.md, README.md, pyproject.toml, package.json
-- **ONNX embeddings** — uses Sentence Transformers' ONNX backend by default for faster memory embeddings
-- **Streaming-first tool calls** — streams tokens immediately while detecting tool calls mid-stream
-- **Web search summaries** — renders concise summaries plus numbered source cards
-- **Tavily or ddgs search** — uses Tavily when configured, otherwise falls back to zero-key `ddgs`
-- **URL fetching** — fetches and renders web page content
-- **File access** — reads, searches, lists, globs, writes, edits, creates, deletes, and moves files — writes sandboxed to home directory
-- **REPL sessions** — persistent Python and Shell subprocess REPLs with sentinel-based output framing
-- **Image generation** — free AI image generation via Pollinations.ai
-- **Image editing** — info, resize, convert, crop via Pillow
-- **Export/import** — JSON backup and restore for memories, conversations, and non-secret config
-- **Skills system** — portable SKILL.md playbooks with YAML frontmatter, 12 built-in skills across 5 categories
-- **MCP client** — connect external MCP servers for extended tool capabilities
-- **Google Workspace** — Gmail and Calendar integration via OAuth
-- **Cron jobs** — scheduled agent sessions with natural language schedule parsing
-- **Voice mode** — hands-free voice interaction with VAD, STT (faster-whisper), and TTS (Edge/Sarvam)
-- **Beautiful terminal UI** — streaming markdown, thinking indicators, rich panels, tables, syntax highlighting
-- **Desktop app** — Electron + React interface with streaming chat, sessions, tools, settings, terminal, and status
-- **100% local data** — all your info stays on your machine
-- **Free to run** — uses OpenCode Zen free models
+- Natural language CLI backed by Rich and prompt_toolkit.
+- OpenAI-compatible LLM client with streaming responses and tool calls.
+- SQLite long-term memory with categories, metadata, FTS search, vector search, automatic extraction, deduplication, cleanup, and stale-memory pruning.
+- Persistent conversations, compact summaries, per-session JSONL logs, and session identity management.
+- Context assembly from soul, profile, project files, relevant memories, summaries, and skills.
+- Project context discovery for repository files such as `AGENTS.md`, `CLAUDE.md`, `README.md`, `pyproject.toml`, and `package.json`.
+- Local skill discovery and CRUD for `SKILL.md` playbooks.
+- Web search through Tavily or ddgs plus URL fetching.
+- Read-only filesystem tools, write/edit filesystem tools, batch edits, backups, undo, diffs, templates, file trees, hashes, duplicate detection, and line utilities.
+- Persistent Python and shell REPL execution, shell command execution, and terminal-panel command execution.
+- Image generation through Pollinations.ai and image info/resize/convert/crop through Pillow.
+- JSON export/import for memories, conversations, and non-secret config.
+- MCP client manager for configured MCP servers, with default Playwright, GitHub, and fetch server configs.
+- Google Workspace bridge/server modules for Gmail and Calendar via OAuth tokens.
+- Cron scheduling: create/list/get/update/delete jobs, run jobs now, read logs, background scheduler, runner, and toast notifications.
+- Android phone bridge tools through KDE Connect and ADB for status, notifications, contacts, SMS, and confirmed calls.
+- Voice mode with VAD, faster-whisper STT, and Edge TTS or Sarvam TTS.
+- WebSocket server for the Electron app.
+- Electron + React desktop app with chat, sessions, settings, status, tool cards, and terminal UI.
+
+## Tool Inventory
+
+`ares/tools/definitions.py` registers 65 tools. `ares/tools/executor.py` wires handlers for all 65 of them; no definition/handler mismatches were found.
+
+| Category | Tools |
+|---|---|
+| Memory | `store_memory`, `search_memory`, `update_memory`, `delete_memory` |
+| Skills/export | `list_skills`, `load_skill`, `create_skill`, `export_data` |
+| Web | `web_search`, `fetch_url` |
+| Read-only filesystem | `read_file`, `search_files`, `list_directory`, `get_file_info`, `glob_pattern` |
+| File writing/editing | `write_file`, `edit_file`, `create_directory`, `delete_file`, `move_file`, `batch_edit`, `glob_apply`, `show_file_with_line_numbers`, `insert_line`, `replace_lines`, `delete_lines`, `preview_diff`, `backup_file`, `undo_last_edit`, `batch_file_ops`, `find_text`, `append_to_file`, `prepend_to_file`, `compare_files`, `create_file_from_template`, `safe_path_status` |
+| File utilities | `disk_usage`, `checksum`, `copy_file`, `find_duplicates`, `tail_file`, `head_file`, `count_lines`, `file_tree` |
+| Code execution/terminal | `run_code`, `run_command`, `terminal_exec` |
+| Images | `generate_image`, `image_info`, `resize_image`, `convert_image`, `crop_image` |
+| Cron | `create_cron_job`, `list_cron_jobs`, `get_cron_job`, `update_cron_job`, `delete_cron_job`, `run_cron_job_now`, `get_cron_logs` |
+| Phone | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number` |
+| Date/time | `get_current_datetime` |
+
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    User Interface                        │
-│  ┌─────────────────┐  ┌──────────────────────────────┐  │
-│  │    CLI (Rich)    │  │  Desktop (Electron + React)  │  │
-│  │  prompt_toolkit  │  │  WebSocket ←→ ares/server.py │  │
-│  └────────┬─────────┘  └──────────────┬───────────────┘  │
-│           │                           │                   │
-│           └───────────┬───────────────┘                   │
-│                       │                                   │
-│  ┌────────────────────▼────────────────────────────────┐  │
-│  │                   Agent (agent.py)                   │  │
-│  │  Central orchestrator — manages LLM, tools, memory,  │  │
-│  │  conversation history, context, skills, MCP, cron    │  │
-│  └──┬──────────┬──────────┬──────────┬─────────────────┘  │
-│     │          │          │          │                     │
-│     ▼          ▼          ▼          ▼                     │
-│  ┌──────┐ ┌────────┐ ┌────────┐ ┌──────────┐             │
-│  │ LLM  │ │ Tools  │ │Memory  │ │ Context  │             │
-│  │client│ │Executor│ │ Store  │ │ Manager  │             │
-│  └──────┘ └───┬────┘ └───┬────┘ └────┬─────┘             │
-│               │          │           │                    │
-│        ┌──────▼──┐ ┌─────▼─────┐ ┌───▼────────┐          │
-│        │ Web     │ │ SQLite    │ │ Soul       │          │
-│        │ Search  │ │ (memories,│ │ Profile    │          │
-│        │ Files   │ │  convos,  │ │ ProjectCtx │          │
-│        │ REPL    │ │  cron)    │ │ Compactor  │          │
-│        │ Images  │ └───────────┘ │ Extractor  │          │
-│        │ MCP     │              │ Cleaner    │          │
-│        │ Google  │              └────────────┘          │
-│        │ Cron    │                                       │
-│        │ Export  │                                       │
-│        └─────────┘                                       │
-└─────────────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart TD
+  CLI[ares/cli.py
+Rich + prompt_toolkit] --> Agent[ares/agent.py
+Agent]
+  Server[ares/server.py
+WebSocket backend] --> Agent
+  Voice[ares/voice/agent.py
+ContinuousVoiceAgent] --> Agent
+  Electron[electron-app
+Electron + React] --> Server
 
-### Data Flow
+  Agent --> LLM[ares/llm.py]
+  Agent --> ToolExecutor[ares/tools/executor.py]
+  Agent --> MemoryStore[ares/memory.py]
+  Agent --> ConversationStore[ares/conversations.py]
+  Agent --> ContextManager[ares/context_manager.py]
+  Agent --> MCP[MCPClientManager
+ares/tools/mcp_client.py]
+  Agent --> Skills[SkillManager
+ares/skills.py]
+  Agent --> Sessions[SessionStore
+ares/sessions.py]
 
-```
-User Input (CLI / WebSocket / Voice)
-    │
-    ▼
-Agent.run_stream(user_input, history)
-    │
-    ├─► context_blend.build_context_prompt()
-    │       soul.md + profile.md + project context
-    │     + relevant memories (vector + FTS)
-    │     + session summaries
-    │     + skills index
-    │
-    ├─► LLM.chat_stream(messages)
-    │       streams tokens + detects tool calls mid-stream
-    │
-    ├─► (loop) if tool_calls:
-    │       ToolExecutor.execute(tool_name, args)
-    │         └─► local tool / MCP tool / Google tool
-    │       feed results back → LLM continues streaming
-    │
-    └─► yield final response text
-         │
-         └─► post-session: memory extraction, compaction, cleanup
+  ContextManager --> Compactor[ares/compactor.py]
+  ContextManager --> Extractor[ares/memory_extractor.py]
+  ContextManager --> Cleaner[ares/memory_cleaner.py]
+  Agent --> ContextBlend[ares/context_blend.py]
+  ContextBlend --> Soul[ares/soul.py]
+  ContextBlend --> Profile[ares/profile.py]
+  ContextBlend --> ProjectContext[ares/context.py]
+
+  ToolExecutor --> Web[ares/tools/web.py]
+  ToolExecutor --> FS[ares/tools/filesystem.py]
+  ToolExecutor --> FSW[ares/tools/filesystem_write.py]
+  ToolExecutor --> REPL[ares/tools/repl.py]
+  ToolExecutor --> Images[image_generate.py / image_edit.py]
+  ToolExecutor --> Exporter[ares/tools/exporter.py]
+  ToolExecutor --> CronTools[ares/cron/tools.py]
+  ToolExecutor --> Phone[kdeconnect_bridge.py / adb_bridge.py]
+  ToolExecutor --> DateTime[ares/tools/datetime_tool.py]
+
+  CLI --> CronScheduler[ares/cron/scheduler.py]
+  CronScheduler --> CronRunner[ares/cron/runner.py]
+  CronRunner --> Agent
+  CronScheduler --> CronStore[ares/cron/store.py]
+  CronTools --> CronStore
 ```
 
-## Core Components
+## Core Components and Module Reference
 
-### Agent (`ares/agent.py`)
-The central orchestrator. Holds all subsystems together: LLM client, tool executor, memory store, conversation store, MCP manager, soul/profile managers, skills manager, project context, and cron scheduler. Two main entry points:
-- `run_stream()` — streaming agent loop with mid-stream tool call detection
-- `run()` — non-streaming for background/cron tasks
+### `ares/` modules
 
-### LLM Client (`ares/llm.py`)
-Async OpenAI-compatible client with streaming support. Contains a `MODEL_REGISTRY` of ~50 known model IDs across free, Claude, GPT, Gemini, and Grok providers.
-
-### CLI (`ares/cli.py`)
-Interactive terminal built on `prompt_toolkit` (input with history, autocomplete, word completer) and `Rich` (panels, tables, markdown, live streaming, syntax highlighting). Handles all `/slash` commands, session management, and context display.
-
-### WebSocket Server (`ares/server.py`)
-Bridges the Electron desktop app to the Python backend. Manages sessions, chat streaming, context, memories, model switching, terminal forwarding, and status updates.
-
-### Memory System
-- **`memory.py`** — SQLite-backed long-term memory with `sqlite-vec` vector similarity search, FTS5 keyword search, and hybrid merge strategy. Facts have categories (preference, fact, belief, habit, relationship, note), importance, confidence scores, and access tracking.
-- **`embeddings.py`** — Three backend abstraction: ONNX (default, fastest), Torch (fallback), Hash (last resort). Model cached in process.
-- **`memory_extractor.py`** — LLM-powered automatic fact extraction from conversations.
-- **`memory_cleaner.py`** — Deduplication, merging similar memories, pruning stale/low-importance facts.
-
-### Context System
-- **`context.py`** — `ProjectContext` scans current directory for CLAUDE.md, AGENTS.md, README.md, pyproject.toml, package.json and returns truncated excerpts.
-- **`context_blend.py`** — Assembles soul + profile + project + memories + summaries into a priority-ordered string within a token budget. Adapts to model context windows (128k–1M tokens).
-- **`context_manager.py`** — Orchestrates pre-send compaction and post-session processing.
-- **`compactor.py`** — 4-phase compression: prune tool output → split head/middle/tail → LLM-summarize middle → reassemble.
-- **`soul.py`** — Personality definition manager (`soul.md`).
-- **`profile.py`** — User identity manager (`profile.md`) with `@path/to/file` import references.
-
-### Tools Subsystem (`ares/tools/`)
-~45 tools organized by domain, all with OpenAI function-calling JSON Schema definitions:
-- **`web.py`** — Tavily/ddgs web search, URL content fetching (readability extraction)
-- **`filesystem.py`** — Read-only: read, search, list, glob, checksum, tree, tail, head
-- **`filesystem_write.py`** — Write/edit: create, delete, move, batch edit, find/replace, backup/undo, diff preview, templates — sandboxed to home directory
-- **`repl.py`** — Persistent Python/Shell subprocess REPLs
-- **`image_generate.py`** — AI image generation (Pollinations.ai)
-- **`image_edit.py`** — Image info, resize, convert, crop (Pillow)
-- **`exporter.py`** — JSON backup/restore of memories, conversations, config
-- **`mcp_client.py`** — Model Context Protocol client: OAuth token management, tool discovery, execution
-- **`google_mcp_bridge.py`** — Direct Google REST API for Gmail/Calendar
-- **`definitions.py`** — All tool schemas
-- **`executor.py`** — Dispatcher routing tool names to handlers
-- **`tool_truncator.py`** — Truncates large tool outputs to save tokens
-- **`renders.py`** — Rich console renderers for web search cards, file content, search results, directory trees
-
-### Skills System (`ares/skills.py`)
-Portable `SKILL.md` playbook pattern. Each skill has YAML frontmatter (name, description, category, version) + markdown instructions. Discovered across built-in (`ares/skills/`) and user (`~/.ares/skills/`) directories. Compact index loaded into system prompt; full instructions loaded on demand.
-
-**12 built-in skills:**
-| Category | Skills |
+| File | What it does |
 |---|---|
-| Research | research-deep-dive, web-research |
-| Coding | project-init, code-review, codebase-summary |
-| Ares | weekly-review, memory-consolidator, export-backup |
-| Utilities | image-batch-processor, system-info, backup-snapshot |
-| Productivity | daily-standup, daily-planner |
+| `ares/__init__.py` | Ares — A personal AI assistant that lives in your terminal. |
+| `ares/__main__.py` | Entry point: python -m ares |
+| `ares/agent.py` | Core agent loop: LLM interaction, tool execution, context building. |
+| `ares/cli.py` | Terminal UI using Rich and prompt_toolkit. |
+| `ares/code_execution.py` | Backward-compatibility shim — moved to ares.tools.code_execution. |
+| `ares/compactor.py` | Four-phase context compression following Hermes Agent pattern. |
+| `ares/config.py` | Configuration management for Ares. |
+| `ares/context.py` | Project context discovery from the current working directory. |
+| `ares/context_blend.py` | Token estimation, truncation, and context blending utilities. |
+| `ares/context_manager.py` | ContextManager — single entry point for all context lifecycle management. |
+| `ares/conversations.py` | Persistent conversation storage and compact session summaries. |
+| `ares/dates.py` | Backward-compatibility shim — moved to ares.tools.dates. |
+| `ares/embeddings.py` | Embedding providers for Ares memory search. |
+| `ares/exporter.py` | Backward-compatibility shim — moved to ares.tools.exporter. |
+| `ares/filesystem.py` | Backward-compatibility shim — moved to ares.tools.filesystem. |
+| `ares/filesystem_write.py` | Backward-compatibility shim — moved to ares.tools.filesystem_write. |
+| `ares/image_edit.py` | Backward-compatibility shim — moved to ares.tools.image_edit. |
+| `ares/image_generate.py` | Backward-compatibility shim — moved to ares.tools.image_generate. |
+| `ares/llm.py` | LLM API client for OpenCode Zen (OpenAI-compatible). |
+| `ares/memory.py` | Memory system: SQLite + sqlite-vec for vector search + FTS5 for keyword search. |
+| `ares/memory_cleaner.py` | Memory cleanup: deduplication, merging, and stale memory pruning. |
+| `ares/memory_extractor.py` | Extracts new memories from conversations using LLM judgment. |
+| `ares/models.py` | Pydantic data models for Ares. |
+| `ares/onboarding.py` | Interactive terminal onboarding wizard for first-time setup. |
+| `ares/planner.py` | LLM-based task planner. Generates execution plans for auto-executable tasks. |
+| `ares/profile.py` | Profile manager: user-owned identity, preferences, goals, and projects. |
+| `ares/prompts.py` | System prompts and prompt templates for Ares. |
+| `ares/reminders.py` | Runtime reminder checking and notification helpers. |
+| `ares/renders.py` | Backward-compatibility shim — moved to ares.tools.renders. |
+| `ares/server.py` | WebSocket server for the Ares desktop app. |
+| `ares/session.py` | Session identity management. |
+| `ares/sessions.py` | Per-session JSONL conversation storage. |
+| `ares/shell_execution.py` | Backward-compatibility shim — moved to ares.tools.shell_execution. |
+| `ares/skills.py` | Local Agent Skills discovery, parsing, and CRUD support. |
+| `ares/soul.py` | Soul manager: user-owned personality definition for Ares. |
+| `ares/sqlite_utils.py` | SQLite connection helpers shared by Ares stores. |
+| `ares/tool_truncator.py` | Backward-compatibility shim — moved to ares.tools.tool_truncator. |
+| `ares/web.py` | Backward-compatibility shim — moved to ares.tools.web. |
 
-### Cron / Scheduling (`ares/cron/`)
-- **`store.py`** — SQLite storage for cron jobs and markdown execution logs
-- **`scheduler.py`** — Background tick loop checking due jobs
-- **`runner.py`** — Spawns fresh agent sessions per execution
-- **`tools.py`** — Agent-callable tools: create, list, update, delete, run-now, get-logs
-- **`schedule_utils.py`** — Natural language → cron expression parsing ("every day at 9am")
+### `ares/tools/` modules
 
-### Voice Mode (`ares/voice/`)
-- **`agent.py`** — `ContinuousVoiceAgent`: always-listening with WebRTC VAD, utterance recording, faster-whisper transcription, agent pipeline, TTS response
-- **`stt.py`** — Speech-to-text (faster-whisper)
-- **`tts.py`** — Text-to-speech (Edge TTS, Sarvam AI)
-- **`listener.py`** — Audio input stream
-- **`player.py`** — Audio output with speed control
-
-### Desktop App (`electron-app/`)
-- **Main process** (`src/main/`) — Electron window, Python backend lifecycle (`python-manager.js`), PTY terminal (`terminal-manager.js` via node-pty), IPC handlers
-- **Preload** (`src/main/preload.js`) — `contextBridge` exposing server URL, terminal, and restart APIs
-- **Renderer** (`src/renderer/`) — React 19 + Vite + Zustand:
-  - Chat: Composer, MessageList, streaming indicator, markdown rendering
-  - Sidebar: session list with create/switch/delete
-  - Settings: model selector, config panel
-  - Tools: WebSearchCard, FileCard, MemoryCard, ToolCard
-  - Terminal: xterm.js PTY terminal panel
-  - Common: CodeBlock, StatusBar, ContextBar
-
-### Persistence
-
-All data stored under `~/.ares/`:
-
-| Path | Contents |
+| File | What it does |
 |---|---|
-| `~/.ares/config.json` | User configuration |
-| `~/.ares/data/ares.db` | SQLite DB: memories (vector + FTS), conversations, cron jobs |
-| `~/.ares/data/soul.md` | Ares personality definition |
-| `~/.ares/data/profile.md` | User profile |
-| `~/.ares/skills/` | User-installed skills |
-| `~/.ares_history` | Terminal prompt history |
-| `~/.ares/data/mcp_tokens/` | OAuth tokens for MCP servers |
-| `electron-app/node_modules/` | Desktop app dependencies (after `npm install`) |
+| `ares/tools/__init__.py` | Ares tools package — tool definitions and implementations. |
+| `ares/tools/adb_bridge.py` | Small ADB bridge for Android phone status and call placement. |
+| `ares/tools/code_execution.py` | Python code execution in isolated subprocess. |
+| `ares/tools/dates.py` | Date/time helpers for user-facing task dates. |
+| `ares/tools/datetime_tool.py` | Get current datetime as a tool for the agent. |
+| `ares/tools/definitions.py` | Tool definitions in OpenAI function calling format. |
+| `ares/tools/executor.py` | ToolExecutor — dispatches tool calls to local implementations. |
+| `ares/tools/exporter.py` | JSON export/import helpers for Ares local data. |
+| `ares/tools/filesystem.py` | Read-only file system operations for Ares. |
+| `ares/tools/filesystem_write.py` | Write file system operations for Ares. |
+| `ares/tools/google_mcp_bridge.py` | Google Workspace MCP bridge for Ares. |
+| `ares/tools/google_mcp_server.py` | Standalone MCP server for Google Workspace (stdio transport). |
+| `ares/tools/image_edit.py` | Image editing operations using Pillow (PIL). |
+| `ares/tools/image_generate.py` | Image generation via Pollinations.ai (free, no API key). |
+| `ares/tools/kdeconnect_bridge.py` | KDE Connect bridge for Android notifications, contacts, and SMS. |
+| `ares/tools/mcp_client.py` | MCP client integration for Ares. |
+| `ares/tools/renders.py` | Rich renderers for tool results. |
+| `ares/tools/repl.py` | Persistent REPL sessions for stateful code and shell execution. |
+| `ares/tools/shell_execution.py` | Shell command execution with output capture. |
+| `ares/tools/tool_truncator.py` | Tool output truncation — keeps context lean by trimming large tool results. |
+| `ares/tools/web.py` | Web search providers and summarization for Ares. |
 
-## Quick Start
+### `ares/cron/` modules
 
-```bash
-# Install
-pip install -e .
+| File | What it does |
+|---|---|
+| `ares/cron/__init__.py` | Cron job scheduling for Ares. |
+| `ares/cron/runner.py` | Cron job runner that executes each run in a fresh Agent session. |
+| `ares/cron/schedule_utils.py` | Cron schedule parsing and validation utilities. |
+| `ares/cron/scheduler.py` | Async cron scheduler tick loop. |
+| `ares/cron/store.py` | Persistent JSON store for scheduled cron jobs. |
+| `ares/cron/toast.py` | Non-intrusive toast notifications for cron job completions. |
+| `ares/cron/tools.py` | Tool handlers for managing cron jobs. |
 
-# Run
-python -m ares
-```
+### `ares/voice/` modules
 
-### Desktop App
+| File | What it does |
+|---|---|
+| `ares/voice/__init__.py` | Voice input/output subsystem for Ares. |
+| `ares/voice/agent.py` | Continuous voice mode entry point. |
+| `ares/voice/listener.py` | Push-to-talk microphone capture for the terminal CLI. |
+| `ares/voice/player.py` | Audio playback helpers for voice responses. |
+| `ares/voice/stt.py` | Local speech-to-text helpers built around faster-whisper. |
+| `ares/voice/tts.py` | TTS provider interface and implementations for Edge TTS and Sarvam AI. |
 
-```bash
-# Install Python package first
-pip install -e .
+## Built-in Skills
 
-# Install desktop dependencies
-cd electron-app
-npm install
+| Name | Category | Description |
+|---|---|---|
+| `export-backup` | ares | Export Ares local data with a timestamped backup and verify the generated file exists. |
+| `memory-consolidator` | ares | Clean up Ares memories by finding duplicates, stale facts, contradictions, and better summaries. |
+| `weekly-review` | ares | Review memories, conversations, and progress from the week, then summarize wins, blockers, and next priorities. |
+| `code-review` | coding | Review code for bugs, security issues, maintainability, tests, and project conventions. Use when the user asks for a code review or PR check. |
+| `codebase-summary` | coding | Analyze any codebase — tree view, language breakdown, file counts by type, largest files, recent changes. Use for "summarize this project", "explore this codebase", "what's in this repo". |
+| `project-init` | coding | Scaffold a new project — create dirs, init git, write boilerplate (README, .gitignore, license), run first commit. Use when the user says "start a new project" or "scaffold". |
+| `daily-planner` | productivity | Help plan a day with priorities, time blocks, constraints, reminders, and realistic next actions. |
+| `daily-standup` | productivity | Compile a daily status — review recent conversations, active projects, calendar context if available, and store a memory snapshot. Use for "my daily standup", "what's on my plate", "daily summary", "status update". |
+| `research-deep-dive` | research | Multi-source research on any topic — run targeted searches, fetch sources, evaluate quality, compile findings into a structured markdown report file. Use for "research X", "write a report on Y", "deep dive into Z". |
+| `web-research` | research | Perform current web research with multiple source checks, source quality evaluation, and concise citations. Use for latest/current facts or recommendations. |
+| `backup-snapshot` | utilities | Snapshot and verify important files or directories — copy with timestamp, checksum each file, verify integrity, report results. Use for "backup this folder", "snapshot these files", "backup with verification". |
+| `image-batch-processor` | utilities | Batch process images in a folder — resize to common dimensions, convert between formats (PNG/JPEG/WebP), rename patterns. Use for "batch resize these images", "convert all PNGs to WebP", "optimize images in this folder". |
+| `system-info` | utilities | Gather local OS, Python, shell, disk, and environment details for debugging Ares issues. |
 
-# Run the Electron desktop app
-npm run dev
-```
+## Slash Commands
 
-For renderer-only development:
+These are the commands actually handled by `AresCLI._handle_command`.
 
-```bash
-python -m ares --server
-cd electron-app
-npm run dev:vite
-```
-
-Open `http://127.0.0.1:5173` for the browser-hosted renderer. The Electron app and CLI share the same Ares backend, config, memories, conversations, `soul.md`, and `profile.md`.
-
-### Voice Mode
-
-```bash
-pip install -e ".[voice]"
-python -m ares --voice
-```
-
-### Server Mode
-
-```bash
-python -m ares --server                 # default port 8765
-python -m ares --server --port 8766     # custom port
-ares-server                              # console script alias
-```
-
-## First Run
-
-On first run, Ares will:
-1. Create `~/.ares/data/` for local storage
-2. Download the embedding model (~90MB) for memory search
-3. Show a welcome message with privacy info
-
-## Usage
-
-Just type naturally:
-- "remember that I prefer dark mode"
-- "what do you know about me?"
-- "show my active context"
-- "search the web for Python 3.13 release notes"
-- "use Tavily to search for today's AI news"
-- "read pyproject.toml"
-- "search for ddgs in this project"
-- "list the docs directory"
-- "generate an image of a sunset"
-- "create a cron job to check the weather every morning"
-
-### Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show available commands |
-| `/memory` | Show recent memories |
-| `/memory search QUERY` | Search stored memories |
-| `/memory edit ID NEW_TEXT` | Edit a memory and refresh its indexes |
-| `/memory delete ID` | Delete a memory |
-| `/forget ID` | Delete a memory by ID |
-| `/model` | Show current/known models |
-| `/model MODEL_NAME` | Switch model and save config |
-| `/clear` | Clear terminal screen |
-| `/export` | Export data to JSON |
-| `/export PATH` | Export data to a specific JSON path |
-| `/import PATH` | Import memories and conversations from JSON |
-| `/import PATH --config` | Import data and non-secret config |
-| `/reset` | Reset conversation context |
-| `/soul` | Show Ares' personality file |
-| `/soul edit` | Open or create `soul.md` for editing |
-| `/profile` | Show your profile file |
-| `/profile edit` | Open or create `profile.md` for editing |
-| `/context` | Show the active blended context |
-| `/skills` | List available skills |
-| `/skills search QUERY` | Search skills |
-| `/skills load NAME` | Show a skill's full instructions |
-| `/skills categories` | Show skill category counts |
-| `/skill-name` | Load a skill directly by slash command |
-| `/exit` | Exit Ares |
-
-### Skills
-
-Ares supports local reusable skills/playbooks using the portable `SKILL.md` pattern:
-
-```text
-~/.ares/skills/<category>/<skill-name>/SKILL.md
-```
-
-Each skill starts with YAML frontmatter (`name`, `description`, optional `category` and `version`) followed by markdown instructions. Ares loads only a compact name/description index into the system prompt and loads full instructions on demand with `load_skill` or `/skills load NAME`.
-
-Built-in starter skills include `code-review`, `web-research`, `daily-planner`, `memory-consolidator`, `weekly-review`, `export-backup`, and `system-info`.
-
-| Command | Description |
-|---------|-------------|
-| `/skills` | List available skills |
-| `/skills search QUERY` | Search skill names, descriptions, categories, and bodies |
-| `/skills load NAME` | Show a skill's full instructions |
-| `/skills categories` | Show category counts |
-| `/skill-name` | Load a skill directly by slash command |
-
-### Tool Examples
-
-Natural prompts that trigger local tools:
-
-- "remember that I prefer dark mode"
-- "forget memory 12"
-- "update memory 12 to say I prefer coffee"
-- "export my data"
-- "search the web for today's AI news"
-- "search Tavily for current Bitcoin price"
-- "read README.md lines 1 through 80"
-- "find files containing sqlite_vec"
-- "list files in docs"
-- "run `python --version` in a shell"
-- "generate an image of a programming cat"
-- "show me the disk usage"
-- "create a cron job to summarize my week every Friday at 5pm"
+| Command | Implemented behavior |
+|---|---|
+| `/help` | Show command table. |
+| `/memory` | Show 10 recent memories. |
+| `/memory search QUERY` | Search memories. |
+| `/memory edit ID NEW_TEXT` | Update a memory's text. |
+| `/memory delete ID` | Delete a memory. |
+| `/forget ID` | Delete a memory by ID. |
+| `/model` or `/model list` | Show current model and known free models. |
+| `/model MODEL` | Switch model, save config, and update the agent. |
+| `/clear` | Clear terminal screen. |
+| `/setup` | Re-run onboarding wizard. |
+| `/export [PATH]` | Export memories, conversations, and non-secret config to JSON. |
+| `/import PATH [--config]` | Import memories/conversations, and optionally non-secret config. |
+| `/reset` | Clear in-memory conversation history; memories remain. |
+| `/soul [show]` | Show the soul/personality markdown. |
+| `/soul edit` | Open or create the soul file in an editor. |
+| `/profile [show]` | Show the user profile markdown. |
+| `/profile edit` | Open or create the profile file in an editor. |
+| `/context` | Show the active blended context. |
+| `/skills` | List skills. |
+| `/skills categories` | Show skill category counts. |
+| `/skills search QUERY` | Search skills. |
+| `/skills load NAME` | Render a skill's full instructions. |
+| `/phone status` or `/phone` | Show phone bridge health when `phone.enabled` is true. |
+| `/skill-name` | Load a skill directly if the slash name matches an installed skill. |
+| `/exit` | Exit Ares. |
 
 ## Configuration
 
-Config is stored at `~/.ares/config.json`:
+Config is stored at `~/.ares/config.json`. The current `AppConfig` defaults are:
 
 ```json
 {
@@ -363,73 +265,147 @@ Config is stored at `~/.ares/config.json`:
   "project_context_enabled": true,
   "context_token_budget": 2000,
   "project_context_max_files": 2,
+  "agent_max_iterations": 20,
+  "context_compact_threshold": 0.9,
+  "context_protected_tail": 20,
+  "tool_output_max_chars": 500,
+  "memory_dedup_threshold": 0.3,
+  "memory_stale_days": 90,
+  "memory_session_scope": 3,
+  "memory_extract_enabled": true,
+  "memory_cleanup_enabled": true,
   "skills_enabled": true,
-  "skill_dirs": ["~/.ares/skills"],
-  "skill_auto_suggest": true
+  "skill_dirs": [
+    "~/.ares/skills"
+  ],
+  "skill_auto_suggest": true,
+  "mcp_servers": [
+    {
+      "name": "playwright",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--browser",
+        "chrome",
+        "--caps",
+        "vision,devtools",
+        "--user-data-dir",
+        "~/.ares/data/playwright-profile",
+        "--viewport-size",
+        "1280x720"
+      ]
+    },
+    {
+      "name": "github",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": ""
+      }
+    },
+    {
+      "name": "fetch",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ]
+    }
+  ],
+  "voice": {
+    "enabled": false,
+    "tts_provider": "edge_tts",
+    "tts_voice": "",
+    "hotkey": "space",
+    "stt_model": "tiny",
+    "sarvam_api_key": "",
+    "sarvam_tts_model": "bulbul:v2",
+    "sarvam_language_code": "hi-IN"
+  },
+  "phone": {
+    "enabled": false,
+    "kdeconnect_device_id": "",
+    "adb_device_address": "",
+    "store_notification_content": false,
+    "kdeconnect_cli_path": "",
+    "adb_path": ""
+  },
+  "cron_enabled": true,
+  "cron_tick_seconds": 60,
+  "cron_max_concurrent": 3,
+  "cron_max_iterations": 10,
+  "cron_log_retention_days": 90
 }
 ```
 
-`embedding_file_name` can be set when you want a specific ONNX file from a model repository, for example an optimized or quantized ONNX artifact. Leave it empty to let Sentence Transformers choose the default file.
-
-If the Sentence Transformers/ONNX/Torch stack fails to import or load, Ares falls back to a deterministic local hash embedding backend so memory storage still works.
-
-`web_search_provider` can be `auto`, `tavily`, or `ddgs`. In `auto` mode, Ares uses Tavily when `TAVILY_API_KEY` or `tavily_api_key` is configured, then falls back to `ddgs`. Set `tavily_search_depth` to `advanced` when you want deeper Tavily searches.
-
-`soul_path` and `profile_path` can point to custom markdown files. Leave them empty to use `soul.md` and `profile.md` under `data_dir`. Project context scans the current directory for files like `CLAUDE.md`, `AGENTS.md`, `pyproject.toml`, `package.json`, and `README.md`.
+Environment variables can also populate config in `ares/config.py`; JSON exports omit secret key fields.
 
 ## Persistence
 
-Stored across sessions:
+| Path | Contents |
+|---|---|
+| `~/.ares/config.json` | User configuration. |
+| `~/.ares/data/ares.db` | SQLite memories, embeddings/FTS data, conversations, summaries, and cron data. |
+| `~/.ares/data/soul.md` | Default soul/personality file. |
+| `~/.ares/data/profile.md` | Default user profile file. |
+| `~/.ares/data/sessions/` | Per-session JSONL messages. |
+| `~/.ares/data/mcp_tokens/` | MCP OAuth tokens. |
+| `~/.ares/skills/` | User-installed skills. |
+| `~/.ares_history` | CLI prompt history. |
 
-- Memories, memory metadata, embeddings, and FTS search index in `~/.ares/data/ares.db`
-- Conversation sessions, chat turns, and compact session summaries in `~/.ares/data/ares.db`
-- Cron job definitions and execution logs in `~/.ares/data/ares.db`
-- Config in `~/.ares/config.json`
-- Ares personality in `~/.ares/data/soul.md` by default
-- User profile in `~/.ares/data/profile.md` by default
-- Terminal input history in `~/.ares_history`
-- Desktop dependencies in `electron-app/node_modules/` after `npm install`
+## Quick Start
 
-Not stored:
+```bash
+pip install -e .
+python -m ares
+```
 
-- API keys in JSON exports
-- Tavily API keys in JSON exports
-- A background reminder daemon after Ares exits
-- Local chat models or Ollama integration
+### Server Mode
 
-## Privacy
+```bash
+python -m ares --server
+python -m ares --server --port 8766
+ares-server
+```
 
-- All data (memories, conversations, and cron jobs) stored locally in SQLite
-- No telemetry, no analytics, no phone-home
-- Free models may log data for improvement — switch to paid models for privacy
-- Web search sends the search query to Tavily or external `ddgs` backends
-- File read operations are unrestricted. File write operations are sandboxed to your home directory with protected paths (`~/.ares/`) blocked and destructive operations require explicit user confirmation
-- Use `/model` to see available models
+### Desktop App
+
+```bash
+pip install -e .
+cd electron-app
+npm install
+npm run dev
+```
+
+### Voice Mode
+
+```bash
+pip install -e ".[voice]"
+python -m ares --voice
+```
+
+## Privacy Notes
+
+- Ares stores memories, conversations, config, skills, cron data, soul, and profile files locally by default.
+- Web search sends queries to Tavily or ddgs backends.
+- Phone bridge tools interact with a paired Android phone through KDE Connect and ADB.
+- Shell/code/file tools run locally with filesystem access; destructive file and call operations require explicit confirmation in their tool schemas/handlers.
+- JSON exports omit secret API-key fields.
 
 ## Tech Stack
 
-- Python 3.11+
-- Rich (terminal rendering)
-- prompt_toolkit (input with history/autocomplete)
-- sentence-transformers ONNX backend (local embeddings)
-- ONNX Runtime / Optimum ONNX (embedding acceleration)
-- sqlite-vec (vector search)
-- dateparser + tzlocal (natural date parsing)
-- Plyer (optional desktop notifications)
-- Tavily Search API (optional summarized web search)
-- ddgs (zero-key web search fallback)
-- ripgrep if installed, with Python regex fallback (file content search)
-- httpx (async HTTP)
-- pydantic (data models)
-- websockets (desktop server protocol)
-- faster-whisper (voice STT)
-- Edge TTS / Sarvam AI (voice TTS)
-- WebRTC VAD (voice activity detection)
-- Electron + React + Zustand + Vite (desktop client)
-- xterm.js + node-pty (desktop terminal)
-- Pillow (image manipulation)
-- MCP (Model Context Protocol)
-- croniter (cron expression parsing)
+Python 3.11+, Rich, prompt_toolkit, pydantic, SQLite, sqlite-vec, sentence-transformers/ONNX Runtime with fallbacks, httpx, Tavily/ddgs, Pillow, MCP SDK, croniter/dateparser/tzlocal, websockets, faster-whisper, Edge TTS/Sarvam, WebRTC VAD, Electron, React, Zustand, Vite, xterm.js, and node-pty.
+
+## Documentation Audit Notes
+
+- Files mentioned in the previous README that no longer exist: none found in the referenced component paths.
+- Existing implementation files now explicitly referenced above include all top-level `ares/*.py`, `ares/tools/*.py`, `ares/cron/*.py`, and `ares/voice/*.py` modules.
+- `ares/prompts.py` mentions a smaller curated subset of tools by name rather than every registered tool; every mentioned tool is registered.
 
 ## License
 

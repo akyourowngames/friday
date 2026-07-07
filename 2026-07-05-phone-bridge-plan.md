@@ -1,7 +1,9 @@
+> **Status:** Shipped
+
 # Phone Bridge Plan — Notifications, Contacts, SMS, Calls
 
 **Date:** 2026-07-05
-**Status:** Draft
+**Status:** Shipped
 **Goal:** Give Ares live access to an Android phone — read notifications, look up contacts, read/send SMS, and place phone calls — using only free tools (no paid Tasker, no custom app).
 
 ---
