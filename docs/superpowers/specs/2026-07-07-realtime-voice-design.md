@@ -133,19 +133,20 @@ async def play_audio_stream(
 
 ### Sentence Buffer
 
+Edge TTS yields `SentenceBoundary` metadata with each sentence's text, offset, and duration. Instead of heuristic punctuation detection, we use these real sentence boundaries from the TTS engine itself.
+
 In `_stream_agent_response`, replace "accumulate full string, print it" with:
 
-1. Buffer incoming tokens
-2. On hitting `.`, `!`, `?`, or `\n` → push completed sentence to `asyncio.Queue[str]`
-3. **Max-length fallback**: 200 chars without sentence-ending punctuation → force-push
+1. Buffer incoming tokens (console print as they arrive)
+2. When TTS yields `SentenceBoundary` events → push completed sentence to `asyncio.Queue[str]`
+3. **Max-length fallback**: 200 chars without a boundary → force-push (handles non-TTS paths)
 4. Console printing stays as-is (print tokens as they arrive)
 
 ```python
-_SENTENCE_ENDERS = set(".!?")
 _MAX_SENTENCE_CHARS = 200
 
 async def _stream_to_sentences(self, text: str, sentence_q: asyncio.Queue[str]) -> str:
-    """Stream LLM tokens, split into sentences, push to queue."""
+    """Stream LLM tokens, split into sentences via TTS SentenceBoundary events."""
     buffer = ""
     full_response = ""
     async for token in self.agent.run_stream(text, self.conversation_history):
@@ -155,8 +156,8 @@ async def _stream_to_sentences(self, text: str, sentence_q: asyncio.Queue[str]) 
         self.console.print(token, end="", highlight=False)
         buffer += token
         full_response += token
-        # Check for sentence boundary
-        if buffer and (buffer[-1] in _SENTENCE_ENDERS or len(buffer) >= _MAX_SENTENCE_CHARS):
+        # Force-push on max length (safety net for non-TTS paths)
+        if len(buffer) >= _MAX_SENTENCE_CHARS:
             await sentence_q.put(buffer)
             buffer = ""
     # Flush remaining
@@ -165,6 +166,8 @@ async def _stream_to_sentences(self, text: str, sentence_q: asyncio.Queue[str]) 
     await sentence_q.put(None)  # Sentinel: stream complete
     return full_response
 ```
+
+**Note:** Edge TTS's `SentenceBoundary` events provide accurate sentence splitting. The `speak_stream()` method yields these events alongside audio chunks. The TTS pipeline consumer picks up sentence boundaries and queues them for playback. The max-length fallback handles direct text paths (cron/CLI) where TTS isn't involved.
 
 ### Parallel TTS + Playback Pipeline
 
@@ -212,7 +215,7 @@ async def _barge_in_watcher(self, stop_event: asyncio.Event, play_start: float):
         if frames:
             if self._is_speech(frames[0]):
                 silence_count += 1
-                if silence_count >= 3:  # 3 consecutive speech frames (~90ms)
+                if silence_count >= 2:  # 2 consecutive speech frames (~60ms)
                     self.console.print("[yellow]>>> Barge-in detected[/yellow]")
                     stop_event.set()
                     self._drain()
@@ -336,7 +339,7 @@ if self.agent.is_voice_session:
 ## Testing Checklist
 
 - [ ] Multi-sentence response: audio for sentence 1 starts before sentence 3 finishes generating
-- [ ] Barge-in: speak while Ares is talking → playback stops within ~90ms (3 VAD frames)
+- [ ] Barge-in: speak while Ares is talking → playback stops within ~60ms (2 VAD frames)
 - [ ] No false barge-in: speak nothing while Ares talks near speakers → no interrupt
 - [ ] Cron/non-voice callers still work (never touch `speak_stream`/`play_audio_stream`)
 - [ ] Conversation history persists across voice turns (ask follow-up question)
@@ -350,7 +353,7 @@ if self.agent.is_voice_session:
 ## Known Limitations (v1)
 
 - **Sarvam "streaming"** is smaller, more frequent REST calls — first-byte latency per sentence is ~200ms, not true low-latency streaming.
-- **Barge-in quality** depends on existing VAD (WebRTC or energy fallback). Noisy environments may cause false interrupts.
+- **Barge-in quality** depends on existing VAD (WebRTC mode 2-3 or energy fallback). 2-frame threshold (~60ms) is aggressive; noisy environments may cause false interrupts. Can tune to 3 frames if needed.
 - **Sentence chunking** via punctuation is a heuristic. Abbreviations ("Dr.", "e.g.") or code snippets could produce awkward chunks. Acceptable for v1.
 - **Speaker feedback** mitigated by 500ms delay, not eliminated. Headphones recommended for best experience.
 
@@ -361,4 +364,4 @@ if self.agent.is_voice_session:
 1. **Placeholder scan:** No TBDs or TODOs. All sections complete.
 2. **Internal consistency:** Architecture diagram matches feature descriptions. File change table matches detailed sections.
 3. **Scope check:** Focused on voice streaming — no unrelated refactoring. 4 changes, all additive.
-4. **Ambiguity check:** Max sentence length (200 chars), barge-in delay (500ms), history limit (10 turns) all explicitly specified.
+4. **Ambiguity check:** Max sentence length (200 chars), barge-in delay (500ms), barge-in threshold (2 frames / ~60ms), history limit (10 turns) all explicitly specified.
