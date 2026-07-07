@@ -319,7 +319,7 @@ class ContinuousVoiceAgent:
         """Convert sentence chunks to audio and play them as soon as they are ready."""
         audio_q: asyncio.Queue[bytes | None] = asyncio.Queue()
         play_task = asyncio.create_task(
-            play_audio_stream(audio_q, stop_event, sample_rate=_TTS_SAMPLE_RATE, speed=1.2)
+            play_audio_stream(audio_q, stop_event, sample_rate=_TTS_SAMPLE_RATE)
         )
         try:
             while not stop_event.is_set():
@@ -333,7 +333,7 @@ class ContinuousVoiceAgent:
                         break
                     encoded.extend(chunk)
                 if encoded and not stop_event.is_set():
-                    await audio_q.put(audio_bytes_to_pcm16(bytes(encoded), sample_rate=_TTS_SAMPLE_RATE))
+                    await audio_q.put(audio_bytes_to_pcm16(bytes(encoded), sample_rate=_TTS_SAMPLE_RATE, speed=1.2))
         finally:
             if stop_event.is_set():
                 play_task.cancel()

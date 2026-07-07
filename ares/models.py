@@ -76,7 +76,7 @@ class VoiceConfig(BaseModel):
     tts_provider: str = "edge_tts"
     tts_voice: str = ""
     hotkey: str = "space"
-    stt_model: str = "tiny"
+    stt_model: str = "small"
     sarvam_api_key: str = ""
     sarvam_tts_model: str = "bulbul:v2"
     sarvam_language_code: str = "hi-IN"

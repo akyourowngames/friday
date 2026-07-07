@@ -47,8 +47,14 @@ async def play_audio_bytes(audio: bytes, speed: float = 1.0) -> None:
         await asyncio.to_thread(_play_with_pydub, audio)
 
 
-def audio_bytes_to_pcm16(audio: bytes, sample_rate: int = 24000) -> bytes:
-    """Decode encoded audio (MP3/WAV/etc.) to mono PCM16 bytes."""
+def audio_bytes_to_pcm16(audio: bytes, sample_rate: int = 24000, speed: float = 1.0) -> bytes:
+    """Decode encoded audio (MP3/WAV/etc.) to mono PCM16 bytes.
+
+    Args:
+        audio: Encoded audio bytes (MP3, WAV, etc.)
+        sample_rate: Target sample rate for output PCM
+        speed: Playback speed multiplier (1.0 = normal, 1.2 = 20% faster)
+    """
     import numpy as np
 
     try:
@@ -69,6 +75,13 @@ def audio_bytes_to_pcm16(audio: bytes, sample_rate: int = 24000) -> bytes:
         new_len = max(1, int(len(data) * sample_rate / source_rate))
         new = np.linspace(0, len(data) - 1, new_len)
         data = np.interp(new, old, data).astype(np.float32)
+
+    # Apply speed by resampling (skip/stretch samples)
+    if speed != 1.0 and len(data):
+        indices = np.arange(0, len(data), speed).astype(int)
+        indices = indices[indices < len(data)]
+        data = data[indices]
+
     pcm = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
     return pcm.tobytes()
 
@@ -77,13 +90,15 @@ async def play_audio_stream(
     audio_queue: asyncio.Queue[bytes | None],
     stop_event: asyncio.Event,
     sample_rate: int = 24000,
-    speed: float = 1.2,
 ) -> None:
     """Play PCM16 audio chunks from a queue with immediate cancellation support.
 
     The queue receives raw little-endian mono PCM16 chunks and a ``None``
     sentinel when synthesis is complete. ``stop_event`` is used by barge-in
     detection to stop playback without waiting for a full clip to finish.
+
+    Speed adjustment should be applied before putting chunks in the queue
+    (via ``audio_bytes_to_pcm16(speed=...)``).
     """
     import numpy as np
     import sounddevice as sd
@@ -106,8 +121,10 @@ async def play_audio_stream(
         samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
         outdata[:] = samples.reshape(-1, 1)
 
+    # NOTE: speed is applied by resampling in the TTS pipeline, not here.
+    # The OutputStream must run at the native sample rate of the PCM data.
     stream = sd.OutputStream(
-        samplerate=int(sample_rate * speed),
+        samplerate=int(sample_rate),
         channels=1,
         dtype="float32",
         latency="low",
