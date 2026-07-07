@@ -175,6 +175,7 @@ class ContinuousVoiceAgent:
 
                     audio = np.concatenate(speech)
                     audio = trim_silence_pcm16(audio, _TARGET_SR)
+                    duration = len(audio) / _TARGET_SR
 
                     if duration < 0.3:
                         continue
