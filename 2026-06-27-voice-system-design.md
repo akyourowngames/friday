@@ -1,7 +1,9 @@
+> **Status:** Shipped
+
 # Ares Voice System — Design Spec
 
 **Date:** 2026-06-27
-**Status:** Draft
+**Status:** Shipped
 
 ## Overview
 
