@@ -144,6 +144,9 @@ class ToolExecutor:
             "phone_search_contact": self._phone_search_contact,
             "phone_send_sms": self._phone_send_sms,
             "phone_call_number": self._phone_call_number,
+            "phone_launch_app": self._phone_launch_app,
+            "phone_open_url": self._phone_open_url,
+            "update_config": self._update_config,
             "get_current_datetime": self._get_current_datetime,
         }
         try:
@@ -652,6 +655,37 @@ class ToolExecutor:
         if not self.config or not self.config.phone.enabled:
             return self._phone_disabled()
         return _adb_bridge.call_number(args["number"], confirm=bool(args.get("confirm", False)))
+
+    def _phone_launch_app(self, args: dict) -> str:
+        """Launch an app on the phone by package name."""
+        if not self.config or not self.config.phone.enabled:
+            return self._phone_disabled()
+        package = args.get("package", "")
+        if not package:
+            import json as _json
+            return _json.dumps({"ok": False, "error": "Package name is required."})
+        return _adb_bridge.launch_app(package)
+
+    def _phone_open_url(self, args: dict) -> str:
+        """Open a URL on the phone."""
+        if not self.config or not self.config.phone.enabled:
+            return self._phone_disabled()
+        url = args.get("url", "")
+        if not url:
+            import json as _json
+            return _json.dumps({"ok": False, "error": "URL is required."})
+        return _adb_bridge.launch_url(url)
+
+    def _update_config(self, args: dict) -> str:
+        """Surgically update a single config field."""
+        from ares.config import update_config_field
+        import json
+        path = args.get("path", "")
+        if not path:
+            return json.dumps({"ok": False, "error": "Path is required."})
+        value = args.get("value")
+        result = update_config_field(path, value)
+        return json.dumps(result, indent=2)
 
     # ── DateTime tool ─────────────────────────────────────────────
 

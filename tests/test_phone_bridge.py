@@ -61,3 +61,21 @@ def test_memory_extractor_can_keep_phone_output_when_enabled():
     extractor.extract_and_store(history)
     # Tool output is retained in the filtered history when enabled, even though only user text is summarized today.
     assert extractor._filter_private_phone_tool_output(history) == history
+
+
+def test_phone_launch_app_requires_package():
+    """phone_launch_app requires a package name."""
+    executor = ToolExecutor(Store(), config=AppConfig(phone=PhoneConfig(enabled=True)))
+    result = executor.execute("phone_launch_app", {})
+    payload = json.loads(result)
+    assert payload["ok"] is False
+    assert "package" in payload["error"].lower()
+
+
+def test_open_url_requires_url():
+    """phone_open_url requires a URL."""
+    executor = ToolExecutor(Store(), config=AppConfig(phone=PhoneConfig(enabled=True)))
+    result = executor.execute("phone_open_url", {})
+    payload = json.loads(result)
+    assert payload["ok"] is False
+    assert "url" in payload["error"].lower()

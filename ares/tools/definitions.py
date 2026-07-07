@@ -472,7 +472,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "run_command",
-            "Execute a shell command (bash, git, npm, python, docker, etc.). Full system access. Supports pipes, redirects, && chaining.",
+            "Execute a shell command (bash, git, npm, python, docker, etc.). Full system access. Supports pipes, redirects, && chaining. DO NOT use for phone operations — use phone_status, phone_get_notifications, phone_send_sms, phone_call_number, or phone_search_contact instead.",
             {
                 "command": {"type": "string", "description": "Shell command to execute"},
                 "timeout": {"type": "integer", "description": "Max seconds before kill (1-300, default 30)"},
@@ -562,23 +562,23 @@ def get_tool_definitions() -> list[dict]:
         _tool("get_cron_logs", "Read recent markdown logs for a cron job.", {"job_id": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, ["job_id"]),
         _tool(
             "phone_status",
-            "Check Android phone bridge health for KDE Connect and ADB. No arguments.",
+            "PHONE TOOL — the ONLY way to check Android phone status. Do NOT use run_command with kdeconnect-cli or adb for this. Checks KDE Connect and ADB bridge health. No arguments.",
             {},
         ),
         _tool(
             "phone_get_notifications",
-            "Read a live snapshot of recent Android notifications via KDE Connect. Treat output as private, transient data.",
+            "PHONE TOOL — the ONLY way to read Android notifications. Do NOT use run_command with kdeconnect-cli for this. Read a live snapshot of recent Android notifications via KDE Connect. Treat output as private, transient data.",
             {"limit": {"type": "integer", "default": 20, "description": "Maximum notifications to return."}},
         ),
         _tool(
             "phone_search_contact",
-            "Search Android contacts synced through KDE Connect by name or number.",
+            "PHONE TOOL — the ONLY way to search contacts. Do NOT use run_command with kdeconnect-cli for this. Search Android contacts synced through KDE Connect by name or number.",
             {"query": {"type": "string", "description": "Name or phone number to search for."}},
             ["query"],
         ),
         _tool(
             "phone_send_sms",
-            "Send a real SMS text message through the paired Android phone via KDE Connect. Use only when the user explicitly asks to text this recipient.",
+            "PHONE TOOL — the ONLY way to send SMS. Do NOT use run_command with kdeconnect-cli for this. Send a real SMS text message through the paired Android phone via KDE Connect. Use only when the user explicitly asks to text this recipient.",
             {
                 "number": {"type": "string", "description": "Recipient phone number."},
                 "message": {"type": "string", "description": "SMS body to send."},
@@ -587,12 +587,33 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "phone_call_number",
-            "Place a real phone call through ADB. Never call unless the user has just explicitly asked for this exact call; confirm=true is required.",
+            "PHONE TOOL — the ONLY way to make phone calls. Do NOT use run_command with adb for this. Place a real phone call through ADB. Never call unless the user has just explicitly asked for this exact call; confirm=true is required.",
             {
                 "number": {"type": "string", "description": "Phone number to call."},
                 "confirm": {"type": "boolean", "default": False, "description": "Must be true after explicit user approval for this exact call."},
             },
             ["number"],
+        ),
+        _tool(
+            "phone_launch_app",
+            "PHONE TOOL — the ONLY way to open an app on the phone. Do NOT use run_command with adb for this. Pass the Android package name (e.g. com.google.android.youtube, com.whatsapp, com.instagram.android).",
+            {"package": {"type": "string", "description": "Android package name of the app to launch (e.g. com.google.android.youtube)."}},
+            ["package"],
+        ),
+        _tool(
+            "phone_open_url",
+            "PHONE TOOL — the ONLY way to open a URL on the phone. Do NOT use run_command with adb for this. Opens the URL in the default browser or matching app.",
+            {"url": {"type": "string", "description": "URL to open on the phone (e.g. https://youtube.com)."}},
+            ["url"],
+        ),
+        _tool(
+            "update_config",
+            "Surgically update a single config field in ~/.ares/config.json. Reads the existing config first, updates ONLY the specified path, and writes back. Never overwrites other fields. Use dot notation for nested fields (e.g. 'phone.enabled', 'model').",
+            {
+                "path": {"type": "string", "description": "Dot-notation config path to update (e.g. 'phone.enabled', 'model', 'voice.enabled')."},
+                "value": {"description": "New value for the field. Use native types: true/false for booleans, numbers for ints, strings for text, arrays for lists."},
+            },
+            ["path", "value"],
         ),
         _tool(
             "get_current_datetime",

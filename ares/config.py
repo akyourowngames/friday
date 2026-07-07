@@ -55,3 +55,30 @@ def save_config(config: AppConfig) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         json.dump(config.model_dump(), f, indent=2)
+
+
+def update_config_field(path: str, value) -> dict:
+    """Surgically update a single config field. Returns {ok, path, value, error}."""
+    if not CONFIG_PATH.exists():
+        return {"ok": False, "error": "Config file not found."}
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"ok": False, "error": f"Failed to read config: {exc}"}
+    keys = path.strip(".").split(".")
+    target = data
+    for key in keys[:-1]:
+        if key not in target or not isinstance(target[key], dict):
+            target[key] = {}
+        target = target[key]
+    target[keys[-1]] = value
+    import tempfile
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(CONFIG_PATH)
+    except OSError as exc:
+        return {"ok": False, "error": f"Failed to write config: {exc}"}
+    return {"ok": True, "path": path, "value": value}

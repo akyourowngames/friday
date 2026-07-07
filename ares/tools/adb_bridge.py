@@ -134,3 +134,39 @@ def phone_status() -> str:
             },
         }
     )
+
+
+def launch_app(package: str) -> str:
+    """Launch an app on the phone by package name via ADB monkey command."""
+    if not _adb():
+        return _json({"ok": False, "error": "adb not found. Install Android platform-tools."})
+    if not is_device_connected():
+        return _json({"ok": False, "error": "No authorized ADB device connected."})
+    if not package or not package.strip():
+        return _json({"ok": False, "error": "Package name is required."})
+    package = package.strip()
+    proc = _run(
+        [*_base_args(), "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"],
+        timeout=15,
+    )
+    output = (proc.stdout + proc.stderr).strip()
+    ok = proc.returncode == 0 and "Events injected" in output
+    return _json({"ok": ok, "launched": ok, "package": package, "error": "" if ok else (output or "Failed to launch app.")})
+
+
+def launch_url(url: str) -> str:
+    """Open a URL on the phone via ADB intent."""
+    if not _adb():
+        return _json({"ok": False, "error": "adb not found. Install Android platform-tools."})
+    if not is_device_connected():
+        return _json({"ok": False, "error": "No authorized ADB device connected."})
+    if not url or not url.strip():
+        return _json({"ok": False, "error": "URL is required."})
+    url = url.strip()
+    proc = _run(
+        [*_base_args(), "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url],
+        timeout=15,
+    )
+    output = (proc.stdout + proc.stderr).strip()
+    ok = proc.returncode == 0
+    return _json({"ok": ok, "launched": ok, "url": url, "error": "" if ok else (output or "Failed to open URL.")})
