@@ -19,14 +19,16 @@ Ares is a terminal-first personal AI assistant with local memory, local project 
 - MCP client manager for configured MCP servers, with default Playwright, GitHub, and fetch server configs.
 - Google Workspace bridge/server modules for Gmail and Calendar via OAuth tokens.
 - Cron scheduling: create/list/get/update/delete jobs, run jobs now, read logs, background scheduler, runner, and toast notifications.
-- Android phone bridge tools through KDE Connect and ADB for status, notifications, contacts, SMS, and confirmed calls.
+- Android phone bridge tools through KDE Connect and ADB for status, notifications, contacts, SMS, confirmed calls, app launch, and URL open.
+- Android ADB MCP server for screenshots, file transfer, app install/uninstall, and shell commands.
+- Atomic config updates via `update_config` tool (surgical field edits, no full rewrites).
 - Voice mode with VAD, faster-whisper STT, and Edge TTS or Sarvam TTS.
 - WebSocket server for the Electron app.
 - Electron + React desktop app with chat, sessions, settings, status, tool cards, and terminal UI.
 
 ## Tool Inventory
 
-`ares/tools/definitions.py` registers 65 tools. `ares/tools/executor.py` wires handlers for all 65 of them; no definition/handler mismatches were found.
+`ares/tools/definitions.py` registers 68 tools. `ares/tools/executor.py` wires handlers for all 68 of them; no definition/handler mismatches were found.
 
 | Category | Tools |
 |---|---|
@@ -39,7 +41,8 @@ Ares is a terminal-first personal AI assistant with local memory, local project 
 | Code execution/terminal | `run_code`, `run_command`, `terminal_exec` |
 | Images | `generate_image`, `image_info`, `resize_image`, `convert_image`, `crop_image` |
 | Cron | `create_cron_job`, `list_cron_jobs`, `get_cron_job`, `update_cron_job`, `delete_cron_job`, `run_cron_job_now`, `get_cron_logs` |
-| Phone | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number` |
+| Phone | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number`, `phone_launch_app`, `phone_open_url` |
+| Config | `update_config` |
 | Date/time | `get_current_datetime` |
 
 
@@ -314,6 +317,15 @@ Config is stored at `~/.ares/config.json`. The current `AppConfig` defaults are:
       "command": "uvx",
       "args": [
         "mcp-server-fetch"
+      ]
+    },
+    {
+      "name": "android-adb",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "android-adb-mcp-server"
       ]
     }
   ],
