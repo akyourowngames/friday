@@ -305,35 +305,27 @@ class ContinuousVoiceAgent:
         play_task = asyncio.create_task(
             play_audio_stream(audio_q, stop_event, sample_rate=_TTS_SAMPLE_RATE)
         )
-        self.console.print("[dim]  [tts: pipeline started][/dim]")
         try:
             while not stop_event.is_set():
                 sentence = await sentence_q.get()
                 if sentence is None:
-                    self.console.print("[dim]  [tts: end of sentences][/dim]")
                     await audio_q.put(None)
                     break
-                self.console.print(f"[dim]  [tts: sentence '{sentence[:50]}...' ({len(sentence)} chars)][/dim]")
                 encoded = bytearray()
                 async for chunk in self.tts.speak_stream(sentence, self.voice_config.tts_voice):
                     if stop_event.is_set():
-                        self.console.print("[dim]  [tts: STOPPED by barge-in during encode][/dim]")
                         break
                     encoded.extend(chunk)
-                self.console.print(f"[dim]  [tts: encoded {len(encoded)} bytes mp3][/dim]")
                 if encoded and not stop_event.is_set():
                     pcm = audio_bytes_to_pcm16(bytes(encoded), sample_rate=_TTS_SAMPLE_RATE, speed=1.2)
-                    self.console.print(f"[dim]  [tts: pcm {len(pcm)} bytes, queued for playback][/dim]")
                     await audio_q.put(pcm)
                     playback_started.set()
         finally:
             if stop_event.is_set():
-                self.console.print("[dim]  [tts: cancelled][/dim]")
                 play_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await play_task
             else:
-                self.console.print("[dim]  [tts: waiting for playback drain][/dim]")
                 await play_task
 
     async def _barge_in_watcher(self, stop_event: asyncio.Event, playback_started: asyncio.Event) -> None:
@@ -371,18 +363,15 @@ class ContinuousVoiceAgent:
         sentence_q: asyncio.Queue[str | None] = asyncio.Queue()
         stop_event = asyncio.Event()
         playback_started = asyncio.Event()
-        self.console.print("[dim]  [pipeline: starting][/dim]")
         stream_task = asyncio.create_task(self._stream_to_sentences(text, sentence_q))
         tts_task = asyncio.create_task(self._tts_play_pipeline(sentence_q, stop_event, playback_started))
         barge_task = asyncio.create_task(self._barge_in_watcher(stop_event, playback_started))
         try:
             full_response = await stream_task
-            self.console.print(f"[dim]  [pipeline: stream done, barge={stop_event.is_set()}][/dim]")
             if stop_event.is_set():
                 tts_task.cancel()
                 return full_response
             await tts_task
-            self.console.print(f"[dim]  [pipeline: all done][/dim]")
             return full_response
         finally:
             barge_task.cancel()
