@@ -133,6 +133,7 @@ async def play_audio_stream(
 
     try:
         stream.start()
+        chunk_count = 0
         while not stop_event.is_set():
             try:
                 chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.05)
@@ -140,14 +141,16 @@ async def play_audio_stream(
                 continue
 
             if chunk is None:
+                # Drain remaining buffer
                 for _ in range(200):
                     with buffer_lock:
-                        empty = not ring_buffer
-                    if empty or stop_event.is_set():
+                        remaining = len(ring_buffer)
+                    if remaining == 0 or stop_event.is_set():
                         break
                     await asyncio.sleep(0.01)
                 break
 
+            chunk_count += 1
             with buffer_lock:
                 ring_buffer.extend(chunk)
     finally:
