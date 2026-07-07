@@ -6,7 +6,7 @@ import base64
 import inspect
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 from ares.models import VoiceConfig
 
@@ -19,6 +19,10 @@ class TTSProvider(ABC):
     @abstractmethod
     async def speak(self, text: str, voice: str = "") -> bytes:
         """Return audio bytes for *text*."""
+
+    @abstractmethod
+    async def speak_stream(self, text: str, voice: str = "") -> AsyncIterator[bytes]:
+        """Yield audio chunks as they become available."""
 
     @abstractmethod
     async def list_voices(self) -> list[dict[str, Any]]:
@@ -35,14 +39,21 @@ class EdgeTTS(TTSProvider):
         self.default_voice = voice
 
     async def speak(self, text: str, voice: str = "") -> bytes:
+        audio = bytearray()
+        async for chunk in self.speak_stream(text, voice):
+            audio.extend(chunk)
+        return bytes(audio)
+
+    async def speak_stream(self, text: str, voice: str = "") -> AsyncIterator[bytes]:
+        """Yield audio chunks as they arrive from Edge TTS."""
         import edge_tts
 
         communicate = edge_tts.Communicate(text, voice or self.default_voice)
-        audio = bytearray()
         async for chunk in communicate.stream():
             if chunk.get("type") == "audio":
-                audio.extend(chunk.get("data", b""))
-        return bytes(audio)
+                data = chunk.get("data", b"")
+                if data:
+                    yield data
 
     async def list_voices(self) -> list[dict[str, Any]]:
         import edge_tts
@@ -93,6 +104,17 @@ class SarvamTTS(TTSProvider):
         if isinstance(audio, str):
             return base64.b64decode(audio)
         return bytes(audio)
+
+    async def speak_stream(self, text: str, voice: str = "") -> AsyncIterator[bytes]:
+        """Yield one audio chunk using Sarvam REST (simulated streaming).
+
+        NOTE: Sarvam REST TTS does not expose native audio chunk streaming here.
+        Continuous voice mode calls this per sentence, so first audio can still
+        begin before the full assistant response has been generated.
+        """
+        audio = await self.speak(text, voice)
+        if audio:
+            yield audio
 
     async def list_voices(self) -> list[dict[str, Any]]:
         return [

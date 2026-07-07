@@ -51,3 +51,17 @@ def test_create_sarvam_provider_with_env_key(monkeypatch):
     assert isinstance(provider, SarvamTTS)
     assert provider.api_key == "test-key"
     assert provider.default_voice == "arya"
+
+
+def test_voice_config_has_history_defaults():
+    config = VoiceConfig()
+
+    assert config.voice_max_history == 10
+    assert config.voice_max_memories == 3
+
+
+def test_voice_config_custom_history():
+    config = VoiceConfig(voice_max_history=5, voice_max_memories=2)
+
+    assert config.voice_max_history == 5
+    assert config.voice_max_memories == 2

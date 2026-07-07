@@ -80,6 +80,8 @@ class VoiceConfig(BaseModel):
     sarvam_api_key: str = ""
     sarvam_tts_model: str = "bulbul:v2"
     sarvam_language_code: str = "hi-IN"
+    voice_max_history: int = 10
+    voice_max_memories: int = 3
 
 
 class PhoneConfig(BaseModel):

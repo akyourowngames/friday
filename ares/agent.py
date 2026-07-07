@@ -31,6 +31,7 @@ class Agent:
         config: AppConfig | None = None,
         mcp_manager: Any | None = None,
         is_cron_session: bool = False,
+        is_voice_session: bool = False,
         session_store: Any | None = None,
         session_id: str | None = None,
     ):
@@ -45,6 +46,7 @@ class Agent:
         )
         self.mcp_manager = mcp_manager
         self.is_cron_session = is_cron_session
+        self.is_voice_session = is_voice_session
         self.refresh_tools()
         self.last_messages: list[dict] = []
 
@@ -79,7 +81,7 @@ class Agent:
     def refresh_tools(self) -> None:
         """Refresh the advertised tool list, including connected MCP tools."""
         self.tools = get_tool_definitions()
-        if getattr(self, "is_cron_session", False):
+        if getattr(self, "is_cron_session", False) or getattr(self, "is_voice_session", False):
             cron_names = {"create_cron_job", "list_cron_jobs", "get_cron_job", "update_cron_job", "delete_cron_job", "run_cron_job_now", "get_cron_logs"}
             self.tools = [tool for tool in self.tools if tool.get("function", {}).get("name") not in cron_names]
         if self.mcp_manager is not None:

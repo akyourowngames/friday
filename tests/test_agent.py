@@ -100,3 +100,32 @@ def test_build_messages_without_skill_manager_does_not_crash(tmp_path):
     agent.config = AppConfig(data_dir=str(tmp_path), skills_enabled=True)
     messages = agent.build_messages("hello", [])
     assert messages[-1] == {"role": "user", "content": "hello"}
+
+
+def test_voice_session_filters_cron_tools():
+    from ares.agent import Agent
+    from ares.memory import MemoryStore
+
+    agent = Agent(memory_store=MemoryStore(), is_voice_session=True)
+    tool_names = {tool["function"]["name"] for tool in agent.tools}
+    cron_tools = {
+        "create_cron_job",
+        "list_cron_jobs",
+        "get_cron_job",
+        "update_cron_job",
+        "delete_cron_job",
+        "run_cron_job_now",
+        "get_cron_logs",
+    }
+
+    assert not tool_names.intersection(cron_tools)
+
+
+def test_non_voice_session_keeps_cron_tools():
+    from ares.agent import Agent
+    from ares.memory import MemoryStore
+
+    agent = Agent(memory_store=MemoryStore(), is_voice_session=False)
+    tool_names = {tool["function"]["name"] for tool in agent.tools}
+
+    assert "list_cron_jobs" in tool_names or "create_cron_job" in tool_names
