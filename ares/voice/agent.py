@@ -9,16 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import threading
 import numpy as np
-import sounddevice as sd
 from rich.console import Console
 from rich.panel import Panel
 
 from ares.config import load_config
 from ares.voice.tts import voice_config_from_env, create_tts_provider
 from ares.voice.stt import STTEngine, trim_silence_pcm16
-from ares.voice.player import play_audio_bytes
+from ares.voice.player import audio_bytes_to_pcm16, play_audio_bytes, play_audio_stream
 
 _NATIVE_SR = 44100       # device native sample rate
 _TARGET_SR = 16000       # VAD / STT rate
@@ -26,6 +26,9 @@ _FRAME_MS = 30
 _FRAME_SAMPLES = int(_TARGET_SR * _FRAME_MS / 1000)  # 480 samples per VAD frame
 _DEVICE_INDEX = 1        # Microphone Array (Realtek Audio)
 _BLOCK_SIZE = 4410       # 100ms at 44100 Hz — how much audio we read per blocking call
+_MAX_SENTENCE_CHARS = 200
+_MAX_VOICE_HISTORY = 10
+_TTS_SAMPLE_RATE = 24000
 
 
 class ContinuousVoiceAgent:
@@ -41,6 +44,8 @@ class ContinuousVoiceAgent:
 
         self.stt = STTEngine(self.voice_config.stt_model)
         self.tts = create_tts_provider(self.voice_config)
+        self.conversation_history: list[dict] = []
+        self.agent = None
 
         # VAD
         self.vad = None
@@ -65,6 +70,8 @@ class ContinuousVoiceAgent:
         """Runs in a background thread: blocking reads → resample → queue VAD frames."""
         # Resample buffer: holds leftover samples between blocks
         resample_buf = np.array([], dtype=np.float32)
+
+        import sounddevice as sd
 
         with sd.InputStream(
             device=_DEVICE_INDEX,
@@ -181,14 +188,9 @@ class ContinuousVoiceAgent:
                     self.console.print(f"[bold]You:[/bold] {text}")
 
                     self.console.print("[yellow]Thinking…[/yellow]")
-                    response = await self._stream_agent_response(text)
-                    if not response or not response.strip():
-                        continue
-
-                    self.console.print("[yellow]Speaking…[/yellow]")
-                    audio_bytes = await self.tts.speak(response, self.voice_config.tts_voice)
-                    if audio_bytes:
-                        await play_audio_bytes(audio_bytes, speed=1.2)
+                    response = await self._respond(text)
+                    if response and response.strip():
+                        self._remember_exchange(text, response)
 
                 except KeyboardInterrupt:
                     raise
@@ -253,6 +255,135 @@ class ContinuousVoiceAgent:
     # Agent pipeline
     # ------------------------------------------------------------------ #
 
+    def _get_or_create_agent(self):
+        """Create one Agent per voice session so memory and clients are reused."""
+        if self.agent is None:
+            from ares.agent import Agent
+            from ares.memory import MemoryStore
+            from ares.conversations import ConversationStore
+
+            self.agent = Agent(
+                memory_store=MemoryStore(),
+                conversation_store=ConversationStore(),
+                api_key=self.config.api_key,
+                base_url=self.config.api_base_url,
+                model=self.config.model,
+                config=self.config,
+                is_voice_session=True,
+            )
+        return self.agent
+
+    def _remember_exchange(self, user_text: str, assistant_text: str) -> None:
+        self.conversation_history.extend([
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ])
+        max_history = getattr(self.voice_config, "voice_max_history", _MAX_VOICE_HISTORY)
+        if len(self.conversation_history) > max_history:
+            self.conversation_history = self.conversation_history[-max_history:]
+
+    async def _stream_to_sentences(self, text: str, sentence_q: asyncio.Queue[str | None]) -> str:
+        """Stream LLM tokens to the console and emit sentence-sized TTS chunks."""
+        agent = getattr(self, "agent", None) or self._get_or_create_agent()
+        history = getattr(self, "conversation_history", [])
+        buffer = ""
+        full_response = ""
+        first_token = True
+
+        async for token in agent.run_stream(text, history):
+            if token.startswith("[tool:"):
+                continue
+            if first_token:
+                self.console.print("[bold green]Ares:[/bold green] ", end="")
+                first_token = False
+            self.console.print(token, end="", highlight=False)
+            buffer += token
+            full_response += token
+
+            if self._sentence_ready(buffer):
+                await sentence_q.put(buffer.strip())
+                buffer = ""
+
+        if buffer.strip():
+            await sentence_q.put(buffer.strip())
+        await sentence_q.put(None)
+        if not first_token:
+            self.console.print()
+        return full_response
+
+    def _sentence_ready(self, text: str) -> bool:
+        stripped = text.rstrip()
+        return len(stripped) >= _MAX_SENTENCE_CHARS or stripped.endswith(('.', '!', '?', '\n'))
+
+    async def _tts_play_pipeline(self, sentence_q: asyncio.Queue[str | None], stop_event: asyncio.Event) -> None:
+        """Convert sentence chunks to audio and play them as soon as they are ready."""
+        audio_q: asyncio.Queue[bytes | None] = asyncio.Queue()
+        play_task = asyncio.create_task(
+            play_audio_stream(audio_q, stop_event, sample_rate=_TTS_SAMPLE_RATE, speed=1.2)
+        )
+        try:
+            while not stop_event.is_set():
+                sentence = await sentence_q.get()
+                if sentence is None:
+                    await audio_q.put(None)
+                    break
+                encoded = bytearray()
+                async for chunk in self.tts.speak_stream(sentence, self.voice_config.tts_voice):
+                    if stop_event.is_set():
+                        break
+                    encoded.extend(chunk)
+                if encoded and not stop_event.is_set():
+                    await audio_q.put(audio_bytes_to_pcm16(bytes(encoded), sample_rate=_TTS_SAMPLE_RATE))
+        finally:
+            if stop_event.is_set():
+                play_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await play_task
+            else:
+                await play_task
+
+    async def _barge_in_watcher(self, stop_event: asyncio.Event, play_start: float) -> None:
+        """Watch mic frames during playback and stop speech when the user talks."""
+        while asyncio.get_event_loop().time() - play_start < 0.5:
+            if stop_event.is_set():
+                return
+            await asyncio.sleep(0.05)
+
+        consecutive_speech = 0
+        while not stop_event.is_set():
+            frames = self._read_frames(1)
+            if not frames:
+                await asyncio.sleep(0.005)
+                continue
+            if self._is_speech(frames[0]):
+                consecutive_speech += 1
+                if consecutive_speech >= 2:
+                    self.console.print("[yellow]>>> Barge-in detected[/yellow]")
+                    stop_event.set()
+                    self._drain()
+                    return
+            else:
+                consecutive_speech = 0
+
+    async def _respond(self, text: str) -> str:
+        """Run LLM streaming, sentence TTS, playback, and barge-in concurrently."""
+        sentence_q: asyncio.Queue[str | None] = asyncio.Queue()
+        stop_event = asyncio.Event()
+        stream_task = asyncio.create_task(self._stream_to_sentences(text, sentence_q))
+        tts_task = asyncio.create_task(self._tts_play_pipeline(sentence_q, stop_event))
+        barge_task = asyncio.create_task(self._barge_in_watcher(stop_event, asyncio.get_event_loop().time()))
+        try:
+            full_response = await stream_task
+            if stop_event.is_set():
+                tts_task.cancel()
+                return full_response
+            await tts_task
+            return full_response
+        finally:
+            barge_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await barge_task
+
     async def _get_agent_response(self, text: str) -> str:
         try:
             from ares.agent import Agent
@@ -281,22 +412,11 @@ class ContinuousVoiceAgent:
     async def _stream_agent_response(self, text: str) -> str:
         """Stream agent response tokens to console in real-time."""
         try:
-            from ares.agent import Agent
-            from ares.memory import MemoryStore
-            from ares.conversations import ConversationStore
-
-            agent = Agent(
-                memory_store=MemoryStore(),
-                conversation_store=ConversationStore(),
-                api_key=self.config.api_key,
-                base_url=self.config.api_base_url,
-                model=self.config.model,
-                config=self.config,
-            )
+            agent = self._get_or_create_agent()
 
             full = ""
             first_token = True
-            async for token in agent.run_stream(text, []):
+            async for token in agent.run_stream(text, self.conversation_history):
                 if token.startswith("[tool:"):
                     continue
                 if first_token:
