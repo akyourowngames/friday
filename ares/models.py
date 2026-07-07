@@ -89,6 +89,8 @@ class PhoneConfig(BaseModel):
     kdeconnect_device_id: str = ""
     adb_device_address: str = ""
     store_notification_content: bool = False
+    kdeconnect_cli_path: str = ""   # auto-detected if empty
+    adb_path: str = ""              # auto-detected if empty
 
 
 class AppConfig(BaseModel):

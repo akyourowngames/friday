@@ -20,8 +20,22 @@ def _run(args: list[str], timeout: int = 12) -> subprocess.CompletedProcess[str]
     return subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=False)
 
 
+def _cli_path() -> str:
+    """Return the path to kdeconnect-cli from config or PATH."""
+    try:
+        cfg_path = load_config().phone.kdeconnect_cli_path.strip()
+        if cfg_path:
+            return cfg_path
+    except Exception:
+        pass
+    return shutil.which("kdeconnect-cli") or "kdeconnect-cli"
+
+
 def _missing_cli() -> str | None:
-    return None if shutil.which("kdeconnect-cli") else "kdeconnect-cli not found. Install KDE Connect desktop tools and pair your phone."
+    path = _cli_path()
+    if path and shutil.which(path):
+        return None
+    return "kdeconnect-cli not found. Install KDE Connect desktop tools and pair your phone."
 
 
 def _device_config_id() -> str:
@@ -49,7 +63,7 @@ def get_device_id() -> str:
         return configured
     if _missing_cli():
         return ""
-    proc = _run(["kdeconnect-cli", "-l"])
+    proc = _run([_cli_path(), "-l"])
     if proc.returncode != 0:
         return ""
     return _parse_device_id(proc.stdout)
@@ -59,7 +73,7 @@ def status() -> dict[str, Any]:
     err = _missing_cli()
     if err:
         return {"ok": False, "paired": False, "reachable": False, "error": err}
-    proc = _run(["kdeconnect-cli", "-l"])
+    proc = _run([_cli_path(), "-l"])
     output = (proc.stdout + proc.stderr).strip()
 
     device_id = _device_config_id() or (_parse_device_id(proc.stdout) if proc.returncode == 0 else "")
@@ -88,7 +102,7 @@ def get_recent_notifications(limit: int = 20) -> str:
     dev = _device_args()
     if not dev:
         return _json({"ok": False, "notifications": [], "error": "KDE Connect device not paired or not reachable."})
-    proc = _run(["kdeconnect-cli", *dev, "--list-notifications"])
+    proc = _run([_cli_path(), *dev, "--list-notifications"])
     if proc.returncode != 0:
         return _json({"ok": False, "notifications": [], "error": (proc.stderr or proc.stdout).strip()})
     notifications = []
@@ -109,7 +123,7 @@ def search_contacts(query: str) -> str:
     dev = _device_args()
     if not dev:
         return _json({"ok": False, "contacts": [], "error": "KDE Connect device not paired or not reachable."})
-    attempts = [["kdeconnect-cli", *dev, "--search-contacts", query], ["kdeconnect-cli", *dev, "--list-contacts"]]
+    attempts = [[_cli_path(), *dev, "--search-contacts", query], [_cli_path(), *dev, "--list-contacts"]]
     last = ""
     for args in attempts:
         proc = _run(args)
@@ -133,7 +147,7 @@ def send_sms(number: str, message: str) -> str:
     dev = _device_args()
     if not dev:
         return _json({"ok": False, "sent": False, "error": "KDE Connect device not paired or not reachable."})
-    proc = _run(["kdeconnect-cli", *dev, "--send-sms", message, "--destination", number], timeout=20)
+    proc = _run([_cli_path(), *dev, "--send-sms", message, "--destination", number], timeout=20)
     return _json({"ok": proc.returncode == 0, "sent": proc.returncode == 0, "number": number, "error": "" if proc.returncode == 0 else (proc.stderr or proc.stdout).strip()})
 
 

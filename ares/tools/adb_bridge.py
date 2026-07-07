@@ -22,6 +22,13 @@ def _run(args: list[str], timeout: int = 12) -> subprocess.CompletedProcess[str]
 
 
 def _adb() -> str | None:
+    """Return the path to adb from config or PATH."""
+    try:
+        cfg_path = load_config().phone.adb_path.strip()
+        if cfg_path:
+            return cfg_path
+    except Exception:
+        pass
     return shutil.which("adb")
 
 
@@ -33,14 +40,16 @@ def _configured_device() -> str:
 
 
 def _base_args() -> list[str]:
+    adb = _adb() or "adb"
     device = _configured_device()
-    return ["adb", "-s", device] if device else ["adb"]
+    return [adb, "-s", device] if device else [adb]
 
 
 def connected_devices() -> list[str]:
-    if not _adb():
+    adb = _adb()
+    if not adb:
         return []
-    proc = _run(["adb", "devices"])
+    proc = _run([adb, "devices"])
     devices = []
     for line in proc.stdout.splitlines()[1:]:
         parts = line.split()
