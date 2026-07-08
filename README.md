@@ -22,7 +22,7 @@ Ares is a terminal-first personal AI assistant with local memory, local project 
 - Android phone bridge tools through KDE Connect and ADB for status, notifications, contacts, SMS, confirmed calls, app launch, and URL open.
 - Android ADB MCP server for screenshots, file transfer, app install/uninstall, and shell commands.
 - Atomic config updates via `update_config` tool (surgical field edits, no full rewrites).
-- Voice mode with VAD, faster-whisper STT, and Edge TTS or Sarvam TTS.
+- Voice mode with stricter VAD, local Whisper/Edge fallback, and optional Sarvam AI STT/TTS.
 - WebSocket server for the Electron app.
 - Electron + React desktop app with chat, sessions, settings, status, tool cards, and terminal UI.
 
@@ -186,10 +186,10 @@ ares/sessions.py]
 |---|---|
 | `ares/voice/__init__.py` | Voice input/output subsystem for Ares. |
 | `ares/voice/agent.py` | Continuous voice mode entry point. |
-| `ares/voice/listener.py` | Push-to-talk microphone capture for the terminal CLI. |
 | `ares/voice/player.py` | Audio playback helpers for voice responses. |
-| `ares/voice/stt.py` | Local speech-to-text helpers built around faster-whisper. |
-| `ares/voice/tts.py` | TTS provider interface and implementations for Edge TTS and Sarvam AI. |
+| `ares/voice/stt.py` | Local Whisper transcription helpers built around faster-whisper. |
+| `ares/voice/tts.py` | Edge TTS speech synthesis wrapper. |
+| `ares/voice/sarvam.py` | Sarvam AI STT/TTS adapters. |
 
 ## Built-in Skills
 
@@ -331,13 +331,27 @@ Config is stored at `~/.ares/config.json`. The current `AppConfig` defaults are:
   ],
   "voice": {
     "enabled": false,
-    "tts_provider": "edge_tts",
-    "tts_voice": "",
-    "hotkey": "space",
-    "stt_model": "tiny",
-    "sarvam_api_key": "",
-    "sarvam_tts_model": "bulbul:v2",
-    "sarvam_language_code": "hi-IN"
+    "stt_backend": "auto",
+    "tts_backend": "auto",
+    "tts_voice": "en-US-JennyNeural",
+    "stt_model": "small",
+    "stt_language": "",
+    "mic_device": null,
+    "min_utterance_ms": 650,
+    "silence_timeout_ms": 700,
+    "max_utterance_seconds": 20.0,
+    "start_speech_frames": 5,
+    "min_voiced_ms": 250,
+    "min_audio_rms": 0.004,
+    "barge_in_enabled": false,
+    "post_speech_cooldown_ms": 1200,
+    "tts_sample_rate": 24000,
+    "tts_volume": 1.6,
+    "sarvam_stt_model": "saaras:v3",
+    "sarvam_tts_model": "bulbul:v3",
+    "sarvam_language_code": "en-IN",
+    "sarvam_speaker": "shubh",
+    "sarvam_pace": 1.0
   },
   "phone": {
     "enabled": false,
@@ -399,6 +413,15 @@ npm run dev
 ```bash
 pip install -e ".[voice]"
 python -m ares --voice
+python -m ares --voice --voice-name en-US-GuyNeural
+python -m ares --voice --stt-backend sarvam --tts-backend sarvam
+python -m ares --voice --barge-in
+```
+
+For Sarvam AI, set your API key outside the repo:
+
+```powershell
+$env:SARVAM_API_KEY = "your-key"
 ```
 
 ## Privacy Notes
@@ -411,7 +434,7 @@ python -m ares --voice
 
 ## Tech Stack
 
-Python 3.11+, Rich, prompt_toolkit, pydantic, SQLite, sqlite-vec, sentence-transformers/ONNX Runtime with fallbacks, httpx, Tavily/ddgs, Pillow, MCP SDK, croniter/dateparser/tzlocal, websockets, faster-whisper, Edge TTS/Sarvam, WebRTC VAD, Electron, React, Zustand, Vite, xterm.js, and node-pty.
+Python 3.11+, Rich, prompt_toolkit, pydantic, SQLite, sqlite-vec, sentence-transformers/ONNX Runtime with fallbacks, httpx, Tavily/ddgs, Pillow, MCP SDK, croniter/dateparser/tzlocal, websockets, faster-whisper, Edge TTS, Sarvam AI, WebRTC VAD, Electron, React, Zustand, Vite, xterm.js, and node-pty.
 
 ## Documentation Audit Notes
 

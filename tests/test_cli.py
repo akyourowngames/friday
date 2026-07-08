@@ -1,6 +1,7 @@
 """Tests for CLI startup helpers."""
 
 import json
+import os
 import sqlite3
 from io import StringIO
 from pathlib import Path
@@ -40,8 +41,39 @@ class StreamingAgent(DummyAgent):
             }],
             "errors": [],
         }
+        yield "[tool_start:web_search]"
         yield f"[tool:web_search:{json.dumps(payload)}]"
         yield "Done."
+
+
+class MemoryStreamingAgent(DummyAgent):
+    async def run_stream(self, *_args, **_kwargs):
+        yield "[tool_start:store_memory]"
+        yield "[tool:store_memory:Stored memory #7: user secret phrase]"
+        yield "Saved."
+
+
+class EmojiStreamingAgent(DummyAgent):
+    async def run_stream(self, *_args, **_kwargs):
+        yield "Hey there 👋 What's up? 😊"
+
+
+class LongStreamingAgent(DummyAgent):
+    async def run_stream(self, *_args, **_kwargs):
+        yield (
+            "LDR: Hot and humid right now, but heavy rain and thunderstorms are coming "
+            "tonight. Stay indoors if you can, and keep an umbrella handy!\n\n"
+            "- High: 35C / Low: 25C with a long note that should wrap cleanly inside "
+            "the assistant gutter."
+        )
+
+
+class RepeatedOpeningAgent(DummyAgent):
+    async def run_stream(self, *_args, **_kwargs):
+        yield (
+            "Haha fair, I deserve that one\n\n"
+            "I'm Ares, your personal AI assistant in the terminal."
+        )
 
 
 class DummyMemoryStore:
@@ -58,6 +90,9 @@ class DummyMemoryStore:
 
     def get_recent(self, limit=10):
         return list(self.memories.values())[:limit]
+
+    def list_all(self):
+        return list(self.memories.values())
 
     def search(self, query, limit=10):
         return [m for m in self.memories.values() if query.lower() in m["fact_text"].lower()]
@@ -179,6 +214,27 @@ def test_memory_edit_and_forget_commands():
     assert 12 not in app.memory_store.memories
 
 
+def test_memory_clean_command_prunes_policy_violations():
+    app = make_cli()
+    app.memory_store.memories[13] = {
+        "fact_id": 13,
+        "fact_text": "Delhi weather is rainy tonight",
+        "category": "fact",
+        "importance": 0.3,
+        "confidence": 0.9,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "access_count": 0,
+        "updated_at": "now",
+    }
+
+    assert app._handle_command("/memory clean")
+
+    output = app.console_file.getvalue()
+    assert "Memory cleaned" in output
+    assert "policy=1" in output
+    assert 13 not in app.memory_store.memories
+
+
 def test_export_command_calls_exporter(monkeypatch, tmp_path):
     app = make_cli()
     called = {}
@@ -208,6 +264,20 @@ def test_soul_profile_and_context_commands_render():
     assert "Current Project Context" in output
 
 
+def test_banner_uses_plain_ascii_layout():
+    app = make_cli()
+
+    app._show_banner()
+
+    output = app.console_file.getvalue()
+    assert "Ares" in output
+    assert "model" in output
+    assert "memory" in output
+    assert "🔥" not in output
+    assert "╭" not in output
+    assert "─" not in output
+
+
 def test_cleanup_step_reports_sqlite_lock_without_crashing():
     app = make_cli()
 
@@ -222,10 +292,45 @@ def test_cleanup_step_reports_sqlite_lock_without_crashing():
 
 
 @pytest.mark.asyncio
-async def test_process_input_routes_tool_tokens_to_renderers():
+async def test_process_input_summarizes_tool_tokens_by_default():
     app = make_cli()
     app.agent = StreamingAgent()
-    app.icons.update({"thinking": "...", "bot": "Ares"})
+
+    await app._process_input("search bitcoin")
+
+    output = app.console_file.getvalue()
+    assert "Using web search..." in output
+    assert "Done web search: 1 result for bitcoin price" in output
+    assert "web search" in output
+    assert "1 result" in output
+    assert "Bitcoin is moving today." not in output
+    assert "Bitcoin price today" not in output
+    assert "Done." in output
+    assert "╭" not in output
+    assert "─" not in output
+    assert "🤖" not in output
+    assert app.conversation_history[-1]["content"] == "Done."
+
+
+@pytest.mark.asyncio
+async def test_process_input_does_not_emit_live_status_escape_codes():
+    app = make_cli()
+    app.agent = StreamingAgent()
+
+    await app._process_input("search bitcoin")
+
+    output = app.console_file.getvalue()
+    assert "Using web search..." in output
+    assert "\x1b[2K" not in output
+    assert "\x1b[0m" not in output
+    assert "Thinking..." in output
+
+
+@pytest.mark.asyncio
+async def test_process_input_can_show_tool_details_for_debugging():
+    app = make_cli()
+    app.agent = StreamingAgent()
+    app.tool_output_mode = "details"
 
     await app._process_input("search bitcoin")
 
@@ -234,7 +339,93 @@ async def test_process_input_routes_tool_tokens_to_renderers():
     assert "Bitcoin is moving today." in output
     assert "Bitcoin price today" in output
     assert "Done." in output
-    assert app.conversation_history[-1]["content"] == "Done."
+
+
+def test_tools_command_sets_output_mode():
+    app = make_cli()
+
+    assert app._handle_command("/tools hidden")
+    assert app.tool_output_mode == "hidden"
+    assert app._handle_command("/tools summary")
+    assert app.tool_output_mode == "summary"
+
+
+@pytest.mark.asyncio
+async def test_process_input_hides_tool_progress_when_requested():
+    app = make_cli()
+    app.agent = StreamingAgent()
+    app.tool_output_mode = "hidden"
+
+    await app._process_input("search bitcoin")
+
+    output = app.console_file.getvalue()
+    assert "Using web search..." not in output
+    assert "Done web search" not in output
+    assert "Done." in output
+
+
+@pytest.mark.asyncio
+async def test_process_input_does_not_leak_generic_tool_content():
+    app = make_cli()
+    app.agent = MemoryStreamingAgent()
+
+    await app._process_input("remember this")
+
+    output = app.console_file.getvalue()
+    assert "memory" in output
+    assert "user secret phrase" not in output
+    assert "Saved." in output
+
+
+@pytest.mark.asyncio
+async def test_process_input_strips_assistant_emoji():
+    app = make_cli()
+    app.agent = EmojiStreamingAgent()
+
+    await app._process_input("hello")
+
+    output = app.console_file.getvalue()
+    assert "👋" not in output
+    assert "😊" not in output
+    assert "Hey there What's up?" in output
+
+
+@pytest.mark.asyncio
+async def test_process_input_wraps_assistant_response_with_gutter(monkeypatch):
+    app = make_cli()
+    app.agent = LongStreamingAgent()
+    monkeypatch.setattr(cli_module.shutil, "get_terminal_size", lambda fallback: os.terminal_size((64, 24)))
+
+    await app._process_input("weather")
+
+    output = app.console_file.getvalue()
+    lines = output.splitlines()
+    answer_lines = lines[lines.index("Ares") + 1:]
+    non_empty = [line for line in answer_lines if line.strip()]
+    assert non_empty
+    assert all(line.startswith("  ") for line in non_empty)
+    assert "umbrella handy!" not in {line.strip() for line in lines}
+    assert any(line.startswith("  - High:") for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_process_input_drops_repeated_opening():
+    app = make_cli()
+    app.agent = RepeatedOpeningAgent()
+    app.conversation_history = [
+        {"role": "user", "content": "ahh man you are so dumb"},
+        {
+            "role": "assistant",
+            "content": "Haha okay fair, I deserve that one\n\nLet me fix the actual issue.",
+        },
+    ]
+
+    await app._process_input("hi who are you")
+
+    output = app.console_file.getvalue()
+    assert "deserve that one" not in output
+    assert "I'm Ares" in output
+    assert "deserve that one" not in app.conversation_history[-1]["content"]
 
 
 def test_setup_command_runs_onboarding_and_refreshes_agent_model(monkeypatch):

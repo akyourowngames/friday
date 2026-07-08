@@ -13,6 +13,7 @@ data/
 *.sqlite
 *.sqlite3
 *.log
+.playwright-mcp/
 electron-app/node_modules/
 electron-app/dist/
 electron-app/release/

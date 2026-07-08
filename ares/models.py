@@ -73,13 +73,27 @@ class VoiceConfig(BaseModel):
     """Voice settings for continuous voice mode."""
 
     enabled: bool = False
-    tts_provider: str = "edge_tts"
-    tts_voice: str = ""
-    hotkey: str = "space"
+    stt_backend: str = "auto"
+    tts_backend: str = "auto"
+    tts_voice: str = "en-US-JennyNeural"
     stt_model: str = "small"
-    sarvam_api_key: str = ""
-    sarvam_tts_model: str = "bulbul:v2"
-    sarvam_language_code: str = "hi-IN"
+    stt_language: str = ""
+    mic_device: int | str | None = None
+    min_utterance_ms: int = 650
+    silence_timeout_ms: int = 700
+    max_utterance_seconds: float = 20.0
+    start_speech_frames: int = 5
+    min_voiced_ms: int = 250
+    min_audio_rms: float = 0.004
+    barge_in_enabled: bool = False
+    post_speech_cooldown_ms: int = 1200
+    tts_sample_rate: int = 24000
+    tts_volume: float = 1.6
+    sarvam_stt_model: str = "saaras:v3"
+    sarvam_tts_model: str = "bulbul:v3"
+    sarvam_language_code: str = "en-IN"
+    sarvam_speaker: str = "shubh"
+    sarvam_pace: float = 1.0
     voice_max_history: int = 10
     voice_max_memories: int = 3
 

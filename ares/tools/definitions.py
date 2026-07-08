@@ -24,9 +24,9 @@ def get_tool_definitions() -> list[dict]:
     return [
         _tool(
             "store_memory",
-            "Save a fact, preference, or personal detail the user wants remembered.",
+            "Save a durable user preference, identity fact, recurring project, or explicit remember-this request. Do not store temporary moods, insults, tool outputs, guesses, current events, or facts about the world.",
             {
-                "content": {"type": "string", "description": "What to remember."},
+                "content": {"type": "string", "description": "Durable user-specific fact to remember, written without guesses or temporary context."},
                 "category": {
                     "type": "string",
                     "description": "preference, fact, belief, habit, relationship, or note",
@@ -39,7 +39,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "search_memory",
-            "Search stored user memories.",
+            "Search stored user memories before relying on or updating remembered user facts.",
             {
                 "query": {"type": "string", "description": "What to search for."},
                 "limit": {"type": "integer", "default": 5},
@@ -48,7 +48,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "update_memory",
-            "Correct or enrich an existing stored memory.",
+            "Correct or enrich an existing stored memory when the user updates a durable preference or an old memory is wrong.",
             {
                 "fact_id": {"type": "integer", "description": "Memory ID."},
                 "content": {"type": "string", "description": "Replacement memory text."},
@@ -97,7 +97,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "web_search",
-            "Search the web AND automatically read the top results. Returns search results plus the full content of the top 3 pages. One call does everything — no need to fetch URLs separately.",
+            "Search the web and automatically read top results. Can prefer the Fetch MCP server when connected, with local fetch_url fallback.",
             {
                 "query": {"type": "string", "description": "The web search query."},
                 "max_results": {"type": "integer", "default": 5},
@@ -105,6 +105,17 @@ def get_tool_definitions() -> list[dict]:
                     "type": "integer",
                     "default": 3,
                     "description": "How many top results to automatically fetch full content for (0 to skip fetching).",
+                },
+                "max_fetch_chars": {
+                    "type": "integer",
+                    "default": 8000,
+                    "description": "Maximum characters to keep from each fetched page.",
+                },
+                "fetcher": {
+                    "type": "string",
+                    "enum": ["auto", "mcp", "local"],
+                    "default": "auto",
+                    "description": "auto uses Fetch MCP when connected, then local fetch_url. mcp requires Fetch MCP. local uses built-in fetch_url.",
                 },
                 "provider": {
                     "type": "string",

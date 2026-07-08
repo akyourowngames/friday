@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ares.memory_policy import memory_rejection_reason
+
 
 class MemoryCleaner:
     """Cleans up memory store: dedup, merge, and prune stale facts."""
@@ -23,6 +25,7 @@ class MemoryCleaner:
         """Run full cleanup: dedup, merge, and prune. Returns stats."""
         stats = {
             "duplicates_merged": 0,
+            "policy_pruned": 0,
             "stale_pruned": 0,
             "total_before": 0,
             "total_after": 0,
@@ -31,11 +34,27 @@ class MemoryCleaner:
         all_memories = self.memory_store.list_all()
         stats["total_before"] = len(all_memories)
 
+        stats["policy_pruned"] = self._prune_policy_violations(all_memories)
+        all_memories = self.memory_store.list_all()
         stats["duplicates_merged"] = self._dedup_similar(all_memories)
         stats["stale_pruned"] = self._prune_stale()
 
         stats["total_after"] = len(self.memory_store.list_all())
         return stats
+
+    def _prune_policy_violations(self, memories: list[dict]) -> int:
+        """Remove memories that now violate deterministic memory policy."""
+        pruned = 0
+        for mem in memories:
+            reason = memory_rejection_reason(
+                mem.get("fact_text", ""),
+                category=mem.get("category", "note"),
+                confidence=float(mem.get("confidence", 1.0) or 1.0),
+            )
+            if reason:
+                self.memory_store.delete(mem["fact_id"])
+                pruned += 1
+        return pruned
 
     def _dedup_similar(self, memories: list[dict]) -> int:
         """Find similar memories and merge them."""

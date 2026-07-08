@@ -16,6 +16,7 @@ from ares.profile import ProfileManager
 from ares.prompts import SYSTEM_PROMPT
 from ares.soul import SoulManager
 from ares.skills import SkillManager
+from ares.tools.datetime_tool import get_current_datetime_result
 
 
 class Agent:
@@ -43,6 +44,7 @@ class Agent:
             memory_store=memory_store,
             conversation_store=conversation_store,
             config=config,
+            mcp_manager=mcp_manager,
         )
         self.mcp_manager = mcp_manager
         self.is_cron_session = is_cron_session
@@ -90,6 +92,14 @@ class Agent:
                        context: str = "") -> list[dict]:
         """Build the message list for the LLM."""
         system_content = SYSTEM_PROMPT
+        runtime = get_current_datetime_result()
+        system_content += (
+            "\n\n## Runtime"
+            f"\nCurrent local datetime: {runtime['datetime']}"
+            f"\nCurrent local date: {runtime['date']} ({runtime['day_of_week']})"
+            f"\nCurrent local time: {runtime['time']}"
+            f"\nTimezone: {runtime['timezone']}"
+        )
         skill_manager = getattr(self, "skill_manager", None)
         if getattr(self.config, "skills_enabled", True) and skill_manager is not None:
             system_content += f"\n\n{skill_manager.compact_index()}"
@@ -183,22 +193,37 @@ class Agent:
     async def process_tool_calls_async(self, tool_calls: list[dict]) -> list[dict]:
         """Execute local and MCP tool calls and return results with metadata."""
         mcp_results: dict[int, str] = {}
+        local_results: dict[int, str] = {}
         for i, call in enumerate(tool_calls):
             tool_name = call.get("function", {}).get("name", "unknown")
-            if not tool_name.startswith("mcp__"):
-                continue
             try:
                 args = self._tool_call_args(call)
-                if self.mcp_manager is None:
-                    result = "Error: MCP manager is not configured."
+                if tool_name.startswith("mcp__"):
+                    if self.mcp_manager is None:
+                        result = "Error: MCP manager is not configured."
+                    else:
+                        result = await self.mcp_manager.call_tool(tool_name, args)
+                    mcp_results[i] = result
                 else:
-                    result = await self.mcp_manager.call_tool(tool_name, args)
+                    local_results[i] = await self.tool_executor.execute_async(tool_name, args)
             except BaseException as exc:
                 result = f"Error: {exc}"
-            mcp_results[i] = result
-        return self._process_tool_calls_core(tool_calls, mcp_results=mcp_results)
+                if tool_name.startswith("mcp__"):
+                    mcp_results[i] = result
+                else:
+                    local_results[i] = result
+        return self._process_tool_calls_core(
+            tool_calls,
+            mcp_results=mcp_results,
+            local_results=local_results,
+        )
 
-    def _process_tool_calls_core(self, tool_calls: list[dict], mcp_results: dict[int, str] | None) -> list[dict]:
+    def _process_tool_calls_core(
+        self,
+        tool_calls: list[dict],
+        mcp_results: dict[int, str] | None,
+        local_results: dict[int, str] | None = None,
+    ) -> list[dict]:
         """Execute/assemble tool results."""
         results = []
         for i, call in enumerate(tool_calls):
@@ -210,6 +235,8 @@ class Agent:
                 args = self._tool_call_args(call)
                 if tool_name.startswith("mcp__"):
                     result = (mcp_results or {}).get(i, "Error: MCP tool was not executed.")
+                elif local_results is not None and i in local_results:
+                    result = local_results[i]
                 else:
                     result = self.tool_executor.execute(tool_name, args)
             except Exception as e:
@@ -358,6 +385,9 @@ class Agent:
                     "content": "".join(content_parts),
                     "tool_calls": formatted_calls,
                 })
+                for call in formatted_calls:
+                    tool_name = call.get("function", {}).get("name") or "unknown"
+                    yield f"[tool_start:{tool_name}]"
                 tool_results = await self.process_tool_calls_async(formatted_calls)
                 for tr in tool_results:
                     yield f"[tool:{tr['tool_name']}:{tr['content']}]"

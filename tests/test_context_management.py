@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from ares.context_blend import TokenEstimator, estimate_tokens, truncate_to_tokens
+from ares.context_blend import TokenEstimator, estimate_tokens, format_memories, truncate_to_tokens
 from ares.tool_truncator import ToolTruncator
 from ares.compactor import ContextCompactor
 from ares.memory_extractor import MemoryExtractor
@@ -141,6 +141,14 @@ class TestTokenEstimator:
         result = truncate_to_tokens(text, 50)
         assert "truncated" in result
 
+    def test_format_memories_includes_evidence_warning(self):
+        result = format_memories([
+            {"fact_id": 1, "fact_text": "User likes tea", "category": "preference", "importance": 0.8}
+        ])
+
+        assert "runtime/tool evidence" in result
+        assert "User likes tea" in result
+
 
 # ── Task 2: ToolTruncator ─────────────────────────────────────────────
 
@@ -261,6 +269,34 @@ class TestMemoryExtractor:
         result = extractor._parse_and_store(response)
         assert result == []
 
+    def test_parse_and_store_rejects_temporary_state_and_insults(self):
+        store = FakeMemoryStore()
+        extractor = MemoryExtractor(FakeLLM(), store)
+        response = json.dumps([
+            {
+                "fact_text": "User likes dark mode",
+                "category": "preference",
+                "importance": 0.8,
+                "confidence": 0.9,
+            },
+            {
+                "fact_text": "User said fuck you",
+                "category": "note",
+                "importance": 0.2,
+                "confidence": 0.9,
+            },
+            {
+                "fact_text": "Delhi weather is rainy tonight",
+                "category": "fact",
+                "importance": 0.3,
+                "confidence": 0.9,
+            },
+        ])
+
+        result = extractor._parse_and_store(response)
+
+        assert [item["fact_text"] for item in result] == ["User likes dark mode"]
+
 
 # ── Task 5: MemoryCleaner ─────────────────────────────────────────────
 
@@ -272,7 +308,29 @@ class TestMemoryCleaner:
         assert stats["total_before"] == 0
         assert stats["total_after"] == 0
         assert stats["duplicates_merged"] == 0
+        assert stats["policy_pruned"] == 0
         assert stats["stale_pruned"] == 0
+
+    def test_cleanup_prunes_policy_violations(self):
+        store = FakeMemoryStore()
+        store._facts.extend([
+            {
+                "fact_id": 1, "fact_text": "Delhi weather is rainy tonight", "category": "fact",
+                "importance": 0.3, "confidence": 0.9, "source": "test",
+                "created_at": "2026-01-01T00:00:00+00:00", "access_count": 0,
+            },
+            {
+                "fact_id": 2, "fact_text": "User likes dark mode", "category": "preference",
+                "importance": 0.8, "confidence": 0.9, "source": "test",
+                "created_at": "2026-01-01T00:00:00+00:00", "access_count": 0,
+            },
+        ])
+
+        cleaner = MemoryCleaner(store)
+        stats = cleaner.cleanup()
+
+        assert stats["policy_pruned"] == 1
+        assert [fact["fact_text"] for fact in store._facts] == ["User likes dark mode"]
 
     def test_prune_stale_keeps_important(self):
         store = FakeMemoryStore()

@@ -19,7 +19,7 @@ from ares.tools.filesystem import (
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.skills import SkillManager
-from ares.tools.web import fetch_url_tool, payload_to_json, web_search_payload
+from ares.tools.web import fetch_url, fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
 from ares.tools.filesystem_write import edit_file as _edit_file_impl
 from ares.tools.filesystem_write import create_directory as _create_directory_impl
@@ -47,6 +47,7 @@ from ares.tools.image_edit import image_info as _image_info
 from ares.tools.image_edit import resize_image as _resize_image
 from ares.tools.image_edit import convert_image as _convert_image
 from ares.tools.image_edit import crop_image as _crop_image
+from ares.memory_policy import memory_rejection_reason
 from ares.cron.store import CronStore
 from ares.cron.tools import CronToolHandlers
 from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
@@ -62,10 +63,12 @@ class ToolExecutor:
         memory_store: MemoryStore,
         conversation_store: ConversationStore | None = None,
         config: AppConfig | None = None,
+        mcp_manager: Any | None = None,
     ):
         self.memory = memory_store
         self.conversations = conversation_store
         self.config = config
+        self.mcp_manager = mcp_manager
         self.repl = PersistentREPL()
         data_root = None
         if config is not None:
@@ -155,14 +158,29 @@ class ToolExecutor:
             raise ValueError(f"Unknown tool: {tool_name}") from exc
         return handler(arguments)
 
+    async def execute_async(self, tool_name: str, arguments: dict) -> str:
+        """Execute a tool, allowing local tools to use async integrations."""
+        if tool_name == "web_search":
+            return await self._web_search_async(arguments)
+        return self.execute(tool_name, arguments)
+
     # ── Memory tools ──────────────────────────────────────────────
 
     def _store_memory(self, args: dict) -> str:
         content = args["content"]
+        category = args.get("category", "note")
+        confidence = float(args.get("confidence", 1.0))
+        rejection = memory_rejection_reason(
+            content,
+            category=category,
+            confidence=confidence,
+        )
+        if rejection:
+            return f"Memory not stored: {rejection}."
         fact_id = self.memory.store(
             content,
-            category=args.get("category", "note"),
-            confidence=float(args.get("confidence", 1.0)),
+            category=category,
+            confidence=confidence,
             importance=float(args.get("importance", 0.5)),
         )
         return f"Stored memory #{fact_id}: {content}"
@@ -269,8 +287,105 @@ class ToolExecutor:
             args["query"],
             max_results=int(args.get("max_results", 5)),
             provider=args.get("provider"),
+            fetch_top=int(args.get("fetch_top", 3)),
+            max_fetch_chars=int(args.get("max_fetch_chars", 8000)),
         )
         return payload_to_json(payload)
+
+    async def _web_search_async(self, args: dict) -> str:
+        fetcher = str(args.get("fetcher", "auto") or "auto").lower()
+        if fetcher not in {"auto", "mcp", "local"}:
+            fetcher = "auto"
+        fetch_top = int(args.get("fetch_top", 3))
+        max_fetch_chars = int(args.get("max_fetch_chars", 8000))
+
+        if fetcher == "local" or fetch_top <= 0:
+            return self._web_search(args)
+
+        payload = web_search_payload(
+            args["query"],
+            max_results=int(args.get("max_results", 5)),
+            provider=args.get("provider"),
+            fetch_top=0,
+            max_fetch_chars=max_fetch_chars,
+        )
+
+        fetched: list[dict[str, Any]] = []
+        for result in payload.get("results", [])[:fetch_top]:
+            url = result.get("url", "")
+            if not url:
+                continue
+
+            page, error = await self._fetch_with_mcp(url, max_fetch_chars)
+            if error:
+                if fetcher == "mcp":
+                    payload.setdefault("errors", []).append(error)
+                    continue
+                page = fetch_url(url, max_chars=max_fetch_chars)
+                page["fetcher"] = "local"
+
+            if not page.get("error"):
+                fetched.append({
+                    "url": url,
+                    "title": page.get("title") or result.get("title", ""),
+                    "content": page.get("content", ""),
+                    "truncated": page.get("truncated", False),
+                    "fetcher": page.get("fetcher", "mcp"),
+                })
+            elif fetcher == "auto":
+                payload.setdefault("errors", []).append(
+                    f"Failed to fetch {url}: {page['error']}"
+                )
+
+        payload["fetched"] = fetched
+        return payload_to_json(payload)
+
+    def _fetch_mcp_tool_name(self) -> str:
+        manager = getattr(self, "mcp_manager", None)
+        if manager is None:
+            return ""
+        definitions = getattr(manager, "tool_definitions", []) or []
+        names = [
+            tool.get("function", {}).get("name", "")
+            for tool in definitions
+        ]
+        if "mcp__fetch__fetch" in names:
+            return "mcp__fetch__fetch"
+        for name in names:
+            if name.startswith("mcp__fetch__"):
+                return name
+        if "fetch" in getattr(manager, "sessions", {}):
+            return "mcp__fetch__fetch"
+        return ""
+
+    async def _fetch_with_mcp(
+        self, url: str, max_chars: int
+    ) -> tuple[dict[str, Any], str]:
+        tool_name = self._fetch_mcp_tool_name()
+        if not tool_name:
+            return {}, "Fetch MCP server is not connected."
+
+        result = await self.mcp_manager.call_tool(
+            tool_name,
+            {"url": url, "max_length": max_chars},
+        )
+        if result.startswith("Error:"):
+            return {}, result
+
+        content = result
+        truncated = False
+        if len(content) > max_chars:
+            content = content[:max_chars] + f"\n\n[Content truncated at {max_chars} chars]"
+            truncated = True
+        return {
+            "url": url,
+            "title": "",
+            "content": content,
+            "content_type": "text/plain; source=mcp-fetch",
+            "truncated": truncated,
+            "error": "",
+            "fetcher": "mcp",
+        }, ""
 
     def _fetch_url(self, args: dict) -> str:
         return fetch_url_tool(args)

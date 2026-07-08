@@ -2,9 +2,14 @@
 
 import asyncio
 from contextlib import suppress
+from difflib import SequenceMatcher
+import json
 import re
+import shutil
 import sqlite3
 import sys
+import textwrap
+import unicodedata
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -15,7 +20,6 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.text import Text
 from rich.table import Table
@@ -26,6 +30,7 @@ from ares.context_blend import build_context_prompt
 from ares.conversations import ConversationStore
 from ares.tools.exporter import export_data, import_data
 from ares.memory import MemoryStore
+from ares.memory_cleaner import MemoryCleaner
 from ares.profile import ProfileManager, PROFILE_TEMPLATE
 from ares.onboarding import OnboardingWizard
 from ares.reminders import DesktopNotifier
@@ -42,18 +47,92 @@ from ares.cron.toast import CronToastManager
 from ares.session import SessionManager
 from ares.sessions import SessionStore
 
-# ── Styles ────────────────────────────────────────────────────
+# Styles
 STYLE = Style.from_dict({
     "prompt": "bold ansicyan",
 })
 
 COMPLETER = WordCompleter([
-    "/help", "/memory", "/model", "/clear",
+    "/help", "/memory", "/memory clean", "/model", "/clear",
     "/forget", "/export", "/import", "/reset", "/exit",
     "/soul", "/profile", "/context",
     "/skills", "/skills search", "/skills categories", "/skills load",
     "/setup", "/phone", "/phone status",
+    "/tools", "/tools summary", "/tools details", "/tools hidden",
 ], ignore_case=True)
+
+TOOL_OUTPUT_MODES = {"summary", "details", "hidden"}
+
+TOOL_LABELS = {
+    "web_search": "web search",
+    "read_file": "file read",
+    "search_files": "file search",
+    "list_directory": "directory scan",
+    "store_memory": "memory",
+    "search_memory": "memory search",
+    "update_memory": "memory",
+    "delete_memory": "memory",
+    "list_skills": "skills",
+    "load_skill": "skills",
+    "create_skill": "skills",
+    "export_data": "export",
+    "fetch_url": "web page",
+    "get_file_info": "file info",
+    "glob_pattern": "file match",
+    "write_file": "file write",
+    "edit_file": "file edit",
+    "create_directory": "directory create",
+    "delete_file": "file delete",
+    "move_file": "file move",
+    "batch_edit": "file edits",
+    "glob_apply": "file edits",
+    "show_file_with_line_numbers": "file preview",
+    "insert_line": "file edit",
+    "replace_lines": "file edit",
+    "delete_lines": "file edit",
+    "preview_diff": "diff preview",
+    "backup_file": "file backup",
+    "undo_last_edit": "file undo",
+    "batch_file_ops": "file operations",
+    "find_text": "text search",
+    "append_to_file": "file edit",
+    "prepend_to_file": "file edit",
+    "compare_files": "file compare",
+    "create_file_from_template": "file create",
+    "safe_path_status": "path check",
+    "disk_usage": "disk usage",
+    "checksum": "checksum",
+    "copy_file": "file copy",
+    "find_duplicates": "duplicate search",
+    "tail_file": "file tail",
+    "head_file": "file head",
+    "count_lines": "line count",
+    "file_tree": "file tree",
+    "run_code": "code run",
+    "run_command": "command",
+    "terminal_exec": "terminal",
+    "generate_image": "image",
+    "image_info": "image info",
+    "resize_image": "image resize",
+    "convert_image": "image convert",
+    "crop_image": "image crop",
+    "create_cron_job": "scheduler",
+    "list_cron_jobs": "scheduler",
+    "get_cron_job": "scheduler",
+    "update_cron_job": "scheduler",
+    "delete_cron_job": "scheduler",
+    "run_cron_job_now": "scheduler",
+    "get_cron_logs": "scheduler logs",
+    "phone_status": "phone",
+    "phone_get_notifications": "phone",
+    "phone_search_contact": "phone",
+    "phone_send_sms": "phone",
+    "phone_call_number": "phone",
+    "phone_launch_app": "phone",
+    "phone_open_url": "phone",
+    "update_config": "config",
+    "get_current_datetime": "clock",
+}
 
 
 def _history_path() -> str:
@@ -84,16 +163,17 @@ class AresCLI:
 
     def __init__(self):
         self.console = Console()
-        self.unicode_output = _supports_unicode_output()
+        self.unicode_output = False
         self.icons = {
-            "fire": "🔥" if self.unicode_output else "*",
-            "thinking": "🤔" if self.unicode_output else "...",
-            "tool": "⚙️" if self.unicode_output else "*",
-            "bot": "🤖" if self.unicode_output else "Ares",
-            "bye": "👋" if self.unicode_output else "",
-            "prompt": "❯ " if self.unicode_output else "> ",
-            "current": " ← current" if self.unicode_output else " < current",
+            "fire": "",
+            "thinking": "",
+            "tool": "",
+            "bot": "Ares",
+            "bye": "",
+            "prompt": "> ",
+            "current": " < current",
         }
+        self.tool_output_mode = "summary"
         self.config = load_config()
         self.memory_store = MemoryStore()
         data_dir = Path(self.config.data_dir).expanduser()
@@ -186,14 +266,12 @@ class AresCLI:
         memory_count = len(self.memory_store.list_all())
 
         self.console.print()
-        self.console.print(Panel(
-            f"[bold]{self.icons['fire']} Ares[/bold]\n"
-            f"[dim]v0.1.0[/dim] | "
-            f"[cyan]Model: {self.config.model}[/cyan] | "
-            f"[green]Memory: {memory_count} facts[/green]",
-            border_style="bright_cyan",
-            padding=(0, 1),
-        ))
+        self.console.print("[bold cyan]Ares[/bold cyan] [dim]v0.1.0[/dim]")
+        self.console.print(
+            f"[dim]model[/dim] {self.config.model}  "
+            f"[dim]memory[/dim] {memory_count} facts  "
+            "[dim]help[/dim] /help"
+        )
         self.console.print()
 
     def _print_memories(self, memories: list[dict], title: str = "Memories") -> None:
@@ -212,7 +290,7 @@ class AresCLI:
                 memory.get("category", "note"),
                 str(memory.get("importance", 0.5)),
                 memory["fact_text"],
-                memory.get("updated_at") or "—",
+                memory.get("updated_at") or "-",
             )
         self.console.print(table)
 
@@ -221,17 +299,29 @@ class AresCLI:
         self.console.print("[dim]Known free models:[/dim]")
         for model in FREE_MODELS:
             marker = self.icons["current"] if model == self.config.model else ""
-            self.console.print(f"  • {model}{marker}")
+            self.console.print(f"  - {model}{marker}")
 
     def _tool_status(self, tool_name: str) -> tuple[str, str]:
         """Return status text and border style for a running tool."""
         statuses = {
-            "web_search": ("Searching web...", "bright_green"),
-            "read_file": ("Reading file...", "bright_blue"),
-            "search_files": ("Searching files...", "bright_yellow"),
-            "list_directory": ("Listing directory...", "bright_magenta"),
+            "web_search": ("Searching the web", "bright_green"),
+            "read_file": ("Reading a file", "bright_blue"),
+            "search_files": ("Searching files", "bright_yellow"),
+            "list_directory": ("Scanning a directory", "bright_magenta"),
+            "store_memory": ("Saving memory", "green"),
         }
-        return statuses.get(tool_name, ("Running tool...", "dim"))
+        label = self._tool_label(tool_name)
+        return statuses.get(tool_name, (f"Using {label}", "dim"))
+
+    def _tool_label(self, tool_name: str) -> str:
+        """Return a friendly tool name for compact CLI status text."""
+        if tool_name in TOOL_LABELS:
+            return TOOL_LABELS[tool_name]
+        if tool_name.startswith("mcp__"):
+            parts = [part for part in tool_name.split("__") if part and part != "mcp"]
+            if parts:
+                return " ".join(parts).replace("_", " ")
+        return tool_name.replace("_", " ") or "tool"
 
     def _parse_tool_token(self, token: str) -> tuple[str, str]:
         """Parse [tool:name:content] tokens with a fallback for legacy tokens."""
@@ -240,6 +330,245 @@ class AresCLI:
         if len(parts) == 2 and re.match(r"^[a-z][a-z0-9_]*$", parts[0]):
             return parts[0] or "unknown", parts[1]
         return "unknown", inner
+
+    def _parse_tool_start_token(self, token: str) -> str:
+        """Parse [tool_start:name] tokens."""
+        inner = token.removeprefix("[tool_start:").removesuffix("]")
+        return inner if re.match(r"^[a-z][a-z0-9_]*$", inner) else "unknown"
+
+    def _clip_tool_detail(self, text: str, limit: int = 90) -> str:
+        """Keep tool summaries short enough to stay out of the user's way."""
+        clean = re.sub(r"\s+", " ", text).strip()
+        if len(clean) <= limit:
+            return clean
+        return clean[: limit - 3].rstrip() + "..."
+
+    def _summarize_tool_result(self, tool_name: str, content: str) -> dict[str, str]:
+        """Build a non-leaky summary of one tool result."""
+        clean = content.strip()
+        label = self._tool_label(tool_name)
+        event = {
+            "tool": tool_name,
+            "label": label,
+            "state": "done",
+            "detail": "completed",
+            "style": "dim",
+        }
+
+        if clean.lower().startswith("error:"):
+            event.update({
+                "state": "failed",
+                "detail": self._clip_tool_detail(clean.removeprefix("Error:").strip() or clean),
+                "style": "red",
+            })
+            return event
+
+        if tool_name == "web_search":
+            try:
+                payload = json.loads(clean)
+                if isinstance(payload, list):
+                    result_count = len(payload)
+                    query = ""
+                else:
+                    result_count = len(payload.get("results") or [])
+                    query = str(payload.get("query") or "")
+                detail = f"{result_count} result{'s' if result_count != 1 else ''}"
+                if query:
+                    detail += f" for {self._clip_tool_detail(query, 48)}"
+                event["detail"] = detail
+            except (TypeError, json.JSONDecodeError):
+                event["detail"] = "search completed"
+        elif tool_name == "read_file":
+            match = re.search(r"\[File: (.+?) \((\d+) lines total\)\]", clean)
+            if match:
+                event["detail"] = self._clip_tool_detail(f"{match.group(1)} ({match.group(2)} lines)")
+            else:
+                event["detail"] = "file read"
+        elif tool_name == "search_files":
+            first_line = next((line.strip() for line in clean.splitlines() if line.strip()), "")
+            event["detail"] = self._clip_tool_detail(first_line or "search completed")
+        elif tool_name == "list_directory":
+            first_line = next((line.strip() for line in clean.splitlines() if line.strip()), "")
+            event["detail"] = self._clip_tool_detail(first_line.removeprefix("[Directory:").removesuffix("]").strip() or "directory scanned")
+        elif tool_name in {"store_memory", "update_memory", "delete_memory", "search_memory"}:
+            event["detail"] = "memory updated" if tool_name != "search_memory" else "memory checked"
+        elif tool_name in {
+            "write_file", "edit_file", "create_directory", "delete_file", "move_file",
+            "batch_edit", "glob_apply", "insert_line", "replace_lines", "delete_lines",
+            "append_to_file", "prepend_to_file", "create_file_from_template",
+            "copy_file", "backup_file", "undo_last_edit", "batch_file_ops",
+        }:
+            event["detail"] = "filesystem updated"
+        elif tool_name in {"run_code", "run_command", "terminal_exec"}:
+            event["detail"] = "execution completed"
+        elif tool_name.startswith("phone_"):
+            event["detail"] = "phone action completed"
+        elif tool_name.startswith("mcp__"):
+            event["detail"] = "external tool completed"
+        else:
+            event["detail"] = "completed"
+
+        return event
+
+    def _render_tool_activity(self, events: list[dict[str, str]]):
+        """Render a compact post-run activity trail."""
+        mode = getattr(self, "tool_output_mode", "summary")
+        if mode == "hidden" or not events:
+            return None
+
+        lines = ["Tools"]
+        for event in events:
+            state = event.get("state", "done")
+            label = event.get("label", "tool")
+            detail = event.get("detail", "")
+            prefix = "failed" if state == "failed" else "done"
+            lines.append(f"  {prefix} {label}: {detail}")
+        return Text("\n".join(lines), style="dim")
+
+    def _print_tool_start(self, tool_name: str) -> None:
+        """Show a tool call as soon as the model asks for it."""
+        if getattr(self, "tool_output_mode", "summary") == "hidden":
+            return
+        self.console.print(f"[dim]Using {self._tool_label(tool_name)}...[/dim]")
+
+    def _print_tool_done(self, event: dict[str, str]) -> None:
+        """Show a compact tool completion line."""
+        if getattr(self, "tool_output_mode", "summary") != "summary":
+            return
+        label = event.get("label", "tool")
+        detail = event.get("detail", "completed")
+        if event.get("state") == "failed":
+            self.console.print(f"[red]Failed {label}: {detail}[/red]")
+        else:
+            self.console.print(f"[dim]Done {label}: {detail}[/dim]")
+
+    def _clean_assistant_text(self, text: str) -> str:
+        """Remove accidental tool protocol tokens from assistant-facing text."""
+        clean = re.sub(r"\[tool:[^\]]+\]", "", text)
+        clean = "".join(
+            ch for ch in clean
+            if unicodedata.category(ch) not in {"So", "Sk"}
+            and ch not in {"\ufe0e", "\ufe0f", "\u200d"}
+        )
+        clean = re.sub(r"[ \t]+", " ", clean)
+        clean = re.sub(r" *\n *", "\n", clean)
+        return clean.strip()
+
+    def _opening_paragraph(self, text: str) -> str:
+        """Return the first meaningful paragraph from assistant text."""
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        return paragraphs[0] if paragraphs else ""
+
+    def _normalize_opening(self, text: str) -> str:
+        """Normalize an opening paragraph for repetition checks."""
+        text = self._plain_response_line(text)
+        text = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _recent_assistant_openings(self, limit: int = 6) -> list[str]:
+        """Return normalized openings from recent assistant messages."""
+        openings: list[str] = []
+        for msg in reversed(self.conversation_history[-limit * 2:]):
+            if msg.get("role") != "assistant" or not msg.get("content"):
+                continue
+            opening = self._normalize_opening(self._opening_paragraph(str(msg["content"])))
+            if len(opening) >= 24:
+                openings.append(opening)
+            if len(openings) >= limit:
+                break
+        return openings
+
+    def _drop_repeated_opening(self, text: str) -> str:
+        """Remove a recycled opening paragraph from the new answer."""
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        if len(paragraphs) < 2:
+            return text
+
+        opening = self._normalize_opening(paragraphs[0])
+        if len(opening) < 24:
+            return text
+
+        for previous in self._recent_assistant_openings():
+            similarity = SequenceMatcher(None, opening, previous).ratio()
+            if similarity >= 0.72:
+                return "\n\n".join(paragraphs[1:]).strip()
+        return text
+
+    def _print_markdown_section(self, title: str, content: str, subtitle: str = "") -> None:
+        """Render a readable section without terminal box drawing."""
+        self.console.print()
+        self.console.print(f"[bold cyan]{title}[/bold cyan]")
+        if subtitle:
+            self.console.print(f"[dim]{subtitle}[/dim]")
+        self.console.print(Markdown(self._clean_assistant_text(content)))
+
+    def _response_width(self) -> int:
+        """Return a conservative width for readable assistant text."""
+        fallback_width = getattr(self.console, "width", 100) or 100
+        columns = shutil.get_terminal_size((fallback_width, 24)).columns
+        return max(48, min(columns, 110) - 4)
+
+    def _plain_response_line(self, line: str) -> str:
+        """Remove lightweight Markdown that makes plain terminal alignment noisy."""
+        line = line.strip()
+        line = re.sub(r"^#{1,6}\s*", "", line)
+        line = re.sub(r"^[-*]\s+", "- ", line)
+        line = re.sub(r"^\+\s+", "- ", line)
+        line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+        line = re.sub(r"__(.*?)__", r"\1", line)
+        line = re.sub(r"`([^`]+)`", r"\1", line)
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", line)
+        return line.strip()
+
+    def _wrapped_response_lines(self, text: str) -> list[str]:
+        """Format assistant text with a stable gutter and hanging bullet indents."""
+        width = self._response_width()
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = self._plain_response_line(raw_line)
+            if not line:
+                lines.append("")
+                continue
+
+            bullet = re.match(r"^-\s+(.*)$", line)
+            numbered = re.match(r"^(\d+[.)])\s+(.*)$", line)
+            if bullet:
+                wrapped = textwrap.wrap(
+                    bullet.group(1),
+                    width=width,
+                    initial_indent="  - ",
+                    subsequent_indent="    ",
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            elif numbered:
+                marker = numbered.group(1)
+                wrapped = textwrap.wrap(
+                    numbered.group(2),
+                    width=width,
+                    initial_indent=f"  {marker} ",
+                    subsequent_indent=" " * (len(marker) + 3),
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            else:
+                wrapped = textwrap.wrap(
+                    line,
+                    width=width,
+                    initial_indent="  ",
+                    subsequent_indent="  ",
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            lines.extend(wrapped or ["  "])
+        return lines
+
+    def _print_assistant_response(self, text: str) -> None:
+        """Render final assistant output in a plain, aligned transcript style."""
+        self.console.print()
+        self.console.print("[bold cyan]Ares[/bold cyan]")
+        for line in self._wrapped_response_lines(text):
+            self.console.print(Text(line))
 
     def _cleanup_step(self, label: str, func) -> None:
         """Run one shutdown step without letting cleanup errors crash Ares."""
@@ -288,7 +617,7 @@ class AresCLI:
             table.add_column("Command", style="cyan")
             table.add_column("Description")
             table.add_row("/help", "Show available commands")
-            table.add_row("/memory [search|edit|delete]", "Review and manage memories")
+            table.add_row("/memory [search|edit|delete|clean]", "Review, manage, and clean memories")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
             table.add_row("/clear", "Clear terminal screen")
@@ -301,6 +630,7 @@ class AresCLI:
             table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
             table.add_row("/setup", "Run the onboarding wizard again")
             table.add_row("/phone status", "Check Android phone bridge pairing health")
+            table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
             table.add_row("/skill-name", "Load a skill directly by slash command")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
@@ -310,6 +640,15 @@ class AresCLI:
                 self._print_memories(self.memory_store.get_recent(limit=10), "Recent Memories")
             elif arg.startswith("search "):
                 self._print_memories(self.memory_store.search(arg[7:].strip(), limit=10), "Memory Search")
+            elif arg == "clean":
+                stats = MemoryCleaner(self.memory_store).cleanup()
+                self.console.print(
+                    "[green]Memory cleaned.[/green] "
+                    f"[dim]policy={stats.get('policy_pruned', 0)}, "
+                    f"duplicates={stats.get('duplicates_merged', 0)}, "
+                    f"stale={stats.get('stale_pruned', 0)}, "
+                    f"remaining={stats.get('total_after', 0)}[/dim]"
+                )
             elif arg.startswith("edit "):
                 edit_parts = arg.split(maxsplit=2)
                 if len(edit_parts) < 3:
@@ -327,7 +666,7 @@ class AresCLI:
                 else:
                     self.console.print(f"[red]Memory #{fact_id} was not found.[/red]")
             else:
-                self.console.print("[red]Usage: /memory [search QUERY|edit ID NEW_TEXT|delete ID][/red]")
+                self.console.print("[red]Usage: /memory [search QUERY|edit ID NEW_TEXT|delete ID|clean][/red]")
 
         elif command == "/forget":
             if not arg:
@@ -399,12 +738,7 @@ class AresCLI:
             if not arg or arg == "show":
                 content = self.soul_manager.read()
                 if content:
-                    self.console.print(Panel(
-                        Markdown(content),
-                        title="Soul - Ares Personality",
-                        border_style="bright_magenta",
-                        padding=(0, 1),
-                    ))
+                    self._print_markdown_section("Soul", content, "Ares personality")
                 else:
                     self.console.print("[dim]No soul file found. Use /soul edit to create one.[/dim]")
             elif arg == "edit":
@@ -416,12 +750,7 @@ class AresCLI:
             if not arg or arg == "show":
                 content = self.profile_manager.read()
                 if content:
-                    self.console.print(Panel(
-                        Markdown(content),
-                        title="Profile - User Identity",
-                        border_style="bright_green",
-                        padding=(0, 1),
-                    ))
+                    self._print_markdown_section("Profile", content, "User identity")
                 else:
                     self.console.print("[dim]No profile file found. Use /profile edit to create one.[/dim]")
             elif arg == "edit":
@@ -439,12 +768,7 @@ class AresCLI:
                 token_budget=self.config.context_token_budget,
             )
             if context_str:
-                self.console.print(Panel(
-                    Markdown(context_str),
-                    title="Active Context",
-                    border_style="bright_cyan",
-                    padding=(0, 1),
-                ))
+                self._print_markdown_section("Active Context", context_str)
             else:
                 self.console.print("[dim]No context active.[/dim]")
 
@@ -470,20 +794,14 @@ class AresCLI:
                     self.console.print("[dim]No matching skills found.[/dim]")
                 else:
                     for skill in skills:
-                        self.console.print(f"[cyan]{skill.name}[/cyan] [{skill.category}] — {skill.description}")
+                        self.console.print(f"[cyan]{skill.name}[/cyan] [{skill.category}] - {skill.description}")
             elif arg.startswith("load "):
                 name = arg.split(maxsplit=1)[1]
                 skill = self.skill_manager.get_skill(name)
                 if skill is None:
                     self.console.print(f"[red]Skill '{name}' not found.[/red]")
                 else:
-                    self.console.print(Panel(
-                        Markdown(skill.content),
-                        title=f"Skill: {skill.name}",
-                        subtitle=skill.description,
-                        border_style="magenta",
-                        padding=(0, 1),
-                    ))
+                    self._print_markdown_section(f"Skill: {skill.name}", skill.content, skill.description)
             else:
                 self.console.print("[red]Usage: /skills [search QUERY|load NAME|categories][/red]")
 
@@ -495,7 +813,7 @@ class AresCLI:
             else:
                 import json
                 payload = json.loads(get_phone_status())
-                table = Table(title="📱 Phone Bridge", border_style="bright_cyan")
+                table = Table(title="Phone Bridge", border_style="bright_cyan")
                 table.add_column("Bridge", style="cyan")
                 table.add_column("Status")
                 table.add_column("Details", style="dim")
@@ -517,19 +835,29 @@ class AresCLI:
                 )
                 self.console.print(table)
 
+        elif command == "/tools":
+            if not arg:
+                mode = getattr(self, "tool_output_mode", "summary")
+                self.console.print(f"[cyan]Tool output:[/cyan] {mode}")
+                self.console.print("[dim]Use /tools summary, /tools details, or /tools hidden.[/dim]")
+            elif arg in TOOL_OUTPUT_MODES:
+                self.tool_output_mode = arg
+                descriptions = {
+                    "summary": "Tool results stay hidden; Ares shows a compact activity trail.",
+                    "details": "Tool result panels are shown for debugging.",
+                    "hidden": "Tool activity is fully hidden unless an error reaches the final answer.",
+                }
+                self.console.print(f"[green]Tool output set to {arg}.[/green] [dim]{descriptions[arg]}[/dim]")
+            else:
+                self.console.print("[red]Usage: /tools [summary|details|hidden][/red]")
+
         elif command == "/exit":
             return False
 
         else:
             skill = self.skill_manager.get_skill(command[1:]) if command.startswith("/") else None
             if skill is not None:
-                self.console.print(Panel(
-                    Markdown(skill.content),
-                    title=f"Skill: {skill.name}",
-                    subtitle=skill.description,
-                    border_style="magenta",
-                    padding=(0, 1),
-                ))
+                self._print_markdown_section(f"Skill: {skill.name}", skill.content, skill.description)
             else:
                 self.console.print(f"[red]Unknown command: {command}. Type /help for available commands.[/red]")
 
@@ -537,50 +865,47 @@ class AresCLI:
 
     async def _process_input(self, user_input: str):
         """Process a user message through the agent and display response."""
+        tool_events = []
         tool_renderables = []
 
         self.console.print()
-        self.console.print(
-            Panel(
-                Text(f"{self.icons['thinking']} Thinking...", style="bold italic dim"),
-                border_style="dim blue",
-            )
-        )
-
+        self.console.print("[dim]Thinking...[/dim]")
         full_response = ""
         try:
             async for token in self.agent.run_stream(user_input, self.conversation_history):
-                if token.startswith("[tool:"):
+                if token.startswith("[tool_start:"):
+                    tool_name = self._parse_tool_start_token(token)
+                    self._print_tool_start(tool_name)
+                elif token.startswith("[tool:"):
                     tool_name, tool_content = self._parse_tool_token(token)
-                    status, color = self._tool_status(tool_name)
-                    self.console.print(
-                        Panel(
-                            Text(status, style=f"bold {color}"),
-                            border_style=color,
-                        )
-                    )
-                    try:
-                        renderer = get_renderer(tool_name)
-                        tool_renderables.append(renderer(tool_content))
-                    except Exception:
-                        tool_renderables.append(render_generic_tool(tool_content))
+                    event = self._summarize_tool_result(tool_name, tool_content)
+                    tool_events.append(event)
+                    self._print_tool_done(event)
+                    if getattr(self, "tool_output_mode", "summary") == "details":
+                        try:
+                            renderer = get_renderer(tool_name)
+                            tool_renderables.append(renderer(tool_content))
+                        except Exception:
+                            tool_renderables.append(render_generic_tool(tool_content))
                 else:
                     full_response += token
         except Exception as e:
             full_response = f"Error: {e}"
 
-        # Show rendered tool results before the final assistant response.
-        for renderable in tool_renderables:
-            self.console.print(renderable)
+        if getattr(self, "tool_output_mode", "summary") == "details":
+            tool_activity = self._render_tool_activity(tool_events)
+            if tool_activity is not None:
+                self.console.print(tool_activity)
+
+        if getattr(self, "tool_output_mode", "summary") == "details":
+            for renderable in tool_renderables:
+                self.console.print(renderable)
 
         # Show final response
+        full_response = self._clean_assistant_text(full_response)
+        full_response = self._drop_repeated_opening(full_response)
         if full_response.strip():
-            self.console.print(Panel(
-                Markdown(full_response),
-                title=f"{self.icons['bot']} Ares",
-                border_style="bright_blue",
-                padding=(0, 1),
-            ))
+            self._print_assistant_response(full_response)
 
         # Update conversation history with full message exchange (including tool calls)
         self.conversation_history.append({"role": "user", "content": user_input})
@@ -702,4 +1027,4 @@ class AresCLI:
                 lambda: self.conversation_store.end_conversation(self.conversation_id),
             )
             self._cleanup_step("conversation store", self.conversation_store.close)
-            self.console.print(f"\n[dim]Goodbye! {self.icons['bye']}[/dim]\n")
+            self.console.print("\n[dim]Goodbye.[/dim]\n")

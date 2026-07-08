@@ -1,5 +1,6 @@
 """Tests for tool definitions and implementations."""
 
+import asyncio
 import json
 
 import pytest
@@ -170,6 +171,16 @@ class TestToolExecutor:
         assert "Stored" in result
         assert "dark mode" in result
 
+    def test_store_memory_rejects_temporary_or_tool_state(self, executor):
+        """store_memory rejects non-durable facts before they pollute memory."""
+        result = executor.execute("store_memory", {
+            "content": "Delhi weather is rainy tonight",
+            "category": "fact",
+        })
+
+        assert result.startswith("Memory not stored")
+        assert not executor.memory.search("rainy")
+
     def test_search_memory(self, executor):
         """search_memory tool retrieves relevant facts."""
         executor.execute("store_memory", {"content": "Birthday is March 5"})
@@ -203,18 +214,86 @@ class TestToolExecutor:
 
     def test_web_search_tool(self, executor, monkeypatch):
         """web_search tool returns structured JSON payload."""
-        monkeypatch.setattr("ares.tools.executor.web_search_payload", lambda query, max_results=5, provider=None: {
+        monkeypatch.setattr("ares.tools.executor.web_search_payload", lambda query, max_results=5, provider=None, fetch_top=3, max_fetch_chars=8000: {
             "query": query,
             "provider": provider or "ddgs",
             "summary": "Summary",
             "answer": "",
             "results": [{"title": "Result", "url": "https://example.com", "snippet": query}],
+            "fetched": [],
             "errors": [],
         })
         result = executor.execute("web_search", {"query": "current news", "max_results": 1})
         payload = json.loads(result)
         assert payload["summary"] == "Summary"
         assert payload["results"][0]["title"] == "Result"
+
+    def test_web_search_tool_passes_fetch_controls(self, executor, monkeypatch):
+        """web_search forwards fetch controls into the payload builder."""
+        seen = {}
+
+        def fake_payload(query, max_results=5, provider=None, fetch_top=3, max_fetch_chars=8000):
+            seen.update(fetch_top=fetch_top, max_fetch_chars=max_fetch_chars)
+            return {
+                "query": query,
+                "provider": "ddgs",
+                "summary": "Summary",
+                "answer": "",
+                "results": [],
+                "fetched": [],
+                "errors": [],
+            }
+
+        monkeypatch.setattr("ares.tools.executor.web_search_payload", fake_payload)
+
+        executor.execute("web_search", {
+            "query": "current news",
+            "fetch_top": 1,
+            "max_fetch_chars": 1234,
+        })
+
+        assert seen == {"fetch_top": 1, "max_fetch_chars": 1234}
+
+    def test_web_search_async_prefers_fetch_mcp(self, executor, monkeypatch):
+        """web_search can combine search with Fetch MCP when connected."""
+        monkeypatch.setattr("ares.tools.executor.web_search_payload", lambda query, max_results=5, provider=None, fetch_top=3, max_fetch_chars=8000: {
+            "query": query,
+            "provider": "ddgs",
+            "summary": "Summary",
+            "answer": "",
+            "results": [{"title": "Result", "url": "https://example.com", "snippet": query}],
+            "fetched": [],
+            "errors": [],
+        })
+
+        class FakeMCPManager:
+            tool_definitions = [
+                {"function": {"name": "mcp__fetch__fetch"}},
+            ]
+
+            def __init__(self):
+                self.calls = []
+
+            async def call_tool(self, tool_name, arguments):
+                self.calls.append((tool_name, arguments))
+                return "Fetched by MCP"
+
+        fake_mcp = FakeMCPManager()
+        executor.mcp_manager = fake_mcp
+
+        result = asyncio.run(executor.execute_async("web_search", {
+            "query": "current news",
+            "fetch_top": 1,
+            "fetcher": "auto",
+            "max_fetch_chars": 500,
+        }))
+
+        payload = json.loads(result)
+        assert payload["fetched"][0]["content"] == "Fetched by MCP"
+        assert payload["fetched"][0]["fetcher"] == "mcp"
+        assert fake_mcp.calls == [
+            ("mcp__fetch__fetch", {"url": "https://example.com", "max_length": 500})
+        ]
 
     def test_fetch_url_tool(self, executor, monkeypatch):
         """fetch_url returns structured page extraction payload."""

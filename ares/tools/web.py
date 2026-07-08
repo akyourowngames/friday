@@ -386,7 +386,7 @@ def fetch_url(
     # Handle non-HTML content
     if "text/html" not in content_type and "text/" in content_type:
         # Plain text or other text type
-        text = response.text[:MAX_FETCH_BYTES].decode(errors="replace")
+        text = response.text[:MAX_FETCH_BYTES]
         if len(text) > max_chars:
             text = text[:max_chars]
             result["truncated"] = True

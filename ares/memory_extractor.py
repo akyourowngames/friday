@@ -8,6 +8,8 @@ import json
 import re
 from typing import Any
 
+from ares.memory_policy import memory_rejection_reason
+
 
 class MemoryExtractor:
     """Extracts new facts and preferences from conversations."""
@@ -42,6 +44,9 @@ class MemoryExtractor:
             "4. A relationship (e.g., \"my colleague John works on the API\")\n\n"
             "Do NOT extract:\n"
             "- Temporary task details\n"
+            "- Current date, weather, browser, app, phone, or tool state\n"
+            "- Insults, frustration, venting, or one-off moods\n"
+            "- Assistant guesses or things inferred from tool output\n"
             "- Information already commonly known\n"
             "- Requests that don't contain personal information\n\n"
             "For each extracted fact, respond with a JSON array:\n"
@@ -113,10 +118,18 @@ class MemoryExtractor:
         for fact in facts:
             if not fact.get("fact_text"):
                 continue
+            confidence = float(fact.get("confidence", 0.8))
+            category = fact.get("category", "note")
+            if memory_rejection_reason(
+                fact["fact_text"],
+                category=category,
+                confidence=confidence,
+            ):
+                continue
             fact_id = self.memory_store.store(
                 fact_text=fact["fact_text"],
-                category=fact.get("category", "note"),
-                confidence=float(fact.get("confidence", 0.8)),
+                category=category,
+                confidence=confidence,
                 importance=float(fact.get("importance", 0.5)),
                 source="conversation_extract",
             )

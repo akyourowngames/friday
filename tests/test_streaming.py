@@ -126,6 +126,7 @@ async def test_agent_run_stream_detects_and_executes_tool_call(tmp_path, fake_em
 
     tokens = [token async for token in agent.run_stream("Remember blue", [])]
 
+    assert "[tool_start:store_memory]" in tokens
     assert any(token.startswith("[tool:store_memory:Stored memory") for token in tokens)
-    assert "".join(token for token in tokens if not token.startswith("[tool:")) == "Stored!"
+    assert "".join(token for token in tokens if not token.startswith("[tool")) == "Stored!"
     assert mem_store.search("blue")

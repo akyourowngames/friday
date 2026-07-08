@@ -210,7 +210,10 @@ def format_memories(memories: list[dict] | None, token_budget: int = 800) -> str
     """Format retrieved memories for context injection."""
     if not memories:
         return ""
-    lines = ["## What I know about you:"]
+    lines = [
+        "## What I know about you:",
+        "Memory is for durable user-specific facts only. If a memory conflicts with runtime/tool evidence, trust the evidence and ask before updating memory.",
+    ]
     for memory in memories:
         cat = memory.get("category", "note")
         importance = memory.get("importance", 0.5)

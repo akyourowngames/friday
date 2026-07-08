@@ -147,3 +147,20 @@ class TestWebSearch:
         assert kwargs["json"]["include_raw_content"] is False
         assert kwargs["json"]["search_depth"] == "advanced"
         assert kwargs["headers"]["Authorization"] == "Bearer tvly-test"
+
+    @patch("ares.tools.web.httpx.Client")
+    def test_fetch_url_plain_text_content(self, mock_client_cls):
+        from ares.tools.web import fetch_url
+
+        response = MagicMock()
+        response.headers = {"content-type": "text/plain; charset=utf-8"}
+        response.text = "plain text body"
+        response.raise_for_status.return_value = None
+        client = MagicMock()
+        client.get.return_value = response
+        mock_client_cls.return_value.__enter__.return_value = client
+
+        result = fetch_url("https://example.com/readme.txt")
+
+        assert result["error"] == ""
+        assert result["content"] == "plain text body"

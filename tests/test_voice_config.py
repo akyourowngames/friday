@@ -1,56 +1,57 @@
-import os
-
-import pytest
-
 from ares.models import AppConfig, VoiceConfig
-from ares.voice.tts import EdgeTTS, SarvamTTS, create_tts_provider, voice_config_from_env
+from ares.voice.agent import voice_config_from_env
+from ares.voice.tts import DEFAULT_EDGE_VOICE, EdgeTTS
 
 
 def test_app_config_has_voice_defaults():
     config = AppConfig()
 
     assert config.voice.enabled is False
-    assert config.voice.tts_provider == "edge_tts"
-    assert config.voice.hotkey == "space"
+    assert config.voice.stt_backend == "auto"
+    assert config.voice.tts_backend == "auto"
+    assert config.voice.tts_voice == DEFAULT_EDGE_VOICE
     assert config.voice.stt_model == "small"
+    assert config.voice.min_utterance_ms == 650
+    assert config.voice.barge_in_enabled is False
+    assert config.voice.post_speech_cooldown_ms == 1200
+    assert config.voice.tts_volume == 1.6
 
 
 def test_voice_env_overrides(monkeypatch):
     monkeypatch.setenv("ARES_VOICE_ENABLED", "true")
-    monkeypatch.setenv("ARES_TTS_PROVIDER", "sarvam")
-    monkeypatch.setenv("ARES_TTS_VOICE", "arya")
-    monkeypatch.setenv("SARVAM_API_KEY", "test-key")
-    monkeypatch.setenv("SARVAM_LANGUAGE_CODE", "en-IN")
+    monkeypatch.setenv("ARES_STT_BACKEND", "sarvam")
+    monkeypatch.setenv("ARES_TTS_BACKEND", "sarvam")
+    monkeypatch.setenv("ARES_TTS_VOICE", "en-US-GuyNeural")
+    monkeypatch.setenv("ARES_STT_MODEL", "tiny")
+    monkeypatch.setenv("ARES_STT_LANGUAGE", "en")
+    monkeypatch.setenv("ARES_MIC_DEVICE", "2")
+    monkeypatch.setenv("ARES_TTS_VOLUME", "1.8")
+    monkeypatch.setenv("SARVAM_STT_MODEL", "saaras:v3")
+    monkeypatch.setenv("SARVAM_TTS_MODEL", "bulbul:v3")
+    monkeypatch.setenv("SARVAM_LANGUAGE_CODE", "hi-IN")
+    monkeypatch.setenv("SARVAM_SPEAKER", "shubh")
 
     resolved = voice_config_from_env(VoiceConfig())
 
     assert resolved.enabled is True
-    assert resolved.tts_provider == "sarvam"
-    assert resolved.tts_voice == "arya"
-    assert resolved.sarvam_api_key == "test-key"
-    assert resolved.sarvam_language_code == "en-IN"
+    assert resolved.stt_backend == "sarvam"
+    assert resolved.tts_backend == "sarvam"
+    assert resolved.tts_voice == "en-US-GuyNeural"
+    assert resolved.stt_model == "tiny"
+    assert resolved.stt_language == "en"
+    assert resolved.mic_device == 2
+    assert resolved.tts_volume == 1.8
+    assert resolved.sarvam_stt_model == "saaras:v3"
+    assert resolved.sarvam_tts_model == "bulbul:v3"
+    assert resolved.sarvam_language_code == "hi-IN"
+    assert resolved.sarvam_speaker == "shubh"
 
 
-def test_create_edge_provider():
-    provider = create_tts_provider(VoiceConfig(tts_provider="edge_tts", tts_voice="en-US-GuyNeural"))
+def test_edge_tts_uses_configured_voice():
+    provider = EdgeTTS(voice="en-US-GuyNeural")
 
     assert isinstance(provider, EdgeTTS)
     assert provider.default_voice == "en-US-GuyNeural"
-
-
-def test_create_sarvam_provider_requires_key():
-    with pytest.raises(ValueError, match="Sarvam TTS requires"):
-        create_tts_provider(VoiceConfig(tts_provider="sarvam"))
-
-
-def test_create_sarvam_provider_with_env_key(monkeypatch):
-    monkeypatch.setenv("SARVAM_API_KEY", "test-key")
-
-    provider = create_tts_provider(VoiceConfig(tts_provider="sarvam", tts_voice="arya"))
-
-    assert isinstance(provider, SarvamTTS)
-    assert provider.api_key == "test-key"
-    assert provider.default_voice == "arya"
 
 
 def test_voice_config_has_history_defaults():

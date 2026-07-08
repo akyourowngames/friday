@@ -14,10 +14,15 @@ async def _run_cli() -> None:
     await cli.run()
 
 
-async def _run_voice(tts_provider: str | None = None) -> None:
+async def _run_voice(
+    voice_name: str | None = None,
+    stt_backend: str | None = None,
+    tts_backend: str | None = None,
+    barge_in: bool = False,
+) -> None:
     from ares.voice.agent import run_voice_agent
 
-    await run_voice_agent(tts_provider)
+    await run_voice_agent(voice_name, stt_backend=stt_backend, tts_backend=tts_backend, barge_in=barge_in)
 
 
 def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
@@ -54,7 +59,11 @@ def main():
     parser = argparse.ArgumentParser(description="Ares personal AI assistant")
     parser.add_argument("--server", action="store_true", help="Run the desktop WebSocket server")
     parser.add_argument("--voice", action="store_true", help="Run continuous voice mode (always listening)")
-    parser.add_argument("--tts", choices=["sarvam", "edge"], default=None, help="TTS provider for --voice (default: from config)")
+    parser.add_argument("--voice-name", default=None, help="Edge TTS voice for --voice")
+    parser.add_argument("--stt-backend", choices=["auto", "whisper", "sarvam"], default=None, help="STT backend for --voice")
+    parser.add_argument("--tts-backend", choices=["auto", "edge", "sarvam"], default=None, help="TTS backend for --voice")
+    parser.add_argument("--barge-in", action="store_true", help="Allow microphone speech to interrupt TTS playback")
+    parser.add_argument("--tts", choices=["edge"], default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default="127.0.0.1", help="Server host for --server")
     parser.add_argument("--port", type=int, default=8765, help="Server port for --server")
     args = parser.parse_args()
@@ -63,7 +72,12 @@ def main():
         if args.server:
             _run_coro(_run_server(args.host, args.port))
         elif args.voice:
-            _run_coro(_run_voice(tts_provider=args.tts))
+            _run_coro(_run_voice(
+                voice_name=args.voice_name,
+                stt_backend=args.stt_backend,
+                tts_backend=args.tts_backend,
+                barge_in=args.barge_in,
+            ))
         else:
             _run_coro(_run_cli())
     except asyncio.CancelledError:

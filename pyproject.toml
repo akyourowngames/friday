@@ -29,13 +29,9 @@ voice = [
     "edge-tts>=7.0",
     "faster-whisper>=1.0",
     "numpy>=1.26",
-    "pynput>=1.7",
     "sounddevice>=0.4",
     "soundfile>=0.12",
     "webrtcvad>=2.0",
-]
-sarvam = [
-    "httpx>=0.27",
 ]
 dev = [
     "pytest>=7.0",

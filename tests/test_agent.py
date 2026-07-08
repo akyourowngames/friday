@@ -26,6 +26,15 @@ class TestAgent:
         assert messages[0]["role"] == "system"
         assert "Ares" in messages[0]["content"]
 
+    def test_build_messages_includes_runtime_clock_context(self, agent):
+        """System prompt includes dynamic runtime clock context."""
+        messages = agent.build_messages("What day is it?", [])
+        system = messages[0]["content"]
+
+        assert "## Runtime" in system
+        assert "Current local date:" in system
+        assert "Timezone:" in system
+
     def test_build_messages_includes_user_input(self, agent):
         """Messages include the user's input."""
         messages = agent.build_messages("Hello", [])
