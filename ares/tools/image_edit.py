@@ -6,6 +6,8 @@ import os
 
 from PIL import Image, ImageOps
 
+from ares.tools.asset_manifest import record_asset
+
 
 def _human_size(nbytes: int) -> str:
     """Convert byte count to human-readable string."""
@@ -111,8 +113,20 @@ def resize_image(
         save_path = output or path
         img.save(save_path)
         img.close()
+        manifest = record_asset(
+            save_path,
+            action="resize_image",
+            history={
+                "source": path,
+                "original_width": original_w,
+                "original_height": original_h,
+                "width": width,
+                "height": height,
+                "percent": percent,
+            },
+        )
 
-        return f"Resized {original_w}\u00d7{original_h} \u2192 {new_size[0]}\u00d7{new_size[1]}, saved to {save_path}"
+        return f"Resized {original_w}\u00d7{original_h} \u2192 {new_size[0]}\u00d7{new_size[1]}, saved to {save_path}\nManifest: {manifest}"
 
     except Exception as e:
         return f"Error: {e}"
@@ -190,8 +204,17 @@ def convert_image(
 
         img.save(save_path, format=_fmt_upper(fmt_lower), **save_kwargs)
         img.close()
+        manifest = record_asset(
+            save_path,
+            action="convert_image",
+            history={
+                "source": path,
+                "format": fmt_lower,
+                "quality": quality,
+            },
+        )
 
-        return f"Converted to {fmt_lower.upper()}, saved to {save_path}"
+        return f"Converted to {fmt_lower.upper()}, saved to {save_path}\nManifest: {manifest}"
 
     except Exception as e:
         return f"Error: {e}"
@@ -243,8 +266,21 @@ def crop_image(
         cropped.save(save_path)
         cropped.close()
         img.close()
+        manifest = record_asset(
+            save_path,
+            action="crop_image",
+            history={
+                "source": path,
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+                "original_width": w,
+                "original_height": h,
+            },
+        )
 
-        return f"Cropped ({left},{top}) \u2192 ({right},{bottom}) = {right - left}\u00d7{bottom - top}, saved to {save_path}"
+        return f"Cropped ({left},{top}) \u2192 ({right},{bottom}) = {right - left}\u00d7{bottom - top}, saved to {save_path}\nManifest: {manifest}"
 
     except Exception as e:
         return f"Error: {e}"

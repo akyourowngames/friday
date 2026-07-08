@@ -10,16 +10,16 @@ Ares is a terminal-first personal AI assistant with local memory, local project 
 - Persistent conversations, compact summaries, per-session JSONL logs, and session identity management.
 - Context assembly from soul, profile, project files, relevant memories, summaries, and skills.
 - Project context discovery for repository files such as `AGENTS.md`, `CLAUDE.md`, `README.md`, `pyproject.toml`, and `package.json`.
-- Local skill discovery and CRUD for `SKILL.md` playbooks.
-- Web search through Tavily or ddgs plus URL fetching.
-- Read-only filesystem tools, write/edit filesystem tools, batch edits, backups, undo, diffs, templates, file trees, hashes, duplicate detection, and line utilities.
-- Persistent Python and shell REPL execution, shell command execution, and terminal-panel command execution.
-- Image generation through Pollinations.ai and image info/resize/convert/crop through Pillow.
-- JSON export/import for memories, conversations, and non-secret config.
-- MCP client manager for configured MCP servers, with default Playwright, GitHub, and fetch server configs.
+- Local skill discovery, lint metadata, examples, test-command metadata, and CRUD for `SKILL.md` playbooks.
+- Web search through Tavily or ddgs plus URL/PDF/text fetching, fetcher metadata, source-quality labels, freshness labels, canonical URLs, and retryability.
+- Read-only filesystem tools, ripgrep-backed ranked search, symbol-aware file slices, write/edit filesystem tools, transactional batch edits, backups, named restore points, undo, diffs, templates, file trees, hashes, duplicate detection, and line utilities.
+- Persistent Python and shell REPL execution with reset checkpoints and dependency fingerprints, shell command profiles, project command registry aliases, and terminal-panel command execution.
+- Image generation through Pollinations.ai and image info/resize/convert/crop through Pillow with asset manifest rows for generated/edited files.
+- JSON export/import for memories, conversations, and non-secret config with selective export profiles and redaction previews.
+- MCP client manager for configured MCP servers, with default Playwright, GitHub, and fetch server configs plus readiness reports, reconnect support, and schema caching.
 - Google Workspace bridge/server modules for Gmail and Calendar via OAuth tokens.
-- Cron scheduling: create/list/get/update/delete jobs, run jobs now, read logs, background scheduler, runner, and toast notifications.
-- Android phone bridge tools through KDE Connect and ADB for status, notifications, contacts, SMS, confirmed calls, app launch, and URL open.
+- Cron scheduling: create/list/get/update/delete jobs, run jobs now, read logs, next-run simulation, missed-run explanations, background scheduler, runner, and toast notifications.
+- Android phone bridge tools through KDE Connect and ADB for status, permission preflight, capability matrix, notifications, contacts, SMS, confirmed calls, app launch, and URL open.
 - Android ADB MCP server for screenshots, file transfer, app install/uninstall, and shell commands.
 - Atomic config updates via `update_config` tool (surgical field edits, no full rewrites).
 - Voice mode with stricter VAD, local Whisper/Edge fallback, and optional Sarvam AI STT/TTS.

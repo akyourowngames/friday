@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -68,3 +69,76 @@ def next_run_utc(expr: str, tz_name: str = "UTC", base: datetime | None = None) 
     if nxt.tzinfo is None:
         nxt = nxt.replace(tzinfo=tz)
     return nxt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def simulate_next_runs(
+    expr: str,
+    tz_name: str = "UTC",
+    *,
+    base: datetime | None = None,
+    count: int = 5,
+    last_run_at: str | datetime | None = None,
+) -> dict[str, Any]:
+    """Simulate upcoming runs and explain missed runs for a cron schedule."""
+    validate_cron(expr)
+    tz = ZoneInfo(tz_name or "UTC")
+    base_utc = base or datetime.now(timezone.utc)
+    if base_utc.tzinfo is None:
+        base_utc = base_utc.replace(tzinfo=timezone.utc)
+    local_base = base_utc.astimezone(tz)
+    itr = croniter(expr, local_base)
+    bounded = max(1, min(int(count), 20))
+    upcoming = []
+    for _ in range(bounded):
+        local_run = itr.get_next(datetime)
+        if local_run.tzinfo is None:
+            local_run = local_run.replace(tzinfo=tz)
+        utc_run = local_run.astimezone(timezone.utc)
+        upcoming.append({
+            "local": local_run.isoformat(),
+            "utc": utc_run.isoformat().replace("+00:00", "Z"),
+        })
+
+    missed = 0
+    explanation = "No previous run timestamp was provided."
+    if last_run_at:
+        last = _parse_maybe_datetime(last_run_at)
+        if last is not None:
+            last_local = last.astimezone(tz)
+            catchup = croniter(expr, last_local)
+            while missed < 100:
+                candidate = catchup.get_next(datetime)
+                if candidate.tzinfo is None:
+                    candidate = candidate.replace(tzinfo=tz)
+                if candidate.astimezone(timezone.utc) > base_utc:
+                    break
+                missed += 1
+            explanation = (
+                f"{missed} scheduled run(s) were missed between "
+                f"{last.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')} and "
+                f"{base_utc.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}."
+            )
+        else:
+            explanation = "Previous run timestamp could not be parsed."
+
+    return {
+        "cron": expr,
+        "timezone": tz_name or "UTC",
+        "base_utc": base_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "next_runs": upcoming,
+        "missed_runs": missed,
+        "missed_run_explanation": explanation,
+    }
+
+
+def _parse_maybe_datetime(value: str | datetime) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed

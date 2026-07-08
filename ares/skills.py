@@ -26,6 +26,9 @@ class Skill:
     content: str = ""
     path: Path = Path()
     files: list[Path] = field(default_factory=list)
+    examples: list[dict[str, Any]] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=list)
+    lint_messages: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -137,6 +140,23 @@ class SkillManager:
         lines.extend(skill.summary_line() for skill in skills)
         return "\n".join(lines)
 
+    def lint_all(self) -> dict[str, list[str]]:
+        """Return lint messages for all discovered skills."""
+        return {
+            skill.name: skill.lint_messages
+            for skill in self.list_all()
+            if skill.lint_messages
+        }
+
+    @classmethod
+    def lint_skill_file(cls, path: Path | str) -> list[str]:
+        """Lint one SKILL.md file without requiring callers to catch parsing errors."""
+        try:
+            skill = cls.parse_skill_file(path)
+        except ValueError as exc:
+            return [str(exc)]
+        return skill.lint_messages
+
     @classmethod
     def parse_skill_file(cls, path: Path | str) -> Skill:
         path = Path(path).expanduser()
@@ -149,7 +169,18 @@ class SkillManager:
             raise ValueError(f"Skill {path} is missing a description.")
         category = str(metadata.get("category") or path.parent.parent.name or "general").strip()
         version = str(metadata.get("version") or metadata.get("metadata", {}).get("version") or "1.0.0")
+        examples = cls._normalize_examples(metadata.get("examples", []))
+        test_commands = cls._normalize_test_commands(metadata.get("test_commands") or metadata.get("tests") or [])
         files = [p for p in sorted(path.parent.rglob("*")) if p.is_file() and p.name != "SKILL.md"]
+        lint_messages = cls._lint_metadata(
+            name=normalized,
+            description=description,
+            category=category,
+            version=version,
+            body=body,
+            examples=examples,
+            test_commands=test_commands,
+        )
         return Skill(
             name=normalized,
             description=description,
@@ -158,6 +189,9 @@ class SkillManager:
             content=body.strip(),
             path=path.resolve(),
             files=files,
+            examples=examples,
+            test_commands=test_commands,
+            lint_messages=lint_messages,
             metadata=metadata,
         )
 
@@ -180,6 +214,53 @@ class SkillManager:
         if not SKILL_NAME_RE.match(normalized):
             raise ValueError("Skill names must use lowercase letters, numbers, and hyphens.")
         return normalized
+
+    @staticmethod
+    def _normalize_examples(raw: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        examples: list[dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, str):
+                examples.append({"prompt": item})
+            elif isinstance(item, dict):
+                examples.append(dict(item))
+        return examples
+
+    @staticmethod
+    def _normalize_test_commands(raw: Any) -> list[str]:
+        if isinstance(raw, str):
+            return [raw]
+        if not isinstance(raw, list):
+            return []
+        return [str(item) for item in raw if str(item).strip()]
+
+    @staticmethod
+    def _lint_metadata(
+        *,
+        name: str,
+        description: str,
+        category: str,
+        version: str,
+        body: str,
+        examples: list[dict[str, Any]],
+        test_commands: list[str],
+    ) -> list[str]:
+        messages: list[str] = []
+        if len(description) < 12:
+            messages.append("Description should be at least 12 characters.")
+        if not category:
+            messages.append("Category is missing.")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            messages.append("Version should use semver, for example 1.0.0.")
+        if "# " not in body:
+            messages.append("Body should include at least one markdown heading.")
+        for index, example in enumerate(examples, 1):
+            if not str(example.get("prompt", "")).strip():
+                messages.append(f"Example {index} is missing a prompt.")
+        if examples and not test_commands:
+            messages.append("Examples are present but no test_commands metadata is configured.")
+        return messages
 
     @classmethod
     def _ensure_frontmatter(cls, name: str, content: str, category: str) -> str:

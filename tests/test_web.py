@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from ares.models import AppConfig
 from ares.tools.web import (
+    fetch_url,
     format_results,
     summarize_results,
     tavily_search,
@@ -99,6 +100,7 @@ class TestWebSearch:
         assert payload["summary"] == "[1] Fallback snippet."
         assert payload["errors"] == []
         assert payload["results"][0]["title"] == "Fallback"
+        assert payload["source_matrix"][0]["freshness_label"] == "undated"
 
     @patch("ares.tools.web.ddgs_search")
     @patch("ares.tools.web.tavily_search")
@@ -115,6 +117,17 @@ class TestWebSearch:
         assert payload["provider"] == "ddgs"
         assert "tavily failed" in payload["errors"]
         assert payload["results"][0]["title"] == "Fallback"
+
+    def test_format_results_includes_source_labels(self):
+        output = format_results({
+            "query": "docs",
+            "provider": "ddgs",
+            "summary": "Summary",
+            "results": [{"title": "Docs", "url": "https://docs.example.com", "snippet": "Snippet."}],
+            "source_matrix": [{"index": 1, "quality_label": "primary-or-technical", "freshness_label": "undated"}],
+        })
+
+        assert "Source labels: 1: primary-or-technical/undated" in output
 
     @patch("ares.tools.web.httpx.Client")
     def test_tavily_search_request_shape(self, mock_client_cls, monkeypatch):
@@ -150,8 +163,6 @@ class TestWebSearch:
 
     @patch("ares.tools.web.httpx.Client")
     def test_fetch_url_plain_text_content(self, mock_client_cls):
-        from ares.tools.web import fetch_url
-
         response = MagicMock()
         response.headers = {"content-type": "text/plain; charset=utf-8"}
         response.text = "plain text body"
@@ -164,3 +175,47 @@ class TestWebSearch:
 
         assert result["error"] == ""
         assert result["content"] == "plain text body"
+
+    @patch("ares.tools.web.httpx.Client")
+    def test_fetch_url_html_metadata_and_canonical(self, mock_client_cls):
+        response = MagicMock()
+        response.headers = {"content-type": "text/html; charset=utf-8"}
+        response.text = """
+        <html><head>
+          <title> Example &amp; Test </title>
+          <meta name="description" content="Useful page.">
+          <link rel="canonical" href="/canonical">
+        </head><body><h1>Hello</h1><script>bad()</script></body></html>
+        """
+        response.status_code = 200
+        response.url = "https://example.com/page"
+        response.raise_for_status.return_value = None
+        client = MagicMock()
+        client.get.return_value = response
+        mock_client_cls.return_value.__enter__.return_value = client
+
+        result = fetch_url("https://example.com/page")
+
+        assert result["title"] == "Example & Test"
+        assert result["description"] == "Useful page."
+        assert result["canonical_url"] == "https://example.com/canonical"
+        assert result["final_url"] == "https://example.com/page"
+        assert result["retryable"] is False
+        assert "bad()" not in result["content"]
+
+    @patch("ares.tools.web.httpx.Client")
+    def test_fetch_url_pdf_best_effort_text(self, mock_client_cls):
+        response = MagicMock()
+        response.headers = {"content-type": "application/pdf"}
+        response.content = b"%PDF-1.4\nBT (Hello PDF) Tj ET\n%%EOF"
+        response.status_code = 200
+        response.url = "https://example.com/file.pdf"
+        response.raise_for_status.return_value = None
+        client = MagicMock()
+        client.get.return_value = response
+        mock_client_cls.return_value.__enter__.return_value = client
+
+        result = fetch_url("https://example.com/file.pdf")
+
+        assert result["error"] == ""
+        assert "Hello PDF" in result["content"]

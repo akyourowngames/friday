@@ -314,6 +314,8 @@ class MCPClientManager:
         self._exit_stacks: dict[str, AsyncExitStack] = {}
         self._http_clients: dict[str, httpx.AsyncClient] = {}
         self.tool_definitions: list[dict[str, Any]] = []
+        self.schema_cache: dict[str, list[dict[str, Any]]] = {}
+        self.server_errors: dict[str, str] = {}
 
     def _iter_config_entries(
         self, server_configs: list[dict[str, Any] | MCPServerConfig] | dict[str, Any]
@@ -354,10 +356,13 @@ class MCPClientManager:
         if self.sessions or self._exit_stacks or self._http_clients:
             await self.close()
         self.tool_definitions = []
+        self.server_errors = {}
         for name, config in self.servers.items():
             try:
                 await self._connect_server(name, config)
-            except BaseException:
+                self.server_errors.pop(name, None)
+            except BaseException as exc:
+                self.server_errors[name] = str(exc) or exc.__class__.__name__
                 logger.warning(
                     "Failed to connect MCP server '%s' — check config and network",
                     name,
@@ -376,6 +381,90 @@ class MCPClientManager:
         self._exit_stacks.clear()
         self._http_clients.clear()
         self.tool_definitions.clear()
+
+    async def close_server(self, name: str) -> None:
+        """Close one MCP server session and keep all other servers connected."""
+        stack = self._exit_stacks.pop(name, None)
+        if stack is not None:
+            with suppress(Exception):
+                await stack.aclose()
+        client = self._http_clients.pop(name, None)
+        if client is not None:
+            with suppress(Exception):
+                await client.aclose()
+        self.sessions.pop(name, None)
+        self.tool_definitions = [
+            tool for tool in self.tool_definitions
+            if not tool.get("function", {}).get("name", "").startswith(f"mcp__{name}__")
+        ]
+
+    async def reconnect_server(self, name: str) -> dict[str, Any]:
+        """Reconnect one configured MCP server and refresh its cached schemas."""
+        config = self.servers.get(name)
+        if config is None:
+            return {"name": name, "ready": False, "error": f"MCP server '{name}' is not configured."}
+        await self.close_server(name)
+        try:
+            await self._connect_server(name, config)
+            self.server_errors.pop(name, None)
+            return self.readiness_report()["servers"][name]
+        except BaseException as exc:
+            _uncancel_task()
+            self.server_errors[name] = str(exc) or exc.__class__.__name__
+            return self.readiness_report()["servers"][name]
+
+    def readiness_report(self) -> dict[str, Any]:
+        """Return a per-server readiness report for diagnostics and startup UI."""
+        servers: dict[str, Any] = {}
+        for name, config in self.servers.items():
+            cached = self.schema_cache.get(name, [])
+            connected = name in self.sessions
+            servers[name] = {
+                "name": name,
+                "ready": connected,
+                "status": "ready" if connected else "disconnected",
+                "transport": config.transport,
+                "endpoint": config.endpoint,
+                "command": config.command,
+                "timeout_seconds": config.timeout_seconds,
+                "tools": len(cached),
+                "schema_cached": bool(cached),
+                "error": self.server_errors.get(name, ""),
+            }
+        return {
+            "ready": any(item["ready"] for item in servers.values()),
+            "configured": len(self.servers),
+            "connected": sum(1 for item in servers.values() if item["ready"]),
+            "tools": sum(item["tools"] for item in servers.values()),
+            "servers": servers,
+        }
+
+    async def health_probe(self) -> dict[str, Any]:
+        """Probe connected sessions and refresh schema cache when possible."""
+        for name, session in list(self.sessions.items()):
+            config = self.servers.get(name, MCPServerConfig(name=name))
+            try:
+                response = await asyncio.wait_for(
+                    session.list_tools(), timeout=config.timeout_seconds
+                )
+                schemas = [
+                    self._to_openai_schema(name, tool)
+                    for tool in getattr(response, "tools", [])
+                ]
+                self.schema_cache[name] = schemas
+                self.tool_definitions = [
+                    tool for tool in self.tool_definitions
+                    if not tool.get("function", {}).get("name", "").startswith(f"mcp__{name}__")
+                ] + schemas
+                self.server_errors.pop(name, None)
+            except asyncio.TimeoutError:
+                self.server_errors[name] = f"Health probe timed out after {config.timeout_seconds:g}s."
+            except asyncio.CancelledError as exc:
+                _clear_current_task_cancellation()
+                self.server_errors[name] = f"Health probe cancelled: {exc}"
+            except Exception as exc:
+                self.server_errors[name] = str(exc)
+        return self.readiness_report()
 
     async def _connect_server(self, name: str, config: MCPServerConfig) -> None:
         if ClientSession is None:
@@ -450,8 +539,11 @@ class MCPClientManager:
         self._exit_stacks[name] = stack
         if http_client is not None:
             self._http_clients[name] = http_client
+        schemas: list[dict[str, Any]] = []
         for tool in getattr(tools_response, "tools", []):
-            self.tool_definitions.append(self._to_openai_schema(name, tool))
+            schemas.append(self._to_openai_schema(name, tool))
+        self.schema_cache[name] = schemas
+        self.tool_definitions.extend(schemas)
 
     def _to_openai_schema(self, server_name: str, tool: Any) -> dict[str, Any]:
         schema = (

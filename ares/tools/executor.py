@@ -53,6 +53,7 @@ from ares.cron.tools import CronToolHandlers
 from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
 from ares.tools import adb_bridge as _adb_bridge
 from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
+from ares.tools.shell_execution import resolve_project_command
 
 
 class ToolExecutor:
@@ -177,6 +178,13 @@ class ToolExecutor:
         )
         if rejection:
             return f"Memory not stored: {rejection}."
+        suggestions = self.memory.suggest_merge(content, category=category)
+        duplicate = next((item for item in suggestions if item["kind"] == "duplicate"), None)
+        if duplicate:
+            return (
+                f"Memory not stored: duplicate of #{duplicate['fact_id']}. "
+                f"{duplicate['recommendation']}"
+            )
         fact_id = self.memory.store(
             content,
             category=category,
@@ -253,12 +261,18 @@ class ToolExecutor:
         if skill.files:
             rel_files = [str(path.relative_to(skill.root)) for path in skill.files[:20]]
             files = "\n\nSupporting files:\n" + "\n".join(f"- {file}" for file in rel_files)
+        tests = ""
+        if skill.test_commands:
+            tests = "\n\nTest commands:\n" + "\n".join(f"- {cmd}" for cmd in skill.test_commands)
+        lint = ""
+        if skill.lint_messages:
+            lint = "\n\nSkill lint:\n" + "\n".join(f"- {msg}" for msg in skill.lint_messages)
         return (
             f"# Skill: {skill.name}\n"
             f"Category: {skill.category}\n"
             f"Description: {skill.description}\n"
             f"Version: {skill.version}\n\n"
-            f"{skill.content}{files}"
+            f"{skill.content}{files}{tests}{lint}"
         )
 
     def _create_skill_tool(self, args: dict) -> str:
@@ -277,6 +291,7 @@ class ToolExecutor:
             conversation_store=self.conversations,
             config=self.config,
             path=args.get("path"),
+            profile=args.get("profile", "full"),
         )
         return f"Exported Ares data to {path}"
 
@@ -667,13 +682,24 @@ class ToolExecutor:
         code = args["code"]
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
-        return self.repl.execute_python(code, timeout=timeout, cwd=cwd)
+        if bool(args.get("reset", False)):
+            self.repl.reset_python()
+        result = self.repl.execute_python(code, timeout=timeout, cwd=cwd)
+        if bool(args.get("include_fingerprint", False)) or bool(args.get("reset", False)):
+            result += f"\nSession: python generation={self.repl.python_generation}; dependency_fingerprint={self.repl.dependency_fingerprint(cwd)}"
+        return result
 
     def _run_command(self, args: dict) -> str:
-        command = args["command"]
+        command = args.get("command") or f"@{args.get('command_key', '')}"
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
-        return self.repl.execute_shell(command, timeout=timeout, cwd=cwd)
+        command = resolve_project_command(command, cwd)
+        if bool(args.get("reset", False)):
+            self.repl.reset_shell()
+        result = self.repl.execute_shell(command, timeout=timeout, cwd=cwd, profile=args.get("profile"))
+        if bool(args.get("include_fingerprint", False)) or bool(args.get("reset", False)):
+            result += f"\nSession: shell generation={self.repl.shell_generation}; dependency_fingerprint={self.repl.dependency_fingerprint(cwd)}"
+        return result
 
     # ── Image tools ────────────────────────────────────────────────
 
@@ -724,12 +750,13 @@ class ToolExecutor:
 
         Optionally displays the command in the visual terminal panel if connected.
         """
-        command = args["command"]
+        command = args.get("command") or f"@{args.get('command_key', '')}"
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
+        command = resolve_project_command(command, cwd)
 
         # Execute via REPL for reliable output capture
-        result = self.repl.execute_shell(command, timeout=timeout, cwd=cwd)
+        result = self.repl.execute_shell(command, timeout=timeout, cwd=cwd, profile=args.get("profile"))
 
         # Also send to visual terminal if connected (best-effort display)
         if hasattr(self, '_terminal_display_callback') and self._terminal_display_callback:

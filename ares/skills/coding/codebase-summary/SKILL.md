@@ -3,6 +3,10 @@ name: codebase-summary
 description: Analyze any codebase — tree view, language breakdown, file counts by type, largest files, recent changes. Use for "summarize this project", "explore this codebase", "what's in this repo".
 category: coding
 version: 1.0.0
+examples:
+  - prompt: "Summarize this repo and tell me how to run it."
+test_commands:
+  - "python -m pytest tests/test_skills.py"
 ---
 
 # Codebase Summary
@@ -27,7 +31,14 @@ version: 1.0.0
    - ## Structure (tree)
    - ## Language Breakdown
    - ## Largest Files
+   - ## Command Inventory
+   - ## Entrypoint Graph
    - ## Recent Activity (last 10 commits, contributors)
+
+## Architecture Map
+- Identify app entrypoints, CLI scripts, server startup files, background workers, and test commands.
+- List repeated command patterns from package scripts, pyproject metadata, Makefiles, CI, and README snippets.
+- Sketch module relationships as text when a graphing tool is unnecessary.
 
 6. **Report** — Tell the user the file path and key stats (total files, main language, most active areas).
 

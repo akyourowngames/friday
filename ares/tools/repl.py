@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import queue
 import signal
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from uuid import uuid4
+
+
+COMMAND_PROFILES: dict[str, dict[str, int]] = {
+    "quick": {"timeout": 15},
+    "test": {"timeout": 120},
+    "build": {"timeout": 180},
+    "long": {"timeout": 300},
+}
 
 
 class REPLSession:
@@ -116,11 +126,35 @@ class REPLSession:
             return self._read_python_result(uid, timeout)
 
     def _execute_shell(self, command: str, uid: str, timeout: int) -> dict:
-        sentinel = f"__ARES_SENTINEL_{uid}__"
         if sys.platform == "win32":
-            sentinel_cmd = f"{command}\necho {sentinel}:%ERRORLEVEL%\n"
-        else:
-            sentinel_cmd = f"{command}\n__ares_status=$?\nprintf '%s:%s\\n' '{sentinel}' \"$__ares_status\"\n"
+            with self._lock:
+                try:
+                    completed = subprocess.run(
+                        command,
+                        shell=True,
+                        cwd=self.cwd,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                    )
+                    error = None if completed.returncode == 0 else f"Command exited with status {completed.returncode}"
+                    return {
+                        "id": uid,
+                        "stdout": completed.stdout,
+                        "stderr": completed.stderr,
+                        "error": error,
+                        "exit_code": completed.returncode,
+                    }
+                except subprocess.TimeoutExpired as exc:
+                    return {
+                        "id": uid,
+                        "stdout": exc.stdout or "",
+                        "stderr": exc.stderr or "",
+                        "error": f"Timeout after {timeout}s",
+                        "exit_code": None,
+                    }
+        sentinel = f"__ARES_SENTINEL_{uid}__"
+        sentinel_cmd = f"{command}\n__ares_status=$?\nprintf '%s:%s\\n' '{sentinel}' \"$__ares_status\"\n"
         with self._lock:
             if not self._write(sentinel_cmd):
                 return {"id": uid, "stdout": "", "stderr": "", "error": "REPL crashed and restarted"}
@@ -246,6 +280,8 @@ class PersistentREPL:
         self.shell_session: REPLSession | None = None
         self._python_lock = threading.Lock()
         self._shell_lock = threading.Lock()
+        self.python_generation = 0
+        self.shell_generation = 0
 
     def execute_python(self, code: str, timeout: int = 30, cwd: str | None = None) -> str:
         """Execute Python code in the persistent session and format its output."""
@@ -256,11 +292,13 @@ class PersistentREPL:
             if not self.python_session or not self.python_session.alive:
                 self.python_session = REPLSession("python", cwd=cwd)
                 self.python_session.start()
+                self.python_generation += 1
             result = self.python_session.execute(code, timeout=timeout)
         return self._format_result(result)
 
-    def execute_shell(self, command: str, timeout: int = 30, cwd: str | None = None) -> str:
+    def execute_shell(self, command: str, timeout: int = 30, cwd: str | None = None, profile: str | None = None) -> str:
         """Execute a shell command in the persistent session and format its output."""
+        timeout = COMMAND_PROFILES.get((profile or "").lower(), {}).get("timeout", timeout)
         with self._shell_lock:
             if cwd and self.shell_session and self.shell_session.cwd != cwd:
                 self.shell_session.close()
@@ -268,8 +306,53 @@ class PersistentREPL:
             if not self.shell_session or not self.shell_session.alive:
                 self.shell_session = REPLSession("shell", cwd=cwd)
                 self.shell_session.start()
+                self.shell_generation += 1
             result = self.shell_session.execute(command, timeout=timeout)
         return self._format_result(result)
+
+    def reset_python(self) -> None:
+        """Reset the pinned Python runtime session."""
+        with self._python_lock:
+            if self.python_session:
+                self.python_session.close()
+            self.python_session = None
+            self.python_generation += 1
+
+    def reset_shell(self) -> None:
+        """Reset the pinned shell runtime session."""
+        with self._shell_lock:
+            if self.shell_session:
+                self.shell_session.close()
+            self.shell_session = None
+            self.shell_generation += 1
+
+    def dependency_fingerprint(self, cwd: str | None = None) -> str:
+        """Return a stable fingerprint of the runtime and nearby dependency files."""
+        root = Path(cwd or os.getcwd()).expanduser().resolve()
+        material = [
+            sys.executable,
+            sys.version,
+            str(root),
+        ]
+        for name in (
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+        ):
+            path = root / name
+            if not path.exists():
+                continue
+            try:
+                stat = path.stat()
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                material.append(f"{name}:{stat.st_size}:{digest}")
+            except OSError:
+                material.append(f"{name}:unreadable")
+        return hashlib.sha256("\n".join(material).encode("utf-8")).hexdigest()[:16]
 
     def close(self) -> None:
         """Terminate all managed sessions."""
@@ -289,6 +372,10 @@ class PersistentREPL:
         exit_code = result.get("exit_code")
         if exit_code is not None:
             parts.append(f"Exit code: {exit_code}")
+            stdout_lines = len(stdout.splitlines()) if stdout else 0
+            stderr_lines = len(stderr.splitlines()) if stderr else 0
+            status = "ok" if exit_code == 0 and not error else "failed"
+            parts.append(f"Summary: status={status}; stdout_lines={stdout_lines}; stderr_lines={stderr_lines}")
         if stdout:
             parts.append(stdout)
         if stderr:

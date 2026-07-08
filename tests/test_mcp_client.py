@@ -107,6 +107,34 @@ def test_call_tool_routes_to_session_and_renders_text():
     assert result == "event one\nevent two"
 
 
+def test_readiness_report_uses_schema_cache():
+    manager = MCPClientManager([{"name": "calendar", "server_url": "https://example.com/mcp"}])
+    manager.schema_cache["calendar"] = [{"function": {"name": "mcp__calendar__list_events"}}]
+    manager.server_errors["calendar"] = "offline"
+
+    report = manager.readiness_report()
+
+    assert report["configured"] == 1
+    assert report["connected"] == 0
+    assert report["servers"]["calendar"]["schema_cached"] is True
+    assert report["servers"]["calendar"]["error"] == "offline"
+
+
+def test_reconnect_server_reports_success(monkeypatch):
+    async def fake_connect(self, name, config):
+        self.sessions[name] = object()
+        self.schema_cache[name] = [{"function": {"name": f"mcp__{name}__tool"}}]
+        self.tool_definitions.extend(self.schema_cache[name])
+
+    manager = MCPClientManager([{"name": "calendar", "server_url": "https://example.com/mcp"}])
+    monkeypatch.setattr(MCPClientManager, "_connect_server", fake_connect)
+
+    report = asyncio.run(manager.reconnect_server("calendar"))
+
+    assert report["ready"] is True
+    assert report["tools"] == 1
+
+
 def test_agent_refreshes_and_routes_mcp_tools():
     class FakeMCPManager:
         tool_definitions = [

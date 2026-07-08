@@ -43,3 +43,31 @@ def test_export_redacts_api_key_and_imports_data(tmp_path, fake_embedding_provid
     assert counts["memories"] == 1
     assert counts["conversations"] == 1
     assert imported_memory.list_all()[0]["fact_text"] == "User prefers dark mode"
+
+
+def test_export_profiles_and_redaction_preview(tmp_path, fake_embedding_provider):
+    memory = MemoryStore(db_path=tmp_path / "source.db", embedding_provider=fake_embedding_provider)
+    memory.store("User prefers dark mode", category="preference")
+
+    output = export_data(
+        memory_store=memory,
+        config=AppConfig(api_key="secret-key", tavily_api_key=""),
+        path=tmp_path / "memories.json",
+        profile="memories",
+    )
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["export_profile"] == "memories"
+    assert payload["memories"]
+    assert payload["config"] == {}
+    assert payload["redaction_preview"] == {}
+
+    config_output = export_data(
+        memory_store=memory,
+        config=AppConfig(api_key="secret-key", tavily_api_key=""),
+        path=tmp_path / "config.json",
+        profile="config",
+    )
+    config_payload = json.loads(config_output.read_text(encoding="utf-8"))
+    assert config_payload["redaction_preview"]["api_key"] == "redacted"
+    assert config_payload["redaction_preview"]["tavily_api_key"] == "empty"

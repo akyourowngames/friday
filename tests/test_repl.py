@@ -187,3 +187,19 @@ def test_shell_result_includes_nonzero_exit_code():
 
     assert "Exit code: 7" in result
     assert "Command exited with status 7" in result
+
+
+def test_persistent_repl_reset_and_dependency_fingerprint(tmp_path):
+    repl = PersistentREPL()
+    try:
+        first = repl.dependency_fingerprint(str(tmp_path))
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+        second = repl.dependency_fingerprint(str(tmp_path))
+        repl.execute_python("x = 10", cwd=str(tmp_path))
+        repl.reset_python()
+        result = repl.execute_python("print('x' in globals())", cwd=str(tmp_path))
+    finally:
+        repl.close()
+
+    assert first != second
+    assert "False" in result

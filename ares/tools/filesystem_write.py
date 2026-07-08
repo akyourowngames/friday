@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import shutil
 import tempfile
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,6 +51,9 @@ def write_file(path: str, content: str, dry_run: bool = False) -> str:
         f"({len(content):,} bytes)"
     )
     if dry_run:
+        if exists and resolved.is_file():
+            old_content = resolved.read_text(encoding="utf-8", errors="replace")
+            return f"[DRY RUN] {preview}:\n{_line_diff(resolved, old_content, content)}"
         return f"[DRY RUN] {preview}"
 
     atomic_write(resolved, content)
@@ -71,15 +76,20 @@ def edit_file(path: str, old_text: str, new_text: str, dry_run: bool = False) ->
     count = content.count(old_text)
     if count == 1:
         new_content = content.replace(old_text, new_text, 1)
+        diff = _line_diff(resolved, content, new_content)
         if dry_run:
-            return f"[DRY RUN] Would edit {_display_path(resolved)} ({len(old_text)} → {len(new_text)} chars)"
+            return f"[DRY RUN] Would edit {_display_path(resolved)} ({len(old_text)} → {len(new_text)} chars):\n{diff}"
+        shutil.copy2(resolved, _backup_path(resolved, "edit"))
         atomic_write(resolved, new_content)
-        return f"Edited {_display_path(resolved)} (replaced {len(old_text)} chars)"
+        return f"Edited {_display_path(resolved)} (replaced {len(old_text)} chars)\n{diff}"
 
     if count > 1:
+        line_numbers = _matching_line_numbers(content, old_text)
+        hint = f" Matching lines: {', '.join(map(str, line_numbers[:10]))}." if line_numbers else ""
         return (
             f"old_text matches {count} locations in {_display_path(resolved)}. "
             "Provide more context to make it unique."
+            f"{hint}"
         )
 
     # 2. Whitespace-normalized match
@@ -89,10 +99,14 @@ def edit_file(path: str, old_text: str, new_text: str, dry_run: bool = False) ->
     if match_idx is not None:
         new_content_lines = content_lines[:match_idx] + new_text.splitlines() + content_lines[match_idx + len(old_lines):]
         new_content = "\n".join(new_content_lines)
+        if content.endswith("\n"):
+            new_content += "\n"
+        diff = _line_diff(resolved, content, new_content)
         if dry_run:
-            return f"[DRY RUN] Would edit {_display_path(resolved)} (whitespace-normalized match)"
+            return f"[DRY RUN] Would edit {_display_path(resolved)} (whitespace-normalized match):\n{diff}"
+        shutil.copy2(resolved, _backup_path(resolved, "edit"))
         atomic_write(resolved, new_content)
-        return f"Edited {_display_path(resolved)} (whitespace-normalized match)"
+        return f"Edited {_display_path(resolved)} (whitespace-normalized match)\n{diff}"
 
     # 3. "Did you mean?" suggestion
     suggestion = _find_closest_match(old_text, content)
@@ -103,6 +117,15 @@ def edit_file(path: str, old_text: str, new_text: str, dry_run: bool = False) ->
         )
 
     return f"No match found for old_text in {_display_path(resolved)}."
+
+
+def _matching_line_numbers(content: str, needle: str) -> list[int]:
+    """Return 1-based line numbers whose text contains the needle."""
+    return [
+        index
+        for index, line in enumerate(content.splitlines(), 1)
+        if needle in line
+    ]
 
 
 def _find_whitespace_match(old_lines: list[str], content_lines: list[str]) -> int | None:
@@ -247,11 +270,11 @@ def move_file(source: str, destination: str, dry_run: bool = False) -> str:
 
 
 def batch_edit(operations: list[dict], dry_run: bool = False, confirm: bool = False, max_operations: int = 100) -> str:
-    """Execute multiple file operations sequentially with per-operation reporting.
+    """Execute multiple file operations transactionally with per-operation reporting.
 
     Supported actions: write, edit, delete, move, copy, mkdir/create_directory.
     Destructive actions (delete, overwrite writes/moves/copies) require confirm=true
-    unless dry_run=true.
+    unless dry_run=true. If a non-dry run fails, touched paths are rolled back.
     """
     if not isinstance(operations, list):
         return "operations must be a list."
@@ -260,23 +283,49 @@ def batch_edit(operations: list[dict], dry_run: bool = False, confirm: bool = Fa
         return f"Too many operations: {len(operations)} requested, max is {bounded}."
 
     results: list[str] = []
-    errors = 0
-    for index, operation in enumerate(operations, 1):
-        if not isinstance(operation, dict):
-            errors += 1
-            results.append(f"{index}. Error: operation must be an object")
-            continue
-        action = str(operation.get("action", "")).lower().strip()
-        op_dry_run = bool(operation.get("dry_run", dry_run))
-        try:
+    snapshots: dict[Path, bytes | None] = {}
+
+    def remember(path: Path) -> None:
+        if dry_run or path in snapshots:
+            return
+        if path.exists() and path.is_file():
+            snapshots[path] = path.read_bytes()
+        elif path.exists() and path.is_dir():
+            snapshots[path] = b"__ARES_DIR_EXISTS__"
+        else:
+            snapshots[path] = None
+
+    def restore() -> None:
+        for path, old in reversed(list(snapshots.items())):
+            if old == b"__ARES_DIR_EXISTS__":
+                continue
+            if old is None:
+                if path.is_file() or path.is_symlink():
+                    with suppress(FileNotFoundError):
+                        path.unlink()
+                elif path.is_dir():
+                    with suppress(OSError):
+                        path.rmdir()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(old)
+
+    try:
+        for index, operation in enumerate(operations, 1):
+            if not isinstance(operation, dict):
+                raise ValueError(f"operation {index}: operation must be an object")
+            action = str(operation.get("action", "")).lower().strip()
+            op_dry_run = bool(operation.get("dry_run", dry_run))
             if action == "write":
                 path = operation["path"]
                 content = operation.get("content", "")
                 target = resolve_write_path(path)
                 if target.exists() and not confirm and not op_dry_run:
                     raise ValueError(f"confirm=true required to overwrite {_display_path(target)}")
+                remember(target)
                 result = write_file(path, content, dry_run=op_dry_run)
             elif action == "edit":
+                remember(resolve_write_path(operation["path"]))
                 result = edit_file(
                     operation["path"],
                     operation["old_text"],
@@ -286,11 +335,14 @@ def batch_edit(operations: list[dict], dry_run: bool = False, confirm: bool = Fa
             elif action == "delete":
                 if not confirm and not op_dry_run:
                     raise ValueError("confirm=true required for delete")
+                remember(resolve_write_path(operation["path"]))
                 result = delete_file(operation["path"], dry_run=op_dry_run)
             elif action == "move":
                 dst = resolve_write_path(operation["destination"])
                 if dst.exists() and not confirm and not op_dry_run:
                     raise ValueError(f"confirm=true required to overwrite {_display_path(dst)}")
+                remember(resolve_write_path(operation["source"]))
+                remember(dst)
                 result = move_file(operation["source"], operation["destination"], dry_run=op_dry_run)
             elif action == "copy":
                 src = resolve_write_path(operation["source"])
@@ -299,6 +351,7 @@ def batch_edit(operations: list[dict], dry_run: bool = False, confirm: bool = Fa
                     raise FileNotFoundError(f"Source not found: {operation['source']}")
                 if dst.exists() and not confirm and not op_dry_run:
                     raise ValueError(f"confirm=true required to overwrite {_display_path(dst)}")
+                remember(dst)
                 preview = f"Copy {_display_path(src)} → {_display_path(dst)}"
                 if op_dry_run:
                     result = f"[DRY RUN] Would {preview.lower()}"
@@ -311,16 +364,20 @@ def batch_edit(operations: list[dict], dry_run: bool = False, confirm: bool = Fa
                         shutil.copy2(src, dst)
                     result = preview
             elif action in {"mkdir", "create_directory"}:
+                remember(resolve_write_path(operation["path"]))
                 result = create_directory(operation["path"], dry_run=op_dry_run)
             else:
                 raise ValueError(f"Unsupported action: {action or '<missing>'}")
             results.append(f"{index}. {result}")
-        except Exception as exc:
-            errors += 1
-            results.append(f"{index}. Error: {exc}")
+    except Exception as exc:
+        if not dry_run:
+            restore()
+        return (
+            f"Batch edit failed and rolled back: {exc}\n"
+            + ("\n".join(results) if results else "No operations completed.")
+        )
 
-    status = "completed" if errors == 0 else f"completed with {errors} error(s)"
-    return f"Batch edit {status}: {len(operations)} operation(s)\n" + "\n".join(results)
+    return f"Batch edit completed: {len(operations)} operation(s)\n" + "\n".join(results)
 
 
 def glob_apply(
@@ -415,7 +472,9 @@ def _is_relative_to_path(path: Path, root: Path) -> bool:
 def _is_dangerous_write_path(path: Path) -> bool:
     if os.name == "nt":
         parts = {part.lower() for part in path.parts}
-        return any(part in parts for part in {"windows", "system32", "program files", "program files (x86)"})
+        unix_root_aliases = {"bin", "boot", "dev", "etc", "lib", "lib64", "proc", "root", "sbin", "sys", "usr", "var"}
+        root_child = path.parts[1].lower() if len(path.parts) > 1 else ""
+        return any(part in parts for part in {"windows", "system32", "program files", "program files (x86)"}) or root_child in unix_root_aliases
     return any(_is_relative_to_path(path, root) for root in DANGEROUS_WRITE_ROOTS)
 
 
@@ -434,16 +493,17 @@ def _ensure_safe_write_path(path: Path, *, confirm_dangerous: bool = False) -> s
     return None
 
 
-def _read_text_lines(path: Path) -> tuple[list[str], bool]:
+def _read_text_lines(path: Path) -> tuple[list[str], bool, str]:
     content = path.read_text(encoding="utf-8", errors="replace")
     has_trailing_newline = content.endswith("\n")
-    return content.splitlines(), has_trailing_newline
+    newline = "\r\n" if "\r\n" in content and content.count("\r\n") >= content.count("\n") / 2 else "\n"
+    return content.splitlines(), has_trailing_newline, newline
 
 
-def _join_lines(lines: list[str], trailing_newline: bool = True) -> str:
-    content = "\n".join(lines)
+def _join_lines(lines: list[str], trailing_newline: bool = True, newline: str = "\n") -> str:
+    content = newline.join(lines)
     if trailing_newline and (content or lines):
-        content += "\n"
+        content += newline
     return content
 
 
@@ -465,7 +525,7 @@ def show_file_with_line_numbers(path: str, start: int | None = None, end: int | 
         return f"File not found: {path}"
     if not resolved.is_file():
         return f"Not a file: {_display_path(resolved)}"
-    lines, _ = _read_text_lines(resolved)
+    lines, _, _newline = _read_text_lines(resolved)
     total = len(lines)
     start_line = max(1, int(start or 1))
     end_line = min(total, int(end or total))
@@ -496,18 +556,44 @@ def backup_file(path: str, label: str = "") -> str:
     backup_root = resolved.parent / ".ares_backups"
     backup_root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    suffix = f".{label}" if label else ""
+    safe_label = _safe_label(label)
+    suffix = f".{safe_label}" if safe_label else ""
     backup_path = backup_root / f"{resolved.name}.{timestamp}{suffix}.bak"
     shutil.copy2(resolved, backup_path)
-    return f"Backed up {_display_path(resolved)} → {_display_path(backup_path)}"
+    _record_backup(resolved, backup_path, label=safe_label or "manual")
+    return f"Backed up {_display_path(resolved)} → {_display_path(backup_path)}\nRestore point: {safe_label or timestamp}"
 
 
 def _backup_path(path: Path, label: str = "") -> Path:
     backup_root = path.parent / ".ares_backups"
     backup_root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    suffix = f".{label}" if label else ""
-    return backup_root / f"{path.name}.{timestamp}{suffix}.bak"
+    safe_label = _safe_label(label)
+    suffix = f".{safe_label}" if safe_label else ""
+    backup_path = backup_root / f"{path.name}.{timestamp}{suffix}.bak"
+    _record_backup(path, backup_path, label=safe_label or "auto")
+    return backup_path
+
+
+def _safe_label(label: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in (label or "").strip())[:80]
+
+
+def _record_backup(source: Path, backup_path: Path, *, label: str) -> None:
+    index_path = backup_path.parent / "backup_index.json"
+    try:
+        existing = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else []
+        if not isinstance(existing, list):
+            existing = []
+    except (OSError, json.JSONDecodeError):
+        existing = []
+    existing.append({
+        "source": str(source),
+        "backup": str(backup_path),
+        "label": label,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    index_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
 
 def _write_with_backup(path: Path, new_content: str, *, dry_run: bool, confirm_dangerous: bool = False) -> str:
@@ -535,11 +621,16 @@ def undo_last_edit(path: str, dry_run: bool = False) -> str:
         return f"No backup found for {_display_path(resolved)}"
     latest = backups[0]
     if dry_run:
-        return f"[DRY RUN] Would restore {_display_path(latest)} → {_display_path(resolved)}"
+        diff = ""
+        if resolved.exists():
+            diff = "\n" + _line_diff(resolved, resolved.read_text(encoding="utf-8", errors="replace"), latest.read_text(encoding="utf-8", errors="replace"))
+        return f"[DRY RUN] Would restore {_display_path(latest)} → {_display_path(resolved)}{diff}"
     if resolved.exists():
         shutil.copy2(resolved, _backup_path(resolved, "before_undo"))
+    before = resolved.read_text(encoding="utf-8", errors="replace") if resolved.exists() else ""
+    after = latest.read_text(encoding="utf-8", errors="replace")
     shutil.copy2(latest, resolved)
-    return f"Restored {_display_path(resolved)} from {_display_path(latest)}"
+    return f"Restored {_display_path(resolved)} from {_display_path(latest)}\n{_line_diff(resolved, before, after)}"
 
 
 def insert_line(path: str, line: int, text: str, position: str = "after", dry_run: bool = False, confirm_dangerous: bool = False) -> str:
@@ -547,12 +638,12 @@ def insert_line(path: str, line: int, text: str, position: str = "after", dry_ru
     resolved = resolve_write_path(path)
     if not resolved.exists():
         return f"File not found: {path}"
-    lines, trailing = _read_text_lines(resolved)
+    lines, trailing, newline = _read_text_lines(resolved)
     if not 1 <= int(line) <= max(1, len(lines)):
         return f"Invalid line {line}; file has {len(lines)} line(s)."
     insert_at = int(line) - 1 if position == "before" else int(line)
     new_lines = lines[:insert_at] + text.splitlines() + lines[insert_at:]
-    return _write_with_backup(resolved, _join_lines(new_lines, trailing), dry_run=dry_run, confirm_dangerous=confirm_dangerous)
+    return _write_with_backup(resolved, _join_lines(new_lines, trailing, newline), dry_run=dry_run, confirm_dangerous=confirm_dangerous)
 
 
 def replace_lines(path: str, start: int, end: int, new_text: str, dry_run: bool = False, confirm_dangerous: bool = False) -> str:
@@ -560,12 +651,12 @@ def replace_lines(path: str, start: int, end: int, new_text: str, dry_run: bool 
     resolved = resolve_write_path(path)
     if not resolved.exists():
         return f"File not found: {path}"
-    lines, trailing = _read_text_lines(resolved)
+    lines, trailing, newline = _read_text_lines(resolved)
     start_i, end_i = int(start), int(end)
     if start_i < 1 or end_i < start_i or end_i > len(lines):
         return f"Invalid range {start}-{end}; file has {len(lines)} line(s)."
     new_lines = lines[: start_i - 1] + new_text.splitlines() + lines[end_i:]
-    return _write_with_backup(resolved, _join_lines(new_lines, trailing), dry_run=dry_run, confirm_dangerous=confirm_dangerous)
+    return _write_with_backup(resolved, _join_lines(new_lines, trailing, newline), dry_run=dry_run, confirm_dangerous=confirm_dangerous)
 
 
 def delete_lines(path: str, start: int, end: int, dry_run: bool = False, confirm_dangerous: bool = False) -> str:
@@ -592,7 +683,7 @@ def find_text(path: str, query: str, context: int = 2, max_results: int = 20) ->
     resolved = resolve_write_path(path)
     if not resolved.exists() or not resolved.is_file():
         return f"File not found: {path}"
-    lines, _ = _read_text_lines(resolved)
+    lines, _, _newline = _read_text_lines(resolved)
     needle = query.lower()
     matches = [i for i, line in enumerate(lines, 1) if needle in line.lower()]
     if not matches:

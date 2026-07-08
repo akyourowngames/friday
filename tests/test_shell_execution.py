@@ -2,7 +2,7 @@
 
 import sys
 import pytest
-from ares.tools.shell_execution import run_command, _translate_to_powershell
+from ares.tools.shell_execution import load_project_command_registry, resolve_project_command, run_command, _translate_to_powershell
 
 
 class TestTranslateToPowershell:
@@ -125,3 +125,25 @@ class TestRunCommand:
             result = run_command("python3 -c \"pass\"")
         assert "Exit code: 0" in result
         assert "No output" in result
+
+    def test_command_profile_and_summary(self):
+        result = run_command("echo profiled", profile="quick")
+
+        assert "Summary: status=ok" in result
+        assert "profiled" in result
+
+    def test_project_command_registry_from_pyproject_and_package_json(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.ares.commands]\nunit = \"python -m pytest\"\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "package.json").write_text(
+            '{"scripts": {"build": "vite build"}}',
+            encoding="utf-8",
+        )
+
+        registry = load_project_command_registry(str(tmp_path))
+
+        assert registry["unit"] == "python -m pytest"
+        assert registry["npm:build"] == "npm run build"
+        assert resolve_project_command("@unit", str(tmp_path)) == "python -m pytest"

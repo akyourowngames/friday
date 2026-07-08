@@ -92,6 +92,19 @@ def test_write_file_dry_run(tmp_path, monkeypatch):
     assert not target.exists()  # file should NOT be created
 
 
+def test_write_file_dry_run_shows_diff_for_overwrite(tmp_path):
+    from ares.tools.filesystem_write import write_file
+    target = tmp_path / "dry.txt"
+    target.write_text("old\n", encoding="utf-8")
+
+    result = write_file(str(target), "new\n", dry_run=True)
+
+    assert "DRY RUN" in result
+    assert "-old" in result
+    assert "+new" in result
+    assert target.read_text(encoding="utf-8") == "old\n"
+
+
 def test_edit_file_exact_match(tmp_path, monkeypatch):
     monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
     
@@ -143,6 +156,8 @@ def test_edit_file_dry_run(tmp_path, monkeypatch):
     result = edit_file(str(target), "old", "new", dry_run=True)
     assert "DRY RUN" in result
     assert target.read_text(encoding="utf-8") == "old content"  # unchanged
+    assert "-old content" in result
+    assert "+new content" in result
 
 
 def test_edit_file_not_found(tmp_path, monkeypatch):
@@ -432,6 +447,7 @@ def test_insert_line_creates_backup_and_supports_undo(tmp_path):
     undo = undo_last_edit(str(target))
     assert "Restored" in undo
     assert target.read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+    assert (tmp_path / ".ares_backups" / "backup_index.json").exists()
 
 
 def test_replace_and_delete_lines_dry_run(tmp_path):
@@ -491,6 +507,23 @@ def test_batch_file_ops_rolls_back_on_failure(tmp_path):
 
     assert "rolled back" in result.lower()
     assert target.read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+
+
+def test_batch_edit_rolls_back_on_partial_failure(tmp_path):
+    from ares.tools.filesystem_write import batch_edit
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("old", encoding="utf-8")
+    second.write_text("keep", encoding="utf-8")
+
+    result = batch_edit([
+        {"action": "write", "path": str(first), "content": "new"},
+        {"action": "delete", "path": str(second)},
+    ], confirm=False)
+
+    assert "rolled back" in result.lower()
+    assert first.read_text(encoding="utf-8") == "old"
+    assert second.read_text(encoding="utf-8") == "keep"
 
 
 def test_safe_path_status_blocks_system_path():

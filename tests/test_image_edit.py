@@ -1,6 +1,7 @@
 """Tests for ares.image_edit module."""
 
 import os
+import json
 import pytest
 from PIL import Image
 from ares.tools.image_edit import (
@@ -97,9 +98,18 @@ class TestResizeImage:
         assert "Error" in result
 
     def test_resize_to_output_path(self, test_png, tmp_path):
+        os.environ["ARES_ASSET_MANIFEST"] = str(tmp_path / "manifest.jsonl")
         output = str(tmp_path / "resized.png")
         result = resize_image(test_png, width=50, output=output)
         assert os.path.exists(output)
+        assert "Manifest:" in result
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[-1]["action"] == "resize_image"
+        assert rows[-1]["width"] == 50
+        os.environ.pop("ARES_ASSET_MANIFEST", None)
 
     def test_resize_file_not_found(self):
         result = resize_image("/nonexistent.png", width=100)

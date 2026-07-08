@@ -14,6 +14,13 @@ from ares.tools.dates import now_local, now_local_iso
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 
+EXPORT_PROFILES: dict[str, dict[str, bool]] = {
+    "full": {"config": True, "memories": True, "conversations": True},
+    "memories": {"config": False, "memories": True, "conversations": False},
+    "conversations": {"config": False, "memories": False, "conversations": True},
+    "config": {"config": True, "memories": False, "conversations": False},
+}
+
 
 def default_export_path() -> Path:
     """Return a timestamped export path under ~/.ares."""
@@ -27,27 +34,42 @@ def export_data(
     conversation_store: ConversationStore | None = None,
     config: AppConfig | None = None,
     path: str | Path | None = None,
+    profile: str = "full",
 ) -> Path:
     """Export local Ares data to JSON."""
     output_path = Path(path).expanduser() if path else default_export_path()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     app_config = config or load_config()
+    flags = EXPORT_PROFILES.get((profile or "full").lower(), EXPORT_PROFILES["full"])
+    redaction_preview = _redaction_preview(app_config) if flags["config"] else {}
     payload: dict[str, Any] = {
         "version": 1,
         "exported_at": now_local_iso(),
-        "config": app_config.model_dump(exclude={"api_key", "tavily_api_key"}),
-        "secrets_redacted": ["api_key", "tavily_api_key"],
-        "memories": memory_store.list_all(),
+        "export_profile": profile if profile in EXPORT_PROFILES else "full",
+        "config": app_config.model_dump(exclude={"api_key", "tavily_api_key"}) if flags["config"] else {},
+        "secrets_redacted": list(redaction_preview),
+        "redaction_preview": redaction_preview,
+        "memories": memory_store.list_all() if flags["memories"] else [],
         "conversations": [],
         "conversation_messages": [],
     }
-    if conversation_store is not None:
+    if conversation_store is not None and flags["conversations"]:
         payload["conversations"] = conversation_store.list_conversations()
         payload["conversation_messages"] = conversation_store.list_messages()
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     return output_path
+
+
+def _redaction_preview(config: AppConfig) -> dict[str, str]:
+    """Return which sensitive config fields were excluded from export."""
+    data = config.model_dump()
+    preview: dict[str, str] = {}
+    for key in ("api_key", "tavily_api_key"):
+        value = str(data.get(key) or "")
+        preview[key] = "redacted" if value else "empty"
+    return preview
 
 
 def import_data(

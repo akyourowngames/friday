@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import signal
 import subprocess
 import sys
+from pathlib import Path
+import tomllib
 
 
 # ── Unix → Windows command translation ─────────────────────────
@@ -54,6 +57,13 @@ _UNIX_TO_PS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"^\s*echo(\s)"), "Write-Output", "\\1"),
 ]
 
+COMMAND_PROFILES: dict[str, dict[str, int]] = {
+    "quick": {"timeout": 15},
+    "test": {"timeout": 120},
+    "build": {"timeout": 180},
+    "long": {"timeout": 300},
+}
+
 
 def _translate_to_powershell(command: str) -> str:
     """Translate common Unix commands to PowerShell equivalents on Windows."""
@@ -90,7 +100,55 @@ def _translate_to_powershell(command: str) -> str:
     return command
 
 
-def run_command(command: str, timeout: int = 30, cwd: str | None = None) -> str:
+def _profile_timeout(profile: str | None, fallback: int) -> int:
+    if not profile:
+        return fallback
+    return COMMAND_PROFILES.get(profile.lower(), {}).get("timeout", fallback)
+
+
+def load_project_command_registry(cwd: str | None = None) -> dict[str, str]:
+    """Load reusable project commands from common repo config files."""
+    root = Path(cwd or os.getcwd()).expanduser().resolve()
+    registry: dict[str, str] = {}
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            commands = data.get("tool", {}).get("ares", {}).get("commands", {})
+            if isinstance(commands, dict):
+                registry.update({str(key): str(value) for key, value in commands.items()})
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    package_json = root / "package.json"
+    if package_json.exists():
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+            scripts = data.get("scripts", {})
+            if isinstance(scripts, dict):
+                registry.update({f"npm:{key}": f"npm run {key}" for key in scripts})
+        except (OSError, json.JSONDecodeError):
+            pass
+    return registry
+
+
+def resolve_project_command(command_or_key: str, cwd: str | None = None) -> str:
+    """Resolve @command-key aliases from the project command registry."""
+    value = (command_or_key or "").strip()
+    if not value.startswith("@"):
+        return command_or_key
+    key = value[1:]
+    registry = load_project_command_registry(cwd)
+    return registry.get(key, command_or_key)
+
+
+def _summary(stdout: str, stderr: str, exit_code: int | None) -> str:
+    stdout_lines = len(stdout.splitlines()) if stdout else 0
+    stderr_lines = len(stderr.splitlines()) if stderr else 0
+    status = "ok" if exit_code == 0 else "failed"
+    return f"Summary: status={status}; stdout_lines={stdout_lines}; stderr_lines={stderr_lines}"
+
+
+def run_command(command: str, timeout: int = 30, cwd: str | None = None, profile: str | None = None) -> str:
     """Execute a shell command with output capture.
 
     Args:
@@ -101,7 +159,8 @@ def run_command(command: str, timeout: int = 30, cwd: str | None = None) -> str:
     Returns:
         Formatted string with exit code and output.
     """
-    timeout = max(1, min(timeout, 300))
+    timeout = max(1, min(_profile_timeout(profile, timeout), 300))
+    command = resolve_project_command(command, cwd)
     command = command.replace("~", os.path.expanduser("~"))
     command = _translate_to_powershell(command)
 
@@ -149,9 +208,9 @@ def run_command(command: str, timeout: int = 30, cwd: str | None = None) -> str:
             output_parts.append(f"--- stderr ---\n{stderr.rstrip()}")
 
         if not output_parts:
-            return f"Exit code: {proc.returncode}\n(No output)"
+            return f"Exit code: {proc.returncode}\n{_summary(stdout, stderr, proc.returncode)}\n(No output)"
 
-        result = f"Exit code: {proc.returncode}\n" + "\n".join(output_parts)
+        result = f"Exit code: {proc.returncode}\n{_summary(stdout, stderr, proc.returncode)}\n" + "\n".join(output_parts)
 
         max_chars = 50_000
         if len(result) > max_chars:

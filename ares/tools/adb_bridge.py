@@ -118,10 +118,35 @@ def phone_status() -> str:
             if not adb_present
             else "No authorized ADB device connected."
         )
+    capability_matrix = {
+        "notifications": bool(kde.get("ok")) and bool(kde.get("reachable", True)),
+        "contacts": bool(kde.get("ok")),
+        "sms": bool(kde.get("ok")),
+        "battery": adb_ok,
+        "calls": adb_ok,
+        "launch_app": adb_ok,
+        "open_url": adb_ok,
+    }
+    permission_preflight = {
+        "kdeconnect_cli": {
+            "ok": bool(kde.get("ok")),
+            "paired": bool(kde.get("paired")),
+            "reachable": bool(kde.get("reachable")),
+            "error": kde.get("error", ""),
+        },
+        "adb": {
+            "installed": adb_present,
+            "authorized_device": adb_ok,
+            "configured_device": _configured_device(),
+            "error": adb_error,
+        },
+    }
 
     return _json(
         {
             "ok": bool(kde.get("ok")) and adb_ok,
+            "permission_preflight": permission_preflight,
+            "capability_matrix": capability_matrix,
             "kdeconnect": kde,
             "adb": {
                 "ok": adb_ok,

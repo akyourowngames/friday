@@ -14,7 +14,7 @@ def test_parse_skill_frontmatter_and_supporting_files(tmp_path):
     refs = skill_dir / "references"
     refs.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: test-skill\ndescription: Helps test skills.\ncategory: coding\nversion: 2.0.0\n---\n\n# Test Skill\nDo it.\n",
+        "---\nname: test-skill\ndescription: Helps test skills.\ncategory: coding\nversion: 2.0.0\nexamples:\n  - prompt: Try it.\ntest_commands:\n  - pytest\n---\n\n# Test Skill\nDo it.\n",
         encoding="utf-8",
     )
     (refs / "notes.md").write_text("extra", encoding="utf-8")
@@ -27,6 +27,23 @@ def test_parse_skill_frontmatter_and_supporting_files(tmp_path):
     assert skill.version == "2.0.0"
     assert "Do it." in skill.content
     assert [p.name for p in skill.files] == ["notes.md"]
+    assert skill.examples[0]["prompt"] == "Try it."
+    assert skill.test_commands == ["pytest"]
+    assert skill.lint_messages == []
+
+
+def test_skill_lint_reports_missing_test_commands_for_examples(tmp_path):
+    skill_dir = tmp_path / "demo" / "lint-me"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: lint-me\ndescription: A useful lint demo.\ncategory: demo\nversion: 1.0.0\nexamples:\n  - prompt: Run demo.\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+
+    messages = SkillManager.lint_skill_file(skill_file)
+
+    assert any("test_commands" in message for message in messages)
 
 
 def test_skill_manager_discovery_search_crud_and_file_safety(tmp_path):

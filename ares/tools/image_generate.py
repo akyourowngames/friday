@@ -8,6 +8,8 @@ from urllib.parse import quote
 
 import httpx
 
+from ares.tools.asset_manifest import record_asset
+
 IMAGES_DIR = Path("~/.ares/images").expanduser()
 
 POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
@@ -60,7 +62,18 @@ def generate_image(
 
             filepath.write_bytes(response.content)
 
-        return f"Image saved to {filepath}"
+        manifest = record_asset(
+            filepath,
+            action="generate_image",
+            history={
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "model": model,
+                "seed": seed,
+            },
+        )
+        return f"Image saved to {filepath}\nManifest: {manifest}"
 
     except httpx.TimeoutException:
         return "Error: Image generation timed out after 120s"

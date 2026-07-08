@@ -238,3 +238,31 @@ def test_glob_pattern_skips_ignored_dirs(tmp_path):
     result = glob_pattern("**/*.py", path=str(tmp_path))
     assert "app.py" in result
     assert "config.py" not in result
+
+
+def test_read_file_adds_python_symbol_context(tmp_path):
+    from ares.tools.filesystem import read_file
+    target = tmp_path / "module.py"
+    target.write_text(
+        "import os\n\nclass Worker:\n    def run(self):\n        value = os.getcwd()\n        return value\n",
+        encoding="utf-8",
+    )
+
+    result = read_file(str(target), start_line=5, num_lines=1)
+
+    assert "Context:" in result
+    assert "import 1: import os" in result
+    assert "scope 3: class Worker:" in result
+    assert "scope 4:     def run(self):" in result
+
+
+def test_search_files_respects_gitignore(tmp_path):
+    from ares.tools.filesystem import search_files
+    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (tmp_path / "ignored.txt").write_text("needle", encoding="utf-8")
+    (tmp_path / "kept.txt").write_text("needle", encoding="utf-8")
+
+    result = search_files(query="needle", path=str(tmp_path))
+
+    assert "kept.txt" in result
+    assert "ignored.txt" not in result

@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import re
+from html import unescape
+from urllib.parse import urljoin
 from typing import Any
 
 import httpx
@@ -152,6 +154,63 @@ def summarize_results(results: list[dict[str, str]], answer: str = "") -> str:
     return "\n".join(bullets) if bullets else "No summary available."
 
 
+def _source_quality(url: str) -> dict[str, Any]:
+    """Return a lightweight source quality label for transparent research output."""
+    host = ""
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        host = ""
+    score = 0.5
+    label = "standard"
+    if host.endswith((".gov", ".edu")):
+        score = 0.9
+        label = "authoritative"
+    elif any(part in host for part in ("docs.", "developer.", "support.", "github.com")):
+        score = 0.8
+        label = "primary-or-technical"
+    elif any(part in host for part in ("wikipedia.org", "reuters.com", "apnews.com")):
+        score = 0.7
+        label = "reference-or-news"
+    elif not host:
+        score = 0.2
+        label = "unknown"
+    return {"score": score, "label": label, "host": host}
+
+
+def _freshness_label(result: dict[str, str]) -> str:
+    """Infer source freshness when provider metadata includes a date-like value."""
+    raw = str(
+        result.get("date")
+        or result.get("published_date")
+        or result.get("published")
+        or result.get("updated")
+        or ""
+    ).strip()
+    if not raw:
+        return "undated"
+    return "dated"
+
+
+def source_matrix(results: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Build source quality/freshness metadata without mutating result rows."""
+    matrix = []
+    for index, result in enumerate(results, 1):
+        quality = _source_quality(result.get("url", ""))
+        matrix.append({
+            "index": index,
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "host": quality["host"],
+            "quality_score": quality["score"],
+            "quality_label": quality["label"],
+            "freshness_label": _freshness_label(result),
+        })
+    return matrix
+
+
 def web_search_payload(
     query: str,
     max_results: int = 5,
@@ -189,6 +248,7 @@ def web_search_payload(
                     "summary": "No summary available.",
                     "answer": "",
                     "results": [],
+                    "source_matrix": [],
                     "fetched": [],
                     "errors": errors,
                 }
@@ -234,6 +294,7 @@ def web_search_payload(
         "summary": summarize_results(results, answer),
         "answer": answer,
         "results": results,
+        "source_matrix": source_matrix(results),
         "fetched": fetched,
         "errors": errors,
     }
@@ -259,6 +320,12 @@ def format_results(results_or_payload: list[dict] | dict) -> str:
             f"Provider: {payload.get('provider', '')}",
             f"Summary: {payload.get('summary', 'No summary available.')}",
         ]
+        if payload.get("source_matrix"):
+            labels = [
+                f"{item.get('index')}: {item.get('quality_label')}/{item.get('freshness_label')}"
+                for item in payload["source_matrix"][:3]
+            ]
+            lines.append("Source labels: " + "; ".join(labels))
         if payload.get("errors"):
             lines.append("Warnings: " + "; ".join(payload["errors"]))
     else:
@@ -307,33 +374,115 @@ def _strip_html_tags(html: str) -> str:
     text = re.sub(r"</?(p|div|li|h[1-6]|tr|blockquote)[^>]*>", "\n", text, flags=re.IGNORECASE)
     # Remove all remaining tags
     text = re.sub(r"<[^>]+>", "", text)
-    # Decode common HTML entities
-    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-    text = text.replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
+    # Decode HTML entities.
+    text = unescape(text)
     # Collapse multiple whitespace/newlines
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def _extract_meta_description(html: str) -> str:
-    """Try to extract meta description from HTML."""
+def _extract_meta_content(html: str, key: str, value: str) -> str:
+    """Extract a content value from a meta tag in either attribute order."""
+    attr = re.escape(key)
+    wanted = re.escape(value)
     match = re.search(
-        r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+{attr}=["\']{wanted}["\'][^>]+content=["\']([^"\']+)["\']',
         html,
         re.IGNORECASE,
     )
     if match:
-        return match.group(1).strip()
-    # Try reversed attribute order
+        return unescape(match.group(1).strip())
     match = re.search(
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+{attr}=["\']{wanted}["\']',
         html,
         re.IGNORECASE,
     )
     if match:
-        return match.group(1).strip()
+        return unescape(match.group(1).strip())
     return ""
+
+
+def _extract_meta_description(html: str) -> str:
+    """Try to extract a useful page description from HTML metadata."""
+    return (
+        _extract_meta_content(html, "name", "description")
+        or _extract_meta_content(html, "property", "og:description")
+        or _extract_meta_content(html, "name", "twitter:description")
+    )
+
+
+def _extract_canonical_url(html: str, base_url: str) -> str:
+    """Extract a canonical URL from HTML when present."""
+    for match in re.finditer(r"<link[^>]+>", html, re.IGNORECASE):
+        tag = match.group(0)
+        rel_match = re.search(r'rel=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if not rel_match:
+            continue
+        rel_values = {value.strip().lower() for value in rel_match.group(1).split()}
+        if "canonical" not in rel_values:
+            continue
+        href_match = re.search(r'href=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if href_match:
+            return urljoin(base_url, unescape(href_match.group(1).strip()))
+    return ""
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    """Return whether a failed HTTP status is worth retrying later."""
+    return status_code in {408, 425, 429} or 500 <= status_code <= 599
+
+
+def _decode_pdf_literal(raw: bytes) -> str:
+    """Decode a small subset of PDF literal-string escapes."""
+    text = raw.decode("latin-1", errors="replace")
+    replacements = {
+        r"\n": "\n",
+        r"\r": "\r",
+        r"\t": "\t",
+        r"\b": "\b",
+        r"\f": "\f",
+        r"\(": "(",
+        r"\)": ")",
+        r"\\": "\\",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    text = re.sub(r"\\([0-7]{1,3})", lambda m: chr(int(m.group(1), 8)), text)
+    return text
+
+
+def _extract_pdf_text(data: bytes, max_chars: int) -> tuple[str, bool]:
+    """Best-effort PDF text extraction without adding a hard dependency.
+
+    The preferred path uses pypdf when available.  The fallback covers simple
+    text PDFs produced by many fixtures and lightweight generators.
+    """
+    try:  # pragma: no cover - exercised only when optional dependency exists.
+        from pypdf import PdfReader
+
+        import io
+
+        reader = PdfReader(io.BytesIO(data))
+        chunks = [(page.extract_text() or "") for page in reader.pages]
+        text = "\n".join(chunk for chunk in chunks if chunk.strip())
+    except Exception:
+        literals = [
+            _decode_pdf_literal(match.group(1))
+            for match in re.finditer(rb"\(((?:\\.|[^\\)])*)\)\s*Tj", data, re.DOTALL)
+        ]
+        if not literals:
+            literals = [
+                _decode_pdf_literal(match)
+                for array in re.findall(rb"\[(.*?)\]\s*TJ", data, re.DOTALL)
+                for match in re.findall(rb"\((?:\\.|[^\\)])*\)", array, re.DOTALL)
+            ]
+        text = "\n".join(literals)
+
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    if len(text) > max_chars:
+        return text[:max_chars] + f"\n\n[Content truncated at {max_chars} chars]", True
+    return text, False
 
 
 def fetch_url(
@@ -348,10 +497,15 @@ def fetch_url(
     """
     result: dict[str, Any] = {
         "url": url,
+        "final_url": url,
+        "canonical_url": "",
         "title": "",
+        "description": "",
         "content": "",
         "content_type": "",
+        "status_code": None,
         "truncated": False,
+        "retryable": False,
         "error": "",
     }
 
@@ -369,19 +523,36 @@ def fetch_url(
             },
         ) as client:
             response = client.get(url)
+            result["status_code"] = response.status_code
+            result["final_url"] = str(response.url)
             response.raise_for_status()
     except httpx.TimeoutException:
         result["error"] = f"Request timed out after {timeout}s"
+        result["retryable"] = True
         return result
     except httpx.HTTPStatusError as exc:
         result["error"] = f"HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
+        result["status_code"] = exc.response.status_code
+        result["final_url"] = str(exc.response.url)
+        result["retryable"] = _is_retryable_status(exc.response.status_code)
         return result
     except Exception as exc:
         result["error"] = f"Request failed: {exc}"
+        result["retryable"] = True
         return result
 
     content_type = response.headers.get("content-type", "")
     result["content_type"] = content_type
+
+    if "application/pdf" in content_type or result["final_url"].lower().endswith(".pdf"):
+        data = response.content[:MAX_FETCH_BYTES]
+        text, truncated = _extract_pdf_text(data, max_chars)
+        if not text:
+            result["error"] = "PDF text extraction produced no readable text."
+            return result
+        result["content"] = text
+        result["truncated"] = truncated or len(response.content) > MAX_FETCH_BYTES
+        return result
 
     # Handle non-HTML content
     if "text/html" not in content_type and "text/" in content_type:
@@ -403,7 +574,9 @@ def fetch_url(
     # Extract title
     title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE)
     if title_match:
-        result["title"] = re.sub(r"\s+", " ", title_match.group(1)).strip()
+        result["title"] = unescape(re.sub(r"\s+", " ", title_match.group(1)).strip())
+    result["description"] = _extract_meta_description(html)
+    result["canonical_url"] = _extract_canonical_url(html, result["final_url"])
 
     if extract_text:
         text = _strip_html_tags(html)
@@ -434,7 +607,16 @@ def fetch_url_tool(args: dict) -> str:
     if data["title"]:
         parts.append(f"Title: {data['title']}")
     parts.append(f"URL: {data['url']}")
+    if data.get("final_url") and data["final_url"] != data["url"]:
+        parts.append(f"Final URL: {data['final_url']}")
+    if data.get("canonical_url"):
+        parts.append(f"Canonical URL: {data['canonical_url']}")
+    if data.get("description"):
+        parts.append(f"Description: {data['description']}")
+    if data.get("status_code") is not None:
+        parts.append(f"Status: {data['status_code']}")
     parts.append(f"Content type: {data['content_type']}")
+    parts.append(f"Retryable: {bool(data.get('retryable'))}")
     parts.append("")
     parts.append(data["content"])
 

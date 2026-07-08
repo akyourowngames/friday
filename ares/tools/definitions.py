@@ -92,8 +92,16 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "export_data",
-            "Export local Ares memories, conversations, and config to JSON.",
-            {"path": {"type": "string", "description": "Optional output JSON path."}},
+            "Export local Ares memories, conversations, and config to JSON, with selective profiles and redaction preview.",
+            {
+                "path": {"type": "string", "description": "Optional output JSON path."},
+                "profile": {
+                    "type": "string",
+                    "enum": ["full", "memories", "conversations", "config"],
+                    "default": "full",
+                    "description": "Selective export profile.",
+                },
+            },
         ),
         _tool(
             "web_search",
@@ -128,7 +136,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "fetch_url",
-            "Fetch a web page and extract its readable text content. Use after web_search to read the full content of a specific page.",
+            "Fetch a page/PDF/text URL and extract readable content plus metadata such as final URL, canonical URL, description, status, truncation, and retryability.",
             {
                 "url": {"type": "string", "description": "The URL to fetch (must start with http:// or https://)."},
                 "max_chars": {
@@ -146,7 +154,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "read_file",
-            "Read a local text file with line numbers. Use for a specific file path.",
+            "Read a local text file with line numbers and automatic nearby imports/classes/functions/heading context for code or markdown slices.",
             {
                 "path": {"type": "string", "description": "Absolute, home-relative, or workspace-relative path."},
                 "start_line": {"type": "integer", "default": 1},
@@ -156,7 +164,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "search_files",
-            "Search local files by content and/or file name glob pattern.",
+            "Search local files by content and/or file name glob pattern using ripgrep when available, ranked results, snippets, and ignore-file awareness.",
             {
                 "query": {"type": "string", "description": "Content regex/text to search for.", "default": ""},
                 "path": {"type": "string", "description": "Directory to search.", "default": "."},
@@ -192,7 +200,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "write_file",
-            "Create a NEW file or FULLY OVERWRITE an existing one. NEVER use for adding/inserting text into an existing file. For adding/inserting: use edit_file (find+replace), insert_line (by line number), append_to_file (end), prepend_to_file (start), or batch_file_ops. If overwriting, confirm=true is required.",
+            "Create a NEW file or FULLY OVERWRITE an existing one. Dry runs include a patch preview for overwrites. NEVER use for adding/inserting text into an existing file. For adding/inserting: use edit_file (find+replace), insert_line (by line number), append_to_file (end), prepend_to_file (start), or batch_file_ops. If overwriting, confirm=true is required.",
             {
                 "path": {"type": "string", "description": "File path to write."},
                 "content": {"type": "string", "description": "File content to write."},
@@ -203,7 +211,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "edit_file",
-            "Edit a file by searching and replacing (or adding around) text. Great for adding text before/after a unique line, inserting between paragraphs, or making targeted changes without touching the rest of the file. old_text must match uniquely. If no match, returns the closest content as a suggestion.",
+            "Edit a file by searching and replacing text with diff preview, conflict hints, and backup creation. Great for targeted changes without touching the rest of the file. old_text must match uniquely. If no match, returns the closest content as a suggestion.",
             {
                 "path": {"type": "string", "description": "File path."},
                 "old_text": {"type": "string", "description": "Text to find (must match uniquely in the file)."},
@@ -245,7 +253,7 @@ def get_tool_definitions() -> list[dict]:
 
         _tool(
             "batch_edit",
-            "Execute multiple file operations in one structured call. Supports write, edit, delete, move, copy, and mkdir/create_directory actions with per-operation results.",
+            "Execute multiple file operations transactionally with rollback on partial failure. Supports write, edit, delete, move, copy, and mkdir/create_directory actions with per-operation results.",
             {
                 "operations": {
                     "type": "array",
@@ -329,7 +337,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "backup_file",
-            "Create a timestamped .ares_backups copy of a file.",
+            "Create a named timestamped .ares_backups restore point and backup index entry for a file.",
             {"path": {"type": "string"}, "label": {"type": "string", "default": ""}},
             ["path"],
         ),
@@ -473,27 +481,33 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "run_code",
-            "Execute Python code in an isolated subprocess. Full access to stdlib, pip, filesystem, network. Returns exit code + output.",
+            "Execute Python code in the pinned persistent Python runtime session. Full access to stdlib, pip, filesystem, network. Supports reset checkpoints and dependency fingerprints.",
             {
                 "code": {"type": "string", "description": "Python code to execute"},
                 "timeout": {"type": "integer", "description": "Max seconds before kill (1-300, default 30)"},
                 "cwd": {"type": "string", "description": "Working directory (default: home)"},
+                "reset": {"type": "boolean", "default": False, "description": "Reset the pinned Python runtime before executing."},
+                "include_fingerprint": {"type": "boolean", "default": False, "description": "Include a dependency fingerprint in the result."},
             },
             required=["code"],
         ),
         _tool(
             "run_command",
-            "Execute a shell command (bash, git, npm, python, docker, etc.). Full system access. Supports pipes, redirects, && chaining. DO NOT use for phone operations — use phone_status, phone_get_notifications, phone_send_sms, phone_call_number, or phone_search_contact instead.",
+            "Execute a shell command (bash, git, npm, python, docker, etc.) in the pinned persistent shell session. Supports command profiles, timeout hints, structured summaries, pipes, redirects, && chaining. DO NOT use for phone operations — use phone_status, phone_get_notifications, phone_send_sms, phone_call_number, or phone_search_contact instead.",
             {
-                "command": {"type": "string", "description": "Shell command to execute"},
+                "command": {"type": "string", "description": "Shell command to execute, or @key from the project command registry."},
+                "command_key": {"type": "string", "description": "Optional key from [tool.ares.commands] or npm:<script>."},
                 "timeout": {"type": "integer", "description": "Max seconds before kill (1-300, default 30)"},
                 "cwd": {"type": "string", "description": "Working directory"},
+                "profile": {"type": "string", "enum": ["quick", "test", "build", "long"], "description": "Optional timeout profile."},
+                "reset": {"type": "boolean", "default": False, "description": "Reset the pinned shell runtime before executing."},
+                "include_fingerprint": {"type": "boolean", "default": False, "description": "Include a dependency fingerprint in the result."},
             },
             required=["command"],
         ),
         _tool(
             "generate_image",
-            "Generate an image from a text prompt using Pollinations.ai (free, no API key). Returns saved file path.",
+            "Generate an image from a text prompt using Pollinations.ai (free, no API key). Returns saved file path and records an asset manifest row with dimensions, format, checksum, and generation history.",
             {
                 "prompt": {"type": "string", "description": "Text description of the image to generate"},
                 "width": {"type": "integer", "description": "Output width in pixels (default 1024)"},
@@ -513,7 +527,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "resize_image",
-            "Resize an image preserving aspect ratio. Uses LANCZOS resampling (highest quality).",
+            "Resize an image preserving aspect ratio. Uses LANCZOS resampling and records an asset manifest row with dimensions, format, checksum, and transformation history.",
             {
                 "path": {"type": "string", "description": "Source image path"},
                 "width": {"type": "integer", "description": "Target width (scales proportionally)"},
@@ -525,7 +539,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "convert_image",
-            "Convert image between formats (PNG, JPEG, WebP, BMP, GIF). Handles RGBA to JPEG transparency.",
+            "Convert image between formats (PNG, JPEG, WebP, BMP, GIF). Handles RGBA to JPEG transparency and records an asset manifest row.",
             {
                 "path": {"type": "string", "description": "Source image path"},
                 "format": {"type": "string", "enum": ["png", "jpeg", "webp", "bmp", "gif"], "description": "Target format"},
@@ -536,7 +550,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "crop_image",
-            "Crop a rectangular region from an image. Coordinates in pixels, right/bottom exclusive.",
+            "Crop a rectangular region from an image. Coordinates in pixels, right/bottom exclusive. Records an asset manifest row.",
             {
                 "path": {"type": "string", "description": "Source image path"},
                 "left": {"type": "integer", "description": "Left edge in pixels (default 0)"},
@@ -551,10 +565,12 @@ def get_tool_definitions() -> list[dict]:
             "terminal_exec",
             "Execute a shell command with full output capture, and optionally display it in the interactive terminal panel. Use this when the user explicitly says 'run in terminal', 'show me in the terminal', or wants to see the command in the terminal panel. For normal command execution without visual terminal, use run_command instead.",
             {
-                "command": {"type": "string", "description": "Shell command to execute"},
+                "command": {"type": "string", "description": "Shell command to execute, or @key from the project command registry."},
+                "command_key": {"type": "string", "description": "Optional key from [tool.ares.commands] or npm:<script>."},
                 "wait": {"type": "boolean", "description": "Wait for command to complete (default true)"},
                 "timeout": {"type": "integer", "description": "Max seconds to wait for completion (default 30)"},
                 "cwd": {"type": "string", "description": "Working directory for the command"},
+                "profile": {"type": "string", "enum": ["quick", "test", "build", "long"], "description": "Optional timeout profile."},
             },
             required=["command"],
         ),

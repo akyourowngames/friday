@@ -88,6 +88,17 @@ class TestMemoryStore:
         assert count == 1
         assert len(store.list_all()) == 2
 
+    def test_suggest_merge_detects_duplicate_and_conflict(self, store):
+        duplicate_id = store.store("User likes tea", category="preference")
+        store.store("User prefers coffee", category="preference")
+
+        duplicate = store.suggest_merge("User likes tea", category="preference")
+        conflict = store.suggest_merge("User prefers green tea", category="preference")
+
+        assert duplicate[0]["kind"] == "duplicate"
+        assert duplicate[0]["fact_id"] == duplicate_id
+        assert any(item["kind"] == "possible_conflict" for item in conflict)
+
     def test_list_all(self, store):
         """list_all returns all stored facts."""
         store.store("Fact one")

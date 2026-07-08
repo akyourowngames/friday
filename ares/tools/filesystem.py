@@ -116,6 +116,10 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     selected = all_lines[start - 1 : end]
 
     parts = [f"[File: {_display_path(resolved)} ({total} lines total)]"]
+    context = _symbol_context(resolved, all_lines, start, end)
+    if context:
+        parts.append("Context:")
+        parts.extend(context)
     if start > 1:
         parts.append(f"({start - 1} more lines above)")
 
@@ -126,6 +130,61 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
         parts.append(f"({total - end} more lines below)")
 
     return "\n".join(parts)
+
+
+def _symbol_context(path: Path, lines: list[str], start: int, end: int) -> list[str]:
+    """Return nearby imports/classes/functions for code-oriented file slices."""
+    suffix = path.suffix.lower()
+    if suffix not in {".py", ".js", ".jsx", ".ts", ".tsx", ".md"}:
+        return []
+
+    selected_range = set(range(start, end + 1))
+    context: list[str] = []
+    seen: set[int] = set()
+
+    def add(line_no: int, label: str) -> None:
+        if line_no in seen or line_no in selected_range:
+            return
+        seen.add(line_no)
+        context.append(f"  {label} {line_no}: {lines[line_no - 1].rstrip()}")
+
+    if suffix == ".py":
+        for i, line in enumerate(lines[: min(len(lines), 80)], 1):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and i < start:
+                add(i, "import")
+        for i in range(start - 1, 0, -1):
+            line = lines[i - 1]
+            stripped = line.lstrip()
+            if re.match(r"(async\s+def|def|class)\s+", stripped):
+                add(i, "scope")
+                if stripped.startswith("def ") or stripped.startswith("async def "):
+                    indent = len(line) - len(stripped)
+                    for j in range(i - 1, 0, -1):
+                        parent = lines[j - 1]
+                        parent_stripped = parent.lstrip()
+                        parent_indent = len(parent) - len(parent_stripped)
+                        if parent_indent < indent and parent_stripped.startswith("class "):
+                            add(j, "scope")
+                            break
+                break
+    elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        for i, line in enumerate(lines[: min(len(lines), 80)], 1):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "const ", "let ", "var ")) and " from " in stripped and i < start:
+                add(i, "import")
+        for i in range(start - 1, 0, -1):
+            stripped = lines[i - 1].strip()
+            if re.match(r"(export\s+)?(async\s+)?function\s+|class\s+|const\s+\w+\s*=", stripped):
+                add(i, "scope")
+                break
+    elif suffix == ".md":
+        for i in range(start - 1, 0, -1):
+            if lines[i - 1].lstrip().startswith("#"):
+                add(i, "heading")
+                break
+
+    return context[:8]
 
 
 def _parse_ripgrep_output(output: str) -> list[dict]:
@@ -141,6 +200,77 @@ def _parse_ripgrep_output(output: str) -> list[dict]:
             "excerpt": match.group(3).strip(),
             "match_type": "content",
         })
+    return results
+
+
+def _load_ignore_patterns(root: Path) -> list[str]:
+    """Load simple .gitignore-style patterns for Python fallback paths."""
+    patterns: list[str] = []
+    for name in (".gitignore", ".ignore"):
+        ignore_file = root / name
+        if not ignore_file.exists():
+            continue
+        try:
+            for raw in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or line.startswith("!"):
+                    continue
+                patterns.append(line)
+        except OSError:
+            continue
+    return patterns
+
+
+def _is_ignored(path: Path, root: Path, ignore_patterns: list[str] | None = None) -> bool:
+    """Return true for noisy dirs and simple .gitignore pattern matches."""
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path
+    parts = rel.parts
+    if any(part in SKIP_DIRS for part in parts):
+        return True
+    patterns = ignore_patterns if ignore_patterns is not None else _load_ignore_patterns(root)
+    rel_posix = rel.as_posix()
+    for pattern in patterns:
+        anchored = pattern.startswith("/")
+        pat = pattern.lstrip("/")
+        if pattern.endswith("/"):
+            prefix = pat.rstrip("/")
+            if any(part == prefix for part in parts) or rel_posix.startswith(prefix + "/"):
+                return True
+            continue
+        if anchored:
+            if fnmatch.fnmatch(rel_posix, pat):
+                return True
+        elif "/" in pat:
+            if fnmatch.fnmatch(rel_posix, pat) or fnmatch.fnmatch(rel_posix, f"*/{pat}"):
+                return True
+        elif fnmatch.fnmatch(path.name, pat) or any(fnmatch.fnmatch(part, pat) for part in parts):
+            return True
+    return False
+
+
+def _attach_context(results: list[dict], root: Path, radius: int = 1) -> list[dict]:
+    """Attach one-line snippets around content matches where possible."""
+    for result in results:
+        if result.get("match_type") != "content":
+            continue
+        path = Path(result["path"])
+        try:
+            if _is_binary(path):
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        line_no = int(result.get("line") or 0)
+        if line_no < 1:
+            continue
+        snippets = []
+        for show_no in range(max(1, line_no - radius), min(len(lines), line_no + radius) + 1):
+            marker = ">" if show_no == line_no else " "
+            snippets.append(f"{marker}{show_no}: {lines[show_no - 1].strip()[:MAX_RESULT_EXCERPT]}")
+        result["context"] = snippets
     return results
 
 
@@ -175,17 +305,25 @@ async def _content_search_ripgrep(
 
     if proc.returncode not in (0, 1):
         return []
-    return _parse_ripgrep_output(stdout.decode(errors="replace"))
+    return _attach_context(_parse_ripgrep_output(stdout.decode(errors="replace")), path)
 
 
 def _iter_files(root: Path, name_pattern: str = ""):
     """Yield files under root while skipping noisy directories."""
+    ignore_patterns = _load_ignore_patterns(root)
     for current_root, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        current = Path(current_root)
+        dirs[:] = [
+            d for d in dirs
+            if not _is_ignored(current / d, root, ignore_patterns)
+        ]
         for filename in files:
+            file_path = Path(current_root) / filename
+            if _is_ignored(file_path, root, ignore_patterns):
+                continue
             if name_pattern and not fnmatch.fnmatch(filename, name_pattern):
                 continue
-            yield Path(current_root) / filename
+            yield file_path
 
 
 async def _content_search_python(
@@ -256,6 +394,8 @@ def _format_search_results(results: list[dict], total: int | None = None) -> str
         if result["match_type"] == "content":
             lines.append(f"[content match] {path}:{result['line']}")
             lines.append(f"  {result['excerpt']}")
+            for snippet in result.get("context", []):
+                lines.append(f"  {snippet}")
         else:
             lines.append(f"[name match] {path}")
     if total_count > len(results):
@@ -290,8 +430,25 @@ async def search_files_async(
             merged.setdefault(str(Path(result["path"]).resolve()), result)
 
     results = list(merged.values())
-    results.sort(key=lambda item: (item["match_type"] != "content", item["path"], item["line"]))
+    results.sort(key=lambda item: _search_rank(item, query, name_pattern))
     return _format_search_results(results[:bounded_max], total=len(results))
+
+
+def _search_rank(item: dict, query: str, name_pattern: str) -> tuple:
+    """Stable ranking: content hits, filename relevance, then path/line."""
+    path = Path(item["path"])
+    haystack = f"{path.name}\n{item.get('excerpt', '')}".lower()
+    query_l = query.lower().strip()
+    score = 0
+    if item["match_type"] == "content":
+        score -= 100
+    if query_l and query_l in path.name.lower():
+        score -= 25
+    if name_pattern and fnmatch.fnmatch(path.name, name_pattern):
+        score -= 5
+    if query_l and haystack.startswith(query_l):
+        score -= 10
+    return (score, str(path).lower(), int(item.get("line") or 0))
 
 
 def search_files(
@@ -418,8 +575,7 @@ def glob_pattern(pattern: str, path: str = ".", max_results: int = 50) -> str:
     try:
         for match in root.rglob(pattern):
             # Skip ignored directories
-            parts = match.relative_to(root).parts
-            if any(p in SKIP_DIRS for p in parts):
+            if _is_ignored(match, root):
                 continue
             matches.append(match)
             if len(matches) >= bounded_max:
@@ -814,11 +970,8 @@ def file_tree(path: str = ".", max_depth: int = 3, show_files: bool = True) -> s
         except (PermissionError, OSError):
             return [f"{prefix}[access denied]"]
 
-        if show_files:
-            items = [i for i in items if i.is_dir() or not any(
-                part in SKIP_DIRS for part in (i.relative_to(root).parts if i.is_file() else ())
-            )]
-        else:
+        items = [i for i in items if not _is_ignored(i, root)]
+        if not show_files:
             items = [i for i in items if i.is_dir()]
 
         for i, item in enumerate(items):

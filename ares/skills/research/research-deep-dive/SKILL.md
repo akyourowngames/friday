@@ -3,6 +3,10 @@ name: research-deep-dive
 description: Multi-source research on any topic — run targeted searches, fetch sources, evaluate quality, compile findings into a structured markdown report file. Use for "research X", "write a report on Y", "deep dive into Z".
 category: research
 version: 1.0.0
+examples:
+  - prompt: "Deep dive into the market for personal AI assistants with evidence links."
+test_commands:
+  - "python -m pytest tests/test_skills.py"
 ---
 
 # Research Deep Dive
@@ -15,10 +19,18 @@ version: 1.0.0
 
 3. **Synthesize** — Compare sources, note contradictions, identify authoritative sources, flag uncertainty.
 
+   Build a claim-level evidence map before writing:
+   - Claim
+   - Supporting source URLs
+   - Source freshness and authority
+   - Contradictions or caveats
+   - Confidence: high, medium, or low
+
 4. **Write report** — Use `write_file` to save a structured markdown report covering:
    - ## Summary (key findings in 2-3 paragraphs)
    - ## Key Findings (detailed breakdown per research angle)
    - ## Sources (numbered list with URLs and why each is credible)
+   - ## Evidence Map (claims linked to source numbers)
    - ## Open Questions (what's unclear or contradictory)
 
 5. **Report back** — Tell the user where the report was saved and the top 3 findings.

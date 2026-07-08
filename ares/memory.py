@@ -21,6 +21,7 @@ EMBEDDING_MODEL_NAME = DEFAULT_EMBEDDING_MODEL
 _default_provider: EmbeddingProvider | None = None
 logger = logging.getLogger(__name__)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_WORD_RE = re.compile(r"[A-Za-z0-9']+")
 
 
 def _get_default_provider() -> EmbeddingProvider:
@@ -189,6 +190,44 @@ class MemoryStore:
 
         self.conn.commit()
         return fact_id
+
+    def suggest_merge(
+        self,
+        fact_text: str,
+        category: str = "note",
+        *,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Suggest duplicate or conflicting memories before storing a new fact."""
+        normalized = _normalize_memory_text(fact_text)
+        if not normalized:
+            return []
+        suggestions: list[dict] = []
+        for memory in self.list_all():
+            existing = _normalize_memory_text(memory.get("fact_text", ""))
+            if not existing:
+                continue
+            if existing == normalized and memory.get("category", "note") == category:
+                suggestions.append({
+                    "kind": "duplicate",
+                    "fact_id": memory["fact_id"],
+                    "fact_text": memory["fact_text"],
+                    "confidence": 1.0,
+                    "recommendation": "Reuse the existing memory instead of storing a duplicate.",
+                })
+            elif _memory_relation(existing) == _memory_relation(normalized):
+                overlap = _token_overlap(existing, normalized)
+                if overlap >= 0.25:
+                    suggestions.append({
+                        "kind": "possible_conflict",
+                        "fact_id": memory["fact_id"],
+                        "fact_text": memory["fact_text"],
+                        "confidence": round(overlap, 2),
+                        "recommendation": "Review and update/merge the existing memory if this supersedes it.",
+                    })
+            if len(suggestions) >= limit:
+                break
+        return suggestions
 
     def get(self, fact_id: int) -> dict | None:
         """Return one memory by ID."""
@@ -465,3 +504,28 @@ class MemoryStore:
     def close(self):
         """Close the database connection."""
         self.conn.close()
+
+
+def _normalize_memory_text(text: str) -> str:
+    return " ".join(_WORD_RE.findall((text or "").lower()))
+
+
+def _memory_subject(normalized: str) -> str:
+    stop = {"the", "a", "an", "is", "are", "was", "were", "likes", "prefers", "user", "users"}
+    tokens = [token for token in normalized.split() if token not in stop]
+    return " ".join(tokens[:3])
+
+
+def _memory_relation(normalized: str) -> str:
+    tokens = normalized.split()
+    if len(tokens) >= 2 and tokens[0] in {"user", "users"}:
+        return " ".join(tokens[:2])
+    return _memory_subject(normalized)
+
+
+def _token_overlap(left: str, right: str) -> float:
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
