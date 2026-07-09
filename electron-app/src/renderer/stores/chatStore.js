@@ -5,14 +5,31 @@ function id(prefix) {
 }
 
 function normalizeToolCall(call) {
+  const safeCall = call && typeof call === "object" ? call : {};
   return {
-    id: call.id || `tool-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    tool: call.tool || call.tool_name || "unknown",
-    args: call.args || {},
-    content: call.content ?? null,
-    status: call.status || "done",
-    opened: call.opened ?? false,
+    id: safeCall.id || `tool-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    tool: safeCall.tool || safeCall.tool_name || safeCall.name || "unknown",
+    args: safeCall.args || safeCall.arguments || {},
+    content: safeCall.content ?? null,
+    status: safeCall.status || "done",
+    opened: safeCall.opened ?? false,
   };
+}
+
+function normalizeToolCalls(message) {
+  const raw = message.toolCalls ?? message.tool_calls ?? [];
+  if (Array.isArray(raw)) {
+    return raw.map(normalizeToolCall);
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.map(normalizeToolCall) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 function normalizeMessage(message) {
@@ -21,7 +38,7 @@ function normalizeMessage(message) {
     role: message.role || "assistant",
     content: message.content || "",
     createdAt: message.created_at || message.createdAt || new Date().toISOString(),
-    toolCalls: (message.toolCalls || message.tool_calls || []).map(normalizeToolCall),
+    toolCalls: normalizeToolCalls(message),
     status: message.status || "done"
   };
 }

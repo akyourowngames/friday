@@ -93,6 +93,26 @@ class FakeConversationStore:
         pass
 
 
+class ToolCallStringConversationStore(FakeConversationStore):
+    def get_messages(self, conversation_id):
+        return [
+            {
+                "id": 1,
+                "role": "assistant",
+                "content": "Used a tool",
+                "created_at": "now",
+                "tool_calls": '[{"tool":"web_search","args":{"query":"ares"}}]',
+            },
+            {
+                "id": 2,
+                "role": "assistant",
+                "content": "Bad legacy tool call",
+                "created_at": "now",
+                "tool_calls": "not json",
+            },
+        ]
+
+
 @pytest.fixture
 def server():
     return AresServer(
@@ -154,6 +174,20 @@ def test_status_uses_total_memory_count():
     )
 
     assert server._status()["memory_count"] == 123
+
+
+def test_conversation_history_normalizes_legacy_tool_call_strings():
+    server = AresServer(
+        config=AppConfig(model="deepseek-v4-flash-free"),
+        agent=FakeAgent(),
+        memory_store=FakeMemoryStore(),
+        conversation_store=ToolCallStringConversationStore(),
+    )
+
+    history = server._conversation_history(1)
+
+    assert history[0]["tool_calls"] == [{"tool": "web_search", "args": {"query": "ares"}}]
+    assert "tool_calls" not in history[1]
 
 
 @pytest.mark.asyncio

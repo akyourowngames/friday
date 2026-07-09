@@ -416,8 +416,11 @@ class AresServer:
                 "content": content,
                 "created_at": item.get("created_at") or item.get("timestamp"),
             }
-            if item.get("tool_calls"):
-                msg["tool_calls"] = item["tool_calls"]
+            tool_calls = item.get("tool_calls")
+            if isinstance(tool_calls, str):
+                tool_calls = _safe_json_loads(tool_calls)
+            if isinstance(tool_calls, list):
+                msg["tool_calls"] = tool_calls
             history.append(msg)
         return history
 

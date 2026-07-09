@@ -46,21 +46,30 @@ class PythonManager {
       stdio: ["ignore", "pipe", "pipe"]
     });
 
+    const readyPromise = this.waitForReadyOutput(30000);
+
     this.process.stdout.on("data", (data) => {
-      process.stdout.write(`[ares-server] ${data}`);
+      const text = data.toString();
+      process.stdout.write(`[ares-server] ${text}`);
+      this._handleReadyOutput(text);
     });
 
     this.process.stderr.on("data", (data) => {
-      process.stderr.write(`[ares-server] ${data}`);
+      process.stderr.write(`[ares-server] ${data.toString()}`);
+    });
+
+    this.process.on("error", (error) => {
+      this._rejectReady(error);
     });
 
     this.process.on("exit", (code, signal) => {
       this.ready = false;
       this.process = null;
       process.stdout.write(`[ares-server] exited code=${code} signal=${signal}\n`);
+      this._rejectReady(new Error(`Ares server exited before startup (code=${code}, signal=${signal})`));
     });
 
-    await this.waitForPort(30000);
+    await readyPromise;
     this.ready = true;
     return this.url;
   }
@@ -104,40 +113,38 @@ class PythonManager {
     });
   }
 
-  waitForPort(timeoutMs) {
-    const startedAt = Date.now();
+  waitForReadyOutput(timeoutMs) {
     return new Promise((resolve, reject) => {
-      const attempt = () => {
-        const socket = net.createConnection(this.port, this.host);
-        let resolved = false;
+      const timer = setTimeout(() => {
+        this._readyWaiter = null;
+        reject(new Error(`Ares server did not announce startup for ${this.host}:${this.port}`));
+      }, timeoutMs);
 
-        socket.once("connect", () => {
-          resolved = true;
-          socket.destroy();
+      this._readyWaiter = {
+        resolve: () => {
+          clearTimeout(timer);
+          this._readyWaiter = null;
           resolve();
-        });
-
-        socket.setTimeout(1000);
-        socket.once("timeout", () => {
-          socket.destroy();
-          retryOrFail();
-        });
-        socket.once("error", () => {
-          socket.destroy();
-          retryOrFail();
-        });
-
-        function retryOrFail() {
-          if (resolved) return;
-          if (Date.now() - startedAt > timeoutMs) {
-            reject(new Error(`Ares server did not open ${this.host}:${this.port}`));
-            return;
-          }
-          setTimeout(attempt, 250);
-        }
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          this._readyWaiter = null;
+          reject(error);
+        },
       };
-      attempt();
     });
+  }
+
+  _handleReadyOutput(text) {
+    if (this._readyWaiter && text.includes("Ares desktop server listening")) {
+      this._readyWaiter.resolve();
+    }
+  }
+
+  _rejectReady(error) {
+    if (this._readyWaiter) {
+      this._readyWaiter.reject(error);
+    }
   }
 
   getFreePort() {

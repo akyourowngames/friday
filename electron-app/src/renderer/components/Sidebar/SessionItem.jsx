@@ -123,12 +123,6 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
       >
         <div className="session-icon-wrap">
           <MessageSquare size={14} className="session-icon" />
-          {streaming && (
-            <>
-              <span className="session-pulse" />
-              <span className="session-pulse-dot" />
-            </>
-          )}
         </div>
         <span className="session-title-text">{session.title || "New session"}</span>
         <span className="session-meta">

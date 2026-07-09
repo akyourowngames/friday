@@ -1,4 +1,4 @@
-import { X, RefreshCw, Server, Cpu, Database, Gauge, Wifi, WifiOff } from "lucide-react";
+import { X, RefreshCw, Server, Cpu, Database, Wifi, WifiOff } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore.js";
 import { ModelSelector } from "./ModelSelector.jsx";
 
@@ -10,12 +10,9 @@ function memoryText(memory) {
 }
 
 export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
-  const model = useSettingsStore((s) => s.model);
-  const memoryCount = useSettingsStore((s) => s.memoryCount);
   const memories = useSettingsStore((s) => s.memories);
   const serverUrl = useSettingsStore((s) => s.serverUrl);
   const connected = useSettingsStore((s) => s.connected);
-  const contextUsage = useSettingsStore((s) => s.contextUsage);
 
   return (
     <div className="settings-scrim" onClick={onClose}>
@@ -51,27 +48,6 @@ export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
             <div className={`settings-connection ${connected ? "online" : "offline"}`}>
               {connected ? <Wifi size={13} /> : <WifiOff size={13} />}
               <span>{connected ? "Connected to Ares server" : "Waiting for Ares server"}</span>
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <h3 className="settings-section-title">
-              <Gauge size={14} />
-              Status
-            </h3>
-            <div className="settings-stats">
-              <div className="settings-stat">
-                <span className="settings-stat-label">Memories</span>
-                <span className="settings-stat-value">{memoryCount}</span>
-              </div>
-              <div className="settings-stat">
-                <span className="settings-stat-label">Model</span>
-                <span className="settings-stat-value settings-stat-model">{model}</span>
-              </div>
-              <div className="settings-stat">
-                <span className="settings-stat-label">Context</span>
-                <span className="settings-stat-value">{contextUsage.percent || 0}%</span>
-              </div>
             </div>
           </section>
 

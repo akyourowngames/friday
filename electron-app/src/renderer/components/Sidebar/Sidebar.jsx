@@ -1,7 +1,4 @@
 import {
-  Brain,
-  Cpu,
-  Gauge,
   Plus,
   RefreshCw,
   Search,
@@ -16,9 +13,6 @@ import { SessionList } from "./SessionList.jsx";
 export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSession, onDeleteSession }) {
   const search = useSessionStore((state) => state.search);
   const setSearch = useSessionStore((state) => state.setSearch);
-  const memoryCount = useSettingsStore((state) => state.memoryCount);
-  const model = useSettingsStore((state) => state.model);
-  const contextUsage = useSettingsStore((state) => state.contextUsage);
   const isStreaming = useChatStore((state) => state.isStreaming);
   const collapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const toggleSidebar = useSettingsStore((state) => state.toggleSidebar);
@@ -74,24 +68,6 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSessio
               onDeleteSession={onDeleteSession}
               isStreaming={isStreaming}
             />
-          </section>
-
-          <section className="sidebar-section compact-section">
-            <div className="section-title">
-              <span>System</span>
-            </div>
-            <div className="system-pill" title={model}>
-              <Cpu size={14} />
-              <span>{model}</span>
-            </div>
-            <div className="system-pill">
-              <Brain size={14} />
-              <span>{memoryCount} memories</span>
-            </div>
-            <div className="system-pill">
-              <Gauge size={14} />
-              <span>{contextUsage.percent || 0}% context</span>
-            </div>
           </section>
         </>
       )}
