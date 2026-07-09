@@ -8,7 +8,6 @@ import re
 import shutil
 import sqlite3
 import sys
-import textwrap
 import unicodedata
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from rich import box
 from rich.console import Console
+from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -160,13 +160,14 @@ def _clear_current_task_cancellation() -> None:
 
 
 CLI_BOX = box.ROUNDED
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class AresCLI:
     """The main CLI application for Ares."""
 
     def __init__(self):
-        self.console = Console(color_system="auto", highlight=True)
+        self.console = Console(color_system="auto", highlight=False)
         self.unicode_output = _supports_unicode_output()
         self.icons = {
             "fire": "",
@@ -453,7 +454,9 @@ class AresCLI:
 
     def _clean_assistant_text(self, text: str) -> str:
         """Remove accidental tool protocol tokens from assistant-facing text."""
-        clean = re.sub(r"\[tool:[^\]]+\]", "", text)
+        clean = ANSI_RE.sub("", text)
+        clean = re.sub(r"\[tool:[^\]]+\]", "", clean)
+        clean = clean.replace("\r\n", "\n").replace("\r", "\n")
         clean = "".join(
             ch for ch in clean
             if unicodedata.category(ch) not in {"So", "Sk"}
@@ -515,7 +518,13 @@ class AresCLI:
         """Return a conservative width for readable assistant text."""
         fallback_width = getattr(self.console, "width", 100) or 100
         columns = shutil.get_terminal_size((fallback_width, 24)).columns
-        return max(48, min(columns, 110) - 4)
+        return max(48, min(columns, fallback_width, 110) - 2)
+
+    def _panel_width(self) -> int:
+        """Return a panel width that fits inside the live terminal."""
+        fallback_width = getattr(self.console, "width", 100) or 100
+        columns = shutil.get_terminal_size((fallback_width, 24)).columns
+        return max(52, min(columns, fallback_width, 112) - 1)
 
     def _plain_response_line(self, line: str) -> str:
         """Remove lightweight Markdown that makes plain terminal alignment noisy."""
@@ -529,60 +538,130 @@ class AresCLI:
         line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", line)
         return line.strip()
 
-    def _wrapped_response_lines(self, text: str) -> list[str]:
-        """Format assistant text with a stable gutter and hanging bullet indents."""
-        width = self._response_width()
-        lines: list[str] = []
+    def _assistant_table(self, lines: list[str]) -> Table | None:
+        """Parse a GitHub-style Markdown table into a bounded Rich table."""
+        rows = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped.startswith("|") or not stripped.endswith("|"):
+                return None
+            rows.append([cell.strip() for cell in stripped.strip("|").split("|")])
+        if len(rows) < 2 or not all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in rows[1]):
+            return None
+        headers = rows[0]
+        body = rows[2:]
+        if not headers or any(len(row) != len(headers) for row in body):
+            return None
+
+        table = Table(box=box.SIMPLE_HEAVY, border_style="bright_cyan", header_style="bold bright_cyan", expand=True)
+        for header in headers:
+            table.add_column(header or " ", overflow="fold", ratio=1)
+        for row in body:
+            table.add_row(*row)
+        return table
+
+    def _render_inline_text(self, line: str, style: str = "default") -> Text:
+        """Render a small safe subset of inline Markdown with explicit resets."""
+        text = Text(style=style)
+        pattern = re.compile(r"(\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))")
+        pos = 0
+        for match in pattern.finditer(line):
+            if match.start() > pos:
+                text.append(line[pos:match.start()], style)
+            if match.group(2) is not None:
+                text.append(match.group(2), "bold bright_white")
+            elif match.group(3) is not None:
+                text.append(match.group(3), "bold yellow")
+            elif match.group(4) is not None:
+                label = match.group(4)
+                url = match.group(5)
+                text.append(label, "underline bright_blue")
+                text.append(f" ({url})", "dim")
+            pos = match.end()
+        if pos < len(line):
+            text.append(line[pos:], style)
+        return text
+
+    def _assistant_renderables(self, text: str) -> list:
+        """Render assistant Markdown with bounded tables and no style bleed."""
+        renderables = []
+        paragraph: list[str] = []
+        table_lines: list[str] = []
+
+        def flush_paragraph() -> None:
+            if not paragraph:
+                return
+            content = " ".join(part.strip() for part in paragraph if part.strip())
+            paragraph.clear()
+            if content:
+                renderables.append(self._render_inline_text(content))
+
+        def flush_table() -> None:
+            if not table_lines:
+                return
+            table = self._assistant_table(table_lines)
+            copied = list(table_lines)
+            table_lines.clear()
+            renderables.append(table or Text("\n".join(copied), style="default"))
+
         for raw_line in text.splitlines():
-            line = self._plain_response_line(raw_line)
-            if not line:
-                lines.append("")
+            line = raw_line.rstrip()
+            stripped = line.strip()
+
+            if stripped.startswith("|") and stripped.endswith("|"):
+                flush_paragraph()
+                table_lines.append(stripped)
                 continue
 
-            bullet = re.match(r"^-\s+(.*)$", line)
-            numbered = re.match(r"^(\d+[.)])\s+(.*)$", line)
-            if bullet:
-                wrapped = textwrap.wrap(
-                    bullet.group(1),
-                    width=width,
-                    initial_indent="  - ",
-                    subsequent_indent="    ",
-                    break_long_words=False,
-                    break_on_hyphens=False,
-                )
+            flush_table()
+            if not stripped:
+                flush_paragraph()
+                renderables.append(Text(""))
+                continue
+
+            heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            bullet = re.match(r"^[-*]\s+(.+)$", stripped)
+            numbered = re.match(r"^(\d+[.)])\s+(.+)$", stripped)
+            rule = re.fullmatch(r"[-*_]{3,}", stripped)
+
+            if heading:
+                flush_paragraph()
+                renderables.append(self._render_inline_text(heading.group(2), "bold bright_cyan"))
+            elif rule:
+                flush_paragraph()
+                renderables.append(Text("-" * min(self._response_width(), 72), style="dim"))
+            elif bullet:
+                flush_paragraph()
+                item = Text("• ", style="bright_cyan")
+                item.append_text(self._render_inline_text(bullet.group(1)))
+                renderables.append(item)
             elif numbered:
-                marker = numbered.group(1)
-                wrapped = textwrap.wrap(
-                    numbered.group(2),
-                    width=width,
-                    initial_indent=f"  {marker} ",
-                    subsequent_indent=" " * (len(marker) + 3),
-                    break_long_words=False,
-                    break_on_hyphens=False,
-                )
+                flush_paragraph()
+                item = Text(f"{numbered.group(1)} ", style="bright_cyan")
+                item.append_text(self._render_inline_text(numbered.group(2)))
+                renderables.append(item)
             else:
-                wrapped = textwrap.wrap(
-                    line,
-                    width=width,
-                    initial_indent="  ",
-                    subsequent_indent="  ",
-                    break_long_words=False,
-                    break_on_hyphens=False,
-                )
-            lines.extend(wrapped or ["  "])
-        return lines
+                paragraph.append(stripped)
+
+        flush_paragraph()
+        flush_table()
+        return renderables or [Text("")]
 
     def _print_assistant_response(self, text: str) -> None:
         """Render final assistant output with Rich Markdown, tables, and color."""
         self.console.print()
         clean = self._clean_assistant_text(text)
+        renderables = self._assistant_renderables(clean)
         self.console.print(Panel(
-            Markdown(clean, code_theme="monokai"),
+            Group(*renderables),
             title="[bold bright_cyan]Ares[/bold bright_cyan]",
             border_style="bright_cyan",
             box=CLI_BOX,
             padding=(0, 1),
+            width=self._panel_width(),
+            safe_box=True,
         ))
+        self.console.print(Text("", style="default"))
 
     def _cleanup_step(self, label: str, func) -> None:
         """Run one shutdown step without letting cleanup errors crash Ares."""

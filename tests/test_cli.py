@@ -78,6 +78,11 @@ class TableStreamingAgent(DummyAgent):
         )
 
 
+class ColorLeakStreamingAgent(DummyAgent):
+    async def run_stream(self, *_args, **_kwargs):
+        yield "\x1b[36mThis should not leak cyan\x1b[0m and the final word survives: scoreboard"
+
+
 class RepeatedOpeningAgent(DummyAgent):
     async def run_stream(self, *_args, **_kwargs):
         yield (
@@ -493,6 +498,20 @@ async def test_process_input_renders_markdown_tables_with_rich():
     assert "Story" in output
     assert "Match update" in output
     assert "| Story | When |" not in output
+
+
+@pytest.mark.asyncio
+async def test_process_input_strips_ansi_colors_and_keeps_long_text(monkeypatch):
+    app = make_cli()
+    app.agent = ColorLeakStreamingAgent()
+    monkeypatch.setattr(cli_module.shutil, "get_terminal_size", lambda fallback: os.terminal_size((58, 24)))
+
+    await app._process_input("colors")
+
+    output = app.console_file.getvalue()
+    assert "\x1b[" not in output
+    assert "This should not leak cyan" in output
+    assert "scoreboard" in output
 
 
 @pytest.mark.asyncio
