@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export const useSessionStore = create((set, get) => ({
+export const useSessionStore = create((set) => ({
   sessions: [],
   activeSessionId: null,
   search: "",
@@ -15,15 +15,5 @@ export const useSessionStore = create((set, get) => ({
 
   setSearch(search) {
     set({ search });
-  },
-
-  filteredSessions() {
-    const query = get().search.trim().toLowerCase();
-    if (!query) {
-      return get().sessions;
-    }
-    return get().sessions.filter((session) =>
-      `${session.title || ""} ${session.summary || ""}`.toLowerCase().includes(query)
-    );
   }
 }));

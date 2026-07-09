@@ -1,7 +1,9 @@
 export function StreamingIndicator() {
   return (
-    <span className="streaming-cursor" aria-label="Streaming">
-      <span className="cursor-bar" />
+    <span className="streaming-breath" aria-label="Streaming">
+      <span />
+      <span />
+      <span />
     </span>
   );
 }

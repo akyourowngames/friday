@@ -23,6 +23,10 @@ export function useWebSocket() {
   const setStatus = useSettingsStore((state) => state.setStatus);
   const setMemories = useSettingsStore((state) => state.setMemories);
   const setContextContent = useSettingsStore((state) => state.setContextContent);
+  const setPersonalSettings = useSettingsStore((state) => state.setPersonalSettings);
+  const markPersonalSettingsSaving = useSettingsStore((state) => state.markPersonalSettingsSaving);
+  const markPersonalSettingsSaved = useSettingsStore((state) => state.markPersonalSettingsSaved);
+  const setPersonalSettingsError = useSettingsStore((state) => state.setPersonalSettingsError);
   const setModelState = useSettingsStore((state) => state.setModel);
   const setLastError = useSettingsStore((state) => state.setLastError);
 
@@ -73,6 +77,12 @@ export function useWebSocket() {
     const offModel = aresSocket.on("model_updated", ({ model }) => setModelState(model));
     const offMemories = aresSocket.on("memories", ({ memories }) => setMemories(memories));
     const offContext = aresSocket.on("context", ({ content }) => setContextContent(content));
+    const offPersonalSettings = aresSocket.on("personal_settings", ({ settings }) =>
+      setPersonalSettings(settings)
+    );
+    const offPersonalSettingsSaved = aresSocket.on("personal_settings_saved", ({ settings }) =>
+      markPersonalSettingsSaved(settings)
+    );
 
     async function connect() {
       const serverUrl = window.aresDesktop
@@ -102,6 +112,8 @@ export function useWebSocket() {
       offModel();
       offMemories();
       offContext();
+      offPersonalSettings();
+      offPersonalSettingsSaved();
     };
   }, [
     addError,
@@ -114,7 +126,9 @@ export function useWebSocket() {
     setConnected,
     setContextContent,
     setLastError,
+    setPersonalSettings,
     setMemories,
+    markPersonalSettingsSaved,
     setModelState,
     setServerUrl,
     setSessions,
@@ -164,6 +178,22 @@ export function useWebSocket() {
     aresSocket.refreshState();
   }, []);
 
+  const fetchPersonalSettings = useCallback(() => {
+    aresSocket.send({ type: "get_personal_settings" });
+  }, []);
+
+  const savePersonalSettings = useCallback(
+    (section, content) => {
+      markPersonalSettingsSaving();
+      if (!aresSocket.send({ type: "save_personal_settings", section, content })) {
+        setPersonalSettingsError("Ares server is not connected yet");
+        return false;
+      }
+      return true;
+    },
+    [markPersonalSettingsSaving, setPersonalSettingsError]
+  );
+
   const renameSession = useCallback((sessionId, title) => {
     aresSocket.send({ type: "rename_session", session_id: sessionId, title });
   }, []);
@@ -194,6 +224,8 @@ export function useWebSocket() {
     refreshSidebar,
     reconnect,
     renameSession,
-    deleteSession
+    deleteSession,
+    fetchPersonalSettings,
+    savePersonalSettings
   };
 }

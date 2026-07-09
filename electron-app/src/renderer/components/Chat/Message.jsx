@@ -35,8 +35,10 @@ export function Message({ message }) {
     );
   }
 
+  const isStreaming = message.status === "streaming";
+
   return (
-    <article className="message-row assistant">
+    <article className={`message-row assistant${isStreaming ? " streaming" : ""}`}>
       {message.status === "streaming" && !message.content && !message.toolCalls?.length ? (
         <div className="thinking-row">
           <ChevronRight size={14} />
@@ -45,7 +47,7 @@ export function Message({ message }) {
         </div>
       ) : null}
       {message.content ? (
-        <div className="assistant-content">
+        <div className={`assistant-content${isStreaming ? " streaming-content" : ""}`}>
           <MarkdownRenderer content={message.content} />
         </div>
       ) : null}

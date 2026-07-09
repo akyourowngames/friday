@@ -114,9 +114,9 @@ class ToolCallStringConversationStore(FakeConversationStore):
 
 
 @pytest.fixture
-def server():
+def server(tmp_path):
     return AresServer(
-        config=AppConfig(model="deepseek-v4-flash-free"),
+        config=AppConfig(model="deepseek-v4-flash-free", data_dir=str(tmp_path)),
         agent=FakeAgent(),
         memory_store=FakeMemoryStore(),
         conversation_store=FakeConversationStore(),
@@ -165,9 +165,9 @@ async def test_context_memory_and_model_messages(server):
     assert socket.messages[3]["model"] == "mimo-v2.5-free"
 
 
-def test_status_uses_total_memory_count():
+def test_status_uses_total_memory_count(tmp_path):
     server = AresServer(
-        config=AppConfig(model="deepseek-v4-flash-free"),
+        config=AppConfig(model="deepseek-v4-flash-free", data_dir=str(tmp_path)),
         agent=FakeAgent(),
         memory_store=CountingMemoryStore(),
         conversation_store=FakeConversationStore(),
@@ -176,9 +176,9 @@ def test_status_uses_total_memory_count():
     assert server._status()["memory_count"] == 123
 
 
-def test_conversation_history_normalizes_legacy_tool_call_strings():
+def test_conversation_history_normalizes_legacy_tool_call_strings(tmp_path):
     server = AresServer(
-        config=AppConfig(model="deepseek-v4-flash-free"),
+        config=AppConfig(model="deepseek-v4-flash-free", data_dir=str(tmp_path)),
         agent=FakeAgent(),
         memory_store=FakeMemoryStore(),
         conversation_store=ToolCallStringConversationStore(),
@@ -188,6 +188,28 @@ def test_conversation_history_normalizes_legacy_tool_call_strings():
 
     assert history[0]["tool_calls"] == [{"tool": "web_search", "args": {"query": "ares"}}]
     assert "tool_calls" not in history[1]
+
+
+@pytest.mark.asyncio
+async def test_personal_settings_round_trip(server):
+    socket = FakeSocket()
+
+    await server.handle_message(socket, json.dumps({"type": "get_personal_settings"}))
+    await server.handle_message(
+        socket,
+        json.dumps(
+            {
+                "type": "save_personal_settings",
+                "section": "profile",
+                "content": "# About Me\n\n## Identity\n- Name: Krish\n",
+            }
+        ),
+    )
+
+    assert socket.messages[0]["type"] == "personal_settings"
+    assert "profile.md" in socket.messages[0]["settings"]["profile"]["path"]
+    assert socket.messages[1]["type"] == "personal_settings_saved"
+    assert "Name: Krish" in socket.messages[1]["settings"]["profile"]["content"]
 
 
 @pytest.mark.asyncio

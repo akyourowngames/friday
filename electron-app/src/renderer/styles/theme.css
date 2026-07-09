@@ -47,12 +47,12 @@
   --text-faint: #5f6472;
 
   /* ── Accent ── */
-  --accent: #6B5B95;
-  --accent-hover: #8B7BB5;
-  --accent-muted: rgba(107, 91, 149, 0.14);
-  --accent-subtle: rgba(107, 91, 149, 0.07);
-  --accent-glow: 0 0 20px rgba(90, 70, 180, 0.25);
-  --accent-glow-soft: 0 0 40px rgba(90, 70, 180, 0.12);
+  --accent: #38bdf8;
+  --accent-hover: #7dd3fc;
+  --accent-muted: rgba(56, 189, 248, 0.14);
+  --accent-subtle: rgba(56, 189, 248, 0.07);
+  --accent-glow: 0 0 20px rgba(56, 189, 248, 0.25);
+  --accent-glow-soft: 0 0 40px rgba(56, 189, 248, 0.12);
 
   /* ── Semantic ── */
   --success: #34d399;

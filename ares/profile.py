@@ -50,6 +50,11 @@ class ProfileManager:
         except (OSError, UnicodeDecodeError):
             return ""
 
+    def write(self, content: str) -> None:
+        """Write profile content to disk."""
+        self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+        self.profile_path.write_text(content.rstrip() + "\n", encoding="utf-8")
+
     def is_populated(self) -> bool:
         """Return True if the profile has been filled in with a non-empty name."""
         content = self.read()

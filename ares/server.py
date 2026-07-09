@@ -26,6 +26,8 @@ from ares.context_manager import ContextManager
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.profile import ProfileManager
+from ares.soul import SoulManager
 from ares.tools.mcp_client import MCPClientManager
 
 
@@ -125,6 +127,14 @@ class AresServer:
             llm_client=self.agent.llm,
             memory_store=self.memory_store,
         )
+        data_dir = self.config.data_dir
+        self.profile_manager = ProfileManager(
+            data_dir=data_dir,
+            profile_path=self.config.profile_path,
+        )
+        self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
+        self.profile_manager.ensure_exists()
+        self.soul_manager.ensure_exists()
         self._terminal_output_buffer: dict[str, str] = {}
         self._terminal_command_events: dict[str, asyncio.Event] = {}
 
@@ -195,6 +205,10 @@ class AresServer:
                 await self._send(websocket, {"type": "memories", "memories": self._memories()})
             elif msg_type == "get_status":
                 await self._send(websocket, self._status())
+            elif msg_type == "get_personal_settings":
+                await self._send(websocket, self._personal_settings())
+            elif msg_type == "save_personal_settings":
+                await self._handle_save_personal_settings(websocket, message)
             elif msg_type == "rename_session":
                 await self._handle_rename_session(websocket, message)
             elif msg_type == "delete_session":
@@ -354,6 +368,27 @@ class AresServer:
         await self._send(websocket, {"type": "model_updated", "model": model})
         await self._send(websocket, self._status())
 
+    async def _handle_save_personal_settings(
+        self, websocket: Any, message: dict[str, Any]
+    ) -> None:
+        section = str(message.get("section") or "").strip()
+        content = str(message.get("content") or "")
+        if section == "profile":
+            self.profile_manager.write(content)
+        elif section == "soul":
+            self.soul_manager.write(content)
+        else:
+            await self._send_error(websocket, "Unknown personal settings section")
+            return
+        await self._send(
+            websocket,
+            {
+                "type": "personal_settings_saved",
+                "section": section,
+                "settings": self._personal_settings()["settings"],
+            },
+        )
+
     def _session_info(self) -> dict[str, Any]:
         return {
             "type": "session_info",
@@ -401,6 +436,23 @@ class AresServer:
             "memory_count": self._memory_count(),
             "session_id": self.conversation_id,
             "context_usage": context_usage,
+        }
+
+    def _personal_settings(self) -> dict[str, Any]:
+        self.profile_manager.ensure_exists()
+        self.soul_manager.ensure_exists()
+        return {
+            "type": "personal_settings",
+            "settings": {
+                "profile": {
+                    "path": str(self.profile_manager.profile_path),
+                    "content": self.profile_manager.read(),
+                },
+                "soul": {
+                    "path": str(self.soul_manager.soul_path),
+                    "content": self.soul_manager.read(),
+                },
+            },
         }
 
     def _conversation_history(self, session_id: int) -> list[dict[str, Any]]:

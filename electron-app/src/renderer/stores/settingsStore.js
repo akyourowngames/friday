@@ -120,6 +120,12 @@ export const useSettingsStore = create((set) => ({
   memoryCount: 0,
   memories: [],
   contextContent: "",
+  personalSettings: {
+    profile: { path: "", content: "" },
+    soul: { path: "", content: "" },
+  },
+  personalSettingsStatus: "idle",
+  personalSettingsError: "",
   settingsOpen: false,
   sidebarCollapsed: false,
   lastError: "",
@@ -158,6 +164,36 @@ export const useSettingsStore = create((set) => ({
 
   setContextContent(contextContent) {
     set({ contextContent: contextContent || "" });
+  },
+
+  setPersonalSettings(settings) {
+    set({
+      personalSettings: {
+        profile: settings?.profile || { path: "", content: "" },
+        soul: settings?.soul || { path: "", content: "" },
+      },
+      personalSettingsStatus: "idle",
+      personalSettingsError: "",
+    });
+  },
+
+  markPersonalSettingsSaving() {
+    set({ personalSettingsStatus: "saving", personalSettingsError: "" });
+  },
+
+  markPersonalSettingsSaved(settings) {
+    set({
+      personalSettings: {
+        profile: settings?.profile || { path: "", content: "" },
+        soul: settings?.soul || { path: "", content: "" },
+      },
+      personalSettingsStatus: "saved",
+      personalSettingsError: "",
+    });
+  },
+
+  setPersonalSettingsError(personalSettingsError) {
+    set({ personalSettingsStatus: "error", personalSettingsError });
   },
 
   setModel(model) {

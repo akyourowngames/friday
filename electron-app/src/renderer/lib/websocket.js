@@ -79,6 +79,7 @@ export class AresWebSocket {
     this.send({ type: "get_status" });
     this.send({ type: "get_memories" });
     this.send({ type: "get_context", query: "" });
+    this.send({ type: "get_personal_settings" });
   }
 }
 

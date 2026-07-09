@@ -47,6 +47,11 @@ class SoulManager:
         except (OSError, UnicodeDecodeError):
             return ""
 
+    def write(self, content: str) -> None:
+        """Write soul content to disk."""
+        self.soul_path.parent.mkdir(parents=True, exist_ok=True)
+        self.soul_path.write_text(content.rstrip() + "\n", encoding="utf-8")
+
     def get_context(self, token_budget: int = 200) -> str:
         """Return the soul as a context block."""
         content = self.read()

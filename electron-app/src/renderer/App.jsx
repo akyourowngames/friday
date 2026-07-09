@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
-import { Settings } from "lucide-react";
+import { MessageSquare, Settings } from "lucide-react";
 import { ChatArea } from "./components/Chat/ChatArea.jsx";
-import { SettingsPanel } from "./components/Settings/SettingsPanel.jsx";
+import { SettingsPage } from "./components/Settings/SettingsPage.jsx";
 import { Sidebar } from "./components/Sidebar/Sidebar.jsx";
 import { StatusBar } from "./components/common/StatusBar.jsx";
 import TerminalPanel from "./components/Terminal/TerminalPanel.jsx";
@@ -91,22 +91,34 @@ export default function App() {
       <main className="main-pane">
         <header className="top-bar">
           <div className="top-title">
-            <span>Ares</span>
+            <span>{settingsOpen ? "Settings" : "Ares"}</span>
             <small>{connection.connected ? "Connected" : "Reconnecting"}</small>
           </div>
           <div className="top-bar-actions">
             <button
               className="icon-button"
               type="button"
-              aria-label="Open settings"
-              title="Settings"
-              onClick={() => setSettingsOpen(true)}
+              aria-label={settingsOpen ? "Back to chat" : "Open settings"}
+              title={settingsOpen ? "Back to chat" : "Settings"}
+              onClick={() => setSettingsOpen(!settingsOpen)}
             >
-              <Settings size={18} strokeWidth={2.2} />
+              {settingsOpen ? (
+                <MessageSquare size={18} strokeWidth={2.2} />
+              ) : (
+                <Settings size={18} strokeWidth={2.2} />
+              )}
             </button>
           </div>
         </header>
-        {isTerminalOpen ? (
+        {settingsOpen ? (
+          <SettingsPage
+            onBack={() => setSettingsOpen(false)}
+            onSetModel={connection.setModel}
+            onRefresh={connection.refreshSidebar}
+            onFetchPersonalSettings={connection.fetchPersonalSettings}
+            onSavePersonalSettings={connection.savePersonalSettings}
+          />
+        ) : isTerminalOpen ? (
           <div className="terminal-split-layout">
             <div className="chat-panel" style={{ width: `${splitPos}%` }}>
               <ChatArea onSend={connection.sendMessage} />
@@ -127,13 +139,6 @@ export default function App() {
         )}
         <StatusBar onRetry={connection.reconnect} />
       </main>
-      {settingsOpen ? (
-        <SettingsPanel
-          onClose={() => setSettingsOpen(false)}
-          onSetModel={connection.setModel}
-          onRefresh={connection.refreshSidebar}
-        />
-      ) : null}
     </div>
   );
 }
