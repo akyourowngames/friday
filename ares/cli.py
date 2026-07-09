@@ -22,6 +22,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 
@@ -158,13 +159,15 @@ def _clear_current_task_cancellation() -> None:
         current_task.uncancel()
 
 
+CLI_BOX = box.ROUNDED
+
 
 class AresCLI:
     """The main CLI application for Ares."""
 
     def __init__(self):
-        self.console = Console()
-        self.unicode_output = False
+        self.console = Console(color_system="auto", highlight=True)
+        self.unicode_output = _supports_unicode_output()
         self.icons = {
             "fire": "",
             "thinking": "",
@@ -279,7 +282,7 @@ class AresCLI:
         if not memories:
             self.console.print("[dim]No memories found.[/dim]")
             return
-        table = Table(title=title, border_style="green", box=box.ASCII)
+        table = Table(title=title, border_style="bright_green", box=CLI_BOX)
         table.add_column("ID", style="dim", no_wrap=True)
         table.add_column("Category", style="cyan", no_wrap=True)
         table.add_column("Importance", justify="right", no_wrap=True)
@@ -296,7 +299,7 @@ class AresCLI:
         self.console.print(table)
 
     def _show_model_list(self) -> None:
-        table = Table(title="Models", border_style="cyan", box=box.ASCII)
+        table = Table(title="Models", border_style="bright_cyan", box=CLI_BOX)
         table.add_column("Model", style="cyan")
         table.add_column("Status", no_wrap=True)
         for model in FREE_MODELS:
@@ -419,8 +422,8 @@ class AresCLI:
         if mode == "hidden" or not events:
             return None
 
-        table = Table(title="Tools", border_style="cyan", box=box.ASCII)
-        table.add_column("Tool", style="cyan", no_wrap=True)
+        table = Table(title="Tools", border_style="bright_cyan", box=CLI_BOX, header_style="bold bright_cyan")
+        table.add_column("Tool", style="bright_cyan", no_wrap=True)
         table.add_column("Status", no_wrap=True)
         table.add_column("Detail", ratio=4)
         for event in events:
@@ -570,11 +573,16 @@ class AresCLI:
         return lines
 
     def _print_assistant_response(self, text: str) -> None:
-        """Render final assistant output in a plain, aligned transcript style."""
+        """Render final assistant output with Rich Markdown, tables, and color."""
         self.console.print()
-        self.console.print("[bold cyan]Ares[/bold cyan]")
-        for line in self._wrapped_response_lines(text):
-            self.console.print(Text(line))
+        clean = self._clean_assistant_text(text)
+        self.console.print(Panel(
+            Markdown(clean, code_theme="monokai"),
+            title="[bold bright_cyan]Ares[/bold bright_cyan]",
+            border_style="bright_cyan",
+            box=CLI_BOX,
+            padding=(0, 1),
+        ))
 
     def _cleanup_step(self, label: str, func) -> None:
         """Run one shutdown step without letting cleanup errors crash Ares."""
@@ -619,7 +627,7 @@ class AresCLI:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if command == "/help":
-            table = Table(title="Commands", border_style="cyan", box=box.ASCII)
+            table = Table(title="Commands", border_style="bright_cyan", box=CLI_BOX)
             table.add_column("Command", style="cyan", no_wrap=True)
             table.add_column("Description", ratio=4)
             table.add_row("/help", "Show available commands")
@@ -648,7 +656,7 @@ class AresCLI:
                 self._print_memories(self.memory_store.search(arg[7:].strip(), limit=10), "Memory Search")
             elif arg == "clean":
                 stats = MemoryCleaner(self.memory_store).cleanup()
-                table = Table(title="Memory Cleanup", border_style="green", box=box.ASCII)
+                table = Table(title="Memory Cleanup", border_style="bright_green", box=CLI_BOX)
                 table.add_column("Metric", style="cyan")
                 table.add_column("Count", justify="right")
                 table.add_row("Policy pruned", str(stats.get("policy_pruned", 0)))
@@ -784,7 +792,7 @@ class AresCLI:
         elif command == "/skills":
             if not arg:
                 skills = self.skill_manager.list_all()
-                table = Table(title="Skills", border_style="magenta", box=box.ASCII)
+                table = Table(title="Skills", border_style="bright_magenta", box=CLI_BOX)
                 table.add_column("Name", style="cyan", no_wrap=True)
                 table.add_column("Category", no_wrap=True)
                 table.add_column("Description", ratio=4)
@@ -793,7 +801,7 @@ class AresCLI:
                 self.console.print(table if skills else "[dim]No skills installed.[/dim]")
             elif arg == "categories":
                 cats = self.skill_manager.list_categories()
-                table = Table(title="Skill Categories", border_style="magenta", box=box.ASCII)
+                table = Table(title="Skill Categories", border_style="bright_magenta", box=CLI_BOX)
                 table.add_column("Category", style="cyan")
                 table.add_column("Skills", justify="right")
                 for category, count in cats.items():
@@ -805,7 +813,7 @@ class AresCLI:
                 if not skills:
                     self.console.print("[dim]No matching skills found.[/dim]")
                 else:
-                    table = Table(title=f"Skill Search: {query}", border_style="magenta", box=box.ASCII)
+                    table = Table(title=f"Skill Search: {query}", border_style="bright_magenta", box=CLI_BOX)
                     table.add_column("Name", style="cyan", no_wrap=True)
                     table.add_column("Category", no_wrap=True)
                     table.add_column("Description", ratio=4)
@@ -830,7 +838,7 @@ class AresCLI:
             else:
                 import json
                 payload = json.loads(get_phone_status())
-                table = Table(title="Phone Bridge", border_style="bright_cyan", box=box.ASCII)
+                table = Table(title="Phone Bridge", border_style="bright_cyan", box=CLI_BOX)
                 table.add_column("Bridge", style="cyan", no_wrap=True)
                 table.add_column("Status")
                 table.add_column("Details", style="dim", ratio=4)
@@ -860,7 +868,7 @@ class AresCLI:
                     "details": "Full rendered tool result tables and panels.",
                     "hidden": "No tool activity unless an error reaches the answer.",
                 }
-                table = Table(title="Tool Output", border_style="cyan", box=box.ASCII)
+                table = Table(title="Tool Output", border_style="bright_cyan", box=CLI_BOX)
                 table.add_column("Mode", style="cyan", no_wrap=True)
                 table.add_column("Status", no_wrap=True)
                 table.add_column("Description", ratio=4)

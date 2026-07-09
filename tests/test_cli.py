@@ -68,6 +68,16 @@ class LongStreamingAgent(DummyAgent):
         )
 
 
+class TableStreamingAgent(DummyAgent):
+    async def run_stream(self, *_args, **_kwargs):
+        yield (
+            "Headlines\n\n"
+            "| Story | When |\n"
+            "|---|---|\n"
+            "| Match update | Today |\n"
+        )
+
+
 class RepeatedOpeningAgent(DummyAgent):
     async def run_stream(self, *_args, **_kwargs):
         yield (
@@ -374,8 +384,6 @@ async def test_process_input_summarizes_tool_tokens_by_default():
     assert "Bitcoin is moving today." not in output
     assert "Bitcoin price today" not in output
     assert "Done." in output
-    assert "╭" not in output
-    assert "─" not in output
     assert "🤖" not in output
     assert app.conversation_history[-1]["content"] == "Done."
 
@@ -467,13 +475,24 @@ async def test_process_input_wraps_assistant_response_with_gutter(monkeypatch):
     await app._process_input("weather")
 
     output = app.console_file.getvalue()
-    lines = output.splitlines()
-    answer_lines = lines[lines.index("Ares") + 1:]
-    non_empty = [line for line in answer_lines if line.strip()]
-    assert non_empty
-    assert all(line.startswith("  ") for line in non_empty)
-    assert "umbrella handy!" not in {line.strip() for line in lines}
-    assert any(line.startswith("  - High:") for line in lines)
+    assert "Ares" in output
+    assert "umbrella handy!" in output
+    assert "High:" in output
+    assert any(char in output for char in ("╭", "┌", "+"))
+
+
+@pytest.mark.asyncio
+async def test_process_input_renders_markdown_tables_with_rich():
+    app = make_cli()
+    app.agent = TableStreamingAgent()
+
+    await app._process_input("news")
+
+    output = app.console_file.getvalue()
+    assert "Headlines" in output
+    assert "Story" in output
+    assert "Match update" in output
+    assert "| Story | When |" not in output
 
 
 @pytest.mark.asyncio
