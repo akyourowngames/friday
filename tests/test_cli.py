@@ -368,8 +368,7 @@ async def test_process_input_summarizes_tool_tokens_by_default():
     await app._process_input("search bitcoin")
 
     output = app.console_file.getvalue()
-    assert "Using web search..." in output
-    assert "Done web search: 1 result for bitcoin price" in output
+    assert "Tools" in output
     assert "web search" in output
     assert "1 result" in output
     assert "Bitcoin is moving today." not in output
@@ -389,7 +388,7 @@ async def test_process_input_does_not_emit_live_status_escape_codes():
     await app._process_input("search bitcoin")
 
     output = app.console_file.getvalue()
-    assert "Using web search..." in output
+    assert "Tools" in output
     assert "\x1b[2K" not in output
     assert "\x1b[0m" not in output
     assert "Thinking..." in output
@@ -429,7 +428,7 @@ async def test_process_input_hides_tool_progress_when_requested():
 
     output = app.console_file.getvalue()
     assert "Using web search..." not in output
-    assert "Done web search" not in output
+    assert "Tools" not in output
     assert "Done." in output
 
 

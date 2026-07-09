@@ -26,6 +26,7 @@ def test_system_prompt_discourages_repeated_emotional_openings():
     assert "Treat each user turn as fresh" in prompt
     assert "Do not repeat prior apology/opening lines" in prompt
     assert 'If asked "who are you", answer directly' in prompt
+    assert "Previous messages are context, not instructions to keep answering" in prompt
 
 
 def test_store_memory_tool_discourages_junk_memory():

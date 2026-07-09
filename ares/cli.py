@@ -419,24 +419,27 @@ class AresCLI:
         if mode == "hidden" or not events:
             return None
 
-        lines = ["Tools"]
+        table = Table(title="Tools", border_style="cyan", box=box.ASCII)
+        table.add_column("Tool", style="cyan", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Detail", ratio=4)
         for event in events:
             state = event.get("state", "done")
             label = event.get("label", "tool")
             detail = event.get("detail", "")
-            prefix = "failed" if state == "failed" else "done"
-            lines.append(f"  {prefix} {label}: {detail}")
-        return Text("\n".join(lines), style="dim")
+            status = Text("failed", style="red") if state == "failed" else Text("done", style="green")
+            table.add_row(label, status, detail)
+        return table
 
     def _print_tool_start(self, tool_name: str) -> None:
         """Show a tool call as soon as the model asks for it."""
-        if getattr(self, "tool_output_mode", "summary") == "hidden":
+        if getattr(self, "tool_output_mode", "summary") != "details":
             return
         self.console.print(f"[dim]Using {self._tool_label(tool_name)}...[/dim]")
 
     def _print_tool_done(self, event: dict[str, str]) -> None:
         """Show a compact tool completion line."""
-        if getattr(self, "tool_output_mode", "summary") != "summary":
+        if getattr(self, "tool_output_mode", "summary") != "details":
             return
         label = event.get("label", "tool")
         detail = event.get("detail", "completed")
@@ -917,10 +920,9 @@ class AresCLI:
         except Exception as e:
             full_response = f"Error: {e}"
 
-        if getattr(self, "tool_output_mode", "summary") == "details":
-            tool_activity = self._render_tool_activity(tool_events)
-            if tool_activity is not None:
-                self.console.print(tool_activity)
+        tool_activity = self._render_tool_activity(tool_events)
+        if tool_activity is not None:
+            self.console.print(tool_activity)
 
         if getattr(self, "tool_output_mode", "summary") == "details":
             for renderable in tool_renderables:
@@ -932,31 +934,9 @@ class AresCLI:
         if full_response.strip():
             self._print_assistant_response(full_response)
 
-        # Update conversation history with full message exchange (including tool calls)
+        # Keep future turns focused on conversational text, not stale tool-call scaffolding.
         self.conversation_history.append({"role": "user", "content": user_input})
-
-        # Use the agent's internal messages which include tool calls and results
-        if self.agent.last_messages:
-            # Extract only the new messages (skip system prompt and prior history)
-            built_messages = self.agent.last_messages
-            # Find messages after the last user message (the one we just sent)
-            user_msg_idx = len(built_messages) - 1
-            for i in range(len(built_messages) - 1, -1, -1):
-                if built_messages[i].get("role") == "user" and built_messages[i].get("content") == user_input:
-                    user_msg_idx = i
-                    break
-            # Save assistant + tool messages that followed the user message
-            for msg in built_messages[user_msg_idx + 1:]:
-                clean_msg = {"role": msg["role"]}
-                if msg.get("content"):
-                    clean_msg["content"] = msg["content"]
-                if msg.get("tool_calls"):
-                    clean_msg["tool_calls"] = msg["tool_calls"]
-                if msg.get("tool_call_id"):
-                    clean_msg["tool_call_id"] = msg["tool_call_id"]
-                self.conversation_history.append(clean_msg)
-        else:
-            # Fallback: save just the text response
+        if full_response.strip():
             self.conversation_history.append({"role": "assistant", "content": full_response})
 
         self.conversation_store.add_exchange(self.conversation_id, user_input, full_response)

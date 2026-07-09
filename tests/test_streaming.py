@@ -130,3 +130,40 @@ async def test_agent_run_stream_detects_and_executes_tool_call(tmp_path, fake_em
     assert any(token.startswith("[tool:store_memory:Stored memory") for token in tokens)
     assert "".join(token for token in tokens if not token.startswith("[tool")) == "Stored!"
     assert mem_store.search("blue")
+
+
+@pytest.mark.asyncio
+async def test_agent_run_stream_suppresses_preamble_before_tool_call(tmp_path, fake_embedding_provider):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    agent = Agent(
+        memory_store=mem_store,
+        api_key="test-key",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
+    call_count = 0
+
+    async def fake_chat_stream(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield {"type": "content", "text": "Today's Thursday, July 9, 2026.\n"}
+            yield {"type": "tool_call", "index": 0, "id": "call_1", "name": "read_file"}
+            yield {"type": "tool_call_delta", "index": 0, "arguments": json.dumps({"path": "notes.txt"})}
+            yield {"type": "done"}
+        else:
+            yield {"type": "content", "text": "Here is notes.txt."}
+            yield {"type": "done"}
+
+    async def fake_execute_async(tool_name, arguments):
+        assert tool_name == "read_file"
+        return "[File: notes.txt (1 lines total)]\n     1\thello"
+
+    agent.llm.chat_stream = fake_chat_stream
+    agent.tool_executor.execute_async = fake_execute_async
+
+    tokens = [token async for token in agent.run_stream("read notes.txt", [])]
+    visible = "".join(token for token in tokens if not token.startswith("[tool"))
+
+    assert "Today's Thursday" not in visible
+    assert visible == "Here is notes.txt."
+    assert agent.last_messages[-1] == {"role": "assistant", "content": "Here is notes.txt."}

@@ -40,6 +40,9 @@ class TestAgent:
         messages = agent.build_messages("Hello", [])
         roles = [m["role"] for m in messages]
         assert "user" in roles
+        assert messages[-2]["role"] == "system"
+        assert "Current Turn Guard" in messages[-2]["content"]
+        assert messages[-1] == {"role": "user", "content": "Hello"}
 
     def test_build_messages_includes_context(self, agent):
         """Messages include context when provided."""

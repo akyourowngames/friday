@@ -106,8 +106,17 @@ class Agent:
         if context:
             system_content += f"\n\n## Current Context\n{context}"
 
+        turn_guard = (
+            "## Current Turn Guard\n"
+            "The previous conversation is context only. Answer the next user message as the current task. "
+            "Do not continue, repeat, or summarize an earlier user request unless the next user message "
+            "explicitly asks to continue it. If tool results are used, base the final answer on the current "
+            "user request plus those tool results."
+        )
+
         messages = [{"role": "system", "content": system_content}]
         messages.extend(conversation_history)
+        messages.append({"role": "system", "content": turn_guard})
         messages.append({"role": "user", "content": user_input})
         return messages
 
@@ -295,6 +304,8 @@ class Agent:
 
             # No tool calls — LLM produced final text response
             content = response.get("content", "")
+            messages.append({"role": "assistant", "content": content})
+            self.last_messages = messages
             if content:
                 yield content
             return
@@ -308,7 +319,6 @@ class Agent:
         messages = self.build_messages(user_input, conversation_history, context)
 
         max_iterations = self.config.agent_max_iterations
-        total_yielded = ""  # Accumulate all yielded text across iterations
         for iteration in range(max_iterations):
             tool_calls: dict[int, dict] = {}
             content_parts: list[str] = []
@@ -321,27 +331,16 @@ class Agent:
                     text = chunk.get("text", "")
                     if text:
                         # Some proxies return accumulated text (full response)
-                        # instead of deltas. Detect and yield only the new part.
+                        # instead of deltas. Detect and keep only the new part.
                         so_far = "".join(content_parts)
                         if text.startswith(so_far) and len(text) > len(so_far):
-                            # True delta — accumulated text grew
-                            delta = text[len(so_far):]
-                            content_parts.append(delta)
-                            # Dedup: skip if the full response text is a prefix
-                            # of what we already yielded (model repeating itself
-                            # across tool-call iterations)
-                            if delta and not total_yielded.startswith(text):
-                                total_yielded += delta
-                                yield delta
+                            content_parts.append(text[len(so_far):])
                         elif so_far.startswith(text):
                             # Already accumulated this — skip (duplicate)
                             pass
                         else:
-                            # Fresh chunk or non-accumulated token
+                            # Fresh chunk or non-accumulated token.
                             content_parts.append(text)
-                            if text and not total_yielded.startswith(text):
-                                total_yielded += text
-                                yield text
 
                 elif chunk_type == "tool_call":
                     has_tool_calls = True
@@ -396,7 +395,11 @@ class Agent:
                 continue
 
             # Save messages for conversation history before returning
+            final_content = "".join(content_parts)
+            messages.append({"role": "assistant", "content": final_content})
             self.last_messages = messages
+            if final_content:
+                yield final_content
             return
 
         # If we exhaust all iterations, warn the user
