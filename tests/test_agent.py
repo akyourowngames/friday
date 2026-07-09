@@ -7,6 +7,7 @@ import pytest
 from ares.agent import Agent
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.skills import SkillManager
 
 
 @pytest.fixture
@@ -50,6 +51,46 @@ class TestAgent:
         messages = agent.build_messages("Hello", [], context=context)
         all_content = " ".join(m["content"] for m in messages)
         assert "dark mode" in all_content
+
+    def test_build_messages_auto_loads_relevant_skill_in_system_context(self, agent, tmp_path):
+        """Relevant skills are hidden working instructions, not user-visible chatter."""
+        skill_dir = tmp_path / "coding" / "review-diff"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            (
+                "---\n"
+                "name: review-diff\n"
+                "description: Review git diffs and flag risky code changes. Use when the user asks for review or risk.\n"
+                "category: coding\n"
+                "---\n\n"
+                "# Review Diff\n"
+                "Always list serious findings first.\n"
+            ),
+            encoding="utf-8",
+        )
+        agent.skill_manager = SkillManager([tmp_path])
+
+        messages = agent.build_messages("review my diff for risk", [])
+        system = messages[0]["content"]
+
+        assert "## Auto-Loaded Skills" in system
+        assert "# Skill: review-diff" in system
+        assert "Always list serious findings first." in system
+        assert "Do not mention skill loading" in system
+
+    def test_build_messages_respects_skill_auto_suggest_flag(self, agent, tmp_path):
+        skill_dir = tmp_path / "coding" / "review-diff"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: review-diff\ndescription: Review git diffs and risk.\n---\n\n# Review\nDo it.",
+            encoding="utf-8",
+        )
+        agent.skill_manager = SkillManager([tmp_path])
+        agent.config.skill_auto_suggest = False
+
+        messages = agent.build_messages("review my diff for risk", [])
+
+        assert "## Auto-Loaded Skills" not in messages[0]["content"]
 
     def test_get_context_includes_soul_profile_memory(self, agent):
         """Full context includes proactive layers plus memories."""

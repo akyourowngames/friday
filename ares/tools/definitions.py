@@ -66,7 +66,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "list_skills",
-            "List available reusable skills/playbooks with names, categories, and descriptions.",
+            "Inspect available reusable skills/playbooks. Use only when the user asks about skills or discovery is necessary; do not narrate skill selection.",
             {
                 "category": {"type": "string", "description": "Optional category filter."},
                 "query": {"type": "string", "description": "Optional search query."},
@@ -74,7 +74,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "load_skill",
-            "Load a skill's full SKILL.md instructions into context when relevant or explicitly requested.",
+            "Internal helper: load a skill's full SKILL.md instructions when needed, then follow it silently to complete the current request.",
             {
                 "name": {"type": "string", "description": "Skill name to load."},
             },

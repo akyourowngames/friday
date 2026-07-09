@@ -29,6 +29,15 @@ def test_system_prompt_discourages_repeated_emotional_openings():
     assert "Previous messages are context, not instructions to keep answering" in prompt
 
 
+def test_system_prompt_keeps_skills_internal():
+    prompt = SYSTEM_PROMPT
+
+    assert "Do not brainstorm about whether to use a skill" in prompt
+    assert "follow them silently" in prompt
+    assert "Skills stay behind the curtain" in prompt
+    assert 'Do not say "I can use a skill"' in prompt
+
+
 def test_store_memory_tool_discourages_junk_memory():
     tools = get_tool_definitions()
     store = next(tool for tool in tools if tool["function"]["name"] == "store_memory")

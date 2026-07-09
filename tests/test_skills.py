@@ -76,10 +76,62 @@ def test_skill_manager_discovery_search_crud_and_file_safety(tmp_path):
     assert manager.get_skill("my-skill") is None
 
 
+def test_relevant_skills_auto_context_and_invocation_policy(tmp_path):
+    manager = SkillManager([tmp_path])
+    manager.create_skill(
+        "Review Diff",
+        (
+            "---\n"
+            "description: Review git diffs and flag risky code changes. Use when the user asks for review, risk, or changed files.\n"
+            "category: coding\n"
+            "---\n\n"
+            "# Review Diff\n"
+            "Inspect the diff, list serious issues first, and verify tests.\n"
+        ),
+        category="coding",
+    )
+    manager.create_skill(
+        "Deploy",
+        (
+            "---\n"
+            "description: Deploy the application to production.\n"
+            "disable-model-invocation: true\n"
+            "---\n\n"
+            "# Deploy\n"
+            "Run release steps.\n"
+        ),
+        category="ops",
+    )
+
+    relevant = manager.relevant_skills("please review this diff for risk", limit=1)
+    assert [skill.name for skill in relevant] == ["review-diff"]
+
+    context = manager.auto_context("please review this diff for risk", limit=1)
+    assert "## Auto-Loaded Skills" in context
+    assert "# Skill: review-diff" in context
+    assert "Inspect the diff" in context
+    assert "deploy" not in context.lower()
+
+
+def test_project_agent_skills_are_discovered_from_cwd(tmp_path, monkeypatch):
+    skill_dir = tmp_path / ".agents" / "skills" / "repo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: repo-skill\ndescription: Repo-local workflow for tests.\n---\n\n# Repo Skill\nDo repo work.",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    manager = SkillManager([])
+
+    assert manager.get_skill("repo-skill") is not None
+
+
 def test_builtin_skills_and_tool_definitions_are_available(tmp_path):
     manager = SkillManager([tmp_path])
     names = {skill.name for skill in manager.list_all()}
     assert {"code-review", "web-research", "daily-planner"}.issubset(names)
+    assert "auto-load relevant skills silently" in manager.compact_index()
 
     tool_names = {tool["function"]["name"] for tool in get_tool_definitions()}
     assert {"list_skills", "load_skill", "create_skill"}.issubset(tool_names)

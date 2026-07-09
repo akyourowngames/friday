@@ -103,6 +103,10 @@ class Agent:
         skill_manager = getattr(self, "skill_manager", None)
         if getattr(self.config, "skills_enabled", True) and skill_manager is not None:
             system_content += f"\n\n{skill_manager.compact_index()}"
+            if getattr(self.config, "skill_auto_suggest", True):
+                skill_context = skill_manager.auto_context(user_input)
+                if skill_context:
+                    system_content += f"\n\n{skill_context}"
         if context:
             system_content += f"\n\n## Current Context\n{context}"
 
