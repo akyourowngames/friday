@@ -21,6 +21,8 @@ export function useWebSocket() {
   const setConnected = useSettingsStore((state) => state.setConnected);
   const setServerUrl = useSettingsStore((state) => state.setServerUrl);
   const setStatus = useSettingsStore((state) => state.setStatus);
+  const setMemories = useSettingsStore((state) => state.setMemories);
+  const setContextContent = useSettingsStore((state) => state.setContextContent);
   const setModelState = useSettingsStore((state) => state.setModel);
   const setLastError = useSettingsStore((state) => state.setLastError);
 
@@ -43,9 +45,13 @@ export function useWebSocket() {
     const offToolResult = aresSocket.on("tool_result", ({ tool, content }) =>
       addToolResult(tool, content)
     );
-    const offDone = aresSocket.on("response_done", ({ content, tool_calls }) =>
-      finishAssistant(content, tool_calls || [])
-    );
+    const offDone = aresSocket.on("response_done", ({ content, tool_calls, session_id }) => {
+      finishAssistant(content, tool_calls || []);
+      if (session_id) {
+        setActiveSessionId(session_id);
+      }
+      aresSocket.refreshState();
+    });
     const offServerError = aresSocket.on("error", ({ message }) => {
       setLastError(message);
       addError(message);
@@ -60,9 +66,13 @@ export function useWebSocket() {
     const offHistory = aresSocket.on("session_history", ({ session_id, messages }) => {
       setActiveSessionId(session_id);
       loadHistory(messages);
+      aresSocket.send({ type: "get_status" });
+      aresSocket.send({ type: "get_context", query: "" });
     });
     const offStatus = aresSocket.on("status", (payload) => setStatus(payload));
     const offModel = aresSocket.on("model_updated", ({ model }) => setModelState(model));
+    const offMemories = aresSocket.on("memories", ({ memories }) => setMemories(memories));
+    const offContext = aresSocket.on("context", ({ content }) => setContextContent(content));
 
     async function connect() {
       const serverUrl = window.aresDesktop
@@ -90,6 +100,8 @@ export function useWebSocket() {
       offHistory();
       offStatus();
       offModel();
+      offMemories();
+      offContext();
     };
   }, [
     addError,
@@ -100,7 +112,9 @@ export function useWebSocket() {
     loadHistory,
     setActiveSessionId,
     setConnected,
+    setContextContent,
     setLastError,
+    setMemories,
     setModelState,
     setServerUrl,
     setSessions,
@@ -132,6 +146,8 @@ export function useWebSocket() {
     clearChat();
     setActiveSessionId(null);
     aresSocket.send({ type: "new_session" });
+    aresSocket.send({ type: "get_status" });
+    aresSocket.send({ type: "get_context", query: "" });
   }, [clearChat, setActiveSessionId]);
 
   const loadSession = useCallback((sessionId) => {
@@ -139,12 +155,13 @@ export function useWebSocket() {
   }, []);
 
   const setModel = useCallback((model) => {
-    aresSocket.send({ type: "set_model", model });
+    if (aresSocket.send({ type: "set_model", model })) {
+      aresSocket.send({ type: "get_status" });
+    }
   }, []);
 
   const refreshSidebar = useCallback(() => {
-    aresSocket.send({ type: "list_sessions" });
-    aresSocket.send({ type: "get_status" });
+    aresSocket.refreshState();
   }, []);
 
   const renameSession = useCallback((sessionId, title) => {
@@ -152,8 +169,14 @@ export function useWebSocket() {
   }, []);
 
   const deleteSession = useCallback((sessionId) => {
+    if (sessionId === activeSessionId) {
+      clearChat();
+      setActiveSessionId(null);
+    }
     aresSocket.send({ type: "delete_session", session_id: sessionId });
-  }, []);
+    aresSocket.send({ type: "get_status" });
+    aresSocket.send({ type: "get_context", query: "" });
+  }, [activeSessionId, clearChat, setActiveSessionId]);
 
   const reconnect = useCallback(async () => {
     const serverUrl = window.aresDesktop

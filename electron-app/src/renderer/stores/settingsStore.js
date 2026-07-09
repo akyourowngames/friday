@@ -118,6 +118,8 @@ export const useSettingsStore = create((set) => ({
   serverUrl: "",
   model: "deepseek-v4-flash-free",
   memoryCount: 0,
+  memories: [],
+  contextContent: "",
   settingsOpen: false,
   sidebarCollapsed: false,
   lastError: "",
@@ -147,6 +149,15 @@ export const useSettingsStore = create((set) => ({
         breakdown: status.context_usage?.breakdown || {},
       },
     });
+  },
+
+  setMemories(memories) {
+    const safeMemories = Array.isArray(memories) ? memories : [];
+    set({ memories: safeMemories });
+  },
+
+  setContextContent(contextContent) {
+    set({ contextContent: contextContent || "" });
   },
 
   setModel(model) {

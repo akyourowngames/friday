@@ -8,6 +8,7 @@ It is built as a local-first assistant: it remembers useful facts, understands t
 |---|---|
 | Package | `ares` |
 | Python | `>=3.11` |
+| Desktop Node | `>=22.12.0` |
 | Primary UI | Rich terminal CLI |
 | Desktop UI | Electron + React |
 | Test suite | `pytest` |

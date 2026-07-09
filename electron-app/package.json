@@ -4,6 +4,9 @@
   "description": "Ares desktop client",
   "main": "src/main/index.js",
   "private": true,
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "concurrently -k \"npm:dev:vite\" \"npm:dev:electron\"",
     "dev:vite": "vite --host 127.0.0.1",
@@ -27,7 +30,7 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
-    "electron": "^35.7.5",
+    "electron": "^43.1.0",
     "electron-builder": "^26.0.12",
     "vite": "^6.0.3",
     "wait-on": "^8.0.1"

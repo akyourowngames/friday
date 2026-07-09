@@ -115,6 +115,12 @@ class TestMemoryStore:
         assert len(recent) == 1
         assert recent[0]["fact_text"] == "Recent fact"
 
+    def test_count(self, store):
+        """count returns the total number of stored facts."""
+        store.store("Fact one")
+        store.store("Fact two")
+        assert store.count() == 2
+
     def test_search_empty_db(self, store):
         """Searching an empty database returns empty list."""
         results = store.search("anything")

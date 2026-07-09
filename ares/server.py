@@ -398,7 +398,7 @@ class AresServer:
         return {
             "type": "status",
             "model": self.config.model,
-            "memory_count": len(self._memories()),
+            "memory_count": self._memory_count(),
             "session_id": self.conversation_id,
             "context_usage": context_usage,
         }
@@ -467,6 +467,19 @@ class AresServer:
         with suppress(TypeError):
             return [_as_jsonable(item) for item in self.memory_store.get_recent(limit=100)]
         return [_as_jsonable(item) for item in self.memory_store.get_recent()]
+
+    def _memory_count(self) -> int:
+        count = getattr(self.memory_store, "count", None)
+        if callable(count):
+            with suppress(Exception):
+                return int(count())
+        conn = getattr(self.memory_store, "conn", None)
+        if conn is not None:
+            with suppress(Exception):
+                row = conn.execute("SELECT COUNT(*) FROM facts_meta").fetchone()
+                if row is not None:
+                    return int(row[0])
+        return len(self._memories())
 
     def _tool_args(self, tool_name: str, payload: Any) -> dict[str, Any]:
         if isinstance(payload, dict):

@@ -28,8 +28,7 @@ export class AresWebSocket {
 
     this.ws.addEventListener("open", () => {
       this.emit("open", { serverUrl });
-      this.send({ type: "list_sessions" });
-      this.send({ type: "get_status" });
+      this.refreshState();
     });
 
     this.ws.addEventListener("message", (event) => {
@@ -73,6 +72,13 @@ export class AresWebSocket {
     }
     this.ws.send(JSON.stringify(payload));
     return true;
+  }
+
+  refreshState() {
+    this.send({ type: "list_sessions" });
+    this.send({ type: "get_status" });
+    this.send({ type: "get_memories" });
+    this.send({ type: "get_context", query: "" });
   }
 }
 

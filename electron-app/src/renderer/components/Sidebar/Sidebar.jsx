@@ -1,5 +1,7 @@
 import {
-  Bot,
+  Brain,
+  Cpu,
+  Gauge,
   Plus,
   RefreshCw,
   Search,
@@ -15,6 +17,8 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSessio
   const search = useSessionStore((state) => state.search);
   const setSearch = useSessionStore((state) => state.setSearch);
   const memoryCount = useSettingsStore((state) => state.memoryCount);
+  const model = useSettingsStore((state) => state.model);
+  const contextUsage = useSettingsStore((state) => state.contextUsage);
   const isStreaming = useChatStore((state) => state.isStreaming);
   const collapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const toggleSidebar = useSettingsStore((state) => state.toggleSidebar);
@@ -76,9 +80,17 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSessio
             <div className="section-title">
               <span>System</span>
             </div>
-            <div className="task-pill">
-              <Bot size={14} />
+            <div className="system-pill" title={model}>
+              <Cpu size={14} />
+              <span>{model}</span>
+            </div>
+            <div className="system-pill">
+              <Brain size={14} />
               <span>{memoryCount} memories</span>
+            </div>
+            <div className="system-pill">
+              <Gauge size={14} />
+              <span>{contextUsage.percent || 0}% context</span>
             </div>
           </section>
         </>

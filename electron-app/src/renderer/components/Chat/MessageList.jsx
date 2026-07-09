@@ -1,13 +1,14 @@
 import { useEffect, useRef } from "react";
+import { Brain, FolderOpen, Search, TerminalSquare } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore.js";
 import { AresLogo } from "../common/AresLogo.jsx";
 import { Message } from "./Message.jsx";
 
 const HINTS = [
-  { icon: "🔍", label: "Search the web" },
-  { icon: "📁", label: "Read a file" },
-  { icon: "🧠", label: "Use memory" },
-  { icon: "💻", label: "Run code" },
+  { icon: Search, label: "Search web", prompt: "Search the web for current AI developer news" },
+  { icon: FolderOpen, label: "Inspect files", prompt: "Inspect this project and summarize the important files" },
+  { icon: Brain, label: "Use memory", prompt: "Search memory for my current preferences" },
+  { icon: TerminalSquare, label: "Run code", prompt: "Run a quick Python sanity check" },
 ];
 
 export function MessageList({ onSend }) {
@@ -24,21 +25,24 @@ export function MessageList({ onSend }) {
         <AresLogo size={72} className="god-logo" />
         <h1 className="god-title">ARES AGENT</h1>
         <p className="god-subtitle">
-          Describe the task in your own words. I'll pick the right tools,
-          explain my plan, and check in before risky steps.
+          Ask in your own words. Ares will pick the right tools, use local
+          context, and check in before risky steps.
         </p>
         <div className="empty-state-hints">
-          {HINTS.map((hint) => (
-            <button
-              className="hint-chip"
-              type="button"
-              key={hint.label}
-              onClick={() => onSend && onSend(hint.label)}
-            >
-              <span>{hint.icon}</span>
-              {hint.label}
-            </button>
-          ))}
+          {HINTS.map((hint) => {
+            const Icon = hint.icon;
+            return (
+              <button
+                className="hint-chip"
+                type="button"
+                key={hint.label}
+                onClick={() => onSend && onSend(hint.prompt)}
+              >
+                <Icon size={14} />
+                {hint.label}
+              </button>
+            );
+          })}
         </div>
       </div>
     );

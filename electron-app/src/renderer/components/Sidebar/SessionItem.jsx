@@ -1,4 +1,4 @@
-import { MessageSquare, Pencil, Trash2, X, Check, MoreHorizontal, Pin, Copy, ExternalLink, Download, Archive } from "lucide-react";
+import { MessageSquare, Pencil, Trash2, X, Check, MoreHorizontal, Copy } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 
@@ -42,8 +42,8 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
     const rect = triggerEl.getBoundingClientRect();
     let top = rect.bottom + 4;
     let left = rect.left;
-    if (top + 320 > window.innerHeight) {
-      top = rect.top - 320;
+    if (top + 180 > window.innerHeight) {
+      top = rect.top - 180;
       if (top < 4) top = 4;
     }
     if (left + 180 > window.innerWidth) {
@@ -149,29 +149,13 @@ export function SessionItem({ session, active, streaming, onClick, onRename, onD
           ref={menuRef}
           style={{ position: "fixed", top: menuPos.top, left: menuPos.left, zIndex: 9999 }}
         >
-          <button type="button" onClick={closeMenu}>
-            <Pin size={13} />
-            <span>Pin</span>
-          </button>
           <button type="button" onClick={() => { navigator.clipboard.writeText(session.id.toString()); closeMenu(); }}>
             <Copy size={13} />
             <span>Copy ID</span>
           </button>
-          <button type="button" onClick={closeMenu}>
-            <ExternalLink size={13} />
-            <span>New window</span>
-          </button>
-          <button type="button" onClick={closeMenu}>
-            <Download size={13} />
-            <span>Export</span>
-          </button>
           <button type="button" onClick={startRename}>
             <Pencil size={13} />
             <span>Rename</span>
-          </button>
-          <button type="button" onClick={closeMenu}>
-            <Archive size={13} />
-            <span>Archive</span>
           </button>
           <div className="context-menu-divider" />
           <button type="button" className="danger" onClick={handleDelete}>

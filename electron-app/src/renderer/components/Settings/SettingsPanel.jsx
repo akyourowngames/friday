@@ -1,11 +1,21 @@
-import { X, RefreshCw, Server, Cpu, Database, CheckCircle2 } from "lucide-react";
+import { X, RefreshCw, Server, Cpu, Database, Gauge, Wifi, WifiOff } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore.js";
 import { ModelSelector } from "./ModelSelector.jsx";
+
+function memoryText(memory) {
+  if (!memory) {
+    return "";
+  }
+  return memory.fact_text || memory.content || memory.text || JSON.stringify(memory);
+}
 
 export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
   const model = useSettingsStore((s) => s.model);
   const memoryCount = useSettingsStore((s) => s.memoryCount);
+  const memories = useSettingsStore((s) => s.memories);
   const serverUrl = useSettingsStore((s) => s.serverUrl);
+  const connected = useSettingsStore((s) => s.connected);
+  const contextUsage = useSettingsStore((s) => s.contextUsage);
 
   return (
     <div className="settings-scrim" onClick={onClose}>
@@ -38,11 +48,15 @@ export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
                 readOnly
               />
             </div>
+            <div className={`settings-connection ${connected ? "online" : "offline"}`}>
+              {connected ? <Wifi size={13} /> : <WifiOff size={13} />}
+              <span>{connected ? "Connected to Ares server" : "Waiting for Ares server"}</span>
+            </div>
           </section>
 
           <section className="settings-section">
             <h3 className="settings-section-title">
-              <Database size={14} />
+              <Gauge size={14} />
               Status
             </h3>
             <div className="settings-stats">
@@ -54,6 +68,27 @@ export function SettingsPanel({ onClose, onSetModel, onRefresh }) {
                 <span className="settings-stat-label">Model</span>
                 <span className="settings-stat-value settings-stat-model">{model}</span>
               </div>
+              <div className="settings-stat">
+                <span className="settings-stat-label">Context</span>
+                <span className="settings-stat-value">{contextUsage.percent || 0}%</span>
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <h3 className="settings-section-title">
+              <Database size={14} />
+              Recent memories
+            </h3>
+            <div className="settings-memory-list">
+              {memories.slice(0, 5).map((memory, index) => (
+                <div className="settings-memory-row" key={memory.fact_id || memory.id || index}>
+                  <span>{memoryText(memory)}</span>
+                </div>
+              ))}
+              {!memories.length ? (
+                <div className="settings-empty">No memories stored yet</div>
+              ) : null}
             </div>
           </section>
 

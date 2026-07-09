@@ -91,6 +91,19 @@ class TestToolDefinitions:
             "get_current_datetime",
         }
 
+    def test_plain_task_tools_are_not_registered(self):
+        """The unfinished plain task-list feature is intentionally removed."""
+        tools = get_tool_definitions()
+        names = {t["function"]["name"] for t in tools}
+        assert not {
+            "create_task",
+            "list_tasks",
+            "search_tasks",
+            "complete_task",
+            "cancel_task",
+            "get_due_soon",
+        }.intersection(names)
+
     def test_tools_have_schemas(self):
         """Each tool has a valid OpenAI-compatible parameters schema."""
         tools = get_tool_definitions()

@@ -8,14 +8,16 @@ Ares is a terminal assistant wrapped around an OpenAI-compatible chat model endp
 
 - long-term memory over SQLite + vector search
 - proactive context from soul/profile/project files
-- task and reminder management
+- cron-based recurring job and reminder-style scheduling
 - conversation history and session summaries
 - current web search through Tavily or ddgs
 - read-only local file access
 - JSON export/import
 - Rich terminal rendering for tool results
 
-The model can answer normal questions without tools, but it should call tools whenever the answer depends on remembered user data, tasks, files, current events, or local state.
+The model can answer normal questions without tools, but it should call tools whenever the answer depends on remembered user data, files, current events, schedules, or local state.
+
+Note: the old plain task-list feature was removed. Use cron jobs for scheduled/repeating work and memory for durable notes.
 
 ## Tool Surface
 
@@ -25,17 +27,18 @@ The model can answer normal questions without tools, but it should call tools wh
 | `search_memory` | Retrieves stored memories with vector search. | "what do you remember about my coding preferences?" |
 | `update_memory` | Corrects a stored memory by ID. | "update memory 12 to say I use PowerShell" |
 | `delete_memory` | Deletes a stored memory by ID. | "forget memory 12" |
-| `create_task` | Creates tasks and reminders with natural dates. | "remind me to renew my domain next Friday at 9am" |
-| `list_tasks` | Shows pending tasks. | "what tasks do I have?" |
-| `search_tasks` | Finds tasks by text. | "find tasks about invoices" |
-| `complete_task` | Marks a task done. | "mark task 4 done" |
-| `cancel_task` | Cancels a task. | "cancel task 7" |
-| `get_due_soon` | Shows tasks due soon. | "what is due in the next 24 hours?" |
 | `export_data` | Exports local data and non-secret config to JSON. | "export my Ares data" |
 | `web_search` | Searches current web results and returns a summary plus sources. | "search Tavily for Python 3.14 news" |
 | `read_file` | Reads a local text file with line numbers. | "read README.md lines 1 to 80" |
 | `search_files` | Searches files by content or name. | "find files containing sqlite_vec" |
 | `list_directory` | Lists directory contents. | "list the docs directory" |
+| `create_cron_job` | Creates a persistent scheduled job. | "run this backup prompt every night at 10" |
+| `list_cron_jobs` | Shows configured cron jobs. | "show my scheduled jobs" |
+| `get_cron_job` | Shows one cron job's details. | "inspect the backup job" |
+| `update_cron_job` | Edits schedule, prompt, or enabled state. | "pause the backup job" |
+| `delete_cron_job` | Removes a cron job. | "delete the backup job" |
+| `run_cron_job_now` | Runs a scheduled job immediately. | "run the backup job now" |
+| `get_cron_logs` | Shows recent cron run history. | "show cron logs" |
 
 ## Proactive Context
 
@@ -46,7 +49,6 @@ Ares now loads layered context every turn:
 - project files in the current directory, such as `CLAUDE.md`, `AGENTS.md`, `pyproject.toml`, `package.json`, and `README.md`
 - recent session summaries
 - relevant memories
-- pending tasks
 
 The files are user-owned. Ares creates templates on first run but does not auto-edit them.
 
@@ -140,11 +142,10 @@ Stored locally in `~/.ares/data/ares.db`:
 - memories
 - memory categories, confidence, importance, timestamps, access counters
 - memory embeddings for vector search
-- task titles, descriptions, priorities, status, due dates
-- reminder times and sent-reminder state
 - conversation sessions
 - chat turns
 - compact conversation summaries
+- cron jobs, schedules, run logs, and enabled state
 
 Stored in `~/.ares/config.json`:
 
@@ -152,7 +153,6 @@ Stored in `~/.ares/config.json`:
 - API base URL
 - context limits
 - embedding backend settings
-- reminder settings
 - web search provider settings
 - Tavily API key, if configured there
 - proactive context settings and optional custom soul/profile paths
@@ -186,7 +186,7 @@ High value next upgrades:
 - Add search-result caching with expiry so repeated current-info questions are faster and cheaper.
 - Add CUDA/DirectML embedding provider detection for Windows machines with supported GPU runtimes.
 - Add richer file search using ripgrep JSON output when `rg` is installed.
-- Add a task/reminder dashboard command with overdue, today, upcoming, and completed sections.
+- Add a cron dashboard command with enabled, paused, next-run, last-run, and failure sections.
 - Add optional encrypted config secrets for API keys on disk.
 
 My take: Tavily + ONNX + Rich renderers is the right direction. The next biggest quality jump would be a `web_fetch` tool plus stricter source citations, because search snippets alone are often enough for simple facts but not enough for deeper answers.

@@ -501,6 +501,11 @@ class MemoryStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def count(self) -> int:
+        """Return the total number of stored memories."""
+        row = self.conn.execute("SELECT COUNT(*) FROM facts_meta").fetchone()
+        return int(row[0]) if row else 0
+
     def close(self):
         """Close the database connection."""
         self.conn.close()

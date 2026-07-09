@@ -1,5 +1,6 @@
-import { Circle, Database, RefreshCw, Zap } from "lucide-react";
+import { Circle, Database, Hash, RefreshCw, Zap } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore.js";
+import { useSessionStore } from "../../stores/sessionStore.js";
 import { ContextBar } from "./ContextBar.jsx";
 
 
@@ -8,6 +9,7 @@ export function StatusBar({ onRetry }) {
   const model = useSettingsStore((state) => state.model);
   const memoryCount = useSettingsStore((state) => state.memoryCount);
   const lastError = useSettingsStore((state) => state.lastError);
+  const activeSessionId = useSessionStore((state) => state.activeSessionId);
 
 
   return (
@@ -24,6 +26,12 @@ export function StatusBar({ onRetry }) {
         <Database size={13} />
         <span>{memoryCount} memories</span>
       </div>
+      {activeSessionId ? (
+        <div>
+          <Hash size={13} />
+          <span>session {activeSessionId}</span>
+        </div>
+      ) : null}
 
       {lastError ? (
         <button className="status-retry" type="button" onClick={onRetry}>

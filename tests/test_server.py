@@ -65,6 +65,11 @@ class FakeMemoryStore:
         pass
 
 
+class CountingMemoryStore(FakeMemoryStore):
+    def count(self):
+        return 123
+
+
 class FakeConversationStore:
     def __init__(self):
         self.exchanges = []
@@ -138,6 +143,17 @@ async def test_context_memory_and_model_messages(server):
     assert socket.messages[2] == {"type": "model_updated", "model": "mimo-v2.5-free"}
     assert socket.messages[3]["type"] == "status"
     assert socket.messages[3]["model"] == "mimo-v2.5-free"
+
+
+def test_status_uses_total_memory_count():
+    server = AresServer(
+        config=AppConfig(model="deepseek-v4-flash-free"),
+        agent=FakeAgent(),
+        memory_store=CountingMemoryStore(),
+        conversation_store=FakeConversationStore(),
+    )
+
+    assert server._status()["memory_count"] == 123
 
 
 @pytest.mark.asyncio

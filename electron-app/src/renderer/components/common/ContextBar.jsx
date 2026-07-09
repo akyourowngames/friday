@@ -29,7 +29,7 @@ export function ContextBar() {
   }, [contextUsage.percent]);
 
   const color =
-    contextUsage.percent > 90 ? "var(--error, #ef4444)" :
+    contextUsage.percent > 90 ? "var(--danger, #ef4444)" :
     contextUsage.percent > 70 ? "var(--warning, #eab308)" :
     "var(--success, #22c55e)";
 
