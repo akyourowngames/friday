@@ -14,6 +14,13 @@ It is built as a local-first assistant: it remembers useful facts, understands t
 | License | MIT |
 | Contributions | Pull requests welcome |
 
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/3d90559c-9e33-4b8a-b906-7701e62339a9" />
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/2f7a2f7c-d1e7-4637-ac9c-791330cafd96" />
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/bc000456-6e62-4bd6-992e-55407bd99fbc" />
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/9a863982-2bb8-4df2-891f-43eac560be99" />
+
+
+
 ## Highlights
 
 | Area | What Ares can do |
