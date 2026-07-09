@@ -141,6 +141,37 @@ class DummyConversationStore:
         self.exchanges.append((conversation_id, user_input, assistant_response))
 
 
+class DummySkill:
+    def __init__(self, name, category, description):
+        self.name = name
+        self.category = category
+        self.description = description
+        self.content = f"# {name}\n{description}"
+
+
+class DummySkillManager:
+    def __init__(self):
+        self.skills = [
+            DummySkill("code-review", "coding", "Review code safely"),
+            DummySkill("daily-planner", "productivity", "Plan the day"),
+        ]
+
+    def list_all(self):
+        return self.skills
+
+    def list_categories(self):
+        return {"coding": 1, "productivity": 1}
+
+    def search(self, query="", category=""):
+        return [
+            skill for skill in self.skills
+            if query.lower() in skill.name.lower() or query.lower() in skill.description.lower()
+        ]
+
+    def get_skill(self, name):
+        return next((skill for skill in self.skills if skill.name == name), None)
+
+
 def make_cli():
     from ares.session import SessionManager
     from ares.sessions import SessionStore
@@ -157,6 +188,7 @@ def make_cli():
     app.conversation_id = 1
     app.conversation_history = []
     app.icons = {"current": " < current"}
+    app.skill_manager = DummySkillManager()
     app.session_manager = SessionManager()
     app.session_store = SessionStore(data_dir=Path(app.config.data_dir).expanduser())
     return app
@@ -231,8 +263,45 @@ def test_memory_clean_command_prunes_policy_violations():
 
     output = app.console_file.getvalue()
     assert "Memory cleaned" in output
-    assert "policy=1" in output
+    assert "Policy pruned" in output
+    assert "1" in output
     assert 13 not in app.memory_store.memories
+
+
+def test_model_list_command_renders_table():
+    app = make_cli()
+
+    assert app._handle_command("/model list")
+
+    output = app.console_file.getvalue()
+    assert "Models" in output
+    assert app.config.model in output
+    assert "current" in output
+
+
+def test_skills_commands_render_tables():
+    app = make_cli()
+
+    assert app._handle_command("/skills")
+    assert app._handle_command("/skills categories")
+    assert app._handle_command("/skills search review")
+
+    output = app.console_file.getvalue()
+    assert "Skills" in output
+    assert "Skill Categories" in output
+    assert "Skill Search: review" in output
+    assert "code-review" in output
+
+
+def test_tools_command_renders_mode_table():
+    app = make_cli()
+
+    assert app._handle_command("/tools")
+
+    output = app.console_file.getvalue()
+    assert "Tool Output" in output
+    assert "summary" in output
+    assert "active" in output
 
 
 def test_export_command_calls_exporter(monkeypatch, tmp_path):

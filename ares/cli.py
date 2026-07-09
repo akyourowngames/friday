@@ -19,6 +19,7 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.styles import Style
 from prompt_toolkit.patch_stdout import patch_stdout
 
+from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
@@ -278,12 +279,12 @@ class AresCLI:
         if not memories:
             self.console.print("[dim]No memories found.[/dim]")
             return
-        table = Table(title=title, border_style="green")
-        table.add_column("ID", style="dim")
-        table.add_column("Category", style="cyan")
-        table.add_column("Importance")
-        table.add_column("Fact")
-        table.add_column("Updated", style="dim")
+        table = Table(title=title, border_style="green", box=box.ASCII)
+        table.add_column("ID", style="dim", no_wrap=True)
+        table.add_column("Category", style="cyan", no_wrap=True)
+        table.add_column("Importance", justify="right", no_wrap=True)
+        table.add_column("Fact", ratio=4)
+        table.add_column("Updated", style="dim", no_wrap=True)
         for memory in memories:
             table.add_row(
                 str(memory["fact_id"]),
@@ -295,11 +296,13 @@ class AresCLI:
         self.console.print(table)
 
     def _show_model_list(self) -> None:
-        self.console.print(f"[bold]Current model:[/bold] {self.config.model}")
-        self.console.print("[dim]Known free models:[/dim]")
+        table = Table(title="Models", border_style="cyan", box=box.ASCII)
+        table.add_column("Model", style="cyan")
+        table.add_column("Status", no_wrap=True)
         for model in FREE_MODELS:
-            marker = self.icons["current"] if model == self.config.model else ""
-            self.console.print(f"  - {model}{marker}")
+            status = "[green]current[/green]" if model == self.config.model else "available"
+            table.add_row(model, status)
+        self.console.print(table)
 
     def _tool_status(self, tool_name: str) -> tuple[str, str]:
         """Return status text and border style for a running tool."""
@@ -613,9 +616,9 @@ class AresCLI:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if command == "/help":
-            table = Table(title="Commands", border_style="cyan")
-            table.add_column("Command", style="cyan")
-            table.add_column("Description")
+            table = Table(title="Commands", border_style="cyan", box=box.ASCII)
+            table.add_column("Command", style="cyan", no_wrap=True)
+            table.add_column("Description", ratio=4)
             table.add_row("/help", "Show available commands")
             table.add_row("/memory [search|edit|delete|clean]", "Review, manage, and clean memories")
             table.add_row("/forget ID", "Delete a memory by ID")
@@ -642,13 +645,15 @@ class AresCLI:
                 self._print_memories(self.memory_store.search(arg[7:].strip(), limit=10), "Memory Search")
             elif arg == "clean":
                 stats = MemoryCleaner(self.memory_store).cleanup()
-                self.console.print(
-                    "[green]Memory cleaned.[/green] "
-                    f"[dim]policy={stats.get('policy_pruned', 0)}, "
-                    f"duplicates={stats.get('duplicates_merged', 0)}, "
-                    f"stale={stats.get('stale_pruned', 0)}, "
-                    f"remaining={stats.get('total_after', 0)}[/dim]"
-                )
+                table = Table(title="Memory Cleanup", border_style="green", box=box.ASCII)
+                table.add_column("Metric", style="cyan")
+                table.add_column("Count", justify="right")
+                table.add_row("Policy pruned", str(stats.get("policy_pruned", 0)))
+                table.add_row("Duplicates merged", str(stats.get("duplicates_merged", 0)))
+                table.add_row("Stale pruned", str(stats.get("stale_pruned", 0)))
+                table.add_row("Remaining", str(stats.get("total_after", 0)))
+                self.console.print("[green]Memory cleaned.[/green]")
+                self.console.print(table)
             elif arg.startswith("edit "):
                 edit_parts = arg.split(maxsplit=2)
                 if len(edit_parts) < 3:
@@ -776,25 +781,34 @@ class AresCLI:
         elif command == "/skills":
             if not arg:
                 skills = self.skill_manager.list_all()
-                table = Table(title="Skills", border_style="magenta")
-                table.add_column("Name", style="cyan")
-                table.add_column("Category")
-                table.add_column("Description")
+                table = Table(title="Skills", border_style="magenta", box=box.ASCII)
+                table.add_column("Name", style="cyan", no_wrap=True)
+                table.add_column("Category", no_wrap=True)
+                table.add_column("Description", ratio=4)
                 for skill in skills:
                     table.add_row(skill.name, skill.category, skill.description)
                 self.console.print(table if skills else "[dim]No skills installed.[/dim]")
             elif arg == "categories":
                 cats = self.skill_manager.list_categories()
+                table = Table(title="Skill Categories", border_style="magenta", box=box.ASCII)
+                table.add_column("Category", style="cyan")
+                table.add_column("Skills", justify="right")
                 for category, count in cats.items():
-                    self.console.print(f"[cyan]{category}[/cyan]: {count}")
+                    table.add_row(category, str(count))
+                self.console.print(table if cats else "[dim]No skill categories found.[/dim]")
             elif arg.startswith("search "):
                 query = arg.split(maxsplit=1)[1]
                 skills = self.skill_manager.search(query=query)
                 if not skills:
                     self.console.print("[dim]No matching skills found.[/dim]")
                 else:
+                    table = Table(title=f"Skill Search: {query}", border_style="magenta", box=box.ASCII)
+                    table.add_column("Name", style="cyan", no_wrap=True)
+                    table.add_column("Category", no_wrap=True)
+                    table.add_column("Description", ratio=4)
                     for skill in skills:
-                        self.console.print(f"[cyan]{skill.name}[/cyan] [{skill.category}] - {skill.description}")
+                        table.add_row(skill.name, skill.category, skill.description)
+                    self.console.print(table)
             elif arg.startswith("load "):
                 name = arg.split(maxsplit=1)[1]
                 skill = self.skill_manager.get_skill(name)
@@ -813,10 +827,10 @@ class AresCLI:
             else:
                 import json
                 payload = json.loads(get_phone_status())
-                table = Table(title="Phone Bridge", border_style="bright_cyan")
-                table.add_column("Bridge", style="cyan")
+                table = Table(title="Phone Bridge", border_style="bright_cyan", box=box.ASCII)
+                table.add_column("Bridge", style="cyan", no_wrap=True)
                 table.add_column("Status")
-                table.add_column("Details", style="dim")
+                table.add_column("Details", style="dim", ratio=4)
                 kde = payload.get("kdeconnect", {})
                 adb = payload.get("adb", {})
                 table.add_row(
@@ -838,8 +852,19 @@ class AresCLI:
         elif command == "/tools":
             if not arg:
                 mode = getattr(self, "tool_output_mode", "summary")
-                self.console.print(f"[cyan]Tool output:[/cyan] {mode}")
-                self.console.print("[dim]Use /tools summary, /tools details, or /tools hidden.[/dim]")
+                descriptions = {
+                    "summary": "Compact activity trail after each answer.",
+                    "details": "Full rendered tool result tables and panels.",
+                    "hidden": "No tool activity unless an error reaches the answer.",
+                }
+                table = Table(title="Tool Output", border_style="cyan", box=box.ASCII)
+                table.add_column("Mode", style="cyan", no_wrap=True)
+                table.add_column("Status", no_wrap=True)
+                table.add_column("Description", ratio=4)
+                for name, description in descriptions.items():
+                    status = "[green]active[/green]" if name == mode else "available"
+                    table.add_row(name, status, description)
+                self.console.print(table)
             elif arg in TOOL_OUTPUT_MODES:
                 self.tool_output_mode = arg
                 descriptions = {
