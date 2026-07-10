@@ -275,7 +275,7 @@ class TelegramChannel:
             return
 
         try:
-            print("Ares Telegram: connecting…")
+            print("Ares Telegram: connecting...")
             await self.api.delete_webhook()
             me = await self.api.get_me()
             logger.info("Telegram channel connected as @%s", me.get("username", "ares-bot"))
