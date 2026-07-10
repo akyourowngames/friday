@@ -128,6 +128,8 @@ export const useSettingsStore = create((set) => ({
   personalSettingsError: "",
   settingsOpen: false,
   sidebarCollapsed: false,
+  onboardingLoaded: false,
+  onboardingCompleted: false,
   lastError: "",
   contextUsage: { used: 0, total: 128000, percent: 0 },
 
@@ -202,6 +204,15 @@ export const useSettingsStore = create((set) => ({
 
   setSettingsOpen(settingsOpen) {
     set({ settingsOpen });
+  },
+
+  setOnboardingState(state) {
+    const payload = state?.state || state || {};
+    set({
+      onboardingLoaded: true,
+      onboardingCompleted: Boolean(payload.completed),
+      ...(payload.model ? { model: payload.model } : {}),
+    });
   },
 
   toggleSidebar() {

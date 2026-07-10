@@ -2,12 +2,21 @@
 
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from ares.config import AppConfig
 from ares.onboarding import OnboardingWizard, _detect_os
 from ares.profile import ProfileManager
 from ares.soul import SoulManager
+
+
+@pytest.fixture(autouse=True)
+def isolate_config_path(tmp_path, monkeypatch):
+    """Keep onboarding saves from touching a developer's real desktop config."""
+    from ares import config as config_module
+
+    monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.json")
 
 
 class TestOnboardingWizard:
@@ -79,6 +88,7 @@ class TestOnboardingWizard:
         wizard._save(data)
         sink.close()
         assert wizard.config.model == "mimo-v2.5-free"
+        assert wizard.config.onboarding_completed is True
         assert "Be direct and test everything." in (tmp_path / "soul.md").read_text(
             encoding="utf-8"
         )

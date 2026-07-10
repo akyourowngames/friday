@@ -14,18 +14,54 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
 import webbrowser
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_MCP_QUERY_KEYS = {
+    "access_token", "api_key", "apikey", "auth", "id_token", "key",
+    "password", "refresh_token", "secret", "token",
+}
+_SENSITIVE_MCP_TEXT_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([^\s,;]+)"),
+    re.compile(r"(?i)(\b(?:api[_-]?key|token|secret|password)\b\s*[=:]\s*)([^\s,;&]+)"),
+    re.compile(r"(?i)(--(?:api[-_]?key|token|secret|password)\s+)([^\s,;&]+)"),
+)
+
+
+def redact_mcp_text(value: object) -> str:
+    """Redact credentials before MCP diagnostics reach a user-facing surface."""
+    text = str(value or "")
+    for pattern in _SENSITIVE_MCP_TEXT_PATTERNS:
+        text = pattern.sub(r"\1[redacted]", text)
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme and parsed.netloc:
+            host = parsed.hostname or ""
+            if parsed.port:
+                host = f"{host}:{parsed.port}"
+            if "@" in parsed.netloc:
+                host = f"[redacted]@{host}"
+            query = urlencode(
+                [
+                    (key, "[redacted]" if key.lower() in _SENSITIVE_MCP_QUERY_KEYS else item)
+                    for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+                ]
+            )
+            text = urlunsplit((parsed.scheme, host or parsed.netloc, parsed.path, query, parsed.fragment))
+    except (TypeError, ValueError):
+        pass
+    return text
 
 
 def _uncancel_task() -> None:
@@ -416,7 +452,8 @@ class MCPClientManager:
     def readiness_report(self) -> dict[str, Any]:
         """Return a per-server readiness report for diagnostics and startup UI."""
         servers: dict[str, Any] = {}
-        for name, config in self.servers.items():
+        for name in sorted(self.servers):
+            config = self.servers[name]
             cached = self.schema_cache.get(name, [])
             connected = name in self.sessions
             servers[name] = {
@@ -424,20 +461,52 @@ class MCPClientManager:
                 "ready": connected,
                 "status": "ready" if connected else "disconnected",
                 "transport": config.transport,
-                "endpoint": config.endpoint,
+                "endpoint": redact_mcp_text(config.endpoint),
                 "command": config.command,
                 "timeout_seconds": config.timeout_seconds,
                 "tools": len(cached),
                 "schema_cached": bool(cached),
-                "error": self.server_errors.get(name, ""),
+                "error": redact_mcp_text(self.server_errors.get(name, "")),
             }
+        errors = {
+            name: details["error"]
+            for name, details in servers.items()
+            if details["error"]
+        }
         return {
             "ready": any(item["ready"] for item in servers.values()),
             "configured": len(self.servers),
             "connected": sum(1 for item in servers.values() if item["ready"]),
             "tools": sum(item["tools"] for item in servers.values()),
             "servers": servers,
+            "errors": errors,
         }
+
+    def tools_by_server(self, server_name: str | None = None) -> dict[str, list[dict[str, str]]]:
+        """Return discovered MCP tools grouped into a stable CLI-friendly shape."""
+        names = [server_name] if server_name else sorted(self.servers)
+        groups: dict[str, list[dict[str, str]]] = {}
+        for name in names:
+            if name not in self.servers:
+                continue
+            tools: list[dict[str, str]] = []
+            for schema in self.schema_cache.get(name, []):
+                function = schema.get("function", {})
+                full_name = str(function.get("name") or "")
+                prefix = f"mcp__{name}__"
+                if not full_name.startswith(prefix):
+                    continue
+                description = str(function.get("description") or "")
+                description = description.removeprefix(f"[MCP:{name}]").strip()
+                tools.append(
+                    {
+                        "name": full_name.removeprefix(prefix),
+                        "full_name": full_name,
+                        "description": description,
+                    }
+                )
+            groups[name] = sorted(tools, key=lambda tool: tool["name"])
+        return groups
 
     async def health_probe(self) -> dict[str, Any]:
         """Probe connected sessions and refresh schema cache when possible."""

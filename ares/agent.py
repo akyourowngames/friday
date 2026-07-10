@@ -176,6 +176,38 @@ class Agent:
         self.llm.model = model
         self.llm.config.model = model
 
+    def set_mcp_manager(self, mcp_manager: Any | None) -> None:
+        """Replace MCP connections after a shared config update."""
+        self.mcp_manager = mcp_manager
+        self.tool_executor.mcp_manager = mcp_manager
+        self.refresh_tools()
+
+    def apply_config(self, config: AppConfig) -> None:
+        """Apply config reloaded by another Ares surface without a restart."""
+        self.config = config
+        self.llm.config = config
+        self.tool_executor.config = config
+        self.set_model(config.model)
+
+        data_dir = Path(config.data_dir).expanduser()
+        profile_path = Path(config.profile_path).expanduser() if config.profile_path else data_dir / "profile.md"
+        soul_path = Path(config.soul_path).expanduser() if config.soul_path else data_dir / "soul.md"
+        if self.profile_manager.profile_path != profile_path:
+            self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=config.profile_path)
+            self.profile_manager.ensure_exists()
+        if self.soul_manager.soul_path != soul_path:
+            self.soul_manager = SoulManager(data_dir=data_dir, soul_path=config.soul_path)
+            self.soul_manager.ensure_exists()
+        self.project_context.enabled = config.project_context_enabled
+        self.project_context.max_files = max(0, int(config.project_context_max_files))
+
+        skill_dirs = list(config.skill_dirs or [])
+        configured_skill_dirs = [Path(path).expanduser() for path in skill_dirs]
+        current_skill_dirs = getattr(self.skill_manager, "skill_dirs", [])
+        if configured_skill_dirs and current_skill_dirs[: len(configured_skill_dirs)] != configured_skill_dirs:
+            self.skill_manager = SkillManager(skill_dirs=configured_skill_dirs)
+            self.tool_executor.skill_manager = self.skill_manager
+
     @staticmethod
     def _tool_call_args(call: dict) -> dict:
         """Parse tool call arguments into a dict."""

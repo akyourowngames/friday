@@ -2,6 +2,7 @@ import React, { useEffect } from "react";
 import { MessageSquare, Settings } from "lucide-react";
 import { ChatArea } from "./components/Chat/ChatArea.jsx";
 import { SettingsPage } from "./components/Settings/SettingsPage.jsx";
+import { OnboardingPage } from "./components/Onboarding/OnboardingPage.jsx";
 import { Sidebar } from "./components/Sidebar/Sidebar.jsx";
 import { StatusBar } from "./components/common/StatusBar.jsx";
 import TerminalPanel from "./components/Terminal/TerminalPanel.jsx";
@@ -17,6 +18,8 @@ export default function App() {
   const setSettingsOpen = useSettingsStore((state) => state.setSettingsOpen);
   const isTerminalOpen = useTerminalStore((state) => state.isOpen);
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
+  const onboardingLoaded = useSettingsStore((state) => state.onboardingLoaded);
+  const onboardingCompleted = useSettingsStore((state) => state.onboardingCompleted);
   const [splitPos, setSplitPos] = React.useState(60);
   const isDragging = React.useRef(false);
 
@@ -79,6 +82,10 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [connection.newSession]);
 
+  if (onboardingLoaded && !onboardingCompleted) {
+    return <OnboardingPage onComplete={connection.completeOnboarding} />;
+  }
+
   return (
     <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <Sidebar
@@ -87,6 +94,9 @@ export default function App() {
         onRefresh={connection.refreshSidebar}
         onRenameSession={connection.renameSession}
         onDeleteSession={connection.deleteSession}
+        settingsOpen={settingsOpen}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenChat={() => setSettingsOpen(false)}
       />
       <main className="main-pane">
         <header className="top-bar">

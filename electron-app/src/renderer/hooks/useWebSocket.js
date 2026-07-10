@@ -28,6 +28,7 @@ export function useWebSocket() {
   const markPersonalSettingsSaved = useSettingsStore((state) => state.markPersonalSettingsSaved);
   const setPersonalSettingsError = useSettingsStore((state) => state.setPersonalSettingsError);
   const setModelState = useSettingsStore((state) => state.setModel);
+  const setOnboardingState = useSettingsStore((state) => state.setOnboardingState);
   const setLastError = useSettingsStore((state) => state.setLastError);
 
   useEffect(() => {
@@ -83,6 +84,12 @@ export function useWebSocket() {
     const offPersonalSettingsSaved = aresSocket.on("personal_settings_saved", ({ settings }) =>
       markPersonalSettingsSaved(settings)
     );
+    const offOnboardingState = aresSocket.on("onboarding_state", (state) =>
+      setOnboardingState(state)
+    );
+    const offOnboardingCompleted = aresSocket.on("onboarding_completed", ({ state }) =>
+      setOnboardingState(state)
+    );
 
     async function connect() {
       const serverUrl = window.aresDesktop
@@ -94,9 +101,11 @@ export function useWebSocket() {
     }
 
     connect();
+    const refreshInterval = window.setInterval(() => aresSocket.refreshState(), 10_000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(refreshInterval);
       offOpen();
       offClose();
       offError();
@@ -114,6 +123,8 @@ export function useWebSocket() {
       offContext();
       offPersonalSettings();
       offPersonalSettingsSaved();
+      offOnboardingState();
+      offOnboardingCompleted();
     };
   }, [
     addError,
@@ -130,6 +141,7 @@ export function useWebSocket() {
     setMemories,
     markPersonalSettingsSaved,
     setModelState,
+    setOnboardingState,
     setServerUrl,
     setSessions,
     setStatus,
@@ -194,6 +206,11 @@ export function useWebSocket() {
     [markPersonalSettingsSaving, setPersonalSettingsError]
   );
 
+  const completeOnboarding = useCallback((data) => {
+    setLastError("");
+    return aresSocket.send({ type: "complete_onboarding", data });
+  }, [setLastError]);
+
   const renameSession = useCallback((sessionId, title) => {
     aresSocket.send({ type: "rename_session", session_id: sessionId, title });
   }, []);
@@ -226,6 +243,7 @@ export function useWebSocket() {
     renameSession,
     deleteSession,
     fetchPersonalSettings,
-    savePersonalSettings
+    savePersonalSettings,
+    completeOnboarding,
   };
 }

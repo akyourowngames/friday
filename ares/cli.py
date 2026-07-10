@@ -42,7 +42,7 @@ from ares.config import load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
-from ares.tools.mcp_client import MCPClientManager
+from ares.tools.mcp_client import MCPClientManager, redact_mcp_text
 from ares.tools.adb_bridge import phone_status as get_phone_status
 from ares.cron import CronScheduler, CronStore
 from ares.cron.toast import CronToastManager
@@ -61,6 +61,8 @@ COMPLETER = WordCompleter([
     "/skills", "/skills search", "/skills categories", "/skills load",
     "/setup", "/phone", "/phone status",
     "/tools", "/tools summary", "/tools details", "/tools hidden",
+    "/mcp", "/mcp status", "/mcp tools", "/mcp health", "/mcp config",
+    "/mcp reconnect", "/mcp reload",
 ], ignore_case=True)
 
 TOOL_OUTPUT_MODES = {"summary", "details", "hidden"}
@@ -190,7 +192,12 @@ class AresCLI:
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
-        if sys.stdin.isatty() and sys.stdout.isatty() and not self.profile_manager.is_populated():
+        if (
+            sys.stdin.isatty()
+            and sys.stdout.isatty()
+            and not self.config.onboarding_completed
+            and not self.profile_manager.is_populated()
+        ):
             OnboardingWizard(
                 console=self.console,
                 config=self.config,
@@ -203,6 +210,8 @@ class AresCLI:
             if self.config.mcp_servers
             else None
         )
+        self._mcp_config_signature = self._get_mcp_config_signature(self.config)
+        self._mcp_reconfigure_pending = False
         self.conversation_store = ConversationStore()
         self.conversation_id = self.conversation_store.start_conversation()
         self.conversation_store.summarize_ended_without_summary(
@@ -259,6 +268,65 @@ class AresCLI:
             on_complete=self.toast_manager,
         ) if self.config.cron_enabled else None
         self.session = self._create_prompt_session()
+        self._mcp_config_signature = self._get_mcp_config_signature(self.config)
+        self._mcp_reconfigure_pending = False
+
+    @staticmethod
+    def _get_mcp_config_signature(config) -> str:
+        """Return the portion of shared settings that requires reconnecting MCP."""
+        return json.dumps(
+            {"data_dir": config.data_dir, "mcp_servers": config.mcp_servers},
+            sort_keys=True,
+            default=str,
+        )
+
+    def _sync_shared_state(self) -> None:
+        """Reload settings saved by the desktop app before handling input."""
+        latest = load_config()
+        if latest.model_dump() == self.config.model_dump():
+            return
+
+        previous_mcp_signature = self._mcp_config_signature
+        self.config = latest
+        data_dir = Path(latest.data_dir).expanduser()
+        self.soul_manager = SoulManager(data_dir=data_dir, soul_path=latest.soul_path)
+        self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=latest.profile_path)
+        self.soul_manager.ensure_exists()
+        self.profile_manager.ensure_exists()
+        self.project_context = ProjectContext(
+            enabled=latest.project_context_enabled,
+            max_files=latest.project_context_max_files,
+        )
+        if hasattr(self.agent, "apply_config"):
+            self.agent.apply_config(latest)
+        else:  # Keep lightweight test doubles compatible.
+            self.agent.set_model(latest.model)
+        self._mcp_config_signature = self._get_mcp_config_signature(latest)
+        self._mcp_reconfigure_pending = previous_mcp_signature != self._mcp_config_signature
+
+    async def _refresh_mcp_manager_if_needed(self) -> None:
+        """Reconnect integrations after another Ares surface changed them."""
+        if not getattr(self, "_mcp_reconfigure_pending", False):
+            return
+        self._mcp_reconfigure_pending = False
+        previous_manager = self.mcp_manager
+        self.mcp_manager = (
+            MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
+            if self.config.mcp_servers
+            else None
+        )
+        if hasattr(self.agent, "set_mcp_manager"):
+            self.agent.set_mcp_manager(self.mcp_manager)
+        else:
+            self.agent.mcp_manager = self.mcp_manager
+        if previous_manager is not None:
+            with suppress(Exception):
+                await previous_manager.close()
+        if self.mcp_manager is not None:
+            with suppress(Exception):
+                await self.mcp_manager.start()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
 
     async def _prompt(self) -> str:
         """Read one prompt line from an interactive session or plain stdin."""
@@ -308,6 +376,158 @@ class AresCLI:
             table.add_row(model, status)
         self.console.print(table)
 
+    @staticmethod
+    def _mcp_target(server: dict) -> str:
+        """Return the safe connection target shown in MCP tables."""
+        return redact_mcp_text(server.get("endpoint") or server.get("command") or "-")
+
+    def _show_mcp_status(self, report: dict, server_name: str | None = None) -> None:
+        """Render the manager's readiness report in a compact, stable table."""
+        servers = report.get("servers") or {}
+        if server_name:
+            servers = {server_name: servers[server_name]} if server_name in servers else {}
+        if not servers:
+            message = (
+                f"MCP server '{server_name}' is not configured."
+                if server_name
+                else "No MCP servers are configured."
+            )
+            self.console.print(f"[dim]{message}[/dim]")
+            return
+
+        title = (
+            f"MCP Status  {report.get('connected', 0)}/{report.get('configured', 0)} connected"
+            f"  {report.get('tools', 0)} tools"
+        )
+        table = Table(title=title, border_style="bright_cyan", box=CLI_BOX)
+        table.add_column("Server", style="cyan", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Transport", no_wrap=True)
+        table.add_column("Target", ratio=2)
+        table.add_column("Tools", justify="right", no_wrap=True)
+        table.add_column("Timeout", justify="right", no_wrap=True)
+        table.add_column("Error", ratio=2)
+        for name, server in servers.items():
+            ready = bool(server.get("ready"))
+            status = "[green]ready[/green]" if ready else "[yellow]disconnected[/yellow]"
+            error = redact_mcp_text(server.get("error") or "")
+            table.add_row(
+                name,
+                status,
+                str(server.get("transport") or "-"),
+                self._mcp_target(server),
+                str(server.get("tools", 0)),
+                f"{float(server.get('timeout_seconds', 0)):g}s",
+                self._clip_tool_detail(error, 100) if error else "-",
+            )
+        self.console.print(table)
+
+    def _show_mcp_tools(self, server_name: str | None = None) -> None:
+        """Render discovered MCP tools grouped by server."""
+        if self.mcp_manager is None:
+            self.console.print("[dim]No MCP servers are configured.[/dim]")
+            return
+        groups = self.mcp_manager.tools_by_server(server_name)
+        if server_name and not groups:
+            self.console.print(f"[red]MCP server '{server_name}' is not configured.[/red]")
+            return
+        for name, tools in groups.items():
+            if not tools:
+                self.console.print(f"[dim]{name}: no tools discovered yet. Run /mcp reconnect {name}.[/dim]")
+                continue
+            table = Table(title=f"MCP Tools: {name}", border_style="bright_cyan", box=CLI_BOX)
+            table.add_column("Tool", style="cyan", no_wrap=True)
+            table.add_column("Description", ratio=4)
+            for tool in tools:
+                table.add_row(tool["name"], tool["description"] or "-")
+            self.console.print(table)
+
+    def _show_mcp_config(self) -> None:
+        """Show configured servers without displaying arguments, env values, or tokens."""
+        if self.mcp_manager is None or not self.mcp_manager.servers:
+            self.console.print("[dim]No MCP servers are configured.[/dim]")
+            return
+        table = Table(title="MCP Configuration", border_style="bright_cyan", box=CLI_BOX)
+        table.add_column("Server", style="cyan", no_wrap=True)
+        table.add_column("Transport", no_wrap=True)
+        table.add_column("Target", ratio=3)
+        table.add_column("Timeout", justify="right", no_wrap=True)
+        table.add_column("Private settings", ratio=2)
+        for name, config in sorted(self.mcp_manager.servers.items()):
+            private = []
+            if config.env:
+                private.append(f"{len(config.env)} env value(s) hidden")
+            if config.oauth_client_id or config.oauth_client_secret or config.oauth_scopes:
+                private.append("OAuth settings hidden")
+            table.add_row(
+                name,
+                config.transport,
+                redact_mcp_text(config.endpoint or config.command or "-"),
+                f"{config.timeout_seconds:g}s",
+                "; ".join(private) if private else "-",
+            )
+        self.console.print(table)
+
+    def _show_mcp_help(self) -> None:
+        table = Table(title="MCP Commands", border_style="bright_cyan", box=CLI_BOX)
+        table.add_column("Command", style="cyan", no_wrap=True)
+        table.add_column("Description", ratio=4)
+        table.add_row("/mcp", "Show this MCP command guide")
+        table.add_row("/mcp status", "Show configured server readiness, tool counts, timeouts, and errors")
+        table.add_row("/mcp tools [SERVER]", "List discovered MCP tools, optionally for one server")
+        table.add_row("/mcp reconnect SERVER", "Reconnect one MCP server and refresh its tools")
+        table.add_row("/mcp health", "Probe connected servers and refresh readiness")
+        table.add_row("/mcp reload", "Reload every MCP server from the current shared config")
+        table.add_row("/mcp config", "Show safe server configuration without private values")
+        self.console.print(table)
+
+    async def _handle_mcp_command(self, cmd: str) -> None:
+        """Handle async MCP control commands from the interactive CLI loop."""
+        parts = cmd.strip().split()
+        action = parts[1].lower() if len(parts) > 1 else "help"
+        server_name = parts[2] if len(parts) > 2 else ""
+
+        if action in {"help", "-h", "--help"}:
+            self._show_mcp_help()
+            return
+        if action == "status" and len(parts) == 2:
+            report = self.mcp_manager.readiness_report() if self.mcp_manager else {"servers": {}}
+            self._show_mcp_status(report)
+            return
+        if action == "tools" and len(parts) <= 3:
+            self._show_mcp_tools(server_name or None)
+            return
+        if action == "config" and len(parts) == 2:
+            self._show_mcp_config()
+            return
+        if self.mcp_manager is None:
+            self.console.print("[red]No MCP servers are configured.[/red]")
+            return
+        if action == "reconnect" and server_name and len(parts) == 3:
+            report = await self.mcp_manager.reconnect_server(server_name)
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
+            self._show_mcp_status({"servers": {server_name: report}, "connected": int(report.get("ready", False)), "configured": 1, "tools": report.get("tools", 0)})
+            return
+        if action == "health" and len(parts) == 2:
+            report = await self.mcp_manager.health_probe()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
+            self._show_mcp_status(report)
+            return
+        if action == "reload" and len(parts) == 2:
+            self._sync_shared_state()
+            await self._refresh_mcp_manager_if_needed()
+            if self.mcp_manager is None:
+                self.console.print("[red]No MCP servers are configured.[/red]")
+                return
+            await self.mcp_manager.start()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
+            self._show_mcp_status(self.mcp_manager.readiness_report())
+            return
+        self.console.print("[red]Usage: /mcp [status|tools [SERVER]|reconnect SERVER|health|reload|config][/red]")
+
     def _tool_status(self, tool_name: str) -> tuple[str, str]:
         """Return status text and border style for a running tool."""
         statuses = {
@@ -317,6 +537,9 @@ class AresCLI:
             "list_directory": ("Scanning a directory", "bright_magenta"),
             "store_memory": ("Saving memory", "green"),
         }
+        if tool_name.startswith("mcp__windows__"):
+            action = tool_name.rsplit("__", 1)[-1].lower()
+            return (f"Windows {action}", "bright_cyan")
         label = self._tool_label(tool_name)
         return statuses.get(tool_name, (f"Using {label}", "dim"))
 
@@ -325,23 +548,25 @@ class AresCLI:
         if tool_name in TOOL_LABELS:
             return TOOL_LABELS[tool_name]
         if tool_name.startswith("mcp__"):
-            parts = [part for part in tool_name.split("__") if part and part != "mcp"]
-            if parts:
-                return " ".join(parts).replace("_", " ")
+            parts = tool_name.split("__", 2)
+            if len(parts) == 3 and parts[1] and parts[2]:
+                server = parts[1].replace("_", " ").title()
+                action = parts[2].replace("_", " ").title()
+                return f"{server}: {action}"
         return tool_name.replace("_", " ") or "tool"
 
     def _parse_tool_token(self, token: str) -> tuple[str, str]:
         """Parse [tool:name:content] tokens with a fallback for legacy tokens."""
         inner = token[6:-1]
         parts = inner.split(":", 1)
-        if len(parts) == 2 and re.match(r"^[a-z][a-z0-9_]*$", parts[0]):
+        if len(parts) == 2 and re.match(r"^[A-Za-z][A-Za-z0-9_]*$", parts[0]):
             return parts[0] or "unknown", parts[1]
         return "unknown", inner
 
     def _parse_tool_start_token(self, token: str) -> str:
         """Parse [tool_start:name] tokens."""
         inner = token.removeprefix("[tool_start:").removesuffix("]")
-        return inner if re.match(r"^[a-z][a-z0-9_]*$", inner) else "unknown"
+        return inner if re.match(r"^[A-Za-z][A-Za-z0-9_]*$", inner) else "unknown"
 
     def _clip_tool_detail(self, text: str, limit: int = 90) -> str:
         """Keep tool summaries short enough to stay out of the user's way."""
@@ -410,6 +635,9 @@ class AresCLI:
             event["detail"] = "execution completed"
         elif tool_name.startswith("phone_"):
             event["detail"] = "phone action completed"
+        elif tool_name.startswith("mcp__windows__"):
+            action = tool_name.rsplit("__", 1)[-1].replace("_", " ").lower()
+            event["detail"] = f"Windows {action} completed"
         elif tool_name.startswith("mcp__"):
             event["detail"] = "external tool completed"
         else:
@@ -724,6 +952,7 @@ class AresCLI:
             table.add_row("/setup", "Run the onboarding wizard again")
             table.add_row("/phone status", "Check Android phone bridge pairing health")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
+            table.add_row("/mcp [status|tools|reconnect|health]", "Manage connected MCP servers and tools")
             table.add_row("/skill-name", "Load a skill directly by slash command")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
@@ -1058,11 +1287,16 @@ class AresCLI:
                 while True:
                     try:
                         user_input = await self._prompt()
+                        self._sync_shared_state()
+                        await self._refresh_mcp_manager_if_needed()
 
                         if not user_input.strip():
                             continue
 
                         if user_input.strip().startswith("/"):
+                            if user_input.strip().split(maxsplit=1)[0].lower() == "/mcp":
+                                await self._handle_mcp_command(user_input.strip())
+                                continue
                             try:
                                 should_continue = self._handle_command(user_input.strip())
                             except Exception as e:

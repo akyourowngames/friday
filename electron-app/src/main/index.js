@@ -132,7 +132,13 @@ ipcMain.handle("ares:terminal:isActive", () => {
 });
 
 app.whenReady().then(async () => {
-  await pythonManager.start();
+  try {
+    await pythonManager.start();
+  } catch (error) {
+    // Keep the UI reachable: the renderer can ask the manager to retry and
+    // shows its existing reconnect state instead of Electron crashing here.
+    console.error("Ares backend startup failed:", error);
+  }
   await createWindow();
 
   app.on("activate", () => {
@@ -140,6 +146,9 @@ app.whenReady().then(async () => {
       createWindow();
     }
   });
+}).catch((error) => {
+  console.error("Electron startup failed:", error);
+  app.quit();
 });
 
 app.on("window-all-closed", () => {

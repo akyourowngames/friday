@@ -66,6 +66,23 @@ DEFAULT_MCP_SERVERS: list[dict] = [
         "command": "uvx",
         "args": ["mcp-server-fetch"],
     },
+    {
+        "name": "windows",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+            "windows-mcp",
+            "serve",
+            "--tools",
+            "Screenshot,Snapshot,Click,Type,Scroll,Move,Shortcut,Wait,WaitFor,App,Clipboard,Notification",
+        ],
+        "env": {
+            "ANONYMIZED_TELEMETRY": "false",
+            "WINDOWS_MCP_SCREENSHOT_SCALE": "0.5",
+            "WINDOWS_MCP_DISABLE_FLASH": "true",
+        },
+        "timeout_seconds": 90.0,
+    },
 ]
 
 
@@ -110,6 +127,10 @@ class PhoneConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    # This is deliberately stored beside the rest of the shared Ares config.
+    # Both the Electron app and CLI read this file, so completing setup in one
+    # surface never triggers the first-run flow in the other.
+    onboarding_completed: bool = False
     model: str = "deepseek-v4-flash-free"
     api_key: str = ""
     api_base_url: str = "https://opencode.ai/zen/v1"
@@ -131,7 +152,9 @@ class AppConfig(BaseModel):
     project_context_enabled: bool = True
     context_token_budget: int = 2000
     project_context_max_files: int = 2
-    agent_max_iterations: int = 20
+    # Desktop control needs an observe-act-verify loop. Twenty turns is too
+    # small for common multi-step tasks such as launching an app and saving.
+    agent_max_iterations: int = 40
     context_compact_threshold: float = 0.90
     context_protected_tail: int = 20
     tool_output_max_chars: int = 500

@@ -80,6 +80,7 @@ export class AresWebSocket {
     this.send({ type: "get_memories" });
     this.send({ type: "get_context", query: "" });
     this.send({ type: "get_personal_settings" });
+    this.send({ type: "get_onboarding_state" });
   }
 }
 

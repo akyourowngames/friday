@@ -111,12 +111,24 @@ export function SettingsPage({
 
   return (
     <section className="settings-page">
-      <aside className="settings-page-nav">
-        <button className="settings-back" type="button" onClick={onBack}>
-          <ArrowLeft size={16} />
-          <span>Back to chat</span>
-        </button>
-        <div className="settings-nav-list">
+      <div className="settings-page-content">
+        <header className="settings-page-header">
+          <div>
+            <h1>Settings</h1>
+            <p>Local Ares identity, personality, runtime, and memory controls.</p>
+          </div>
+          <div className="settings-header-actions">
+            <button className="settings-refresh-inline" type="button" onClick={onRefresh}>
+              <RefreshCw size={15} />
+              <span>Refresh</span>
+            </button>
+            <button className="settings-back" type="button" onClick={onBack}>
+              <ArrowLeft size={16} />
+              <span>Chat</span>
+            </button>
+          </div>
+        </header>
+        <nav className="settings-tabs" aria-label="Settings sections">
           {SECTIONS.map((section) => {
             const Icon = section.icon;
             return (
@@ -131,20 +143,7 @@ export function SettingsPage({
               </button>
             );
           })}
-        </div>
-      </aside>
-
-      <div className="settings-page-content">
-        <header className="settings-page-header">
-          <div>
-            <h1>Settings</h1>
-            <p>Local Ares identity, personality, runtime, and memory controls.</p>
-          </div>
-          <button className="settings-refresh-inline" type="button" onClick={onRefresh}>
-            <RefreshCw size={15} />
-            <span>Refresh</span>
-          </button>
-        </header>
+        </nav>
 
         {activeSection === "profile" ? (
           <div className="settings-card">

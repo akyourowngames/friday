@@ -13,6 +13,7 @@ from ares import cli as cli_module
 from ares.__main__ import _run_coro
 from ares.cli import AresCLI, _history_path
 from ares.models import AppConfig
+from ares.tools.mcp_client import MCPServerConfig
 
 
 async def _answer() -> int:
@@ -232,6 +233,133 @@ def test_parse_tool_token_supports_named_and_legacy_formats():
         "unknown",
         "Stored memory #1: User likes tea",
     )
+    assert app._parse_tool_token("[tool:mcp__windows__Snapshot:desktop state]") == (
+        "mcp__windows__Snapshot",
+        "desktop state",
+    )
+    assert app._parse_tool_start_token("[tool_start:mcp__windows__Click]") == "mcp__windows__Click"
+    assert app._tool_label("mcp__windows__Snapshot") == "Windows: Snapshot"
+
+
+def test_windows_mcp_activity_uses_a_friendly_label():
+    app = make_cli()
+
+    event = app._summarize_tool_result("mcp__windows__Type", "Typed text successfully")
+
+    assert event["label"] == "Windows: Type"
+    assert event["detail"] == "Windows type completed"
+
+
+class FakeMCPManager:
+    def __init__(self):
+        self.servers = {
+            "calendar": MCPServerConfig(
+                name="calendar",
+                server_url="https://example.com/mcp?token=server-token",
+                timeout_seconds=12,
+            ),
+            "github": MCPServerConfig(
+                name="github",
+                command="npx",
+                args=["server-github"],
+                env={"GITHUB_TOKEN": "env-secret"},
+            ),
+        }
+        self.reconnected = []
+        self.health_checked = False
+
+    def readiness_report(self):
+        return {
+            "configured": 2,
+            "connected": 1,
+            "tools": 3,
+            "servers": {
+                "calendar": {
+                    "ready": True,
+                    "transport": "streamable_http",
+                    "endpoint": "https://example.com/mcp?token=server-token",
+                    "command": "",
+                    "tools": 2,
+                    "timeout_seconds": 12,
+                    "error": "",
+                },
+                "github": {
+                    "ready": False,
+                    "transport": "stdio",
+                    "endpoint": "",
+                    "command": "npx",
+                    "tools": 1,
+                    "timeout_seconds": 60,
+                    "error": "token=error-secret",
+                },
+            },
+        }
+
+    def tools_by_server(self, server_name=None):
+        groups = {
+            "calendar": [
+                {"name": "list_events", "description": "List events"},
+                {"name": "create_event", "description": "Create events"},
+            ],
+            "github": [{"name": "list_issues", "description": "List issues"}],
+        }
+        if server_name is None:
+            return groups
+        return {server_name: groups[server_name]} if server_name in groups else {}
+
+    async def reconnect_server(self, name):
+        self.reconnected.append(name)
+        if name not in self.servers:
+            return {"name": name, "ready": False, "error": "not configured", "tools": 0}
+        return {
+            "name": name,
+            "ready": True,
+            "transport": self.servers[name].transport,
+            "endpoint": self.servers[name].endpoint,
+            "command": self.servers[name].command,
+            "tools": 2,
+            "timeout_seconds": self.servers[name].timeout_seconds,
+            "error": "",
+        }
+
+    async def health_probe(self):
+        self.health_checked = True
+        return self.readiness_report()
+
+
+@pytest.mark.asyncio
+async def test_mcp_commands_render_status_tools_reconnect_health_and_redacted_config():
+    app = make_cli()
+    app.mcp_manager = FakeMCPManager()
+
+    await app._handle_mcp_command("/mcp status")
+    await app._handle_mcp_command("/mcp tools calendar")
+    await app._handle_mcp_command("/mcp reconnect calendar")
+    await app._handle_mcp_command("/mcp health")
+    await app._handle_mcp_command("/mcp config")
+
+    output = app.console_file.getvalue()
+    assert "MCP Status" in output
+    assert "calendar" in output
+    assert "list_events" in output
+    assert app.mcp_manager.reconnected == ["calendar"]
+    assert app.mcp_manager.health_checked is True
+    assert "server-token" not in output
+    assert "env-secret" not in output
+    assert "error-secret" not in output
+
+
+@pytest.mark.asyncio
+async def test_mcp_commands_show_help_and_unknown_server_message():
+    app = make_cli()
+    app.mcp_manager = FakeMCPManager()
+
+    await app._handle_mcp_command("/mcp")
+    await app._handle_mcp_command("/mcp tools missing")
+
+    output = app.console_file.getvalue()
+    assert "MCP Commands" in output
+    assert "not configured" in output
 
 
 @pytest.mark.asyncio

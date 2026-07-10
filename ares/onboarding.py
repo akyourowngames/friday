@@ -91,6 +91,61 @@ ASSISTANT_STYLES = [
 ]
 
 
+def format_project(project: dict[str, str]) -> str:
+    """Render one project consistently for CLI and desktop onboarding."""
+    if project.get("description"):
+        return f"- {project.get('name', '')} — {project.get('description', '')}"
+    return f"- {project.get('name', '')}"
+
+
+def render_profile(data: dict[str, Any]) -> str:
+    """Build the single shared profile document from onboarding data."""
+    project_lines = [format_project(project) for project in data.get("projects", [])]
+    goal_lines = [f"- {goal}" for goal in data.get("goals", []) if str(goal).strip()]
+    lines = [
+        "# About Me",
+        "",
+        "## Identity",
+        f"- Name: {data.get('name', '')}",
+        f"- Pronouns: {data.get('pronouns', '')}",
+        "",
+        "## Preferences",
+        f"- Coding style: {data.get('coding_style', '')}",
+        f"- Assistant style: {data.get('assistant_style', '')}",
+        f"- Terminal/OS: {data.get('os_terminal', '')}",
+        "",
+        "## Current Projects",
+        *project_lines,
+        "",
+        "## Goals",
+        *goal_lines,
+        "",
+        "## Notes",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def save_onboarding_data(
+    config: Any,
+    profile_manager: Any,
+    soul_manager: Any,
+    data: dict[str, Any],
+) -> None:
+    """Persist onboarding once for every Ares surface.
+
+    The profile and soul stay user-editable markdown files; the completion flag
+    and model live in the common config used by the CLI and Electron server.
+    """
+    profile_manager.write(render_profile(data))
+    soul = data.get("personality", "jarvis")
+    content = soul if "\n" in soul else SOUL_PRESETS.get(soul, SOUL_PRESETS["jarvis"])
+    soul_manager.write(content)
+    config.model = str(data.get("model") or config.model)
+    config.onboarding_completed = True
+    save_config(config)
+
+
 def _detect_os() -> str:
     """Auto-detect the user's OS and likely terminal shell."""
     system = platform.system()
@@ -313,48 +368,18 @@ class OnboardingWizard:
         return data
 
     def _save(self, data: dict[str, Any]) -> None:
-        profile = self._render_profile(data)
-        self.profile_manager.profile_path.parent.mkdir(parents=True, exist_ok=True)
-        self.profile_manager.profile_path.write_text(profile, encoding="utf-8")
-        soul = data.get("personality", "jarvis")
-        content = (
-            soul if "\n" in soul else SOUL_PRESETS.get(soul, SOUL_PRESETS["jarvis"])
+        save_onboarding_data(
+            self.config,
+            self.profile_manager,
+            self.soul_manager,
+            data,
         )
-        self.soul_manager.soul_path.parent.mkdir(parents=True, exist_ok=True)
-        self.soul_manager.soul_path.write_text(content, encoding="utf-8")
-        self.config.model = data["model"]
-        save_config(self.config)
 
     def _render_profile(self, data: dict[str, Any]) -> str:
-        project_lines = [self._format_project(p) for p in data.get("projects", [])]
-        goal_lines = [f"- {goal}" for goal in data.get("goals", [])]
-        lines = [
-            "# About Me",
-            "",
-            "## Identity",
-            f"- Name: {data.get('name', '')}",
-            f"- Pronouns: {data.get('pronouns', '')}",
-            "",
-            "## Preferences",
-            f"- Coding style: {data.get('coding_style', '')}",
-            f"- Assistant style: {data.get('assistant_style', '')}",
-            f"- Terminal/OS: {data.get('os_terminal', '')}",
-            "",
-            "## Current Projects",
-            *project_lines,
-            "",
-            "## Goals",
-            *goal_lines,
-            "",
-            "## Notes",
-            "",
-        ]
-        return "\n".join(lines)
+        return render_profile(data)
 
     def _format_project(self, project: dict[str, str]) -> str:
-        if project.get("description"):
-            return f"- {project.get('name', '')} — {project.get('description', '')}"
-        return f"- {project.get('name', '')}"
+        return format_project(project)
 
     def _render_progress(self, step: int, total: int, label: str) -> None:
         self.console.print(f"\n[dim]Step {step}/{total}: {label}[/dim]")

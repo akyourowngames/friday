@@ -1,0 +1,4 @@
+interface:
+  display_name: "Computer Use"
+  short_description: "Operate Windows apps reliably with MCP"
+  default_prompt: "Use $computer-use to complete a Windows desktop task safely."

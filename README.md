@@ -37,6 +37,7 @@ It is built as a local-first assistant: it remembers useful facts, understands t
 | Voice | Optional STT/TTS with local and Sarvam/Edge backends. |
 | Phone bridge | Android status, notifications, contacts, SMS, confirmed calls, app launch, URL open, ADB workflows. |
 | Desktop app | Electron + React chat UI, settings, sessions, status, tool cards, and terminal surface. |
+| Windows control | Native app and desktop control through a restricted local Windows MCP integration. |
 
 ## Quick Start
 
@@ -134,6 +135,7 @@ flowchart TD
 | Images | `generate_image`, `image_info`, `resize_image`, `convert_image`, `crop_image` |
 | Cron | `create_cron_job`, `list_cron_jobs`, `get_cron_job`, `update_cron_job`, `delete_cron_job`, `run_cron_job_now`, `get_cron_logs` |
 | Phone | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number`, `phone_launch_app`, `phone_open_url` |
+| Windows desktop | MCP-powered screen snapshots, app launch/window control, mouse, keyboard, clipboard, and notifications. |
 | Config/time | `update_config`, `get_current_datetime` |
 
 ## Skills
@@ -161,6 +163,7 @@ Built-in skills include:
 | `backup-snapshot` | utilities | Snapshot files/folders with checksum verification. |
 | `image-batch-processor` | utilities | Batch resize, convert, rename, or optimize images. |
 | `system-info` | utilities | Gather local debugging environment information. |
+| `computer-use` | automation | Operate Windows desktop apps through MCP with fresh UI snapshots and post-action verification. |
 
 ## Slash Commands
 
@@ -177,6 +180,13 @@ Built-in skills include:
 | `/skills search QUERY` | Search skills. |
 | `/skills load NAME` | Show a skill's full instructions. |
 | `/tools summary/details/hidden` | Control tool activity display. |
+| `/mcp` | Show MCP management commands. |
+| `/mcp status` | Show configured MCP server readiness and diagnostics. |
+| `/mcp tools [SERVER]` | List discovered tools, optionally for one MCP server. |
+| `/mcp reconnect SERVER` | Reconnect one MCP server and refresh its tools. |
+| `/mcp health` | Probe connected MCP servers. |
+| `/mcp reload` | Reload all MCP servers from shared config. |
+| `/mcp config` | Show safe MCP configuration without private values. |
 | `/phone status` | Check Android phone bridge health. |
 | `/soul show/edit` | View or edit Ares' personality file. |
 | `/profile show/edit` | View or edit the user profile file. |
@@ -200,7 +210,15 @@ Built-in skills include:
 | `~/.ares/skills/` | User-installed skills. |
 | `~/.ares_history` | CLI prompt history. |
 
+### Windows Desktop Control
+
+Ares uses [Windows-MCP](https://github.com/CursorTouch/Windows-MCP) locally through stdio. On its first run, `uvx` downloads the server; later runs use the local cache. The bundled configuration is deliberately restricted to UI interaction tools: snapshots, screenshots, mouse/keyboard input, app/window control, clipboard, and notifications. It does **not** grant the agent the MCP server's PowerShell, registry, or filesystem tools.
+
+Use natural requests such as `open Spotify`, `inspect the Settings window`, or `click the Save button in the open app`. Ares observes the Windows accessibility tree first, then verifies major UI changes with a fresh snapshot. The MCP server controls the real desktop, so requests that send, submit, purchase, delete, share, or change system settings require explicit intent.
+
 Environment variables can populate config in `ares/config.py`. JSON exports omit secret key fields.
+
+See [MCP configuration and management](docs/mcp.md) for server examples, transport details, and diagnostics.
 
 ## Development
 

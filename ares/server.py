@@ -26,6 +26,7 @@ from ares.context_manager import ContextManager
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.onboarding import save_onboarding_data
 from ares.profile import ProfileManager
 from ares.soul import SoulManager
 from ares.tools.mcp_client import MCPClientManager
@@ -104,6 +105,7 @@ class AresServer:
     ) -> None:
         self.host = host
         self.port = port
+        self._uses_shared_config = config is None
         self.config = config or load_config()
         self.memory_store = memory_store or MemoryStore()
         self.conversation_store = conversation_store or ConversationStore()
@@ -137,6 +139,7 @@ class AresServer:
         self.soul_manager.ensure_exists()
         self._terminal_output_buffer: dict[str, str] = {}
         self._terminal_command_events: dict[str, asyncio.Event] = {}
+        self._mcp_start_task: asyncio.Task | None = None
 
         # Wire terminal display callback to ToolExecutor
         if hasattr(self.agent, "tool_executor"):
@@ -152,15 +155,31 @@ class AresServer:
                 pass
 
     async def run_forever(self) -> None:
-        """Start the WebSocket server and block until cancelled."""
-        if self.mcp_manager is not None:
-            await self.mcp_manager.start()
-            if hasattr(self.agent, "refresh_tools"):
-                self.agent.refresh_tools()
+        """Start the WebSocket server and block until cancelled.
+
+        MCP processes can download packages on their first run.  The desktop
+        needs to become reachable before that work finishes, otherwise
+        Electron treats a healthy-but-slow integration as a failed backend.
+        """
         async with serve(self.handle_client, self.host, self.port) as ws_server:
             self._server = ws_server
             print(f"Ares desktop server listening on ws://{self.host}:{self.port}")
+            if self.mcp_manager is not None:
+                self._mcp_start_task = asyncio.create_task(self._start_mcp_manager())
             await asyncio.Future()
+
+    async def _start_mcp_manager(self) -> None:
+        """Connect optional MCP integrations without delaying desktop startup."""
+        manager = self.mcp_manager
+        if manager is None:
+            return
+        try:
+            await manager.start()
+        except BaseException as exc:  # Keep the chat server available without integrations.
+            print(f"Ares MCP startup failed: {exc}")
+            return
+        if manager is self.mcp_manager and hasattr(self.agent, "refresh_tools"):
+            self.agent.refresh_tools()
 
     async def handle_client(self, websocket: ServerConnection) -> None:
         """Handle a connected desktop renderer."""
@@ -184,8 +203,9 @@ class AresServer:
             await self._send_error(websocket, "Invalid JSON message")
             return
 
-        msg_type = message.get("type")
         try:
+            await self._sync_shared_config()
+            msg_type = message.get("type")
             if msg_type == "chat":
                 await self._handle_chat(websocket, message)
             elif msg_type == "new_session":
@@ -209,6 +229,10 @@ class AresServer:
                 await self._send(websocket, self._personal_settings())
             elif msg_type == "save_personal_settings":
                 await self._handle_save_personal_settings(websocket, message)
+            elif msg_type == "get_onboarding_state":
+                await self._send(websocket, self._onboarding_state())
+            elif msg_type == "complete_onboarding":
+                await self._handle_complete_onboarding(websocket, message)
             elif msg_type == "rename_session":
                 await self._handle_rename_session(websocket, message)
             elif msg_type == "delete_session":
@@ -245,6 +269,14 @@ class AresServer:
         history = self._conversation_history(session_id)
         history = self._sanitize_history(history)
         history = self.context_manager.before_send(history)
+
+        # Persist the turn before asking the model.  This makes a newly sent
+        # message visible in the sidebar immediately, and keeps it safe if a
+        # slow model or integration never returns a final response.
+        self.conversation_store.add_message(session_id, "user", content)
+        await self._send(websocket, self._session_info())
+        await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
+
         response_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
 
@@ -298,7 +330,13 @@ class AresServer:
         full_response = "".join(response_parts).strip()
         import json as _json
         tool_calls_json = _json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
-        self.conversation_store.add_exchange(session_id, content, full_response, tool_calls_json)
+        if full_response or tool_calls_json:
+            self.conversation_store.add_message(
+                session_id,
+                "assistant",
+                full_response,
+                tool_calls_json,
+            )
 
         await self._send(
             websocket,
@@ -368,6 +406,46 @@ class AresServer:
         await self._send(websocket, {"type": "model_updated", "model": model})
         await self._send(websocket, self._status())
 
+    async def _handle_complete_onboarding(
+        self, websocket: Any, message: dict[str, Any]
+    ) -> None:
+        data = message.get("data") or {}
+        if not isinstance(data, dict):
+            await self._send_error(websocket, "Onboarding data must be an object")
+            return
+        name = str(data.get("name") or "").strip()
+        if not name:
+            await self._send_error(websocket, "Your name is required to finish setup")
+            return
+        goals = data.get("goals") or []
+        if not isinstance(goals, list):
+            goals = [goals]
+        normalized = {
+            "name": name,
+            "pronouns": str(data.get("pronouns") or "").strip(),
+            "coding_style": str(data.get("coding_style") or "Clean & minimal").strip(),
+            "assistant_style": str(
+                data.get("assistant_style")
+                or "Concise (Jarvis-style) — lead with answer, brief explanations"
+            ).strip(),
+            "os_terminal": str(data.get("os_terminal") or "").strip(),
+            "personality": str(data.get("personality") or "jarvis").strip(),
+            "model": str(data.get("model") or self.config.model).strip(),
+            "projects": [],
+            "goals": [str(goal).strip() for goal in goals if str(goal).strip()],
+        }
+        save_onboarding_data(
+            self.config,
+            self.profile_manager,
+            self.soul_manager,
+            normalized,
+        )
+        self._apply_config_to_agent()
+        await self._send(websocket, {"type": "onboarding_completed", "state": self._onboarding_state()})
+        await self._send(websocket, {"type": "model_updated", "model": self.config.model})
+        await self._send(websocket, self._personal_settings())
+        await self._send(websocket, self._status())
+
     async def _handle_save_personal_settings(
         self, websocket: Any, message: dict[str, Any]
     ) -> None:
@@ -375,6 +453,11 @@ class AresServer:
         content = str(message.get("content") or "")
         if section == "profile":
             self.profile_manager.write(content)
+            # Completing identity through Settings counts as completing setup.
+            # This keeps a subsequent CLI launch from asking the same questions.
+            if self.profile_manager.is_populated() and not self.config.onboarding_completed:
+                self.config.onboarding_completed = True
+                save_config(self.config)
         elif section == "soul":
             self.soul_manager.write(content)
         else:
@@ -388,6 +471,8 @@ class AresServer:
                 "settings": self._personal_settings()["settings"],
             },
         )
+        if section == "profile":
+            await self._send(websocket, self._onboarding_state())
 
     def _session_info(self) -> dict[str, Any]:
         return {
@@ -437,6 +522,66 @@ class AresServer:
             "session_id": self.conversation_id,
             "context_usage": context_usage,
         }
+
+    def _onboarding_state(self) -> dict[str, Any]:
+        """Return setup state derived from the shared config and profile."""
+        return {
+            "type": "onboarding_state",
+            "completed": bool(
+                self.config.onboarding_completed or self.profile_manager.is_populated()
+            ),
+            "model": self.config.model,
+        }
+
+    async def _sync_shared_config(self) -> None:
+        """Pick up model/settings changes saved by the CLI while desktop is open."""
+        if not self._uses_shared_config:
+            return
+        latest = load_config()
+        if latest.model_dump() == self.config.model_dump():
+            return
+        previous = self.config
+        self.config = latest
+        self.context_manager.config = latest
+        data_dir = latest.data_dir
+        self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=latest.profile_path)
+        self.soul_manager = SoulManager(data_dir=data_dir, soul_path=latest.soul_path)
+        self.profile_manager.ensure_exists()
+        self.soul_manager.ensure_exists()
+        self._apply_config_to_agent()
+
+        # A model-only update is cheap.  For MCP/data-root changes, rebuild the
+        # manager as well so long-running desktop and CLI sessions keep the
+        # same effective integration settings.
+        if (
+            previous.mcp_servers != latest.mcp_servers
+            or previous.data_dir != latest.data_dir
+        ):
+            previous_manager = self.mcp_manager
+            self.mcp_manager = (
+                MCPClientManager(latest.mcp_servers, data_dir=latest.data_dir)
+                if latest.mcp_servers
+                else None
+            )
+            if hasattr(self.agent, "set_mcp_manager"):
+                self.agent.set_mcp_manager(self.mcp_manager)
+            else:  # Lightweight fakes used in focused server tests.
+                self.agent.mcp_manager = self.mcp_manager
+                if hasattr(self.agent, "tool_executor"):
+                    self.agent.tool_executor.mcp_manager = self.mcp_manager
+            if previous_manager is not None:
+                with suppress(Exception):
+                    await previous_manager.close()
+            if self.mcp_manager is not None:
+                await self.mcp_manager.start()
+                if hasattr(self.agent, "refresh_tools"):
+                    self.agent.refresh_tools()
+
+    def _apply_config_to_agent(self) -> None:
+        if hasattr(self.agent, "apply_config"):
+            self.agent.apply_config(self.config)
+        else:  # Lightweight fakes used in focused server tests.
+            self.agent.set_model(self.config.model)
 
     def _personal_settings(self) -> dict[str, Any]:
         self.profile_manager.ensure_exists()
@@ -649,6 +794,10 @@ class AresServer:
 
     async def close(self) -> None:
         """Shut down stores."""
+        if self._mcp_start_task is not None and not self._mcp_start_task.done():
+            self._mcp_start_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._mcp_start_task
         if self.mcp_manager is not None:
             with suppress(Exception):
                 await self.mcp_manager.close()

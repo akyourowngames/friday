@@ -10,7 +10,9 @@ module.exports = {
   server: {
     host: "127.0.0.1",
     port: 5173,
-    strictPort: false
+    // Electron always loads port 5173. Failing loudly is safer than silently
+    // opening an older Vite process on 5173 while this one moves to 5175.
+    strictPort: true
   },
   build: {
     outDir: path.join(__dirname, "dist"),

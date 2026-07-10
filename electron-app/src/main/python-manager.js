@@ -9,6 +9,7 @@ class PythonManager {
     this.port = port;
     this.process = null;
     this.ready = false;
+    this.startPromise = null;
   }
 
   get url() {
@@ -29,9 +30,27 @@ class PythonManager {
   }
 
   async start() {
-    if (this.process) {
+    if (this.ready && this.process) {
       return this.url;
     }
+
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+
+    if (this.process) {
+      await this.stop();
+    }
+
+    this.startPromise = this._start();
+    try {
+      return await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  async _start() {
 
     if (this.port === 8765) {
       this.port = await this.getFreePort();
@@ -39,39 +58,50 @@ class PythonManager {
 
     const { command, args, cwd } = this._resolveServerCommand();
 
-    this.process = spawn(command, args, {
+    const child = spawn(command, args, {
       cwd,
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
+    this.process = child;
 
     const readyPromise = this.waitForReadyOutput(30000);
 
-    this.process.stdout.on("data", (data) => {
+    child.stdout.on("data", (data) => {
       const text = data.toString();
       process.stdout.write(`[ares-server] ${text}`);
       this._handleReadyOutput(text);
     });
 
-    this.process.stderr.on("data", (data) => {
+    child.stderr.on("data", (data) => {
       process.stderr.write(`[ares-server] ${data.toString()}`);
     });
 
-    this.process.on("error", (error) => {
+    child.on("error", (error) => {
       this._rejectReady(error);
     });
 
-    this.process.on("exit", (code, signal) => {
-      this.ready = false;
-      this.process = null;
+    child.on("exit", (code, signal) => {
+      const isCurrentProcess = this.process === child;
+      if (isCurrentProcess) {
+        this.ready = false;
+        this.process = null;
+      }
       process.stdout.write(`[ares-server] exited code=${code} signal=${signal}\n`);
-      this._rejectReady(new Error(`Ares server exited before startup (code=${code}, signal=${signal})`));
+      if (isCurrentProcess) {
+        this._rejectReady(new Error(`Ares server exited before startup (code=${code}, signal=${signal})`));
+      }
     });
 
-    await readyPromise;
-    this.ready = true;
-    return this.url;
+    try {
+      await readyPromise;
+      this.ready = true;
+      return this.url;
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
   }
 
   async restart() {

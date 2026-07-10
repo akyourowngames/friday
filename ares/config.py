@@ -2,7 +2,9 @@
 
 import json
 import logging
+import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from pydantic import ValidationError
 
@@ -27,9 +29,29 @@ def get_db_path(data_dir: Path | None = None) -> Path:
 
 
 def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
-    """Inject default MCP servers if the user hasn't configured any."""
+    """Inject defaults and upgrade the legacy built-in MCP set.
+
+    Ares v0.1 shipped with Playwright, GitHub, and Fetch only.  Add newly
+    bundled integrations for users who still have precisely that old default
+    list, while leaving any custom MCP setup untouched.
+    """
     if not config.mcp_servers:
         config.mcp_servers = [s.copy() for s in DEFAULT_MCP_SERVERS]
+    else:
+        legacy_default_names = {"playwright", "github", "fetch"}
+        configured_names = {
+            str(server.get("name", ""))
+            for server in config.mcp_servers
+            if isinstance(server, dict)
+        }
+        if configured_names and configured_names <= legacy_default_names:
+            for server in DEFAULT_MCP_SERVERS:
+                if server["name"] not in configured_names:
+                    config.mcp_servers.append(server.copy())
+    # v0.1 persisted the former 20-step default. Upgrade that unchanged value
+    # so existing users gain enough room for a real desktop workflow.
+    if config.agent_max_iterations == 20:
+        config.agent_max_iterations = 40
     return config
 
 
@@ -51,10 +73,31 @@ def load_config() -> AppConfig:
 
 
 def save_config(config: AppConfig) -> None:
-    """Save config to ~/.ares/config.json."""
+    """Atomically save the config shared by the CLI and desktop app."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config.model_dump(), f, indent=2)
+    _write_config_data(config.model_dump())
+
+
+def _write_config_data(data: dict) -> None:
+    """Replace the shared config in one operation to avoid partial reads."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=CONFIG_PATH.parent,
+            prefix=f".{CONFIG_PATH.stem}-",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            json.dump(data, tmp, indent=2)
+            tmp.write("\n")
+            temp_path = Path(tmp.name)
+        os.replace(temp_path, CONFIG_PATH)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
 
 
 def update_config_field(path: str, value) -> dict:
@@ -73,12 +116,8 @@ def update_config_field(path: str, value) -> dict:
             target[key] = {}
         target = target[key]
     target[keys[-1]] = value
-    import tempfile
-    tmp = CONFIG_PATH.with_suffix(".tmp")
     try:
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        tmp.replace(CONFIG_PATH)
+        _write_config_data(data)
     except OSError as exc:
         return {"ok": False, "error": f"Failed to write config: {exc}"}
     return {"ok": True, "path": path, "value": value}

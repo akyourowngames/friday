@@ -130,8 +130,11 @@ def test_project_agent_skills_are_discovered_from_cwd(tmp_path, monkeypatch):
 def test_builtin_skills_and_tool_definitions_are_available(tmp_path):
     manager = SkillManager([tmp_path])
     names = {skill.name for skill in manager.list_all()}
-    assert {"code-review", "web-research", "daily-planner"}.issubset(names)
+    assert {"code-review", "web-research", "daily-planner", "computer-use"}.issubset(names)
     assert "auto-load relevant skills silently" in manager.compact_index()
+
+    relevant = manager.relevant_skills("Open Notepad, type a note, and save it on my desktop")
+    assert "computer-use" in {skill.name for skill in relevant}
 
     tool_names = {tool["function"]["name"] for tool in get_tool_definitions()}
     assert {"list_skills", "load_skill", "create_skill"}.issubset(tool_names)

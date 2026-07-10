@@ -6,17 +6,34 @@ from types import SimpleNamespace
 import asyncio
 
 from ares.agent import Agent
-from ares.models import AppConfig
-from ares.tools.mcp_client import MCPAuthProvider, MCPClientManager, MCPServerConfig
+from ares.models import AppConfig, DEFAULT_MCP_SERVERS
+from ares.tools.mcp_client import (
+    MCPAuthProvider,
+    MCPClientManager,
+    MCPServerConfig,
+    redact_mcp_text,
+)
 
 
 def test_app_config_exposes_mcp_servers_default():
     config = AppConfig()
-    # Default includes Playwright, GitHub, and Fetch MCP servers
+    # Default includes browser, integration, fetch, and Windows desktop MCP servers.
     names = [s["name"] for s in config.mcp_servers]
     assert "playwright" in names
     assert "github" in names
     assert "fetch" in names
+    assert "windows" in names
+
+
+def test_windows_mcp_is_restricted_to_desktop_interaction_tools():
+    config = next(server for server in DEFAULT_MCP_SERVERS if server["name"] == "windows")
+
+    assert config["command"] == "uvx"
+    assert config["args"][:2] == ["windows-mcp", "serve"]
+    allow_list = config["args"][config["args"].index("--tools") + 1]
+    assert "PowerShell" not in allow_list
+    assert "Registry" not in allow_list
+    assert "FileSystem" not in allow_list
 
 
 def test_mcp_server_config_defaults():
@@ -118,6 +135,59 @@ def test_readiness_report_uses_schema_cache():
     assert report["connected"] == 0
     assert report["servers"]["calendar"]["schema_cached"] is True
     assert report["servers"]["calendar"]["error"] == "offline"
+
+
+def test_readiness_report_is_sorted_and_redacts_diagnostics():
+    manager = MCPClientManager(
+        [
+            {"name": "zeta", "server_url": "https://user:password@example.com/mcp?token=top-secret"},
+            {"name": "alpha", "command": "python", "args": ["server.py"]},
+        ]
+    )
+    manager.server_errors["zeta"] = "Authorization: Bearer top-secret"
+
+    report = manager.readiness_report()
+
+    assert list(report["servers"]) == ["alpha", "zeta"]
+    assert report["errors"] == {"zeta": "Authorization: Bearer [redacted]"}
+    assert "top-secret" not in report["servers"]["zeta"]["endpoint"]
+    assert "password" not in report["servers"]["zeta"]["endpoint"]
+
+
+def test_redact_mcp_text_hides_query_and_flag_secrets():
+    text = "https://example.com/mcp?api_key=abc&access_token=def&project=ares --token xyz"
+
+    redacted = redact_mcp_text(text)
+
+    assert "abc" not in redacted
+    assert "def" not in redacted
+    assert "xyz" not in redacted
+    assert "project=ares" in redacted
+
+
+def test_tools_by_server_groups_and_sorts_discovered_tools():
+    manager = MCPClientManager(
+        [
+            {"name": "calendar", "server_url": "https://example.com/calendar"},
+            {"name": "github", "server_url": "https://example.com/github"},
+        ]
+    )
+    manager.schema_cache = {
+        "calendar": [
+            {"function": {"name": "mcp__calendar__list_events", "description": "[MCP:calendar] List events"}},
+            {"function": {"name": "mcp__calendar__create_event", "description": "[MCP:calendar] Create an event"}},
+        ],
+        "github": [
+            {"function": {"name": "mcp__github__list_issues", "description": "[MCP:github] List issues"}},
+        ],
+    }
+
+    groups = manager.tools_by_server()
+
+    assert list(groups) == ["calendar", "github"]
+    assert [tool["name"] for tool in groups["calendar"]] == ["create_event", "list_events"]
+    assert groups["github"][0]["description"] == "List issues"
+    assert list(manager.tools_by_server("github")) == ["github"]
 
 
 def test_reconnect_server_reports_success(monkeypatch):
