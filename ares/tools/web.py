@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from html import unescape
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from typing import Any
 
 import httpx
@@ -30,8 +31,8 @@ def _bounded_results(max_results: int) -> int:
     return max(1, min(int(max_results), 10))
 
 
-def _normalize_result(result: dict, *, tavily: bool = False) -> dict[str, str]:
-    """Normalize provider result fields."""
+def _normalize_result(result: dict, *, tavily: bool = False) -> dict[str, Any]:
+    """Normalize provider fields without discarding provenance or dates."""
     if tavily:
         title = result.get("title", "")
         url = result.get("url", "")
@@ -40,11 +41,28 @@ def _normalize_result(result: dict, *, tavily: bool = False) -> dict[str, str]:
         title = result.get("title", "")
         url = result.get("href", "") or result.get("url", "")
         snippet = result.get("body", "") or result.get("snippet", "")
-    return {
+    normalized: dict[str, Any] = {
         "title": str(title).strip(),
         "url": str(url).strip(),
         "snippet": str(snippet).strip(),
+        "provider": "tavily" if tavily else "ddgs",
     }
+    for source, target in (
+        ("date", "date"),
+        ("published_date", "published_date"),
+        ("published", "published_date"),
+        ("published_at", "published_date"),
+        ("updated", "updated_date"),
+        ("updated_date", "updated_date"),
+        ("updated_at", "updated_date"),
+    ):
+        value = result.get(source)
+        if value not in (None, ""):
+            normalized[target] = str(value).strip()
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict):
+        normalized["provider_metadata"] = metadata
+    return normalized
 
 
 def ddgs_search(
@@ -158,20 +176,24 @@ def _source_quality(url: str) -> dict[str, Any]:
     """Return a lightweight source quality label for transparent research output."""
     host = ""
     try:
-        from urllib.parse import urlparse
-
-        host = urlparse(url).netloc.lower()
+        host = (urlparse(url).hostname or "").rstrip(".").casefold()
     except Exception:
         host = ""
     score = 0.5
     label = "standard"
+    def trusted_domain(domain: str) -> bool:
+        return host == domain or host.endswith("." + domain)
+
     if host.endswith((".gov", ".edu")):
         score = 0.9
         label = "authoritative"
-    elif any(part in host for part in ("docs.", "developer.", "support.", "github.com")):
+    elif any(trusted_domain(domain) for domain in {
+        "github.com", "gitlab.com", "docs.python.org", "developer.mozilla.org",
+        "learn.microsoft.com", "docs.oracle.com", "developer.apple.com", "kubernetes.io",
+    }):
         score = 0.8
         label = "primary-or-technical"
-    elif any(part in host for part in ("wikipedia.org", "reuters.com", "apnews.com")):
+    elif any(trusted_domain(domain) for domain in {"wikipedia.org", "reuters.com", "apnews.com"}):
         score = 0.7
         label = "reference-or-news"
     elif not host:
@@ -269,24 +291,37 @@ def web_search_payload(
         errors.extend(ddgs_errors)
         actual_provider = "ddgs"
 
-    # Automatically fetch top results for full content
+    # Fetch every bounded top result concurrently.  Outcomes retain input
+    # order and failures are visible rather than silently omitted.
     fetched: list[dict[str, Any]] = []
     if fetch_top > 0 and results:
-        for result in results[:fetch_top]:
-            url = result.get("url", "")
+        selected = results[:max(0, min(int(fetch_top), len(results)))]
+
+        def fetch_one(result: dict[str, Any]) -> dict[str, Any]:
+            url = str(result.get("url", ""))
             if not url:
-                continue
+                return {"url": "", "title": result.get("title", ""), "content": "", "truncated": False, "error": "Search result has no URL."}
             try:
                 page = fetch_url(url, max_chars=max_fetch_chars)
-                if not page["error"]:
-                    fetched.append({
-                        "url": url,
-                        "title": page.get("title", result.get("title", "")),
-                        "content": page["content"],
-                        "truncated": page.get("truncated", False),
-                    })
-            except Exception as exc:
-                errors.append(f"Failed to fetch {url}: {exc}")
+            except Exception as exc:  # defensive boundary for third-party clients
+                return {"url": url, "title": result.get("title", ""), "content": "", "truncated": False, "error": f"Failed to fetch {url}: {exc}"}
+            return {
+                "url": url,
+                "title": page.get("title", result.get("title", "")),
+                "content": page.get("content", ""),
+                "truncated": bool(page.get("truncated", False)),
+                "status_code": page.get("status_code"),
+                "final_url": page.get("final_url", url),
+                "retryable": bool(page.get("retryable", False)),
+                "error": page.get("error", ""),
+            }
+
+        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as pool:
+            outcomes = list(pool.map(fetch_one, selected))
+        fetched.extend(outcomes)
+        for outcome in outcomes:
+            if outcome.get("error"):
+                errors.append(f"Fetch {outcome.get('url') or '<missing URL>'}: {outcome['error']}")
 
     return {
         "query": query,
@@ -360,6 +395,7 @@ def payload_to_json(payload: dict[str, Any]) -> str:
 
 MAX_FETCH_BYTES = 2 * 1024 * 1024  # 2 MB limit
 DEFAULT_FETCH_TIMEOUT = 15.0
+FETCH_CHUNK_BYTES = 64 * 1024
 
 
 def _strip_html_tags(html: str) -> str:
@@ -505,6 +541,7 @@ def fetch_url(
         "content_type": "",
         "status_code": None,
         "truncated": False,
+        "byte_truncated": False,
         "retryable": False,
         "error": "",
     }
@@ -514,62 +551,93 @@ def fetch_url(
         result["error"] = "URL must start with http:// or https://"
         return result
 
+    body = b""
+    response_encoding = "utf-8"
     try:
         with httpx.Client(
             timeout=timeout,
             follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            },
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         ) as client:
-            response = client.get(url)
-            result["status_code"] = response.status_code
-            result["final_url"] = str(response.url)
-            response.raise_for_status()
+            with client.stream("GET", url) as response:
+                result["status_code"] = response.status_code
+                result["final_url"] = str(response.url)
+                result["content_type"] = response.headers.get("content-type", "")
+                response_encoding = response.encoding or "utf-8"
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    result["error"] = f"HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
+                    result["retryable"] = _is_retryable_status(exc.response.status_code)
+                    return result
+                chunks: list[bytes] = []
+                received = 0
+                for chunk in response.iter_bytes(chunk_size=FETCH_CHUNK_BYTES):
+                    if not chunk:
+                        continue
+                    remaining = MAX_FETCH_BYTES - received
+                    if remaining <= 0:
+                        result["byte_truncated"] = True
+                        result["truncated"] = True
+                        break
+                    if len(chunk) > remaining:
+                        chunks.append(chunk[:remaining])
+                        received += remaining
+                        result["byte_truncated"] = True
+                        result["truncated"] = True
+                        break
+                    chunks.append(chunk)
+                    received += len(chunk)
+                body = b"".join(chunks)
     except httpx.TimeoutException:
         result["error"] = f"Request timed out after {timeout}s"
         result["retryable"] = True
         return result
     except httpx.HTTPStatusError as exc:
-        result["error"] = f"HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
-        result["status_code"] = exc.response.status_code
-        result["final_url"] = str(exc.response.url)
-        result["retryable"] = _is_retryable_status(exc.response.status_code)
+        # This catches unusual client implementations that raise before the
+        # response context can expose headers; retain what is available.
+        response = exc.response
+        result["status_code"] = response.status_code
+        result["final_url"] = str(response.url)
+        result["content_type"] = response.headers.get("content-type", "")
+        result["error"] = f"HTTP {response.status_code}: {response.reason_phrase}"
+        result["retryable"] = _is_retryable_status(response.status_code)
         return result
     except Exception as exc:
         result["error"] = f"Request failed: {exc}"
         result["retryable"] = True
         return result
 
-    content_type = response.headers.get("content-type", "")
-    result["content_type"] = content_type
-
-    if "application/pdf" in content_type or result["final_url"].lower().endswith(".pdf"):
-        data = response.content[:MAX_FETCH_BYTES]
-        text, truncated = _extract_pdf_text(data, max_chars)
+    content_type = str(result["content_type"])
+    if "application/pdf" in content_type.casefold() or result["final_url"].lower().endswith(".pdf"):
+        text, truncated = _extract_pdf_text(body, max_chars)
         if not text:
             result["error"] = "PDF text extraction produced no readable text."
             return result
         result["content"] = text
-        result["truncated"] = truncated or len(response.content) > MAX_FETCH_BYTES
+        result["truncated"] = bool(result["truncated"] or truncated)
         return result
 
-    # Handle non-HTML content
-    if "text/html" not in content_type and "text/" in content_type:
-        # Plain text or other text type
-        text = response.text[:MAX_FETCH_BYTES]
+    try:
+        decoded = body.decode(response_encoding, errors="replace")
+    except LookupError:
+        decoded = body.decode("utf-8", errors="replace")
+
+    # Handle non-HTML content.
+    if "text/html" not in content_type.casefold() and "text/" in content_type.casefold():
+        text = decoded
         if len(text) > max_chars:
             text = text[:max_chars]
             result["truncated"] = True
         result["content"] = text
         return result
 
-    if "text/html" not in content_type:
+    if "text/html" not in content_type.casefold():
         result["error"] = f"Unsupported content type: {content_type}. Can only fetch text/HTML."
         return result
 
-    # Parse HTML
-    html = response.text[:MAX_FETCH_BYTES]
+    # Parse bounded HTML bytes only.
+    html = decoded
 
     # Extract title
     title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE)
@@ -601,7 +669,19 @@ def fetch_url_tool(args: dict) -> str:
     data = fetch_url(url, max_chars=max_chars, extract_text=extract_text)
 
     if data["error"]:
-        return f"Error fetching {url}: {data['error']}"
+        # Keep the transport metadata visible to callers even on an HTTP or
+        # extraction failure.  Agents use this to decide whether a retry is
+        # appropriate and to distinguish a redirect from the requested URL.
+        error_parts = [f"Error fetching {url}: {data['error']}"]
+        error_parts.append(f"URL: {data.get('url') or url}")
+        if data.get("final_url") and data["final_url"] != (data.get("url") or url):
+            error_parts.append(f"Final URL: {data['final_url']}")
+        if data.get("status_code") is not None:
+            error_parts.append(f"Status: {data['status_code']}")
+        if data.get("content_type"):
+            error_parts.append(f"Content type: {data['content_type']}")
+        error_parts.append(f"Retryable: {bool(data.get('retryable'))}")
+        return "\n".join(error_parts)
 
     parts = []
     if data["title"]:

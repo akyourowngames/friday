@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def local_timezone_name() -> str:
@@ -52,6 +53,20 @@ def parse_user_datetime(
         return None
 
     tz_name = timezone_name or local_timezone_name()
+    try:
+        requested_tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        if timezone_name is None:
+            requested_tz = now_local().tzinfo
+            if requested_tz is not None:
+                tz_name = str(tz_name or "local")
+            else:
+                return text
+        else:
+            # Date parsing is also used by non-tool callers that historically
+            # returned the original text on a bad value.  Keep that contract while
+            # never silently reinterpret it in the machine timezone.
+            return text
     parsed = _parse_iso(text)
 
     if parsed is None:
@@ -62,7 +77,7 @@ def parse_user_datetime(
                 text,
                 settings={
                     "PREFER_DATES_FROM": "future",
-                    "RELATIVE_BASE": base or now_local(),
+                    "RELATIVE_BASE": (base or datetime.now(requested_tz)).astimezone(requested_tz),
                     "TIMEZONE": tz_name,
                     "TO_TIMEZONE": tz_name,
                     "RETURN_AS_TIMEZONE_AWARE": True,
@@ -75,6 +90,6 @@ def parse_user_datetime(
         return text
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=now_local().tzinfo)
+        parsed = parsed.replace(tzinfo=requested_tz)
 
-    return parsed.astimezone(now_local().tzinfo).isoformat(timespec="seconds")
+    return parsed.astimezone(requested_tz).isoformat(timespec="seconds")

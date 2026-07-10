@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,9 +27,59 @@ EXPORT_PROFILES: dict[str, dict[str, bool]] = {
 
 
 def default_export_path() -> Path:
-    """Return a timestamped export path under ~/.ares."""
+    """Return a collision-safe export path under ~/.ares."""
     stamp = now_local().strftime("%Y%m%d-%H%M%S")
-    return Path("~/.ares").expanduser() / f"ares-export-{stamp}.json"
+    return Path("~/.ares").expanduser() / f"ares-export-{stamp}-{uuid.uuid4().hex[:8]}.json"
+
+
+_SECRET_KEY = re.compile(
+    r"(?:api[_-]?key|access[_-]?key|token|secret|password|passwd|credential|authorization|private[_-]?key|client[_-]?secret)",
+    re.IGNORECASE,
+)
+
+
+def _redact_credentials(value: Any, *, path: str = "") -> tuple[Any, dict[str, str]]:
+    """Redact nested secrets while retaining every non-secret config field."""
+    preview: dict[str, str] = {}
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            if _SECRET_KEY.search(str(key)):
+                preview[child_path] = "redacted" if item not in (None, "", [], {}) else "empty"
+                cleaned[key] = None
+            else:
+                cleaned_item, child_preview = _redact_credentials(item, path=child_path)
+                cleaned[key] = cleaned_item
+                preview.update(child_preview)
+        return cleaned, preview
+    if isinstance(value, list):
+        cleaned_list = []
+        for index, item in enumerate(value):
+            cleaned_item, child_preview = _redact_credentials(item, path=f"{path}[{index}]")
+            cleaned_list.append(cleaned_item)
+            preview.update(child_preview)
+        return cleaned_list, preview
+    return value, preview
+
+
+def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
+    """Validate serialized JSON before atomically making an export visible."""
+    encoded = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
+    # Catch serialization / malformed output before a destination is touched.
+    json.loads(encoded.decode("utf-8"))
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Verify precisely what was written, not only the pre-write bytes.
+        json.loads(temporary.read_text(encoding="utf-8"))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def export_data(
@@ -40,14 +94,17 @@ def export_data(
     output_path = Path(path).expanduser() if path else default_export_path()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     app_config = config or load_config()
-    flags = EXPORT_PROFILES.get((profile or "full").lower(), EXPORT_PROFILES["full"])
-    redaction_preview = _redaction_preview(app_config) if flags["config"] else {}
+    normalized_profile = str(profile or "full").casefold()
+    if normalized_profile not in EXPORT_PROFILES:
+        normalized_profile = "full"
+    flags = EXPORT_PROFILES[normalized_profile]
+    config_data, redaction_preview = _redact_credentials(app_config.model_dump()) if flags["config"] else ({}, {})
     payload: dict[str, Any] = {
         "version": 1,
         "exported_at": now_local_iso(),
-        "export_profile": profile if profile in EXPORT_PROFILES else "full",
-        "config": app_config.model_dump(exclude={"api_key", "tavily_api_key"}) if flags["config"] else {},
-        "secrets_redacted": list(redaction_preview),
+        "export_profile": normalized_profile,
+        "config": config_data,
+        "secrets_redacted": sorted(redaction_preview),
         "redaction_preview": redaction_preview,
         "memories": memory_store.list_all() if flags["memories"] else [],
         "conversations": [],
@@ -57,18 +114,13 @@ def export_data(
         payload["conversations"] = conversation_store.list_conversations()
         payload["conversation_messages"] = conversation_store.list_messages()
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+    _atomic_json_write(output_path, payload)
     return output_path
 
 
 def _redaction_preview(config: AppConfig) -> dict[str, str]:
-    """Return which sensitive config fields were excluded from export."""
-    data = config.model_dump()
-    preview: dict[str, str] = {}
-    for key in ("api_key", "tavily_api_key"):
-        value = str(data.get(key) or "")
-        preview[key] = "redacted" if value else "empty"
+    """Backward-compatible public helper for redaction diagnostics."""
+    _data, preview = _redact_credentials(config.model_dump())
     return preview
 
 

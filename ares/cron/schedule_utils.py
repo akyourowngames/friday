@@ -100,24 +100,37 @@ def simulate_next_runs(
         })
 
     missed = 0
+    missed_truncated = False
     explanation = "No previous run timestamp was provided."
     if last_run_at:
         last = _parse_maybe_datetime(last_run_at)
         if last is not None:
             last_local = last.astimezone(tz)
             catchup = croniter(expr, last_local)
-            while missed < 100:
+            missed_cap = 100
+            while missed < missed_cap:
                 candidate = catchup.get_next(datetime)
                 if candidate.tzinfo is None:
                     candidate = candidate.replace(tzinfo=tz)
                 if candidate.astimezone(timezone.utc) > base_utc:
                     break
                 missed += 1
+            if missed == missed_cap:
+                # Do one bounded look-ahead so callers never mistake the cap
+                # for an exact count when a machine was offline for a long
+                # time.  We intentionally do not enumerate an unbounded
+                # backlog here.
+                candidate = catchup.get_next(datetime)
+                if candidate.tzinfo is None:
+                    candidate = candidate.replace(tzinfo=tz)
+                missed_truncated = candidate.astimezone(timezone.utc) <= base_utc
             explanation = (
-                f"{missed} scheduled run(s) were missed between "
+                f"{'At least ' if missed_truncated else ''}{missed} scheduled run(s) were missed between "
                 f"{last.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')} and "
                 f"{base_utc.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}."
             )
+            if missed_truncated:
+                explanation += " The missed-run count is capped at 100."
         else:
             explanation = "Previous run timestamp could not be parsed."
 
@@ -127,6 +140,8 @@ def simulate_next_runs(
         "base_utc": base_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "next_runs": upcoming,
         "missed_runs": missed,
+        "missed_runs_truncated": missed_truncated,
+        "missed_runs_lower_bound": missed if missed_truncated else None,
         "missed_run_explanation": explanation,
     }
 

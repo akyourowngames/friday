@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 from ares.tools.exporter import export_data
 from ares.tools.filesystem import (
-    list_directory, read_file, search_files, get_file_info as _get_file_info_impl,
+    list_directory, read_file, search_files, search_files_async, get_file_info as _get_file_info_impl,
     glob_pattern as _glob_pattern_impl, disk_usage as _disk_usage_impl,
     checksum as _checksum_impl, copy_file as _copy_file_impl,
     find_duplicates as _find_duplicates_impl, tail_file as _tail_file_impl,
@@ -163,6 +163,13 @@ class ToolExecutor:
         """Execute a tool, allowing local tools to use async integrations."""
         if tool_name == "web_search":
             return await self._web_search_async(arguments)
+        if tool_name == "search_files":
+            return await search_files_async(
+                query=arguments.get("query", ""),
+                path=arguments.get("path", "."),
+                name_pattern=arguments.get("name_pattern", ""),
+                max_results=int(arguments.get("max_results", 20)),
+            )
         return self.execute(tool_name, arguments)
 
     # ── Memory tools ──────────────────────────────────────────────
@@ -441,31 +448,12 @@ class ToolExecutor:
     # ── Filesystem (write) tools ───────────────────────────────────
 
     def _write_file(self, args: dict) -> str:
-        path = args["path"]
-        content = args["content"]
-        dry_run = bool(args.get("dry_run", False))
-        confirm = bool(args.get("confirm", False))
-
-        # Check if file exists and needs confirmation
-        from ares.tools.filesystem import resolve_path as read_resolve
-        try:
-            resolved = read_resolve(path)
-            is_overwrite = resolved.exists()
-        except ValueError:
-            is_overwrite = False
-
-        if is_overwrite and not confirm and not dry_run:
-            from ares.tools.filesystem import _format_size
-            try:
-                size = _format_size(resolved.stat().st_size)
-            except OSError:
-                size = "unknown"
-            return (
-                f"⚠ CONFIRM REQUIRED: This will overwrite {path} ({size}). "
-                f"Re-call with confirm=true to proceed."
-            )
-
-        return _write_file_impl(path, content, dry_run=dry_run)
+        return _write_file_impl(
+            args["path"],
+            args["content"],
+            dry_run=bool(args.get("dry_run", False)),
+            confirm=bool(args.get("confirm", False)),
+        )
 
     def _edit_file(self, args: dict) -> str:
         return _edit_file_impl(
@@ -746,26 +734,21 @@ class ToolExecutor:
     # ── Terminal ───────────────────────────────────────────────────
 
     def _terminal_exec(self, args: dict) -> str:
-        """Execute a shell command via persistent REPL for reliable output capture.
-
-        Optionally displays the command in the visual terminal panel if connected.
-        """
-        command = args.get("command") or f"@{args.get('command_key', '')}"
-        timeout = int(args.get("timeout", 30))
-        cwd = args.get("cwd")
-        command = resolve_project_command(command, cwd)
-
-        # Execute via REPL for reliable output capture
-        result = self.repl.execute_shell(command, timeout=timeout, cwd=cwd, profile=args.get("profile"))
-
-        # Also send to visual terminal if connected (best-effort display)
-        if hasattr(self, '_terminal_display_callback') and self._terminal_display_callback:
-            try:
-                self._terminal_display_callback(command)
-            except Exception:
-                pass  # display is optional
-
-        return result
+        """Run with exactly run_command semantics plus observable display state."""
+        result = self._run_command(args)
+        command = resolve_project_command(
+            args.get("command") or f"@{args.get('command_key', '')}",
+            args.get("cwd"),
+        )
+        callback = getattr(self, "_terminal_display_callback", None)
+        if callback is None:
+            return result + "\nDisplay delivery: unavailable (no visual terminal attached)."
+        try:
+            callback(command)
+        except Exception as exc:
+            # Display is intentionally non-fatal, but never invisible.
+            return result + f"\nDisplay delivery: failed (non-fatal): {exc}"
+        return result + "\nDisplay delivery: delivered."
 
 
     # ── Phone tools ───────────────────────────────────────────────

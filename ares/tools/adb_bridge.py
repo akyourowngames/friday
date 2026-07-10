@@ -18,7 +18,15 @@ def _json(payload: dict[str, Any]) -> str:
 
 
 def _run(args: list[str], timeout: int = 12) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=False)
+    return subprocess.run(
+        args,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
 
 
 def _adb() -> str | None:
@@ -49,7 +57,10 @@ def connected_devices() -> list[str]:
     adb = _adb()
     if not adb:
         return []
-    proc = _run([adb, "devices"])
+    try:
+        proc = _run([adb, "devices"])
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return []
     devices = []
     for line in proc.stdout.splitlines()[1:]:
         parts = line.split()
@@ -68,7 +79,10 @@ def get_battery_status() -> str:
         return _json({"ok": False, "error": "adb not found. Install Android platform-tools."})
     if not is_device_connected():
         return _json({"ok": False, "error": "No authorized ADB device connected."})
-    proc = _run([*_base_args(), "shell", "dumpsys", "battery"])
+    try:
+        proc = _run([*_base_args(), "shell", "dumpsys", "battery"])
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        return _json({"ok": False, "error": f"ADB battery query failed: {exc}"})
     if proc.returncode != 0:
         return _json({"ok": False, "error": (proc.stderr or proc.stdout).strip()})
     fields: dict[str, Any] = {}
@@ -91,7 +105,10 @@ def call_number(number: str, confirm: bool = False) -> str:
 
     normalized = re.sub(r"[ ()-]", "", number)
     uri = "tel:" + normalized
-    proc = _run([*_base_args(), "shell", "am", "start", "-a", "android.intent.action.CALL", "-d", uri], timeout=20)
+    try:
+        proc = _run([*_base_args(), "shell", "am", "start", "-a", "android.intent.action.CALL", "-d", uri], timeout=20)
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        return _json({"ok": False, "dialed": False, "number": number, "error": f"ADB call command failed: {exc}"})
     return _json({"ok": proc.returncode == 0, "dialed": proc.returncode == 0, "manual_phone_confirmation_may_be_required": True, "number": number, "error": "" if proc.returncode == 0 else (proc.stderr or proc.stdout).strip()})
 
 
@@ -104,12 +121,15 @@ def phone_status() -> str:
 
     battery_fields: dict[str, Any] = {}
     if adb_ok:
-        proc = _run([*_base_args(), "shell", "dumpsys", "battery"])
-        if proc.returncode == 0:
-            for line in proc.stdout.splitlines():
-                if ":" in line:
-                    key, value = line.strip().split(":", 1)
-                    battery_fields[key.strip()] = value.strip()
+        try:
+            proc = _run([*_base_args(), "shell", "dumpsys", "battery"])
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    if ":" in line:
+                        key, value = line.strip().split(":", 1)
+                        battery_fields[key.strip()] = value.strip()
+        except (OSError, subprocess.TimeoutExpired, UnicodeError):
+            pass
 
     adb_error = ""
     if not adb_ok:
@@ -118,10 +138,11 @@ def phone_status() -> str:
             if not adb_present
             else "No authorized ADB device connected."
         )
+    kde_ready = bool(kde.get("ok")) and bool(kde.get("reachable"))
     capability_matrix = {
-        "notifications": bool(kde.get("ok")) and bool(kde.get("reachable", True)),
-        "contacts": bool(kde.get("ok")),
-        "sms": bool(kde.get("ok")),
+        "notifications": kde_ready,
+        "contacts": kde_ready,
+        "sms": kde_ready,
         "battery": adb_ok,
         "calls": adb_ok,
         "launch_app": adb_ok,
@@ -144,7 +165,12 @@ def phone_status() -> str:
 
     return _json(
         {
-            "ok": bool(kde.get("ok")) and adb_ok,
+            # ``ok`` means at least one useful capability family is available;
+            # callers that need both can use fully_ready.  This prevents an
+            # ADB-only phone from looking wholly unavailable.
+            "ok": kde_ready or adb_ok,
+            "any_ready": kde_ready or adb_ok,
+            "fully_ready": kde_ready and adb_ok,
             "permission_preflight": permission_preflight,
             "capability_matrix": capability_matrix,
             "kdeconnect": kde,
@@ -170,10 +196,13 @@ def launch_app(package: str) -> str:
     if not package or not package.strip():
         return _json({"ok": False, "error": "Package name is required."})
     package = package.strip()
-    proc = _run(
-        [*_base_args(), "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"],
-        timeout=15,
-    )
+    try:
+        proc = _run(
+            [*_base_args(), "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"],
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        return _json({"ok": False, "launched": False, "package": package, "error": f"ADB launch command failed: {exc}"})
     output = (proc.stdout + proc.stderr).strip()
     ok = proc.returncode == 0 and "Events injected" in output
     return _json({"ok": ok, "launched": ok, "package": package, "error": "" if ok else (output or "Failed to launch app.")})
@@ -188,10 +217,13 @@ def launch_url(url: str) -> str:
     if not url or not url.strip():
         return _json({"ok": False, "error": "URL is required."})
     url = url.strip()
-    proc = _run(
-        [*_base_args(), "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url],
-        timeout=15,
-    )
+    try:
+        proc = _run(
+            [*_base_args(), "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url],
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        return _json({"ok": False, "launched": False, "url": url, "error": f"ADB URL command failed: {exc}"})
     output = (proc.stdout + proc.stderr).strip()
     ok = proc.returncode == 0
     return _json({"ok": ok, "launched": ok, "url": url, "error": "" if ok else (output or "Failed to open URL.")})

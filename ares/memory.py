@@ -294,7 +294,9 @@ class MemoryStore:
     def _rank_score(self, base_score: float, meta: sqlite3.Row) -> float:
         """Blend retrieval score with importance, confidence, age, and use."""
         importance = float(meta["importance"] if "importance" in meta.keys() else 0.5)
-        confidence = float(meta["confidence"] or 1.0)
+        raw_confidence = meta["confidence"] if "confidence" in meta.keys() else None
+        # 0.0 is an explicit user signal, not a missing value.
+        confidence = 1.0 if raw_confidence is None else float(raw_confidence)
         access_count = int(meta["access_count"] or 0)
         created = _parse_db_datetime(meta["created_at"])
         age_days = 0.0
@@ -320,14 +322,16 @@ class MemoryStore:
             session_id: Current session ID (required when scope="session").
             recent_sessions: Number of recent sessions to include (default 3).
         """
-        results = {}
+        results: dict[int, dict[str, object]] = {}
+        bounded_limit = max(1, min(int(limit), 100))
+        diagnostics: dict[str, object] = {"query": query, "scope": scope, "vector": "disabled", "fts": "not-run", "mode": "degraded"}
 
         # Build session filter for scoped search
         session_filter = ""
-        session_params: list = []
+        session_params: list[object] = []
         if scope == "session" and session_id:
-            session_filter = """AND (session_id = ? OR session_id IS NULL
-                OR session_id IN (
+            session_filter = """AND (m.session_id = ? OR m.session_id IS NULL
+                OR m.session_id IN (
                     SELECT DISTINCT session_id FROM facts_meta
                     WHERE session_id IS NOT NULL
                     ORDER BY created_at DESC
@@ -339,54 +343,75 @@ class MemoryStore:
         if self.vector_enabled:
             try:
                 query_vec = self._embed(query)
+                # Pull a larger bounded candidate window when a vec0 join is
+                # unavailable, then apply the scope before accepting entries.
+                candidate_limit = max(bounded_limit * 20, 100)
                 vec_rows = self.conn.execute(
                     """
                     SELECT rowid, distance FROM user_facts
                     WHERE embedding MATCH ? ORDER BY distance LIMIT ?
                     """,
-                    (query_vec, limit * 2),
+                    (query_vec, candidate_limit),
                 ).fetchall()
-                # Filter by session scope after vector search
-                if session_filter:
-                    valid_ids = set()
+                if session_filter and vec_rows:
                     meta_rows = self.conn.execute(
-                        f"SELECT fact_id FROM facts_meta WHERE fact_id IN ({','.join('?' for _ in vec_rows)}) {session_filter}",
-                        [r["rowid"] for r in vec_rows] + session_params,
+                        f"SELECT fact_id FROM facts_meta AS m WHERE fact_id IN ({','.join('?' for _ in vec_rows)}) {session_filter}",
+                        [row["rowid"] for row in vec_rows] + session_params,
                     ).fetchall()
-                    valid_ids = {r["fact_id"] for r in meta_rows}
-                    vec_rows = [r for r in vec_rows if r["rowid"] in valid_ids]
+                    valid_ids = {row["fact_id"] for row in meta_rows}
+                    vec_rows = [row for row in vec_rows if row["rowid"] in valid_ids]
                 for row in vec_rows:
                     results[row["rowid"]] = {"distance": row["distance"], "source": "vector"}
+                diagnostics["vector"] = "ok" if vec_rows else "no-results"
             except Exception as exc:
+                diagnostics["vector"] = f"failed: {type(exc).__name__}"
                 logger.debug("Vector memory search failed; falling back to FTS only: %s", exc)
 
         # 2. FTS5 keyword search
-        try:
-            fts_rows = self.conn.execute(
-                """
-                SELECT rowid, rank FROM facts_fts
-                WHERE facts_fts MATCH ? ORDER BY rank LIMIT ?
-                """,
-                (query, limit * 2),
-            ).fetchall()
-            # Filter by session scope after FTS search
-            if session_filter:
-                valid_ids = set()
-                meta_rows = self.conn.execute(
-                    f"SELECT fact_id FROM facts_meta WHERE fact_id IN ({','.join('?' for _ in fts_rows)}) {session_filter}",
-                    [r["rowid"] for r in fts_rows] + session_params,
+        candidate_limit = max(bounded_limit * 4, 50)
+        structured_error = None
+        fts_rows = []
+        queries: list[tuple[str, str]] = [(str(query), "structured")]
+        literal_terms = re.findall(r"[\w]+", str(query), flags=re.UNICODE)
+        if literal_terms:
+            literal_query = " AND ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in literal_terms)
+            if literal_query != query:
+                queries.append((literal_query, "literal"))
+        for fts_query, mode in queries:
+            try:
+                fts_rows = self.conn.execute(
+                    f"""
+                    SELECT facts_fts.rowid AS rowid, facts_fts.rank AS rank
+                    FROM facts_fts
+                    JOIN facts_meta AS m ON m.fact_id = facts_fts.rowid
+                    WHERE facts_fts MATCH ? {session_filter}
+                    ORDER BY facts_fts.rank LIMIT ?
+                    """,
+                    [fts_query] + session_params + [candidate_limit],
                 ).fetchall()
-                valid_ids = {r["fact_id"] for r in meta_rows}
-                fts_rows = [r for r in fts_rows if r["rowid"] in valid_ids]
-            for row in fts_rows:
-                rid = row["rowid"]
-                if rid in results:
-                    results[rid]["fts_rank"] = row["rank"]
-                    results[rid]["source"] = "both"
-                else:
-                    results[rid] = {"fts_rank": row["rank"], "source": "fts"}
-        except Exception as exc:
-            logger.debug("FTS memory search failed; using vector results only: %s", exc)
+                diagnostics["fts"] = mode if fts_rows else f"{mode}: no-results"
+                if fts_rows or mode == "literal":
+                    break
+            except Exception as exc:
+                structured_error = exc
+                diagnostics["fts"] = f"{mode} failed: {type(exc).__name__}"
+                logger.debug("FTS memory %s query failed: %s", mode, exc)
+                continue
+        for row in fts_rows:
+            rid = row["rowid"]
+            if rid in results:
+                results[rid]["fts_rank"] = row["rank"]
+                results[rid]["source"] = "both"
+            else:
+                results[rid] = {"fts_rank": row["rank"], "source": "fts"}
+        if fts_rows:
+            diagnostics["mode"] = "hybrid" if any(value.get("source") == "both" for value in results.values()) else "fts"
+        elif results:
+            diagnostics["mode"] = "vector"
+        elif structured_error:
+            diagnostics["mode"] = "degraded"
+
+        self.last_search_diagnostics = diagnostics
 
         if not results:
             return []
@@ -417,14 +442,14 @@ class MemoryStore:
         enriched.sort(key=lambda x: x["_score"])
 
         # 4. Update access stats
-        for entry in enriched[:limit]:
+        for entry in enriched[:bounded_limit]:
             self.conn.execute(
                 "UPDATE facts_meta SET last_accessed = datetime('now'), access_count = access_count + 1 WHERE fact_id = ?",
                 (entry["fact_id"],),
             )
         self.conn.commit()
 
-        return enriched[:limit]
+        return enriched[:bounded_limit]
 
     def delete(self, fact_id: int) -> bool:
         """Delete a fact by ID. Returns True if deleted, False if not found."""
@@ -451,16 +476,26 @@ class MemoryStore:
         """Delete multiple facts by ID. Returns count deleted."""
         if not fact_ids:
             return 0
-        placeholders = ",".join("?" * len(fact_ids))
-        self.conn.execute(
-            f"DELETE FROM facts_meta WHERE fact_id IN ({placeholders})",
-            fact_ids,
+        unique_ids = list(dict.fromkeys(int(fact_id) for fact_id in fact_ids))
+        placeholders = ",".join("?" * len(unique_ids))
+        existing = [
+            row["fact_id"]
+            for row in self.conn.execute(
+                f"SELECT fact_id FROM facts_meta WHERE fact_id IN ({placeholders})", unique_ids
+            ).fetchall()
+        ]
+        if not existing:
+            return 0
+        existing_placeholders = ",".join("?" * len(existing))
+        cursor = self.conn.execute(
+            f"DELETE FROM facts_meta WHERE fact_id IN ({existing_placeholders})",
+            existing,
         )
-        for fid in fact_ids:
+        for fid in existing:
             self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fid,))
             self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fid,))
         self.conn.commit()
-        return len(fact_ids)
+        return max(0, int(cursor.rowcount))
 
     def find_similar_to(self, fact_id: int, limit: int = 5) -> list[dict]:
         """Find memories vector-similar to the given fact."""

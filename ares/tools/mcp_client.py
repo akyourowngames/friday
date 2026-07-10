@@ -393,18 +393,32 @@ class MCPClientManager:
             await self.close()
         self.tool_definitions = []
         self.server_errors = {}
-        for name, config in self.servers.items():
+        async def connect_one(name: str, config: MCPServerConfig) -> None:
             try:
-                await self._connect_server(name, config)
+                await asyncio.wait_for(
+                    self._connect_server(name, config),
+                    timeout=max(1.0, float(config.timeout_seconds) * 2 + 1),
+                )
                 self.server_errors.pop(name, None)
-            except BaseException as exc:
+            except asyncio.CancelledError as exc:
+                _clear_current_task_cancellation()
+                self.server_errors[name] = f"Connection cancelled: {exc or 'cancelled'}"
+                await self.close_server(name)
+            except Exception as exc:
                 self.server_errors[name] = str(exc) or exc.__class__.__name__
+                await self.close_server(name)
                 logger.warning(
                     "Failed to connect MCP server '%s' — check config and network",
                     name,
                 )
             finally:
                 _uncancel_task()
+        # Independent integrations must not queue behind one slow/unhealthy
+        # server.  Each task owns a timeout and an explicit readiness result.
+        await asyncio.gather(
+            *(connect_one(name, config) for name, config in self.servers.items()),
+            return_exceptions=True,
+        )
 
     async def close(self) -> None:
         for stack in list(self._exit_stacks.values()):
@@ -456,17 +470,18 @@ class MCPClientManager:
             config = self.servers[name]
             cached = self.schema_cache.get(name, [])
             connected = name in self.sessions
+            error = redact_mcp_text(self.server_errors.get(name, ""))
             servers[name] = {
                 "name": name,
-                "ready": connected,
-                "status": "ready" if connected else "disconnected",
+                "ready": connected and not error,
+                "status": "ready" if connected and not error else ("degraded" if error else "disconnected"),
                 "transport": config.transport,
                 "endpoint": redact_mcp_text(config.endpoint),
                 "command": config.command,
                 "timeout_seconds": config.timeout_seconds,
                 "tools": len(cached),
                 "schema_cached": bool(cached),
-                "error": redact_mcp_text(self.server_errors.get(name, "")),
+                "error": error,
             }
         errors = {
             name: details["error"]
@@ -510,7 +525,7 @@ class MCPClientManager:
 
     async def health_probe(self) -> dict[str, Any]:
         """Probe connected sessions and refresh schema cache when possible."""
-        for name, session in list(self.sessions.items()):
+        async def probe_one(name: str, session: Any) -> None:
             config = self.servers.get(name, MCPServerConfig(name=name))
             try:
                 response = await asyncio.wait_for(
@@ -528,11 +543,18 @@ class MCPClientManager:
                 self.server_errors.pop(name, None)
             except asyncio.TimeoutError:
                 self.server_errors[name] = f"Health probe timed out after {config.timeout_seconds:g}s."
+                await self.close_server(name)
             except asyncio.CancelledError as exc:
                 _clear_current_task_cancellation()
                 self.server_errors[name] = f"Health probe cancelled: {exc}"
+                await self.close_server(name)
             except Exception as exc:
                 self.server_errors[name] = str(exc)
+                await self.close_server(name)
+        await asyncio.gather(
+            *(probe_one(name, session) for name, session in list(self.sessions.items())),
+            return_exceptions=True,
+        )
         return self.readiness_report()
 
     async def _connect_server(self, name: str, config: MCPServerConfig) -> None:
@@ -593,12 +615,12 @@ class MCPClientManager:
             tools_response =             await asyncio.wait_for(
                 session.list_tools(), timeout=config.timeout_seconds
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             _uncancel_task()
             await stack.aclose()
             if http_client is not None:
                 await http_client.aclose()
-            return
+            raise RuntimeError(f"MCP connection cancelled: {exc or 'cancelled'}") from exc
         except Exception:
             await stack.aclose()
             if http_client is not None:
@@ -644,7 +666,11 @@ class MCPClientManager:
             result = await asyncio.wait_for(
                 session.call_tool(mcp_tool, arguments=arguments), timeout=timeout
             )
-            return self._render_result(result)
+            is_error = bool(getattr(result, "isError", getattr(result, "is_error", False)))
+            rendered = self._render_result(result)
+            if is_error:
+                return f"Error: MCP tool '{mcp_tool}' on '{server_name}' reported failure: {rendered}"
+            return rendered
         except asyncio.TimeoutError:
             return f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s."
         except asyncio.CancelledError as exc:

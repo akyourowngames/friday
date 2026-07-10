@@ -1,68 +1,209 @@
-"""Cron job runner that executes each run in a fresh Agent session."""
+"""Cron execution with a claimed lease and one durable terminal outcome."""
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 import traceback
+import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 from ares.config import load_config
-from ares.cron.schedule_utils import next_run_utc
-from ares.cron.store import CronStore, utc_now
+from ares.cron.store import CronLeaseLostError, CronStore, utc_now
+
 
 class CronRunner:
-    def __init__(self, store: CronStore | None = None, config=None, on_complete=None):
+    def __init__(self, store: CronStore | None = None, config=None, on_complete=None, *, lease_seconds: int = 900):
         self.config = config or load_config()
         self.store = store or CronStore(Path(self.config.data_dir).expanduser().parent)
         self.on_complete = on_complete
+        self.lease_seconds = max(30, int(lease_seconds))
+
     def latest_summary(self, job_id: str) -> str:
-        logs=self.store.recent_logs(job_id, 1)
-        if not logs: return ""
-        text=logs[0].read_text(encoding='utf-8')
-        marker='## Summary'
-        if marker not in text: return ""
-        part=text.split(marker,1)[1]
-        for sep in ('\n## ', '\r\n## '):
-            if sep in part: part=part.split(sep,1)[0]
-        return part.strip()
-    async def run_job(self, job_id: str) -> Path:
-        job=self.store.get_job(job_id)
-        if not job: raise ValueError(f"Cron job '{job_id}' not found")
-        self.store.update_job(job_id, state='running')
-        started=utc_now(); start=perf_counter(); output=''; status='completed'; err=''
+        logs = self.store.recent_logs(job_id, 1)
+        if not logs:
+            return ""
         try:
-            prompt=job['prompt']
-            prev=self.latest_summary(job_id)
-            if prev: prompt=f"## Previous Run Summary\n{prev}\n\n## Scheduled Job Prompt\n{prompt}"
-            cfg=self.config.model_copy(deep=True)
-            if job.get('max_iterations'): cfg.agent_max_iterations=int(job['max_iterations'])
-            else: cfg.agent_max_iterations=int(getattr(cfg,'cron_max_iterations',10))
+            text = logs[0].read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        marker = "## Summary"
+        if marker not in text:
+            return ""
+        part = text.split(marker, 1)[1]
+        for separator in ("\n## ", "\r\n## "):
+            if separator in part:
+                part = part.split(separator, 1)[0]
+        return part.strip()
+
+    async def _heartbeat_loop(self, job_id: str, lease_id: str, stopped: asyncio.Event) -> None:
+        # Refresh well before expiration but do not churn the JSON store every
+        # second for a job that may run hours.
+        interval = max(5, min(60, self.lease_seconds // 3))
+        while True:
+            try:
+                await asyncio.wait_for(stopped.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                self.store.heartbeat_job(job_id, lease_id, lease_seconds=self.lease_seconds)
+            except CronLeaseLostError:
+                return
+            except Exception:
+                # The runner will still attempt a terminal transition.  A
+                # transient heartbeat failure must not turn an otherwise useful
+                # run into a silent, orphaned task.
+                continue
+
+    async def run_job(self, job_id: str, *, lease_id: str | None = None) -> Path:
+        """Run a job once after claiming (or validating) its exclusive lease.
+
+        ``lease_id`` is used by the tool layer when it has already claimed a
+        run before scheduling a background task.  This prevents a race between
+        acknowledgement and task start.
+        """
+        if lease_id is None:
+            job = self.store.claim_job(job_id, lease_seconds=self.lease_seconds)
+            lease_id = str(job["lease_id"])
+        else:
+            job = self.store.get_job(job_id)
+            if not job or job.get("state") != "running" or job.get("lease_id") != lease_id:
+                raise CronLeaseLostError(f"Cron job '{job_id}' does not hold the requested lease")
+
+        started = str(job.get("run_started_at") or utc_now())
+        start = perf_counter()
+        output = ""
+        error_text = ""
+        status = "completed"
+        agent = None
+        memory_store = None
+        conversation_store = None
+        stopped = asyncio.Event()
+        heartbeat = asyncio.create_task(self._heartbeat_loop(job_id, lease_id, stopped))
+        cancelled = False
+
+        try:
+            prompt = str(job["prompt"])
+            previous = self.latest_summary(job_id)
+            if previous:
+                prompt = f"## Previous Run Summary\n{previous}\n\n## Scheduled Job Prompt\n{prompt}"
+            config = self.config.model_copy(deep=True)
+            if job.get("max_iterations"):
+                config.agent_max_iterations = int(job["max_iterations"])
+            else:
+                config.agent_max_iterations = int(getattr(config, "cron_max_iterations", 10))
+
             from ares.conversations import ConversationStore
             from ares.memory import MemoryStore
-            mem=MemoryStore(); conv=ConversationStore()
             from ares.agent import Agent
-            agent=Agent(mem, conv, config=cfg, is_cron_session=True)
-            try:
-                chunks=[]
-                async for chunk in agent.run_stream(prompt, []): chunks.append(chunk)
-                output=''.join(chunks)
-            finally:
-                await agent.close(); conv.close(); mem.close()
+
+            memory_store = MemoryStore()
+            conversation_store = ConversationStore()
+            agent = Agent(memory_store, conversation_store, config=config, is_cron_session=True)
+            chunks: list[str] = []
+            async for chunk in agent.run_stream(prompt, []):
+                chunks.append(str(chunk))
+            output = "".join(chunks)
+        except asyncio.CancelledError:
+            cancelled = True
+            status = "failed"
+            error_text = "Cron run was cancelled."
+            output = error_text
         except Exception:
-            status='failed'; err=traceback.format_exc(); output=err
-        duration=perf_counter()-start
-        log=self._write_log(job, started, status, duration, output, err)
-        updates={"state":"scheduled","last_run_at":started,"run_count":int(job.get('run_count') or 0)+1,"last_status":status,"next_run_at":next_run_utc(job['cron'], job.get('timezone','UTC'), datetime.now(timezone.utc))}
-        self.store.update_job(job_id, **updates)
+            status = "failed"
+            error_text = traceback.format_exc()
+            output = error_text
+        finally:
+            for resource in (agent, conversation_store, memory_store):
+                if resource is None:
+                    continue
+                try:
+                    close = getattr(resource, "close", None)
+                    if close is None:
+                        continue
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception:
+                    status = "failed"
+                    cleanup_error = traceback.format_exc()
+                    error_text = f"{error_text}\n{cleanup_error}".strip()
+                    output = f"{output}\n{cleanup_error}".strip()
+            stopped.set()
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await heartbeat
+
+        duration = perf_counter() - start
+        try:
+            log = self._write_log(job, started, status, duration, output, error_text)
+        except Exception:
+            # A log failure must itself have a visible terminal record.  Use a
+            # distinct emergency file so a failed replace cannot erase a prior
+            # good log.
+            status = "failed"
+            error_text = f"{error_text}\nLog write failure:\n{traceback.format_exc()}".strip()
+            output = f"{output}\n{error_text}".strip()
+            log = self._write_emergency_log(job, started, output)
+
+        try:
+            self.store.complete_job(job_id, lease_id, status=status, log_path=log)
+        except CronLeaseLostError:
+            # Another process recovered/superseded the lease.  Do not falsely
+            # claim this stale execution changed its terminal state.
+            raise
+
         if self.on_complete:
-            clean = re.sub(r'\[tool:[^\]]*\]', '', output).strip()
-            summary_text = (clean.split('\n\n')[0] if clean else ('Run failed.' if status == 'failed' else 'No output.'))
-            self.on_complete(job['name'], summary_text, status, duration)
+            clean = re.sub(r"\[tool:[^\]]*\]", "", output).strip()
+            summary = clean.split("\n\n")[0] if clean else ("Run failed." if status == "failed" else "No output.")
+            with suppress(Exception):
+                self.on_complete(job["name"], summary, status, duration)
+        if cancelled:
+            raise asyncio.CancelledError
         return log
-    def _write_log(self, job: dict, started: str, status: str, duration: float, output: str, err: str='') -> Path:
-        path=self.store.log_dir(job['id']) / (started.replace(':','-') + '.md')
-        clean = re.sub(r'\[tool:[^\]]*\]', '', output).strip()
-        summary=(clean.split('\n\n')[0] if clean else ('Run failed.' if status=='failed' else 'No output.'))
-        path.write_text(f"# Cron Run: {job['name']}\n**Job:** {job['id']}\n**Run:** {started}\n**Status:** {status}\n**Duration:** {duration:.1f}s\n\n## Prompt\n{job['prompt']}\n\n## Agent Output\n{output}\n\n## Summary\n{summary}\n\n## Run Metadata\n- Model: {getattr(self.config,'model','')}\n", encoding='utf-8')
+
+    def _write_emergency_log(self, job: dict[str, Any], started: str, output: str) -> Path:
+        path = self.store.log_dir(job["id"]) / f"{started.replace(':', '-')}-{uuid.uuid4().hex[:8]}-emergency.md"
+        path.write_text(
+            f"# Cron Run: {job['name']}\n\n**Status:** failed\n\n## Agent Output\n{output}\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _write_log(self, job: dict[str, Any], started: str, status: str, duration: float, output: str, error_text: str = "") -> Path:
+        directory = self.store.log_dir(job["id"])
+        path = directory / f"{started.replace(':', '-')}.md"
+        # Multiple recovery paths can share a second.  Preserve every run.
+        if path.exists():
+            path = directory / f"{started.replace(':', '-')}-{uuid.uuid4().hex[:8]}.md"
+        clean = re.sub(r"\[tool:[^\]]*\]", "", output).strip()
+        summary = clean.split("\n\n")[0] if clean else ("Run failed." if status == "failed" else "No output.")
+        text = (
+            f"# Cron Run: {job['name']}\n"
+            f"**Job:** {job['id']}\n"
+            f"**Run:** {started}\n"
+            f"**Status:** {status}\n"
+            f"**Duration:** {duration:.1f}s\n\n"
+            f"## Prompt\n{job['prompt']}\n\n"
+            f"## Agent Output\n{output}\n\n"
+            f"## Summary\n{summary}\n\n"
+            f"## Run Metadata\n- Model: {getattr(self.config, 'model', '')}\n"
+        )
+        if error_text:
+            text += f"\n## Error\n{error_text}\n"
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            with suppress(FileNotFoundError):
+                temporary.unlink()
         return path

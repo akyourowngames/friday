@@ -75,9 +75,10 @@ def test_write_file_overwrite_requires_confirm(tmp_path, monkeypatch):
     from ares.tools.filesystem_write import write_file
     target = tmp_path / "existing.txt"
     target.write_text("old", encoding="utf-8")
-    # write_file doesn't have confirm param — that's in ToolExecutor
-    # The function itself just writes
-    result = write_file(str(target), "new")
+    blocked = write_file(str(target), "new")
+    assert "CONFIRM REQUIRED" in blocked
+    assert target.read_text(encoding="utf-8") == "old"
+    result = write_file(str(target), "new", confirm=True)
     assert "Overwrote" in result
     assert target.read_text(encoding="utf-8") == "new"
 

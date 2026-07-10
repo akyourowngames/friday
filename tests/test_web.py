@@ -48,9 +48,10 @@ class TestWebSearch:
 
         results = web_search("test query", max_results=1)
 
-        assert results == [
-            {"title": "Test", "url": "https://example.com", "snippet": "A test result"},
-        ]
+        assert results[0]["title"] == "Test"
+        assert results[0]["url"] == "https://example.com"
+        assert results[0]["snippet"] == "A test result"
+        assert results[0]["provider"] == "ddgs"
 
     @patch("ares.tools.web.DDGS")
     def test_web_search_empty_results(self, mock_ddgs_cls):
@@ -165,10 +166,11 @@ class TestWebSearch:
     def test_fetch_url_plain_text_content(self, mock_client_cls):
         response = MagicMock()
         response.headers = {"content-type": "text/plain; charset=utf-8"}
-        response.text = "plain text body"
+        response.encoding = "utf-8"
+        response.iter_bytes.return_value = [b"plain text body"]
         response.raise_for_status.return_value = None
         client = MagicMock()
-        client.get.return_value = response
+        client.stream.return_value.__enter__.return_value = response
         mock_client_cls.return_value.__enter__.return_value = client
 
         result = fetch_url("https://example.com/readme.txt")
@@ -180,18 +182,19 @@ class TestWebSearch:
     def test_fetch_url_html_metadata_and_canonical(self, mock_client_cls):
         response = MagicMock()
         response.headers = {"content-type": "text/html; charset=utf-8"}
-        response.text = """
+        response.encoding = "utf-8"
+        response.iter_bytes.return_value = [b"""
         <html><head>
           <title> Example &amp; Test </title>
           <meta name="description" content="Useful page.">
           <link rel="canonical" href="/canonical">
         </head><body><h1>Hello</h1><script>bad()</script></body></html>
-        """
+        """]
         response.status_code = 200
         response.url = "https://example.com/page"
         response.raise_for_status.return_value = None
         client = MagicMock()
-        client.get.return_value = response
+        client.stream.return_value.__enter__.return_value = response
         mock_client_cls.return_value.__enter__.return_value = client
 
         result = fetch_url("https://example.com/page")
@@ -207,12 +210,13 @@ class TestWebSearch:
     def test_fetch_url_pdf_best_effort_text(self, mock_client_cls):
         response = MagicMock()
         response.headers = {"content-type": "application/pdf"}
-        response.content = b"%PDF-1.4\nBT (Hello PDF) Tj ET\n%%EOF"
+        response.encoding = "utf-8"
+        response.iter_bytes.return_value = [b"%PDF-1.4\nBT (Hello PDF) Tj ET\n%%EOF"]
         response.status_code = 200
         response.url = "https://example.com/file.pdf"
         response.raise_for_status.return_value = None
         client = MagicMock()
-        client.get.return_value = response
+        client.stream.return_value.__enter__.return_value = response
         mock_client_cls.return_value.__enter__.return_value = client
 
         result = fetch_url("https://example.com/file.pdf")

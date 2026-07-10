@@ -1,9 +1,17 @@
 """Tests for ares.image_generate module."""
 
 import os
+import io
 import pytest
 from unittest.mock import patch, MagicMock
+from PIL import Image
 from ares.tools.image_generate import generate_image, IMAGES_DIR
+
+
+def _jpeg_bytes():
+    buffer = io.BytesIO()
+    Image.new("RGB", (2, 2), color="white").save(buffer, format="JPEG")
+    return buffer.getvalue()
 
 
 class TestGenerateImage:
@@ -13,7 +21,7 @@ class TestGenerateImage:
     def test_generate_returns_file_path(self, mock_client_cls):
         mock_response = MagicMock()
         mock_response.headers = {"content-type": "image/jpeg"}
-        mock_response.content = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        mock_response.content = _jpeg_bytes()
         mock_response.raise_for_status = MagicMock()
 
         mock_client = MagicMock()
@@ -71,7 +79,7 @@ class TestGenerateImage:
     def test_generate_with_seed(self, mock_client_cls):
         mock_response = MagicMock()
         mock_response.headers = {"content-type": "image/jpeg"}
-        mock_response.content = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        mock_response.content = _jpeg_bytes()
         mock_response.raise_for_status = MagicMock()
 
         mock_client = MagicMock()
@@ -88,7 +96,7 @@ class TestGenerateImage:
     def test_generate_with_custom_dimensions(self, mock_client_cls):
         mock_response = MagicMock()
         mock_response.headers = {"content-type": "image/jpeg"}
-        mock_response.content = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        mock_response.content = _jpeg_bytes()
         mock_response.raise_for_status = MagicMock()
 
         mock_client = MagicMock()
@@ -103,7 +111,7 @@ class TestGenerateImage:
     def test_generate_creates_images_dir(self, mock_client_cls):
         mock_response = MagicMock()
         mock_response.headers = {"content-type": "image/jpeg"}
-        mock_response.content = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        mock_response.content = _jpeg_bytes()
         mock_response.raise_for_status = MagicMock()
 
         mock_client = MagicMock()

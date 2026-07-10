@@ -3,10 +3,11 @@
 import json
 import logging
 import os
+import copy
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
 
@@ -93,6 +94,8 @@ def _write_config_data(data: dict) -> None:
         ) as tmp:
             json.dump(data, tmp, indent=2)
             tmp.write("\n")
+            tmp.flush()
+            os.fsync(tmp.fileno())
             temp_path = Path(tmp.name)
         os.replace(temp_path, CONFIG_PATH)
     finally:
@@ -101,23 +104,69 @@ def _write_config_data(data: dict) -> None:
 
 
 def update_config_field(path: str, value) -> dict:
-    """Surgically update a single config field. Returns {ok, path, value, error}."""
+    """Validate and atomically apply one known config path.
+
+    Invalid patches never call the writer, preserving the original file bytes
+    exactly.  This is important because a config file is the shared control
+    plane for the CLI, desktop app, cron runner, and phone bridge.
+    """
     if not CONFIG_PATH.exists():
         return {"ok": False, "error": "Config file not found."}
     try:
-        with open(CONFIG_PATH) as f:
-            data = json.load(f)
+        original_bytes = CONFIG_PATH.read_bytes()
+        data = json.loads(original_bytes.decode("utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         return {"ok": False, "error": f"Failed to read config: {exc}"}
-    keys = path.strip(".").split(".")
-    target = data
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "Config root must be a JSON object."}
+    keys = [key for key in str(path or "").strip(".").split(".") if key]
+    if not keys:
+        return {"ok": False, "error": "Path is required."}
+
+    model: type[BaseModel] = AppConfig
+    for index, key in enumerate(keys):
+        field = model.model_fields.get(key)
+        if field is None:
+            return {
+                "ok": False,
+                "error": f"Unknown config field: {'.'.join(keys[:index + 1])}",
+                "field_errors": [{"path": ".".join(keys[:index + 1]), "message": "Unknown field"}],
+            }
+        if index < len(keys) - 1:
+            annotation = field.annotation
+            if not isinstance(annotation, type) or not issubclass(annotation, BaseModel):
+                return {
+                    "ok": False,
+                    "error": f"Config field is not an object: {'.'.join(keys[:index + 1])}",
+                    "field_errors": [{"path": ".".join(keys[:index + 1]), "message": "Not a nested config object"}],
+                }
+            model = annotation
+
+    candidate = copy.deepcopy(data)
+    target = candidate
     for key in keys[:-1]:
-        if key not in target or not isinstance(target[key], dict):
+        if key not in target:
             target[key] = {}
+        if not isinstance(target[key], dict):
+            return {
+                "ok": False,
+                "error": f"Config parent is not an object: {key}",
+                "field_errors": [{"path": key, "message": "Expected object"}],
+            }
         target = target[key]
     target[keys[-1]] = value
     try:
-        _write_config_data(data)
-    except OSError as exc:
+        # Strict mode makes a wrong JSON type a validation error instead of a
+        # surprising coercion such as the string "false" becoming truthy.
+        AppConfig.model_validate(candidate, strict=True)
+    except ValidationError as exc:
+        field_errors = [
+            {"path": ".".join(str(part) for part in error.get("loc", ())), "message": error.get("msg", "Invalid value")}
+            for error in exc.errors()
+        ]
+        return {"ok": False, "error": "Config validation failed.", "field_errors": field_errors}
+    try:
+        _write_config_data(candidate)
+    except (OSError, TypeError, ValueError) as exc:
         return {"ok": False, "error": f"Failed to write config: {exc}"}
     return {"ok": True, "path": path, "value": value}
