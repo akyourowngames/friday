@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from ares.channels.store import ChannelStore
-from ares.channels.telegram import TelegramChannel, _split_message
+from ares.channels.telegram import TelegramChannel, _split_message, run_telegram_channel
 from ares.models import AppConfig, TelegramConfig
 
 
@@ -259,3 +259,14 @@ def test_long_telegram_messages_split_without_losing_text():
     assert len(chunks) > 1
     assert all(len(chunk) <= 4096 for chunk in chunks)
     assert "".join(f"{chunk} " for chunk in chunks).replace("  ", " ").strip() == text.strip()
+
+
+@pytest.mark.asyncio
+async def test_headless_channel_explains_setup_when_disabled(tmp_path, monkeypatch, capsys):
+    from ares import config as config_module
+
+    monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.json")
+
+    await run_telegram_channel()
+
+    assert "python -m ares --telegram-setup" in capsys.readouterr().out

@@ -268,20 +268,23 @@ class TelegramChannel:
         """Poll Telegram until stopped, retaining cursor state across restarts."""
         runtime = self._telegram_config()
         if not runtime.enabled:
-            logger.info("Telegram channel is disabled")
+            print("Ares Telegram is disabled. Run `python -m ares --telegram-setup` first.")
             return
         if not resolve_bot_token(runtime):
-            logger.error("Telegram is enabled but no bot token was supplied")
+            print("Ares Telegram needs a bot token. Run `python -m ares --telegram-setup` first.")
             return
 
         try:
+            print("Ares Telegram: connecting…")
             await self.api.delete_webhook()
             me = await self.api.get_me()
             logger.info("Telegram channel connected as @%s", me.get("username", "ares-bot"))
+            print(f"Ares Telegram: connected as @{me.get('username', 'ares-bot')}; waiting for messages.")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("Telegram startup failed: %s", exc)
+            print(f"Ares Telegram could not connect: {exc}")
             return
 
         backoff = 1.0
@@ -706,7 +709,11 @@ async def run_telegram_channel() -> None:
     """Run Telegram alone, for a headless always-on PC deployment."""
     config = load_config()
     if not config.telegram.enabled:
-        raise RuntimeError("Telegram is disabled. Set telegram.enabled to true in ~/.ares/config.json first.")
+        print("Ares Telegram is not configured. Run `python -m ares --telegram-setup` first.")
+        return
+    if not resolve_bot_token(config.telegram):
+        print("Ares Telegram needs a bot token. Run `python -m ares --telegram-setup` first.")
+        return
     memory_store = MemoryStore()
     conversation_store = ConversationStore()
     manager = MCPClientManager(config.mcp_servers, data_dir=config.data_dir) if config.mcp_servers else None
