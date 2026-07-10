@@ -126,6 +126,24 @@ class PhoneConfig(BaseModel):
     adb_path: str = ""              # auto-detected if empty
 
 
+class TelegramConfig(BaseModel):
+    """Configuration for Ares' local Telegram channel.
+
+    The channel is intentionally disabled and locked down by default.  A bot
+    token is best supplied through ``ARES_TELEGRAM_BOT_TOKEN`` so it does not
+    have to live in the shared config file.
+    """
+
+    enabled: bool = False
+    bot_token: str = ""
+    allowed_chat_ids: list[int] = Field(default_factory=list)
+    allow_group_chats: bool = False
+    poll_timeout_seconds: int = Field(default=30, ge=1, le=50)
+    show_tool_progress: bool = True
+    max_attachment_bytes: int = Field(default=20 * 1024 * 1024, ge=1, le=20 * 1024 * 1024)
+    max_outbound_file_bytes: int = Field(default=50 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
+
+
 class AppConfig(BaseModel):
     # This is deliberately stored beside the rest of the shared Ares config.
     # Both the Electron app and CLI read this file, so completing setup in one
@@ -172,6 +190,7 @@ class AppConfig(BaseModel):
     )
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     phone: PhoneConfig = Field(default_factory=PhoneConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     cron_enabled: bool = True
     cron_tick_seconds: int = 60
     cron_max_concurrent: int = 3

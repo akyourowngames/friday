@@ -36,6 +36,7 @@ It is built as a local-first assistant: it remembers useful facts, understands t
 | Scheduling | Create, update, run, inspect, and log recurring cron jobs. |
 | Voice | Optional STT/TTS with local and Sarvam/Edge backends. |
 | Phone bridge | Android status, notifications, contacts, SMS, confirmed calls, app launch, URL open, ADB workflows. |
+| Telegram channel | An allowlisted, persistent Telegram bridge for remote chat, file input, progress, and file delivery from the PC. |
 | Desktop app | Electron + React chat UI, settings, sessions, status, tool cards, and terminal surface. |
 | Windows control | Native app and desktop control through a restricted local Windows MCP integration. |
 
@@ -61,6 +62,47 @@ python -m ares --server
 python -m ares --server --port 8766
 ares-server
 ```
+
+## Telegram Channel
+
+Telegram runs from the same local Ares process and stores every remote chat in the existing local SQLite database. It uses long polling, so your PC does **not** need a public IP, a webhook, or port forwarding.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather), then run the local setup command. It accepts the token without echoing it and enables the channel:
+
+```powershell
+python -m ares --telegram-setup
+```
+
+   Alternatively, keep the token out of Ares' config by setting it only in the PC environment and enabling the channel in `~/.ares/config.json`:
+
+```json
+{
+  "telegram": {
+    "enabled": true,
+    "allowed_chat_ids": []
+  }
+}
+```
+
+```powershell
+$env:ARES_TELEGRAM_BOT_TOKEN = "123456:replace-with-your-token"
+```
+
+3. Start Ares once, open your bot in Telegram, and send `/start`. Ares replies with the chat ID but keeps the chat locked. On the PC, allow that exact ID:
+
+```powershell
+python -m ares --telegram-authorize 123456789
+```
+
+4. Start the Electron desktop app as usual (it starts the channel with its local server), or run a headless PC service:
+
+```powershell
+python -m ares --server
+# or
+python -m ares --telegram
+```
+
+An authorized chat can send normal messages, documents, and photos. `/new` starts a separate remote session, `/status` confirms the channel, and `/file C:\path\to\report.pdf` sends a local file back to that chat. Ares also uploads files it creates when the user explicitly asks it to send the result. Group chats remain disabled by default, and an unknown chat never gets tool access.
 
 Run voice mode:
 
@@ -207,6 +249,7 @@ Built-in skills include:
 | `~/.ares/data/profile.md` | User profile file. |
 | `~/.ares/data/sessions/` | Per-session JSONL logs. |
 | `~/.ares/data/mcp_tokens/` | MCP OAuth tokens. |
+| `~/.ares/data/channels/telegram/inbox/` | Documents and media received from Telegram, held locally for the related turn. |
 | `~/.ares/skills/` | User-installed skills. |
 | `~/.ares_history` | CLI prompt history. |
 

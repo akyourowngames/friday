@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover
 
 from ares.agent import Agent
 from ares.attachments import AttachmentInspection, build_attachment_context, inspect_attachment
+from ares.channels.telegram import TelegramChannel
 from ares.config import load_config, save_config
 from ares.context_manager import ContextManager
 from ares.conversations import ConversationStore
@@ -150,6 +151,21 @@ class AresServer:
         self._terminal_output_buffer: dict[str, str] = {}
         self._terminal_command_events: dict[str, asyncio.Event] = {}
         self._mcp_start_task: asyncio.Task | None = None
+        self.telegram_channel: TelegramChannel | None = None
+        if self.config.telegram.enabled:
+            try:
+                self.telegram_channel = TelegramChannel(
+                    config=self.config,
+                    agent=self.agent,
+                    conversation_store=self.conversation_store,
+                    # Settings remain shared with the CLI/desktop while this
+                    # long-running server is active.
+                    config_provider=load_config,
+                )
+            except Exception as exc:
+                # A missing/invalid token must never make the desktop backend
+                # unavailable. The channel logs a precise setup error instead.
+                print(f"Ares Telegram channel was not started: {exc}")
 
         # Wire terminal display callback to ToolExecutor
         if hasattr(self.agent, "tool_executor"):
@@ -179,6 +195,8 @@ class AresServer:
         ) as ws_server:
             self._server = ws_server
             print(f"Ares desktop server listening on ws://{self.host}:{self.port}")
+            if self.telegram_channel is not None:
+                await self.telegram_channel.start()
             if self.mcp_manager is not None:
                 self._mcp_start_task = asyncio.create_task(self._start_mcp_manager())
             await asyncio.Future()
@@ -1027,6 +1045,9 @@ class AresServer:
 
     async def close(self) -> None:
         """Shut down stores."""
+        if self.telegram_channel is not None:
+            with suppress(Exception):
+                await self.telegram_channel.stop()
         if self._mcp_start_task is not None and not self._mcp_start_task.done():
             self._mcp_start_task.cancel()
             with suppress(asyncio.CancelledError, Exception):

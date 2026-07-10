@@ -2,11 +2,14 @@
 
 import argparse
 import asyncio
+import getpass
+import os
 import threading
 from collections.abc import Coroutine
 from typing import Any
 
 from ares.cli import AresCLI
+from ares.config import load_config, save_config
 
 
 async def _run_cli() -> None:
@@ -55,9 +58,55 @@ async def _run_server(host: str, port: int) -> None:
     await run_server(host=host, port=port)
 
 
+async def _run_telegram() -> None:
+    from ares.channels.telegram import run_telegram_channel
+
+    await run_telegram_channel()
+
+
+def _authorize_telegram_chat(chat_id: int, *, revoke: bool = False) -> None:
+    """Update the strict local allowlist without ever printing the bot token."""
+    config = load_config()
+    allowed = {int(value) for value in config.telegram.allowed_chat_ids}
+    if revoke:
+        allowed.discard(chat_id)
+    else:
+        allowed.add(chat_id)
+        config.telegram.enabled = True
+    config.telegram.allowed_chat_ids = sorted(allowed)
+    save_config(config)
+    if revoke:
+        print(f"Telegram chat {chat_id} was removed from Ares' allowlist.")
+    else:
+        print(
+            f"Telegram chat {chat_id} is authorized. Start or restart Ares with "
+            "`python -m ares --server` (or `--telegram`) to connect it."
+        )
+
+
+def _setup_telegram() -> None:
+    """Store local Telegram settings without echoing a bot token to the terminal."""
+    config = load_config()
+    token = getpass.getpass("Telegram bot token (leave blank to keep the current/environment token): ").strip()
+    if token:
+        config.telegram.bot_token = token
+    if not config.telegram.bot_token and not os.environ.get("ARES_TELEGRAM_BOT_TOKEN"):
+        raise RuntimeError("A Telegram bot token is required. Create one with @BotFather first.")
+    config.telegram.enabled = True
+    save_config(config)
+    print(
+        "Telegram is enabled locally. Start `python -m ares --telegram`, message /start to your bot, "
+        "then run `python -m ares --telegram-authorize CHAT_ID`."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ares personal AI assistant")
     parser.add_argument("--server", action="store_true", help="Run the desktop WebSocket server")
+    parser.add_argument("--telegram", action="store_true", help="Run the Telegram channel without the desktop UI")
+    parser.add_argument("--telegram-setup", action="store_true", help="Securely save Telegram channel setup")
+    parser.add_argument("--telegram-authorize", type=int, metavar="CHAT_ID", help="Allow one Telegram chat ID")
+    parser.add_argument("--telegram-revoke", type=int, metavar="CHAT_ID", help="Remove one Telegram chat ID")
     parser.add_argument("--voice", action="store_true", help="Run continuous voice mode (always listening)")
     parser.add_argument("--voice-name", default=None, help="Edge TTS voice for --voice")
     parser.add_argument("--stt-backend", choices=["auto", "whisper", "sarvam"], default=None, help="STT backend for --voice")
@@ -69,8 +118,18 @@ def main():
     args = parser.parse_args()
 
     try:
-        if args.server:
+        if args.telegram_setup:
+            _setup_telegram()
+        elif args.telegram_authorize is not None:
+            _authorize_telegram_chat(args.telegram_authorize)
+        elif args.telegram_revoke is not None:
+            _authorize_telegram_chat(args.telegram_revoke, revoke=True)
+        elif args.server and args.telegram:
+            parser.error("Use either --server or --telegram. The desktop server also starts Telegram when enabled.")
+        elif args.server:
             _run_coro(_run_server(args.host, args.port))
+        elif args.telegram:
+            _run_coro(_run_telegram())
         elif args.voice:
             _run_coro(_run_voice(
                 voice_name=args.voice_name,

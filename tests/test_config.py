@@ -73,3 +73,20 @@ def test_load_config_upgrades_legacy_agent_iteration_default(tmp_path, monkeypat
 
     assert loaded.agent_max_iterations == 40
     assert "windows" in {server["name"] for server in loaded.mcp_servers}
+
+
+def test_telegram_config_defaults_to_disabled_and_parses_allowlist(tmp_path, monkeypatch):
+    from ares import config as config_module
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"telegram": {"enabled": True, "allowed_chat_ids": [12345]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+
+    loaded = config_module.load_config()
+
+    assert loaded.telegram.enabled is True
+    assert loaded.telegram.allowed_chat_ids == [12345]
+    assert loaded.telegram.bot_token == ""
