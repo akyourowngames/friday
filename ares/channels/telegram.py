@@ -24,6 +24,7 @@ import httpx
 
 from ares.agent import Agent
 from ares.attachments import build_attachment_context, inspect_attachment
+from ares.channels.audio import AudioTranscriptionError, EnglishAudioTranscriber, EnglishTranscript
 from ares.channels.store import ChannelStore
 from ares.config import get_db_path, load_config
 from ares.conversations import ConversationStore
@@ -229,6 +230,7 @@ class TelegramChannel:
         api: Any | None = None,
         config_provider: Callable[[], AppConfig] | None = None,
         state_store: ChannelStore | None = None,
+        audio_transcriber: Any | None = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
     ) -> None:
         self.config = config
@@ -243,6 +245,7 @@ class TelegramChannel:
         )
         self.state_store = state_store or ChannelStore(Path(db_path))
         self._owns_state_store = state_store is None
+        self.audio_transcriber = audio_transcriber or EnglishAudioTranscriber(self._telegram_config)
         self._sleep = sleep
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -385,7 +388,8 @@ class TelegramChannel:
             if command in {"/start", "/help"}:
                 await self.api.send_message(
                     chat_id,
-                    "Ares is connected to this PC. Send a message or a document/photo.\n\n"
+                    "Ares is connected to this PC. Send a message, document, photo, or voice note. "
+                    "Hindi, English, and Hinglish voice notes are transcribed to English.\n\n"
                     "Commands:\n/new — start a fresh Ares session\n/status — channel status\n"
                     "/file <path> — upload a local PC file\n/help — show this help",
                     reply_to_message_id=reply_to,
@@ -422,8 +426,12 @@ class TelegramChannel:
     ) -> None:
         inspection_context = ""
         attachment_label = ""
+        audio_path: Path | None = None
+        audio_metadata: dict[str, Any] | None = None
         try:
-            attachment_label, inspection_context = await self._attachment_context(chat_id, message, update)
+            attachment_label, inspection_context, audio_path, audio_metadata = await self._attachment_context(
+                chat_id, message, update
+            )
         except ValueError as exc:
             await self.api.send_message(chat_id, f"I couldn't accept that attachment: {exc}", reply_to_message_id=reply_to)
             return
@@ -433,15 +441,65 @@ class TelegramChannel:
             return
 
         if not text and not attachment_label:
-            await self.api.send_message(chat_id, "Send a message, document, or photo for Ares to work with.", reply_to_message_id=reply_to)
+            await self.api.send_message(
+                chat_id,
+                "Send a message, document, photo, or voice note for Ares to work with.",
+                reply_to_message_id=reply_to,
+            )
             return
 
-        visible_content = text or f"Attached: {attachment_label}"
-        prompt = text or "Inspect and explain the attached file."
-        if attachment_label:
-            prompt += " The file is attached to this turn. Do not ask the user to re-upload it."
-        if inspection_context:
-            prompt += "\n\n" + inspection_context
+        session_id = self._conversation_id(chat_id)
+        history = self._conversation_history(session_id)
+        status = _TelegramProgress(self, chat_id, reply_to)
+        await status.start()
+        transcript: EnglishTranscript | None = None
+        if audio_path is not None:
+            await status.event("Transcribing voice note to English (first use may prepare a local model)")
+            try:
+                transcript = await self.audio_transcriber.transcribe_to_english(
+                    audio_path,
+                    duration_seconds=int((audio_metadata or {}).get("duration") or 0),
+                )
+            except AudioTranscriptionError as exc:
+                await status.finish("⚠️ Voice transcription could not finish.")
+                await self.api.send_message(chat_id, str(exc), reply_to_message_id=reply_to)
+                return
+            except Exception as exc:
+                logger.exception("Telegram audio transcription failed")
+                await status.finish("⚠️ Voice transcription could not finish.")
+                await self.api.send_message(
+                    chat_id,
+                    f"I could not transcribe that voice note: {exc}",
+                    reply_to_message_id=reply_to,
+                )
+                return
+            await status.event("Voice transcription complete")
+            await self.api.send_message(
+                chat_id,
+                f"Transcript (English): {transcript.text}",
+                reply_to_message_id=reply_to,
+            )
+
+        if transcript is not None:
+            visible_content = "Voice note (English transcript): " + transcript.text
+            if text:
+                visible_content += "\nCaption: " + text
+            prompt = (
+                "## Telegram voice note\n"
+                "The user spoke Hindi, English, or Hinglish. This is the speech translated into English:\n"
+                f"{transcript.text}\n\n"
+                "Reply only in English. Do not switch to Hindi or any other language."
+            )
+            if text:
+                prompt += "\n\nAdditional caption from the user:\n" + text
+        else:
+            visible_content = text or f"Attached: {attachment_label}"
+            prompt = text or "Inspect and explain the attached file."
+            if attachment_label:
+                prompt += " The file is attached to this turn. Do not ask the user to re-upload it."
+            if inspection_context:
+                prompt += "\n\n" + inspection_context
+
         if self._file_delivery_requested(text):
             prompt += (
                 "\n\n## Telegram delivery\nThe user explicitly asked for a local file to be uploaded "
@@ -450,11 +508,7 @@ class TelegramChannel:
                 "the user explicitly asked for delivery."
             )
 
-        session_id = self._conversation_id(chat_id)
-        history = self._conversation_history(session_id)
         self.conversation_store.add_message(session_id, "user", visible_content)
-        status = _TelegramProgress(self, chat_id, reply_to)
-        await status.start()
         try:
             response, tool_calls = await self._run_agent(prompt, history, status)
         except Exception as exc:
@@ -540,10 +594,10 @@ class TelegramChannel:
 
     async def _attachment_context(
         self, chat_id: int, message: dict[str, Any], update: dict[str, Any]
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, Path | None, dict[str, Any] | None]:
         item = self._attachment_metadata(message, update)
         if item is None:
-            return "", ""
+            return "", "", None, None
         cfg = self._telegram_config()
         if int(item.get("size") or 0) > cfg.max_attachment_bytes:
             raise ValueError(f"{item['name']} is larger than the configured attachment limit")
@@ -551,18 +605,27 @@ class TelegramChannel:
         safe_name = Path(str(item["name"])).name.replace("\x00", "") or "attachment"
         destination = root / str(int(update.get("update_id") or 0)) / safe_name
         await self.api.download_file(str(item["file_id"]), destination, max_bytes=cfg.max_attachment_bytes)
+        if item.get("kind") == "audio":
+            return safe_name, "", destination, item
         inspection = inspect_attachment({"name": safe_name, "type": item.get("type", ""), "path": str(destination)})
-        return safe_name, build_attachment_context([inspection])
+        return safe_name, build_attachment_context([inspection]), None, item
 
     @staticmethod
     def _attachment_metadata(message: dict[str, Any], update: dict[str, Any]) -> dict[str, Any] | None:
         document = message.get("document")
         if isinstance(document, dict) and document.get("file_id"):
+            document_name = str(document.get("file_name") or f"document-{update.get('update_id', 'file')}")
+            document_type = str(document.get("mime_type") or "application/octet-stream")
+            suffix = Path(document_name).suffix.lower()
             return {
                 "file_id": document["file_id"],
-                "name": document.get("file_name") or f"document-{update.get('update_id', 'file')}",
-                "type": document.get("mime_type") or "application/octet-stream",
+                "name": document_name,
+                "type": document_type,
                 "size": document.get("file_size") or 0,
+                "duration": document.get("duration") or 0,
+                "kind": "audio" if document_type.startswith("audio/") or suffix in {
+                    ".aac", ".aiff", ".amr", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".webm", ".wma"
+                } else "file",
             }
         photos = message.get("photo")
         if isinstance(photos, list) and photos and isinstance(photos[-1], dict) and photos[-1].get("file_id"):
@@ -571,6 +634,7 @@ class TelegramChannel:
                 "name": f"photo-{update.get('update_id', 'image')}.jpg",
                 "type": "image/jpeg",
                 "size": photos[-1].get("file_size") or 0,
+                "kind": "image",
             }
         for key, default_type in (("video", "video/mp4"), ("audio", "audio/mpeg"), ("voice", "audio/ogg")):
             value = message.get(key)
@@ -580,6 +644,8 @@ class TelegramChannel:
                     "name": value.get("file_name") or f"{key}-{update.get('update_id', 'file')}",
                     "type": value.get("mime_type") or default_type,
                     "size": value.get("file_size") or 0,
+                    "duration": value.get("duration") or 0,
+                    "kind": "audio" if key in {"audio", "voice"} else "video",
                 }
         return None
 

@@ -102,7 +102,7 @@ python -m ares --server
 python -m ares --telegram
 ```
 
-An authorized chat can send normal messages, documents, and photos. `/new` starts a separate remote session, `/status` confirms the channel, and `/file C:\path\to\report.pdf` sends a local file back to that chat. Ares also uploads files it creates when the user explicitly asks it to send the result. Group chats remain disabled by default, and an unknown chat never gets tool access.
+An authorized chat can send normal messages, documents, photos, and voice notes. Voice notes in English, Hindi, or Hinglish are converted to an English transcript, then Ares answers in English. By default this runs through local multilingual faster-whisper; if `SARVAM_API_KEY` is configured, short Indian-language recordings use Sarvam Saaras first and automatically fall back to local Whisper if that provider is unavailable. `/new` starts a separate remote session, `/status` confirms the channel, and `/file C:\path\to\report.pdf` sends a local file back to that chat. Ares also uploads files it creates when the user explicitly asks it to send the result. Group chats remain disabled by default, and an unknown chat never gets tool access.
 
 Run voice mode:
 

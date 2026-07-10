@@ -90,3 +90,5 @@ def test_telegram_config_defaults_to_disabled_and_parses_allowlist(tmp_path, mon
     assert loaded.telegram.enabled is True
     assert loaded.telegram.allowed_chat_ids == [12345]
     assert loaded.telegram.bot_token == ""
+    assert loaded.telegram.audio_transcription_enabled is True
+    assert loaded.telegram.audio_stt_backend == "auto"

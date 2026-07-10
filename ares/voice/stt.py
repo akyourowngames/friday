@@ -34,13 +34,38 @@ class WhisperTranscriber:
             self._model = WhisperModel(self.model_name, device="cpu", compute_type=self.compute_type)
         return self._model
 
-    def transcribe_file(self, path: str | Path) -> str:
-        """Transcribe a file and return cleaned text."""
+    def transcribe_file(
+        self,
+        path: str | Path,
+        *,
+        task: str = "transcribe",
+        multilingual: bool = False,
+    ) -> str:
+        """Transcribe or translate a file and return cleaned text.
+
+        ``multilingual`` enables per-segment language handling in newer
+        faster-whisper releases, which matters for Hindi-English code-switching.
+        """
         model = self._ensure_model()
-        kwargs = {"vad_filter": True}
+        kwargs = {
+            "vad_filter": True,
+            "task": task,
+            "condition_on_previous_text": False,
+        }
         if self.language:
             kwargs["language"] = self.language
-        segments, _info = model.transcribe(str(path), **kwargs)
+        if multilingual:
+            kwargs["multilingual"] = True
+        try:
+            segments, _info = model.transcribe(str(path), **kwargs)
+        except TypeError as exc:
+            # Older compatible faster-whisper installs predate the optional
+            # per-segment multilingual flag. Translation still works there;
+            # retain it as a graceful compatibility path.
+            if not multilingual or "multilingual" not in str(exc):
+                raise
+            kwargs.pop("multilingual", None)
+            segments, _info = model.transcribe(str(path), **kwargs)
         return clean_transcript(" ".join(segment.text.strip() for segment in segments))
 
     def transcribe_samples(self, samples: np.ndarray, sample_rate: int = 16000) -> str:

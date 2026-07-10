@@ -6,6 +6,8 @@ import asyncio
 import base64
 import os
 import tempfile
+import mimetypes
+from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -19,6 +21,12 @@ DEFAULT_SARVAM_SPEAKER = "shubh"
 DEFAULT_SARVAM_LANGUAGE = "en-IN"
 DEFAULT_SARVAM_SAMPLE_RATE = 24000
 DEFAULT_SARVAM_PACE = 1.0
+
+
+@dataclass(frozen=True)
+class SarvamTranscript:
+    text: str
+    language_code: str = ""
 
 
 def sarvam_api_key() -> str:
@@ -58,11 +66,53 @@ class SarvamTranscriber:
         finally:
             tmp_path.unlink(missing_ok=True)
 
-        files = {"file": ("speech.wav", audio, "audio/wav")}
+        result = await self._transcribe_audio_async(
+            "speech.wav",
+            audio,
+            "audio/wav",
+            mode="transcribe",
+            language_code=self.language_code,
+        )
+        return result.text
+
+    def transcribe_file(self, path: str | Path, *, mode: str = "transcribe", language_code: str = "") -> str:
+        """Synchronously transcribe an audio file for non-async callers."""
+        return asyncio.run(self.transcribe_file_async(path, mode=mode, language_code=language_code)).text
+
+    async def transcribe_file_async(
+        self,
+        path: str | Path,
+        *,
+        mode: str = "transcribe",
+        language_code: str = "",
+    ) -> SarvamTranscript:
+        """Transcribe supported audio files (including Telegram OGG/Opus)."""
+        file_path = Path(path)
+        media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        return await self._transcribe_audio_async(
+            file_path.name,
+            file_path.read_bytes(),
+            media_type,
+            mode=mode,
+            language_code=language_code or self.language_code,
+        )
+
+    async def _transcribe_audio_async(
+        self,
+        filename: str,
+        audio: bytes,
+        media_type: str,
+        *,
+        mode: str,
+        language_code: str,
+    ) -> SarvamTranscript:
+        import httpx
+
+        files = {"file": (filename, audio, media_type)}
         data = {
             "model": self.model,
-            "mode": "transcribe",
-            "language_code": self.language_code,
+            "mode": mode,
+            "language_code": language_code,
         }
         headers = {"api-subscription-key": self.api_key}
         async with httpx.AsyncClient(timeout=60) as client:
@@ -70,12 +120,13 @@ class SarvamTranscriber:
             if response.is_error:
                 raise RuntimeError(f"Sarvam STT HTTP {response.status_code}: {response.text[:500]}")
             payload = response.json()
-        return (
+        text = (
             payload.get("transcript")
             or payload.get("text")
             or payload.get("transcription")
             or ""
         ).strip()
+        return SarvamTranscript(text=text, language_code=str(payload.get("language_code") or ""))
 
     def transcribe_pcm16(self, samples: np.ndarray, sample_rate: int = 16000) -> str:
         """Compatibility alias used by older callers."""

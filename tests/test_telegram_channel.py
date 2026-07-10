@@ -5,6 +5,7 @@ import pytest
 
 from ares.channels.store import ChannelStore
 from ares.channels.telegram import TelegramChannel, _split_message, run_telegram_channel
+from ares.channels.audio import EnglishAudioTranscriber, EnglishTranscript
 from ares.models import AppConfig, TelegramConfig
 
 
@@ -96,6 +97,16 @@ class FakePollingTelegramAPI(FakeTelegramAPI):
             return [self.update]
         await self.hold.wait()
         return []
+
+
+class FakeAudioTranscriber:
+    def __init__(self, text="What is on my calendar today?"):
+        self.text = text
+        self.calls = []
+
+    async def transcribe_to_english(self, path, *, duration_seconds=0):
+        self.calls.append((Path(path), duration_seconds))
+        return EnglishTranscript(text=self.text, backend="whisper")
 
 
 @pytest.fixture
@@ -205,6 +216,57 @@ async def test_document_attachment_is_downloaded_and_added_as_untrusted_context(
     assert "Telegram attachment" in prompt
     assert "untrusted file contents" in prompt
     assert api.downloads[0][0] == "file-1"
+
+
+@pytest.mark.asyncio
+async def test_voice_note_is_transcribed_to_english_before_running_ares(telegram_channel):
+    channel, conversations, api, _state = telegram_channel
+    transcriber = FakeAudioTranscriber()
+    channel.audio_transcriber = transcriber
+
+    await channel._handle_update(
+        {
+            "update_id": 15,
+            "message": {
+                "message_id": 11,
+                "chat": {"id": 123, "type": "private"},
+                "voice": {"file_id": "voice-1", "file_size": 120, "duration": 8},
+            },
+        }
+    )
+
+    prompt, _history = channel.agent.prompts[0]
+    assert "What is on my calendar today?" in prompt
+    assert "Reply only in English" in prompt
+    assert transcriber.calls[0][1] == 8
+    assert conversations.messages[0]["content"].startswith("Voice note (English transcript):")
+    assert any(message[1].startswith("Transcript (English):") for message in api.messages)
+
+
+@pytest.mark.asyncio
+async def test_audio_transcriber_auto_falls_back_to_whisper_when_sarvam_fails(monkeypatch):
+    from ares.models import TelegramConfig
+
+    config = TelegramConfig(audio_stt_backend="auto")
+    transcriber = EnglishAudioTranscriber(lambda: config)
+    calls = []
+
+    async def sarvam_failure(_path):
+        calls.append("sarvam")
+        raise RuntimeError("temporary provider outage")
+
+    async def whisper_success(_path, _model):
+        calls.append("whisper")
+        return EnglishTranscript(text="English fallback transcript", backend="whisper")
+
+    monkeypatch.setenv("SARVAM_API_KEY", "configured")
+    monkeypatch.setattr(transcriber, "_transcribe_with_sarvam", sarvam_failure)
+    monkeypatch.setattr(transcriber, "_transcribe_with_whisper", whisper_success)
+
+    result = await transcriber.transcribe_to_english("voice.ogg", duration_seconds=10)
+
+    assert result.text == "English fallback transcript"
+    assert calls == ["sarvam", "whisper"]
 
 
 @pytest.mark.asyncio

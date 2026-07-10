@@ -142,6 +142,10 @@ class TelegramConfig(BaseModel):
     show_tool_progress: bool = True
     max_attachment_bytes: int = Field(default=20 * 1024 * 1024, ge=1, le=20 * 1024 * 1024)
     max_outbound_file_bytes: int = Field(default=50 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
+    audio_transcription_enabled: bool = True
+    audio_stt_backend: str = "auto"  # auto: Sarvam when configured, otherwise local Whisper
+    audio_stt_model: str = "small"
+    max_audio_duration_seconds: int = Field(default=600, ge=1, le=7200)
 
 
 class AppConfig(BaseModel):

@@ -23,13 +23,13 @@ dependencies = [
     "pypdf>=5.0",
     "mcp>=1.28.0",
     "croniter>=2.0.0",
+    "numpy>=1.26",
+    "faster-whisper>=1.0",
 ]
 
 [project.optional-dependencies]
 voice = [
     "edge-tts>=7.0",
-    "faster-whisper>=1.0",
-    "numpy>=1.26",
     "sounddevice>=0.4",
     "soundfile>=0.12",
     "webrtcvad>=2.0",
