@@ -2,6 +2,7 @@ import React, { useEffect } from "react";
 import { MessageSquare, Settings } from "lucide-react";
 import { ChatArea } from "./components/Chat/ChatArea.jsx";
 import { SettingsPage } from "./components/Settings/SettingsPage.jsx";
+import { SkillsPage } from "./components/Skills/SkillsPage.jsx";
 import { OnboardingPage } from "./components/Onboarding/OnboardingPage.jsx";
 import { Sidebar } from "./components/Sidebar/Sidebar.jsx";
 import { StatusBar } from "./components/common/StatusBar.jsx";
@@ -16,12 +17,28 @@ export default function App() {
   const connection = useWebSocket();
   const settingsOpen = useSettingsStore((state) => state.settingsOpen);
   const setSettingsOpen = useSettingsStore((state) => state.setSettingsOpen);
+  const [activePage, setActivePage] = React.useState(settingsOpen ? "settings" : "chat");
   const isTerminalOpen = useTerminalStore((state) => state.isOpen);
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const onboardingLoaded = useSettingsStore((state) => state.onboardingLoaded);
   const onboardingCompleted = useSettingsStore((state) => state.onboardingCompleted);
   const [splitPos, setSplitPos] = React.useState(60);
   const isDragging = React.useRef(false);
+
+  const openPage = React.useCallback((page) => {
+    setActivePage(page);
+    setSettingsOpen(page === "settings");
+  }, [setSettingsOpen]);
+
+  const startNewSession = React.useCallback(() => {
+    connection.newSession();
+    openPage("chat");
+  }, [connection.newSession, openPage]);
+
+  const loadSession = React.useCallback((sessionId) => {
+    connection.loadSession(sessionId);
+    openPage("chat");
+  }, [connection.loadSession, openPage]);
 
   const handleDividerMouseDown = (e) => {
     isDragging.current = true;
@@ -75,12 +92,12 @@ export default function App() {
     function onKeyDown(e) {
       if ((e.ctrlKey || e.metaKey) && e.key === "n") {
         e.preventDefault();
-        connection.newSession();
+        startNewSession();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [connection.newSession]);
+  }, [startNewSession]);
 
   if (onboardingLoaded && !onboardingCompleted) {
     return <OnboardingPage onComplete={connection.completeOnboarding} />;
@@ -89,30 +106,31 @@ export default function App() {
   return (
     <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <Sidebar
-        onNewSession={connection.newSession}
-        onLoadSession={connection.loadSession}
+        onNewSession={startNewSession}
+        onLoadSession={loadSession}
         onRefresh={connection.refreshSidebar}
         onRenameSession={connection.renameSession}
         onDeleteSession={connection.deleteSession}
-        settingsOpen={settingsOpen}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenChat={() => setSettingsOpen(false)}
+        activePage={activePage}
+        onOpenSettings={() => openPage("settings")}
+        onOpenSkills={() => openPage("skills")}
+        onOpenChat={() => openPage("chat")}
       />
       <main className="main-pane">
         <header className="top-bar">
           <div className="top-title">
-            <span>{settingsOpen ? "Settings" : "Ares"}</span>
+            <span>{activePage === "settings" ? "Settings" : activePage === "skills" ? "Skills" : "Ares"}</span>
             <small>{connection.connected ? "Connected" : "Reconnecting"}</small>
           </div>
           <div className="top-bar-actions">
             <button
               className="icon-button"
               type="button"
-              aria-label={settingsOpen ? "Back to chat" : "Open settings"}
-              title={settingsOpen ? "Back to chat" : "Settings"}
-              onClick={() => setSettingsOpen(!settingsOpen)}
+              aria-label={activePage !== "chat" ? "Back to chat" : "Open settings"}
+              title={activePage !== "chat" ? "Back to chat" : "Settings"}
+              onClick={() => openPage(activePage === "chat" ? "settings" : "chat")}
             >
-              {settingsOpen ? (
+              {activePage !== "chat" ? (
                 <MessageSquare size={18} strokeWidth={2.2} />
               ) : (
                 <Settings size={18} strokeWidth={2.2} />
@@ -120,14 +138,16 @@ export default function App() {
             </button>
           </div>
         </header>
-        {settingsOpen ? (
+        {activePage === "settings" ? (
           <SettingsPage
-            onBack={() => setSettingsOpen(false)}
+            onBack={() => openPage("chat")}
             onSetModel={connection.setModel}
             onRefresh={connection.refreshSidebar}
             onFetchPersonalSettings={connection.fetchPersonalSettings}
             onSavePersonalSettings={connection.savePersonalSettings}
           />
+        ) : activePage === "skills" ? (
+          <SkillsPage />
         ) : isTerminalOpen ? (
           <div className="terminal-split-layout">
             <div className="chat-panel" style={{ width: `${splitPos}%` }}>

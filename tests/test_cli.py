@@ -5,6 +5,7 @@ import os
 import sqlite3
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
@@ -52,6 +53,27 @@ class MemoryStreamingAgent(DummyAgent):
         yield "[tool_start:store_memory]"
         yield "[tool:store_memory:Stored memory #7: user secret phrase]"
         yield "Saved."
+
+
+class MCPStreamingAgent(DummyAgent):
+    async def run_stream(self, *_args, **_kwargs):
+        snapshot = "\n".join(f"button Save row {index}" for index in range(240))
+        yield "[tool_start:mcp__playwright__browser_snapshot]"
+        yield f"[tool:mcp__playwright__browser_snapshot:{snapshot}]"
+        yield "Snapshot reviewed."
+
+
+class SkillStreamingAgent(DummyAgent):
+    def __init__(self):
+        super().__init__()
+        skill = SimpleNamespace(
+            name="computer-use",
+            description="Operate desktop apps with observe and verify steps.",
+        )
+        self.skill_manager = SimpleNamespace(relevant_skills=lambda _query: [skill])
+
+    async def run_stream(self, *_args, **_kwargs):
+        yield "Ready to work."
 
 
 class EmojiStreamingAgent(DummyAgent):
@@ -476,7 +498,7 @@ def test_soul_profile_and_context_commands_render():
     assert "Current Project Context" in output
 
 
-def test_banner_uses_plain_ascii_layout():
+def test_banner_gives_capabilities_and_prompt_ideas():
     app = make_cli()
 
     app._show_banner()
@@ -485,9 +507,10 @@ def test_banner_uses_plain_ascii_layout():
     assert "Ares" in output
     assert "model" in output
     assert "memory" in output
+    assert "Ready." in output
+    assert "Try" in output
+    assert "review this repo" in output
     assert "🔥" not in output
-    assert "╭" not in output
-    assert "─" not in output
 
 
 def test_cleanup_step_reports_sqlite_lock_without_crashing():
@@ -511,8 +534,10 @@ async def test_process_input_summarizes_tool_tokens_by_default():
     await app._process_input("search bitcoin")
 
     output = app.console_file.getvalue()
-    assert "Tools" in output
-    assert "web search" in output
+    assert "Thinking" in output
+    assert "Ares working" in output
+    assert "Tool | Web Search" in output
+    assert "running" in output
     assert "1 result" in output
     assert "Bitcoin is moving today." not in output
     assert "Bitcoin price today" not in output
@@ -529,10 +554,39 @@ async def test_process_input_does_not_emit_live_status_escape_codes():
     await app._process_input("search bitcoin")
 
     output = app.console_file.getvalue()
-    assert "Tools" in output
+    assert "Tool | Web Search" in output
     assert "\x1b[2K" not in output
     assert "\x1b[0m" not in output
-    assert "Thinking..." in output
+    assert "Thinking" in output
+
+
+@pytest.mark.asyncio
+async def test_process_input_discloses_auto_loaded_skills():
+    app = make_cli()
+    app.agent = SkillStreamingAgent()
+
+    await app._process_input("control Notepad")
+
+    output = app.console_file.getvalue()
+    assert "Skills selected" in output
+    assert "computer-use" in output
+    assert "Why:" in output
+    assert "Ready to work." in output
+
+
+@pytest.mark.asyncio
+async def test_playwright_snapshot_is_collapsed_even_in_details_mode():
+    app = make_cli()
+    app.agent = MCPStreamingAgent()
+    app.tool_output_mode = "details"
+
+    await app._process_input("inspect the current page")
+
+    output = app.console_file.getvalue()
+    assert "MCP | Playwright | Snapshot" in output
+    assert "240 lines collapsed" in output
+    assert "button Save row 239" not in output
+    assert "Snapshot reviewed." in output
 
 
 @pytest.mark.asyncio

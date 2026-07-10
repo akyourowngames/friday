@@ -1,13 +1,14 @@
 """Terminal UI using Rich and prompt_toolkit."""
 
 import asyncio
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from difflib import SequenceMatcher
 import json
 import re
 import shutil
 import sqlite3
 import sys
+import time
 import unicodedata
 from pathlib import Path
 
@@ -337,14 +338,55 @@ class AresCLI:
     def _show_banner(self):
         """Display the welcome banner."""
         memory_count = len(self.memory_store.list_all())
+        skill_count = 0
+        with suppress(Exception):
+            skill_count = len(self.skill_manager.list_all())
+        mcp_summary = "not configured"
+        manager = getattr(self, "mcp_manager", None)
+        if manager is not None:
+            with suppress(Exception):
+                report = manager.readiness_report()
+                mcp_summary = (
+                    f"{report.get('connected', 0)}/{report.get('configured', 0)} connected"
+                    f"{self._activity_separator()}{report.get('tools', 0)} tools"
+                )
+        overview = Table.grid(expand=True, padding=(0, 1))
+        overview.add_column(ratio=1)
+        overview.add_row(Text("Ready. Research, build, edit files, run commands, or control your desktop.", style="bright_white"))
+        overview.add_row(Text.assemble(
+            ("model  ", "dim"),
+            (self.config.model, "bright_cyan"),
+            ("    memory  ", "dim"),
+            (f"{memory_count} facts", "bright_green"),
+        ))
+        overview.add_row(Text.assemble(
+            ("MCP  ", "dim"),
+            (mcp_summary, "bright_cyan"),
+            ("    skills  ", "dim"),
+            (str(skill_count), "bright_magenta"),
+            ("    activity  ", "dim"),
+            (getattr(self, "tool_output_mode", "summary"), "bright_green"),
+        ))
+        overview.add_row(Text.assemble(
+            ("Try  ", "dim"),
+            ("review this repo", "cyan"),
+            ("  /  ", "dim"),
+            ("research a topic", "cyan"),
+            ("  /  ", "dim"),
+            ("open Notepad and write a note", "cyan"),
+        ))
+        overview.add_row(Text.assemble(("Commands  ", "dim"), ("/help", "cyan"), ("    Activity detail  ", "dim"), ("/tools", "cyan")))
 
         self.console.print()
-        self.console.print("[bold cyan]Ares[/bold cyan] [dim]v0.1.0[/dim]")
-        self.console.print(
-            f"[dim]model[/dim] {self.config.model}  "
-            f"[dim]memory[/dim] {memory_count} facts  "
-            "[dim]help[/dim] /help"
-        )
+        self.console.print(Panel(
+            overview,
+            title="[bold bright_cyan]Ares[/bold bright_cyan] [dim]v0.1.0[/dim]",
+            border_style="bright_cyan",
+            box=self._ui_box(),
+            padding=(0, 1),
+            width=self._panel_width(),
+            safe_box=True,
+        ))
         self.console.print()
 
     def _print_memories(self, memories: list[dict], title: str = "Memories") -> None:
@@ -555,6 +597,126 @@ class AresCLI:
                 return f"{server}: {action}"
         return tool_name.replace("_", " ") or "tool"
 
+    @staticmethod
+    def _pretty_activity_name(value: str) -> str:
+        """Turn protocol identifiers into compact human-facing labels."""
+        clean = value.replace("-", "_")
+        for prefix in ("browser_", "page_", "desktop_"):
+            if clean.lower().startswith(prefix):
+                clean = clean[len(prefix):]
+                break
+        return " ".join(part for part in clean.split("_") if part).title() or "Tool"
+
+    def _activity_label(self, tool_name: str) -> str:
+        """Identify local tools and MCP calls without exposing protocol noise."""
+        if tool_name.startswith("mcp__"):
+            parts = tool_name.split("__", 2)
+            if len(parts) == 3:
+                server = self._pretty_activity_name(parts[1])
+                action = self._pretty_activity_name(parts[2])
+                separator = self._activity_separator()
+                return f"MCP{separator}{server}{separator}{action}"
+        return f"Tool{self._activity_separator()}{self._pretty_activity_name(self._tool_label(tool_name))}"
+
+    def _activity_separator(self) -> str:
+        """Use plain ASCII separators in legacy Windows command prompts."""
+        return " · " if getattr(self, "unicode_output", False) else " | "
+
+    def _ui_box(self):
+        """Avoid Unicode border redraw issues in classic Command Prompt."""
+        return CLI_BOX if getattr(self, "unicode_output", False) else box.ASCII
+
+    def _activity_marker(self, state: str) -> str:
+        unicode_markers = {
+            "working": "◌",
+            "skill": "◆",
+            "start": "→",
+            "done": "✓",
+            "failed": "×",
+        }
+        ascii_markers = {
+            "working": "...",
+            "skill": "*",
+            "start": ">",
+            "done": "OK",
+            "failed": "X",
+        }
+        markers = unicode_markers if getattr(self, "unicode_output", False) else ascii_markers
+        return markers.get(state, "-")
+
+    def _activity_line(self, state: str, label: str, detail: str = "") -> Text:
+        """Build one durable, bounded activity receipt."""
+        marker_style = {
+            "working": "bright_cyan",
+            "skill": "bright_magenta",
+            "start": "bright_cyan",
+            "done": "bright_green",
+            "failed": "bright_red",
+        }.get(state, "dim")
+        line = Text("  ")
+        line.append(f"{self._activity_marker(state)} ", marker_style)
+        line.append(label, "bold bright_white")
+        if detail:
+            line.append(f"  {self._activity_separator().strip()}  ", "dim")
+            line.append(self._clip_tool_detail(detail, 110), "red" if state == "failed" else "dim")
+        return line
+
+    def _working_text(self, label: str) -> Text:
+        return Text.assemble(
+            (f"{self._activity_marker('working')} ", "bright_cyan"),
+            (label, "bold bright_white"),
+        )
+
+    def _active_skills(self, user_input: str) -> list[tuple[object, str]]:
+        """Return the same auto-selected skills the agent will use this turn."""
+        if not getattr(self.config, "skills_enabled", True):
+            return []
+        if not getattr(self.config, "skill_auto_suggest", True):
+            return []
+        manager = getattr(self.agent, "skill_manager", None)
+        relevant = getattr(manager, "relevant_skills", None)
+        if not callable(relevant):
+            return []
+        try:
+            reason_for = getattr(manager, "selection_reason", None)
+            skills = list(relevant(user_input))
+            return [
+                (
+                    skill,
+                    reason_for(skill, user_input) if callable(reason_for) else "matches this task",
+                )
+                for skill in skills
+            ]
+        except Exception:
+            return []
+
+    def _activity_card_width(self) -> int:
+        return min(self._panel_width(), 96)
+
+    def _print_skill_card(self, selected_skills: list[tuple[object, str]]) -> None:
+        """Show selected instruction sets separately from model/tool activity."""
+        if not selected_skills:
+            return
+        rows = Table.grid(expand=True, padding=(0, 1))
+        rows.add_column(no_wrap=True, style="bold bright_magenta")
+        rows.add_column(ratio=1)
+        for skill, reason in selected_skills:
+            name = str(getattr(skill, "name", "unknown"))
+            category = str(getattr(skill, "category", "workflow"))
+            rows.add_row(
+                f"{name}  [{category}]",
+                f"Why: {self._clip_tool_detail(str(reason), 72)}",
+            )
+        self.console.print(Panel(
+            rows,
+            title="[bold bright_magenta]Skills selected[/bold bright_magenta] [dim]instruction sets for this task[/dim]",
+            border_style="bright_magenta",
+            box=self._ui_box(),
+            padding=(0, 1),
+            width=self._activity_card_width(),
+            safe_box=True,
+        ))
+
     def _parse_tool_token(self, token: str) -> tuple[str, str]:
         """Parse [tool:name:content] tokens with a fallback for legacy tokens."""
         inner = token[6:-1]
@@ -637,9 +799,22 @@ class AresCLI:
             event["detail"] = "phone action completed"
         elif tool_name.startswith("mcp__windows__"):
             action = tool_name.rsplit("__", 1)[-1].replace("_", " ").lower()
-            event["detail"] = f"Windows {action} completed"
+            lines = len(clean.splitlines()) if clean else 0
+            if "snapshot" in action:
+                event["detail"] = f"snapshot captured{self._activity_separator()}{lines:,} lines collapsed"
+            elif "screenshot" in action:
+                event["detail"] = "screenshot captured · visual payload collapsed"
+            else:
+                event["detail"] = f"Windows {action} completed"
         elif tool_name.startswith("mcp__"):
-            event["detail"] = "external tool completed"
+            action = tool_name.rsplit("__", 1)[-1].lower()
+            lines = len(clean.splitlines()) if clean else 0
+            if "snapshot" in action:
+                event["detail"] = f"snapshot captured{self._activity_separator()}{lines:,} lines collapsed"
+            elif "screenshot" in action:
+                event["detail"] = "screenshot captured · visual payload collapsed"
+            else:
+                event["detail"] = f"{self._pretty_activity_name(action).lower()} completed"
         else:
             event["detail"] = "completed"
 
@@ -663,22 +838,65 @@ class AresCLI:
             table.add_row(label, status, detail)
         return table
 
-    def _print_tool_start(self, tool_name: str) -> None:
+    def _print_tool_start(self, tool_name: str, live_status=None, step: int | None = None) -> None:
         """Show a tool call as soon as the model asks for it."""
-        if getattr(self, "tool_output_mode", "summary") != "details":
+        if getattr(self, "tool_output_mode", "summary") == "hidden":
             return
-        self.console.print(f"[dim]Using {self._tool_label(tool_name)}...[/dim]")
+        label = self._activity_label(tool_name)
+        if step is not None:
+            label = f"[{step:02d}] {label}"
+        if live_status is not None:
+            live_status.update(self._working_text(label))
+        else:
+            self.console.print(self._activity_line("start", label, "running"))
 
     def _print_tool_done(self, event: dict[str, str]) -> None:
         """Show a compact tool completion line."""
-        if getattr(self, "tool_output_mode", "summary") != "details":
+        if getattr(self, "tool_output_mode", "summary") == "hidden":
             return
-        label = event.get("label", "tool")
+        label = self._activity_label(event.get("tool", "unknown"))
+        step = event.get("step")
+        if isinstance(step, int):
+            label = f"[{step:02d}] {label}"
         detail = event.get("detail", "completed")
-        if event.get("state") == "failed":
-            self.console.print(f"[red]Failed {label}: {detail}[/red]")
-        else:
-            self.console.print(f"[dim]Done {label}: {detail}[/dim]")
+        failed = event.get("state") == "failed"
+        kind = "MCP step" if str(event.get("tool", "")).startswith("mcp__") else "Tool step"
+        state = "failed" if failed else "completed"
+        body = Table.grid(expand=True, padding=(0, 1))
+        body.add_column(no_wrap=True)
+        body.add_column(ratio=1)
+        body.add_row(
+            Text(state.upper(), style="bold red" if failed else "bold bright_green"),
+            Text(self._clip_tool_detail(detail, 100), style="red" if failed else "default"),
+        )
+        self.console.print(Panel(
+            body,
+            title=f"[bold]{kind}[/bold] [dim]{label}[/dim]",
+            border_style="red" if failed else "bright_cyan",
+            box=self._ui_box(),
+            padding=(0, 1),
+            width=self._activity_card_width(),
+            safe_box=True,
+        ))
+
+    def _collapse_noisy_tool_output(self, tool_name: str, content: str) -> bool:
+        """Keep snapshots and very large MCP payloads out of detailed mode."""
+        if not tool_name.startswith("mcp__"):
+            return False
+        action = tool_name.rsplit("__", 1)[-1].lower()
+        return "snapshot" in action or "screenshot" in action or len(content) > 5000
+
+    def _print_static_activity_header(self, label: str) -> None:
+        """Start a stable per-turn activity area for legacy terminals."""
+        self.console.print(Panel(
+            self._working_text(label),
+            title="[bold bright_cyan]Ares working[/bold bright_cyan]",
+            border_style="bright_cyan",
+            box=self._ui_box(),
+            padding=(0, 1),
+            width=self._panel_width(),
+            safe_box=True,
+        ))
 
     def _clean_assistant_text(self, text: str) -> str:
         """Remove accidental tool protocol tokens from assistant-facing text."""
@@ -781,7 +999,7 @@ class AresCLI:
         if not headers or any(len(row) != len(headers) for row in body):
             return None
 
-        table = Table(box=box.SIMPLE_HEAVY, border_style="bright_cyan", header_style="bold bright_cyan", expand=True)
+        table = Table(box=self._ui_box(), border_style="bright_cyan", header_style="bold bright_cyan", expand=True)
         for header in headers:
             table.add_column(header or " ", overflow="fold", ratio=1)
         for row in body:
@@ -860,7 +1078,7 @@ class AresCLI:
                 renderables.append(Text("-" * min(self._response_width(), 72), style="dim"))
             elif bullet:
                 flush_paragraph()
-                item = Text("• ", style="bright_cyan")
+                item = Text("• " if getattr(self, "unicode_output", False) else "- ", style="bright_cyan")
                 item.append_text(self._render_inline_text(bullet.group(1)))
                 renderables.append(item)
             elif numbered:
@@ -884,7 +1102,7 @@ class AresCLI:
             Group(*renderables),
             title="[bold bright_cyan]Ares[/bold bright_cyan]",
             border_style="bright_cyan",
-            box=CLI_BOX,
+            box=self._ui_box(),
             padding=(0, 1),
             width=self._panel_width(),
             safe_box=True,
@@ -1172,8 +1390,8 @@ class AresCLI:
             if not arg:
                 mode = getattr(self, "tool_output_mode", "summary")
                 descriptions = {
-                    "summary": "Compact activity trail after each answer.",
-                    "details": "Full rendered tool result tables and panels.",
+                    "summary": "Live operation name plus one compact completion line.",
+                    "details": "Live activity and rendered results; huge MCP payloads stay collapsed.",
                     "hidden": "No tool activity unless an error reaches the answer.",
                 }
                 table = Table(title="Tool Output", border_style="bright_cyan", box=CLI_BOX)
@@ -1187,8 +1405,8 @@ class AresCLI:
             elif arg in TOOL_OUTPUT_MODES:
                 self.tool_output_mode = arg
                 descriptions = {
-                    "summary": "Tool results stay hidden; Ares shows a compact activity trail.",
-                    "details": "Tool result panels are shown for debugging.",
+                    "summary": "Ares shows live tools, MCP calls, skills, and compact results.",
+                    "details": "Rendered results are shown, while snapshots remain collapsed.",
                     "hidden": "Tool activity is fully hidden unless an error reaches the final answer.",
                 }
                 self.console.print(f"[green]Tool output set to {arg}.[/green] [dim]{descriptions[arg]}[/dim]")
@@ -1209,38 +1427,67 @@ class AresCLI:
 
     async def _process_input(self, user_input: str):
         """Process a user message through the agent and display response."""
-        tool_events = []
         tool_renderables = []
+        tool_started_at: dict[str, list[float]] = {}
+        tool_steps: dict[str, list[int]] = {}
+        next_tool_step = 1
+        mode = getattr(self, "tool_output_mode", "summary")
+        activity_visible = mode != "hidden"
+        live_enabled = (
+            activity_visible
+            and bool(getattr(self.console, "is_terminal", False))
+            and bool(getattr(self, "unicode_output", False))
+        )
+        thinking_label = f"Thinking{self._activity_separator()}{self.config.model}"
+        status_context = (
+            self.console.status(self._working_text(thinking_label), spinner="dots")
+            if live_enabled
+            else nullcontext(None)
+        )
 
         self.console.print()
-        self.console.print("[dim]Thinking...[/dim]")
+        if activity_visible and not live_enabled:
+            self._print_static_activity_header(thinking_label)
+        selected_skills = self._active_skills(user_input) if activity_visible else []
         full_response = ""
-        try:
-            async for token in self.agent.run_stream(user_input, self.conversation_history):
-                if token.startswith("[tool_start:"):
-                    tool_name = self._parse_tool_start_token(token)
-                    self._print_tool_start(tool_name)
-                elif token.startswith("[tool:"):
-                    tool_name, tool_content = self._parse_tool_token(token)
-                    event = self._summarize_tool_result(tool_name, tool_content)
-                    tool_events.append(event)
-                    self._print_tool_done(event)
-                    if getattr(self, "tool_output_mode", "summary") == "details":
-                        try:
-                            renderer = get_renderer(tool_name)
-                            tool_renderables.append(renderer(tool_content))
-                        except Exception:
-                            tool_renderables.append(render_generic_tool(tool_content))
-                else:
-                    full_response += token
-        except Exception as e:
-            full_response = f"Error: {e}"
+        with status_context as live_status:
+            if selected_skills:
+                self._print_skill_card(selected_skills)
+            try:
+                async for token in self.agent.run_stream(user_input, self.conversation_history):
+                    if token.startswith("[tool_start:"):
+                        tool_name = self._parse_tool_start_token(token)
+                        tool_started_at.setdefault(tool_name, []).append(time.monotonic())
+                        tool_steps.setdefault(tool_name, []).append(next_tool_step)
+                        self._print_tool_start(tool_name, live_status, step=next_tool_step)
+                        next_tool_step += 1
+                    elif token.startswith("[tool:"):
+                        tool_name, tool_content = self._parse_tool_token(token)
+                        event = self._summarize_tool_result(tool_name, tool_content)
+                        steps = tool_steps.get(tool_name) or []
+                        if steps:
+                            event["step"] = steps.pop(0)
+                        starts = tool_started_at.get(tool_name) or []
+                        if starts:
+                            elapsed = max(0.0, time.monotonic() - starts.pop(0))
+                            event["detail"] = f"{event['detail']}{self._activity_separator()}{elapsed:.1f}s"
+                        self._print_tool_done(event)
+                        if live_status is not None:
+                            live_status.update(self._working_text(thinking_label))
+                        if mode == "details" and not self._collapse_noisy_tool_output(tool_name, tool_content):
+                            try:
+                                renderer = get_renderer(tool_name)
+                                tool_renderables.append(renderer(tool_content))
+                            except Exception:
+                                tool_renderables.append(render_generic_tool(tool_content))
+                    else:
+                        full_response += token
+            except Exception as e:
+                if activity_visible:
+                    self.console.print(self._activity_line("failed", "Request", str(e)))
+                full_response = f"Error: {e}"
 
-        tool_activity = self._render_tool_activity(tool_events)
-        if tool_activity is not None:
-            self.console.print(tool_activity)
-
-        if getattr(self, "tool_output_mode", "summary") == "details":
+        if mode == "details":
             for renderable in tool_renderables:
                 self.console.print(renderable)
 

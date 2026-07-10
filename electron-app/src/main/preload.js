@@ -1,10 +1,11 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("aresDesktop", {
   getServerUrl: () => ipcRenderer.invoke("ares:get-server-url"),
   restartServer: () => ipcRenderer.invoke("ares:restart-server"),
   getAppVersion: () => ipcRenderer.invoke("ares:get-app-version"),
   platform: process.platform,
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   logToFile: (msg) => ipcRenderer.send("ares:log-to-file", msg),
 
   // ── Terminal API ──────────────────────────────────────────

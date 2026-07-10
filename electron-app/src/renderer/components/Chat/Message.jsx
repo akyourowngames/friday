@@ -1,4 +1,4 @@
-import { Copy, RefreshCw, ChevronRight } from "lucide-react";
+import { Copy, ChevronRight, FileText } from "lucide-react";
 import { useState } from "react";
 import { ToolCard } from "../Tools/ToolCard.jsx";
 import { MarkdownRenderer } from "../common/MarkdownRenderer.jsx";
@@ -18,7 +18,24 @@ export function Message({ message }) {
     return (
       <article className="message-row user">
         <div className="user-bubble">
-          <span>{message.content}</span>
+          {message.attachments?.length ? (
+            <div className="message-attachments">
+              {message.attachments.map((attachment, index) => (
+                <div className="message-attachment" key={`${attachment.name}-${index}`}>
+                  {attachment.preview && attachment.type.startsWith("image/") ? (
+                    <img src={attachment.preview} alt={attachment.name} />
+                  ) : (
+                    <span className="message-attachment-icon"><FileText size={18} /></span>
+                  )}
+                  <span>
+                    <strong>{attachment.name}</strong>
+                    <small>{attachment.size ? `${(attachment.size / 1024).toFixed(1)} KB` : attachment.type}</small>
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {message.content ? <span>{message.content}</span> : null}
         </div>
       </article>
     );

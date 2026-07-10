@@ -4,7 +4,8 @@ import json
 import pytest
 
 from ares.models import AppConfig
-from ares.server import AresServer, parse_tool_token
+from ares.server import AresServer, parse_tool_start_token, parse_tool_token
+from ares.skills import SkillManager
 
 
 class FakeSocket:
@@ -168,6 +169,72 @@ def test_parse_tool_token():
         '{"query":"btc"}',
     )
     assert parse_tool_token("plain text") is None
+    assert parse_tool_start_token("[tool_start:read_file]") == "read_file"
+    assert parse_tool_start_token("plain text") is None
+
+
+@pytest.mark.asyncio
+async def test_internal_tool_start_tokens_never_stream_as_chat(server):
+    async def run_stream(_message, conversation_history=None):
+        yield "Starting. "
+        yield "[tool_start:read_file]"
+        yield '[tool:read_file:{"path":"README.md","content":"hello"}]'
+        yield "Finished."
+
+    server.agent.run_stream = run_stream
+    socket = FakeSocket()
+
+    await server.handle_message(socket, json.dumps({"type": "chat", "content": "search bitcoin"}))
+
+    content = "".join(item.get("text", "") for item in socket.messages if item["type"] == "content")
+    assert content == "Starting. Finished."
+    assert "tool_start" not in content
+    assert len([item for item in socket.messages if item["type"] == "tool_start"]) == 1
+    assert len([item for item in socket.messages if item["type"] == "tool_args"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_skills_websocket_crud(server, tmp_path):
+    server.agent.skill_manager = SkillManager([tmp_path / "skills"])
+    socket = FakeSocket()
+    source = "---\ndescription: A useful desktop workflow.\n---\n\n# Demo\nDo the work."
+
+    await server.handle_message(socket, json.dumps({
+        "type": "create_skill", "name": "desktop-demo", "category": "demo", "source": source,
+    }))
+    await server.handle_message(socket, json.dumps({"type": "get_skill", "name": "desktop-demo"}))
+
+    saved = next(item for item in socket.messages if item["type"] == "skill_saved")
+    detail = next(item for item in socket.messages if item["type"] == "skill_detail")
+    assert saved["skill"]["editable"] is True
+    assert detail["skill"]["name"] == "desktop-demo"
+    assert "# Demo" in detail["skill"]["source"]
+
+    await server.handle_message(socket, json.dumps({"type": "delete_skill", "name": "desktop-demo"}))
+    assert any(item["type"] == "skill_deleted" for item in socket.messages)
+
+
+@pytest.mark.asyncio
+async def test_chat_accepts_attachment_without_hardcoded_user_prompt(server):
+    captured = {}
+
+    async def run_stream(message, conversation_history=None):
+        captured["message"] = message
+        yield "I inspected it."
+
+    server.agent.run_stream = run_stream
+    socket = FakeSocket()
+    encoded = __import__("base64").b64encode(b"important file text").decode("ascii")
+
+    await server.handle_message(socket, json.dumps({
+        "type": "chat",
+        "content": "",
+        "attachments": [{"name": "notes.txt", "type": "text/plain", "data": encoded}],
+    }))
+
+    assert "important file text" in captured["message"]
+    assert "untrusted file contents" in captured["message"]
+    assert server.conversation_store.messages[0]["content"] == "Attached: notes.txt"
 
 
 @pytest.mark.asyncio

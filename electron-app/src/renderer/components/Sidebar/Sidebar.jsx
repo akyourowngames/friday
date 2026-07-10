@@ -4,13 +4,26 @@ import {
   Search,
   PanelLeftClose,
   PanelLeftOpen,
+  MessageSquare,
+  Settings,
+  Sparkles,
 } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore.js";
 import { useSettingsStore } from "../../stores/settingsStore.js";
 import { useChatStore } from "../../stores/chatStore.js";
 import { SessionList } from "./SessionList.jsx";
 
-export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSession, onDeleteSession }) {
+export function Sidebar({
+  onNewSession,
+  onLoadSession,
+  onRefresh,
+  onRenameSession,
+  onDeleteSession,
+  activePage = "chat",
+  onOpenChat,
+  onOpenSkills,
+  onOpenSettings,
+}) {
   const search = useSessionStore((state) => state.search);
   const setSearch = useSessionStore((state) => state.setSearch);
   const isStreaming = useChatStore((state) => state.isStreaming);
@@ -69,6 +82,17 @@ export function Sidebar({ onNewSession, onLoadSession, onRefresh, onRenameSessio
               isStreaming={isStreaming}
             />
           </section>
+          <nav className="sidebar-nav" aria-label="Ares sections">
+            <button className={activePage === "chat" ? "active" : ""} type="button" onClick={onOpenChat}>
+              <MessageSquare size={16} /><span>Chat</span>
+            </button>
+            <button className={activePage === "skills" ? "active" : ""} type="button" onClick={onOpenSkills}>
+              <Sparkles size={16} /><span>Skills</span>
+            </button>
+            <button className={activePage === "settings" ? "active" : ""} type="button" onClick={onOpenSettings}>
+              <Settings size={16} /><span>Settings</span>
+            </button>
+          </nav>
         </>
       )}
     </aside>

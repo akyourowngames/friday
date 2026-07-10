@@ -67,7 +67,7 @@ export class AresWebSocket {
 
   send(payload) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.emit("error", { message: "Ares server is not connected yet" });
+      this.emit("connection_error", { message: "Ares server is not connected yet" });
       return false;
     }
     this.ws.send(JSON.stringify(payload));

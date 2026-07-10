@@ -10,6 +10,7 @@ export function useWebSocket() {
   const appendAssistantContent = useChatStore((state) => state.appendAssistantContent);
   const addToolStart = useChatStore((state) => state.addToolStart);
   const addToolResult = useChatStore((state) => state.addToolResult);
+  const updateToolArgs = useChatStore((state) => state.updateToolArgs);
   const finishAssistant = useChatStore((state) => state.finishAssistant);
   const addError = useChatStore((state) => state.addError);
   const loadHistory = useChatStore((state) => state.loadHistory);
@@ -43,12 +44,18 @@ export function useWebSocket() {
     const offError = aresSocket.on("socket_error", ({ message }) => {
       setLastError(message);
     });
+    const offConnectionError = aresSocket.on("connection_error", ({ message }) => {
+      setLastError(message);
+    });
     const offContent = aresSocket.on("content", ({ text }) => appendAssistantContent(text));
     const offToolStart = aresSocket.on("tool_start", ({ tool, args }) =>
       addToolStart(tool, args)
     );
     const offToolResult = aresSocket.on("tool_result", ({ tool, content }) =>
       addToolResult(tool, content)
+    );
+    const offToolArgs = aresSocket.on("tool_args", ({ tool, args }) =>
+      updateToolArgs(tool, args)
     );
     const offDone = aresSocket.on("response_done", ({ content, tool_calls, session_id }) => {
       finishAssistant(content, tool_calls || []);
@@ -109,9 +116,11 @@ export function useWebSocket() {
       offOpen();
       offClose();
       offError();
+      offConnectionError();
       offContent();
       offToolStart();
       offToolResult();
+      offToolArgs();
       offDone();
       offServerError();
       offSessions();
@@ -129,6 +138,7 @@ export function useWebSocket() {
   }, [
     addError,
     addToolResult,
+    updateToolArgs,
     addToolStart,
     appendAssistantContent,
     finishAssistant,
@@ -148,20 +158,29 @@ export function useWebSocket() {
   ]);
 
   const sendMessage = useCallback(
-    (content) => {
+    (content, attachments = [], displayAttachments = []) => {
       const trimmed = content.trim();
-      if (!trimmed) {
+      if (!trimmed && !attachments.length) {
         return false;
       }
-      addUserMessage(trimmed);
+      if (!connected) {
+        setLastError("Ares server is not connected yet");
+        return false;
+      }
+      addUserMessage(trimmed, displayAttachments);
       startAssistantMessage();
-      return aresSocket.send({
+      const sent = aresSocket.send({
         type: "chat",
         content: trimmed,
+        attachments,
         session_id: activeSessionId
       });
+      if (!sent) {
+        useChatStore.getState().cancelPendingSend();
+      }
+      return sent;
     },
-    [activeSessionId, addUserMessage, startAssistantMessage]
+    [activeSessionId, addUserMessage, connected, setLastError, startAssistantMessage]
   );
 
   const newSession = useCallback(() => {

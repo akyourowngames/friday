@@ -140,6 +140,26 @@ def test_builtin_skills_and_tool_definitions_are_available(tmp_path):
     assert {"list_skills", "load_skill", "create_skill"}.issubset(tool_names)
 
 
+def test_auto_loaded_skills_require_direct_intent_signals(tmp_path):
+    manager = SkillManager([tmp_path])
+
+    desktop_files = manager.relevant_skills("show me files on desktop")
+    mcp_status = manager.relevant_skills("what status of mcps")
+    latest_news = manager.relevant_skills("what is the latest in news")
+
+    assert not desktop_files
+    assert not mcp_status
+    assert "web-research" in {skill.name for skill in latest_news}
+
+    computer_use = next(
+        skill for skill in manager.relevant_skills("open Instagram using MCP")
+        if skill.name == "computer-use"
+    )
+    assert manager.selection_reason(computer_use, "open Instagram using MCP") == (
+        "matches a desktop action request"
+    )
+
+
 def test_tool_executor_skill_tools(tmp_path):
     executor = ToolExecutor(DummyStore(), DummyStore())
     executor.skill_manager = SkillManager([tmp_path])

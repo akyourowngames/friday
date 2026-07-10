@@ -17,6 +17,18 @@ STOP_WORDS = {
     "for", "from", "have", "into", "make", "more", "need", "please", "that",
     "the", "this", "use", "using", "want", "when", "with", "work", "you",
 }
+AUTOLOAD_BROAD_TOKENS = {
+    "app", "apps", "code", "desktop", "file", "files", "project",
+    "status", "tool", "tools", "window", "windows", "workflow",
+}
+AUTOMATION_ACTION_TOKENS = {
+    "click", "close", "launch", "navigate", "open", "save", "type",
+    "write",
+}
+RECENCY_TOKENS = {
+    "current", "latest", "news", "now", "recent", "recommendation",
+    "recommendations", "today",
+}
 BUILTIN_SKILLS_DIR = Path(__file__).with_name("skills")
 USER_SKILLS_DIR = Path("~/.ares/skills").expanduser()
 
@@ -145,6 +157,32 @@ class SkillManager:
         scored.sort(key=lambda item: (-item[0], item[1].category, item[1].name))
         return [skill for _, skill in scored[: max(0, limit)]]
 
+    def selection_reason(self, skill: Skill, user_input: str) -> str:
+        """Explain the direct request signal that selected a skill."""
+        query_l = user_input.lower()
+        query_tokens = self._tokens(user_input)
+        name = skill.name.lower()
+        normalized_name = name.replace("-", " ")
+        if name in query_l or normalized_name in query_l:
+            return "you named this workflow"
+
+        quoted = self._quoted_trigger_phrases(skill.description)
+        for phrase in quoted:
+            if phrase in query_l:
+                return f'matches “{phrase}”'
+
+        name_hits, description_hits, example_hits = self._match_tokens(skill, query_tokens)
+        if skill.category.lower() == "automation" and query_tokens & AUTOMATION_ACTION_TOKENS:
+            targets = query_tokens - AUTOMATION_ACTION_TOKENS - AUTOLOAD_BROAD_TOKENS
+            if targets:
+                return "matches a desktop action request"
+        if skill.category.lower() == "research" and query_tokens & RECENCY_TOKENS:
+            return "matches a current-information request"
+        direct_hits = sorted((name_hits | description_hits | example_hits) - AUTOLOAD_BROAD_TOKENS)
+        if direct_hits:
+            return "matches " + ", ".join(direct_hits[:3])
+        return "matches this task"
+
     def auto_context(self, user_input: str, limit: int = 3, max_chars: int = 12000) -> str:
         """Build hidden context for relevant skills without user-facing chatter."""
         skills = self.relevant_skills(user_input, limit=limit)
@@ -176,25 +214,75 @@ class SkillManager:
         name = skill.name.lower()
         description = skill.description.lower()
         category = skill.category.lower()
-        examples = " ".join(str(example.get("prompt", "")) for example in skill.examples).lower()
+        name_tokens, description_tokens, example_tokens = self._match_tokens(skill, query_tokens)
 
-        name_tokens = self._tokens(name.replace("-", " "))
-        description_tokens = self._tokens(description)
-        category_tokens = self._tokens(category)
-        example_tokens = self._tokens(examples)
-        content_tokens = self._tokens(skill.content[:4000])
+        if not self._passes_autoload_gate(skill, query_l, query_tokens, name_tokens, description_tokens, example_tokens):
+            return 0
 
         score = 0
         if name in query_l or name.replace("-", " ") in query_l:
             score += 10
-        if description and any(phrase in query_l for phrase in self._trigger_phrases(description)):
+        if description and any(phrase in query_l for phrase in self._quoted_trigger_phrases(description)):
             score += 6
-        score += 5 * len(query_tokens & name_tokens)
-        score += 4 * len(query_tokens & description_tokens)
-        score += 2 * len(query_tokens & example_tokens)
-        score += len(query_tokens & category_tokens)
-        score += min(3, len(query_tokens & content_tokens))
+        score += 5 * len(name_tokens)
+        score += 4 * len(description_tokens)
+        score += 2 * len(example_tokens)
+        score += len(query_tokens & self._tokens(category))
+        # Long skill bodies often contain generic words such as "files" and
+        # "status".  They may refine a direct match, but never create one.
+        if score:
+            score += min(2, len(query_tokens & self._tokens(skill.content[:4000])))
         return score
+
+    def _passes_autoload_gate(
+        self,
+        skill: Skill,
+        query_l: str,
+        query_tokens: set[str],
+        name_hits: set[str],
+        description_hits: set[str],
+        example_hits: set[str],
+    ) -> bool:
+        """Require an intent signal before auto-loading a broad workflow."""
+        name = skill.name.lower()
+        if name in query_l or name.replace("-", " ") in query_l:
+            return True
+        if any(phrase in query_l for phrase in self._quoted_trigger_phrases(skill.description)):
+            return True
+
+        specific_name_hits = name_hits - AUTOLOAD_BROAD_TOKENS
+        specific_description_hits = description_hits - AUTOLOAD_BROAD_TOKENS
+        if specific_name_hits or len(specific_description_hits) >= 2 or example_hits:
+            return True
+
+        category = skill.category.lower()
+        if category == "automation":
+            actions = query_tokens & AUTOMATION_ACTION_TOKENS
+            targets = query_tokens - AUTOMATION_ACTION_TOKENS - AUTOLOAD_BROAD_TOKENS
+            return bool(actions and targets)
+        if category == "research":
+            return bool(query_tokens & RECENCY_TOKENS and query_tokens & self._tokens(skill.description))
+        return False
+
+    def _match_tokens(self, skill: Skill, query_tokens: set[str]) -> tuple[set[str], set[str], set[str]]:
+        """Return request-term overlap for the short, intentional skill fields."""
+        name_tokens = self._tokens(skill.name.replace("-", " "))
+        description_tokens = self._tokens(skill.description)
+        examples = " ".join(str(example.get("prompt", "")) for example in skill.examples).lower()
+        example_tokens = self._tokens(examples)
+        return (
+            query_tokens & name_tokens,
+            query_tokens & description_tokens,
+            query_tokens & example_tokens,
+        )
+
+    @staticmethod
+    def _quoted_trigger_phrases(description: str) -> list[str]:
+        return [
+            phrase.lower().strip()
+            for phrase in re.findall(r'"([^\"]{4,120})"', description)
+            if phrase.strip()
+        ]
 
     @staticmethod
     def _trigger_phrases(description: str) -> list[str]:
@@ -255,6 +343,10 @@ class SkillManager:
             return False
         shutil.rmtree(skill.root)
         return True
+
+    def is_editable(self, skill: Skill) -> bool:
+        """Return whether a skill belongs to the user-managed skills directory."""
+        return self._is_in_user_dir(skill.path)
 
     def list_categories(self) -> dict[str, int]:
         counts: dict[str, int] = {}

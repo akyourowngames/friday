@@ -16,6 +16,23 @@ function normalizeToolCall(call) {
   };
 }
 
+function cleanAssistantContent(content) {
+  return String(content || "")
+    .replace(/\[tool_start:[^\]]+\]/g, "")
+    .replace(/^\s*\[tool:[^\n]+\]\s*$/gm, "");
+}
+
+function normalizeAttachments(message) {
+  const raw = message.attachments;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((attachment) => ({
+    name: attachment.name || "attachment",
+    size: Number(attachment.size || 0),
+    type: attachment.type || "application/octet-stream",
+    preview: attachment.preview || "",
+  }));
+}
+
 function normalizeToolCalls(message) {
   const raw = message.toolCalls ?? message.tool_calls ?? [];
   if (Array.isArray(raw)) {
@@ -36,10 +53,13 @@ function normalizeMessage(message) {
   return {
     id: message.id || id(message.role || "message"),
     role: message.role || "assistant",
-    content: message.content || "",
+    content: message.role === "assistant"
+      ? cleanAssistantContent(message.content)
+      : message.content || "",
     createdAt: message.created_at || message.createdAt || new Date().toISOString(),
     toolCalls: normalizeToolCalls(message),
-    status: message.status || "done"
+    status: message.status || "done",
+    attachments: normalizeAttachments(message),
   };
 }
 
@@ -49,12 +69,12 @@ export const useChatStore = create((set, get) => ({
   isStreaming: false,
   error: "",
 
-  addUserMessage(content) {
+  addUserMessage(content, attachments = []) {
     set((state) => ({
       error: "",
       messages: [
         ...state.messages,
-        normalizeMessage({ role: "user", content, status: "done" })
+        normalizeMessage({ role: "user", content, attachments, status: "done" })
       ]
     }));
   },
@@ -74,6 +94,8 @@ export const useChatStore = create((set, get) => ({
   },
 
   appendAssistantContent(text) {
+    const cleanText = cleanAssistantContent(text);
+    if (!cleanText) return;
     const { activeAssistantId } = get();
     if (!activeAssistantId) {
       get().startAssistantMessage();
@@ -82,7 +104,7 @@ export const useChatStore = create((set, get) => ({
     set((state) => ({
       messages: state.messages.map((message) =>
         message.id === currentId
-          ? { ...message, content: `${message.content}${text}`, status: "streaming" }
+          ? { ...message, content: `${message.content}${cleanText}`, status: "streaming" }
           : message
       )
     }));
@@ -131,6 +153,26 @@ export const useChatStore = create((set, get) => ({
     }));
   },
 
+  updateToolArgs(tool, args) {
+    const currentId = get().activeAssistantId;
+    set((state) => ({
+      messages: state.messages.map((message) => {
+        if (message.id !== currentId) return message;
+        let updated = false;
+        return {
+          ...message,
+          toolCalls: message.toolCalls.map((call) => {
+            if (!updated && call.tool === tool && call.status === "running") {
+              updated = true;
+              return { ...call, args: args || {} };
+            }
+            return call;
+          }),
+        };
+      }),
+    }));
+  },
+
   finishAssistant(content, toolCalls = []) {
     const currentId = get().activeAssistantId;
     set((state) => ({
@@ -145,12 +187,27 @@ export const useChatStore = create((set, get) => ({
           : toolCalls.map((call) => ({ ...call, id: id("tool"), status: "done" }));
         return {
           ...message,
-          content: content || message.content,
+          content: cleanAssistantContent(content || message.content),
           toolCalls: completedTools,
           status: "done"
         };
       })
     }));
+  },
+
+  cancelPendingSend() {
+    const { activeAssistantId } = get();
+    set((state) => {
+      const withoutAssistant = state.messages.filter((message) => message.id !== activeAssistantId);
+      const lastUserIndex = [...withoutAssistant]
+        .map((message) => message.role)
+        .lastIndexOf("user");
+      return {
+        activeAssistantId: null,
+        isStreaming: false,
+        messages: withoutAssistant.filter((_, index) => index !== lastUserIndex),
+      };
+    });
   },
 
   addError(message) {

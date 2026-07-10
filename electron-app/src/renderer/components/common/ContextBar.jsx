@@ -63,7 +63,7 @@ export function ContextBar() {
               <div
                 style={{
                   width: `${(sysPct / Math.max(sysPct + histPct + toolPct, 1)) * 100}%`,
-                  backgroundColor: "var(--accent, #38bdf8)",
+                  backgroundColor: "var(--accent, #c4c7cc)",
                   height: "100%",
                   minWidth: sysPct > 1 ? undefined : 0,
                 }}
@@ -131,7 +131,7 @@ export function ContextBar() {
             {formatTokens(contextUsage.used)} / {formatTokens(totalTokens)} tokens
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: "var(--accent, #38bdf8)", display: "inline-block" }} />
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: "var(--accent, #c4c7cc)", display: "inline-block" }} />
             <span>System: {formatTokens(bd.system_prompt || 0)}</span>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
