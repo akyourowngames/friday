@@ -7,7 +7,7 @@ import numpy as np
 
 from ares.models import VoiceConfig
 from ares.voice import agent as voice_agent
-from ares.voice.agent import ContinuousVoiceAgent, _MAX_SENTENCE_CHARS
+from ares.voice.agent import ContinuousVoiceAgent, _MAX_SENTENCE_CHARS, run_voice_agent
 
 
 def test_stream_to_sentences_skips_tool_tokens_and_flushes():
@@ -15,6 +15,7 @@ def test_stream_to_sentences_skips_tool_tokens_and_flushes():
         agent = MagicMock(spec=ContinuousVoiceAgent)
         agent.console = MagicMock()
         agent.conversation_history = []
+        agent.voice_config = VoiceConfig()
 
         async def run_stream(text, history):
             yield "[tool:shell:echo hi]"
@@ -43,6 +44,7 @@ def test_stream_to_sentences_max_length_flushes():
         agent = MagicMock(spec=ContinuousVoiceAgent)
         agent.console = MagicMock()
         agent.conversation_history = []
+        agent.voice_config = VoiceConfig()
         long_text = "x" * (_MAX_SENTENCE_CHARS + 5)
 
         async def run_stream(text, history):
@@ -62,25 +64,32 @@ def test_barge_in_watcher_sets_stop_event():
     async def run():
         agent = MagicMock(spec=ContinuousVoiceAgent)
         agent.console = MagicMock()
-        agent.voice_config = MagicMock(barge_in_enabled=True, start_speech_frames=3)
+        agent.voice_config = VoiceConfig(
+            barge_in_enabled=True,
+            barge_in_delay_ms=0,
+            barge_in_min_voiced_ms=60,
+            start_speech_frames=2,
+        )
         agent._read_frames = MagicMock(return_value=[np.ones(480, dtype=np.float32)])
         agent._is_speech = MagicMock(return_value=True)
-        agent._drain = MagicMock()
+        agent.capture = MagicMock()
+        agent._barge_in_occurred = False
         stop = asyncio.Event()
         playback_started = asyncio.Event()
         playback_started.set()
         await ContinuousVoiceAgent._barge_in_watcher(agent, stop, playback_started)
-        return stop.is_set(), agent._drain
+        return stop.is_set(), agent.capture.unread, agent._barge_in_occurred
 
-    is_set, drain = asyncio.run(run())
+    is_set, unread, interrupted = asyncio.run(run())
     assert is_set
-    drain.assert_called_once()
+    assert interrupted is True
+    unread.assert_called_once()
 
 
 def test_barge_in_watcher_returns_when_disabled():
     async def run():
         agent = MagicMock(spec=ContinuousVoiceAgent)
-        agent.voice_config = MagicMock(barge_in_enabled=False, start_speech_frames=3)
+        agent.voice_config = VoiceConfig(barge_in_enabled=False)
         agent._read_frames = MagicMock(return_value=[np.ones(480, dtype=np.float32)])
         agent._is_speech = MagicMock(return_value=True)
         stop = asyncio.Event()
@@ -92,6 +101,61 @@ def test_barge_in_watcher_returns_when_disabled():
     is_set, read_frames = asyncio.run(run())
     assert is_set is False
     read_frames.assert_not_called()
+
+
+def test_run_voice_agent_preserves_saved_barge_setting_without_a_cli_override(monkeypatch):
+    captured = []
+
+    class FakeVoiceAgent:
+        def __init__(self, _voice_name=None):
+            self.voice_config = VoiceConfig(barge_in_enabled=True)
+
+        async def listen_and_respond(self):
+            captured.append(self.voice_config.barge_in_enabled)
+
+    monkeypatch.setattr(voice_agent, "ContinuousVoiceAgent", FakeVoiceAgent)
+
+    asyncio.run(run_voice_agent(barge_in=None))
+    asyncio.run(run_voice_agent(barge_in=False))
+
+    assert captured == [True, False]
+
+
+def test_barge_in_cancels_a_long_response_without_waiting_for_completion():
+    async def run():
+        agent = MagicMock(spec=ContinuousVoiceAgent)
+        agent.voice_config = VoiceConfig(barge_in_enabled=True)
+        agent._barge_in_occurred = False
+        cancelled = {"stream": False, "tts": False}
+
+        async def stream(_text, _queue):
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled["stream"] = True
+                raise
+
+        async def tts(_queue, _stop, _started):
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled["tts"] = True
+                raise
+
+        async def barge(stop, _started):
+            await asyncio.sleep(0)
+            agent._barge_in_occurred = True
+            stop.set()
+
+        agent._stream_to_sentences = stream
+        agent._tts_play_pipeline = tts
+        agent._barge_in_watcher = barge
+        result = await ContinuousVoiceAgent._respond(agent, "hello")
+        return result, cancelled
+
+    result, cancelled = asyncio.run(run())
+    assert result == ""
+    assert cancelled == {"stream": True, "tts": True}
 
 
 def test_wait_for_utterance_skips_low_energy_audio():

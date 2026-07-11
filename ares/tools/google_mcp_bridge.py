@@ -462,6 +462,7 @@ def calendar_create_event(
     description: str = "",
     location: str = "",
     calendar_id: str = "primary",
+    attendees: list[str] | None = None,
 ) -> str:
     """Create a calendar event.
 
@@ -472,6 +473,8 @@ def calendar_create_event(
         description: Event description (optional)
         location: Event location (optional)
         calendar_id: Calendar ID (defaults to primary)
+        attendees: Optional attendee email addresses. The Ares workflow runner
+            requires explicit confirmation before creating events with these.
 
     Returns:
         JSON string with created event details.
@@ -487,6 +490,9 @@ def calendar_create_event(
             event["description"] = description
         if location:
             event["location"] = location
+        clean_attendees = [str(email).strip() for email in (attendees or []) if str(email).strip()]
+        if clean_attendees:
+            event["attendees"] = [{"email": email} for email in clean_attendees]
 
         created = service.events().insert(calendarId=calendar_id, body=event).execute()
         return json.dumps({
@@ -495,6 +501,7 @@ def calendar_create_event(
             "start": str(created.get("start", {}).get("dateTime", "")),
             "end": str(created.get("end", {}).get("dateTime", "")),
             "htmlLink": created.get("htmlLink", ""),
+            "attendee_count": len(created.get("attendees", clean_attendees)),
         }, indent=2)
     except Exception as e:
         if "401" in str(e):
@@ -637,6 +644,7 @@ TOOL_DEFINITIONS = [
                 "description": {"type": "string", "description": "Event description (optional)"},
                 "location": {"type": "string", "description": "Event location (optional)"},
                 "calendar_id": {"type": "string", "description": "Calendar ID (default: primary)"},
+                "attendees": {"type": "array", "items": {"type": "string"}, "description": "Optional attendee email addresses or locally resolved aliases."},
             },
             "required": ["summary", "start_time", "end_time"],
         },

@@ -292,6 +292,73 @@ def render_memory_result(content: str) -> Any:
     return Panel(Text(clean), title="Memory", border_style="green", padding=(0, 1))
 
 
+def render_people_result(content: str) -> Any:
+    """Render contact-redacted people search/create results without exposing PII."""
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return Panel(Text(content), title="People", border_style="bright_magenta", padding=(0, 1))
+    if not isinstance(payload, dict):
+        return render_json_status(content, title="People", border_style="bright_magenta")
+    if payload.get("confirm_required") or not payload.get("ok", False):
+        return render_json_status(content, title="People", border_style="bright_magenta")
+    people = payload.get("people")
+    if people is None and isinstance(payload.get("person"), dict):
+        people = [payload["person"]]
+    if not isinstance(people, list):
+        return render_json_status(content, title="People", border_style="bright_magenta")
+    table = _simple_table("People", "ID", "Name", "Relation", "Aliases", "Contact", border_style="bright_magenta")
+    table.columns[0].style = "dim"
+    table.columns[1].style = "cyan"
+    table.columns[4].ratio = 3
+    for person in people:
+        if not isinstance(person, dict):
+            continue
+        contact = []
+        if person.get("has_phone"):
+            contact.append("phone")
+        if person.get("has_email"):
+            contact.append("email")
+        table.add_row(
+            str(person.get("person_id", "?")),
+            _clip(person.get("canonical_name", ""), 80),
+            _clip(person.get("relation", "") or "-", 60),
+            _clip(", ".join(str(alias) for alias in person.get("aliases", [])[:4]) or "-", 100),
+            ", ".join(contact) or "-",
+        )
+    if table.row_count == 0:
+        return Panel(Text("No matching people found.", style="dim"), title="People", border_style="bright_magenta")
+    return Panel(table, title="People", border_style="bright_magenta", padding=(0, 1))
+
+
+def render_actions_result(content: str) -> Any:
+    """Render the privacy-minimized Action Ledger as a concise provenance table."""
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return Panel(Text(content), title="Action History", border_style="bright_cyan", padding=(0, 1))
+    if not isinstance(payload, dict) or not payload.get("ok", False):
+        return render_json_status(content, title="Action History", border_style="bright_cyan")
+    actions = payload.get("actions", [])
+    table = _simple_table("Action History", "When", "Action", "Summary", "Target", border_style="bright_cyan")
+    table.columns[0].style = "dim"
+    table.columns[1].style = "cyan"
+    table.columns[2].ratio = 3
+    table.columns[3].ratio = 2
+    for action in actions if isinstance(actions, list) else []:
+        if not isinstance(action, dict):
+            continue
+        table.add_row(
+            _clip(action.get("created_at", ""), 32),
+            _clip(action.get("action_type", ""), 40),
+            _clip(action.get("summary", ""), 180),
+            _clip(action.get("target", "") or "-", 120),
+        )
+    if table.row_count == 0:
+        return Panel(Text("No matching action records found.", style="dim"), title="Action History", border_style="bright_cyan")
+    return Panel(table, title="Action History", border_style="bright_cyan", padding=(0, 1))
+
+
 def render_skills_result(content: str) -> Any:
     """Render list_skills output as skill and category tables."""
     clean = content.strip()
@@ -502,6 +569,11 @@ RENDERERS: dict[str, Callable[[str], Any]] = {
     "search_memory": render_memory_result,
     "update_memory": render_memory_result,
     "delete_memory": render_memory_result,
+    "remember_person": render_people_result,
+    "search_person": render_people_result,
+    "update_person": render_people_result,
+    "forget_person": render_people_result,
+    "search_actions": render_actions_result,
     "list_skills": render_skills_result,
     "run_code": render_command_result,
     "run_command": render_command_result,
@@ -545,6 +617,12 @@ RENDERERS: dict[str, Callable[[str], Any]] = {
     "get_current_datetime": lambda content: render_json_status(content, title="Date And Time", border_style="cyan"),
     "update_config": lambda content: render_json_status(content, title="Config", border_style="cyan"),
     "export_data": render_file_operation,
+    "create_task": lambda content: render_json_status(content, title="Workflow Task", border_style="bright_blue"),
+    "list_tasks": lambda content: render_json_status(content, title="Workflow Tasks", border_style="bright_blue"),
+    "get_task_status": lambda content: render_json_status(content, title="Workflow Task", border_style="bright_blue"),
+    "update_task": lambda content: render_json_status(content, title="Workflow Task", border_style="bright_blue"),
+    "cancel_task": lambda content: render_json_status(content, title="Workflow Task", border_style="bright_blue"),
+    "run_task": lambda content: render_json_status(content, title="Workflow Run", border_style="bright_blue"),
 }
 DEFAULT_RENDERER = render_generic_tool
 

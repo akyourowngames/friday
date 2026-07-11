@@ -7,6 +7,8 @@ from typing import Any, AsyncIterator
 
 from ares.context import ProjectContext
 from ares.context_blend import build_context_prompt, get_model_budgets
+from ares.actions import extract_since_reference, has_reference_language
+from ares.autonomy import AutonomousWorkflowRunner
 from ares.memory import MemoryStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
@@ -64,6 +66,18 @@ class Agent:
             self.llm.config = config
         self.tool_executor.config = self.llm.config
         self.config = self.llm.config
+        self.tool_executor.set_session_id(session_id)
+        self.people_store = self.tool_executor.people_store
+        self.action_ledger = self.tool_executor.action_ledger
+        self.task_store = self.tool_executor.task_store
+        self.workflow_runner: AutonomousWorkflowRunner | None = None
+        if self.task_store is not None and self.action_ledger is not None:
+            self.workflow_runner = AutonomousWorkflowRunner(
+                task_store=self.task_store,
+                action_ledger=self.action_ledger,
+                execute_tool=self._execute_workflow_step,
+            )
+            self.tool_executor.workflow_runner = self.workflow_runner
 
         data_dir = Path(self.config.data_dir).expanduser()
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -152,6 +166,22 @@ class Agent:
             recent_sessions=getattr(self.config, "memory_session_scope", 3),
         )
 
+        # People context intentionally contains names/relations/aliases and
+        # availability flags only. Phone numbers, email addresses, notes, and
+        # dates remain local and are resolved at dispatch time.
+        people = self.people_store.recent_for_context(limit=max(3, min(max_retrieval, 8))) if self.people_store else []
+
+        recent_actions = self.action_ledger.recent(limit=5) if self.action_ledger else []
+        relevant_actions: list[dict] = []
+        if self.action_ledger and has_reference_language(user_input):
+            try:
+                since = extract_since_reference(user_input)
+                relevant_actions = self.action_ledger.search(user_input, since=since, limit=max(3, min(max_retrieval, 8)))
+                if not relevant_actions and since:
+                    relevant_actions = self.action_ledger.search(since=since, limit=max(3, min(max_retrieval, 8)))
+            except ValueError:
+                relevant_actions = []
+
         summaries = []
         if self.conversation_store is not None:
             summaries = self.conversation_store.get_recent_summaries(limit=5)
@@ -166,6 +196,9 @@ class Agent:
             profile_context=profile_ctx,
             project_context=project_ctx,
             memories=memories,
+            people=people,
+            recent_actions=recent_actions,
+            relevant_actions=relevant_actions,
             conversation_summaries=summaries,
             previous_session_summary=prev_summary,
             token_budget=token_budget,
@@ -216,6 +249,59 @@ class Agent:
             return json.loads(raw_args)
         return raw_args or {}
 
+    def _resolve_email_reference(self, value: Any) -> str:
+        """Resolve a saved name locally while never surfacing the email to the LLM."""
+        text = str(value or "").strip()
+        people_store = getattr(self, "people_store", None)
+        if not text or people_store is None:
+            return text
+        entries = [item.strip() for item in text.split(",") if item.strip()]
+        resolved: list[str] = []
+        for entry in entries:
+            if "@" in entry:
+                resolved.append(entry)
+                continue
+            person = people_store.resolve(entry, require="email")
+            resolved.append(str(person["email"]))
+        return ", ".join(resolved)
+
+    def _resolve_external_person_arguments(self, tool_name: str, args: dict) -> dict:
+        """Resolve Gmail/calendar aliases before the MCP boundary only."""
+        lowered = str(tool_name).casefold()
+        people_store = getattr(self, "people_store", None)
+        if not lowered.startswith("mcp__") or people_store is None:
+            return args
+        resolved = dict(args)
+        if lowered.endswith("__gmail_send"):
+            if "to" in resolved:
+                resolved["to"] = self._resolve_email_reference(resolved.get("to"))
+            if resolved.get("cc"):
+                resolved["cc"] = self._resolve_email_reference(resolved.get("cc"))
+        elif lowered.endswith("__calendar_create_event") and resolved.get("attendees"):
+            raw_attendees = resolved.get("attendees")
+            if isinstance(raw_attendees, str):
+                raw_attendees = [item.strip() for item in raw_attendees.split(",") if item.strip()]
+            if not isinstance(raw_attendees, list):
+                raise ValueError("calendar attendees must be a list of email addresses or saved person aliases")
+            emails = []
+            for attendee in raw_attendees:
+                text = str(attendee or "").strip()
+                if not text:
+                    continue
+                emails.append(text if "@" in text else str(people_store.resolve(text, require="email")["email"]))
+            resolved["attendees"] = emails
+        return resolved
+
+    async def _execute_workflow_step(self, tool_name: str, arguments: dict) -> str:
+        """Run one workflow step through the same normal Agent dispatcher."""
+        call = {
+            "id": f"workflow_{tool_name}",
+            "type": "function",
+            "function": {"name": tool_name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+        }
+        results = await self.process_tool_calls_async([call])
+        return str(results[0]["content"]) if results else "Error: Workflow step produced no result."
+
     def process_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         """Execute tool calls from synchronous callers.
 
@@ -247,8 +333,23 @@ class Agent:
                     if self.mcp_manager is None:
                         result = "Error: MCP manager is not configured."
                     else:
-                        result = await self.mcp_manager.call_tool(tool_name, args)
+                        result = await self.mcp_manager.call_tool(
+                            tool_name,
+                            self._resolve_external_person_arguments(tool_name, args),
+                        )
+                    executor = getattr(self, "tool_executor", None)
+                    if executor is not None:
+                        executor.record_external_action(tool_name, args, result)
                     mcp_results[i] = result
+                elif tool_name == "run_task":
+                    if getattr(self, "workflow_runner", None) is None:
+                        local_results[i] = "Error: Workflow runner is unavailable because local task storage is not configured."
+                    else:
+                        local_results[i] = await self.workflow_runner.run(
+                            str(args.get("task_id", "")),
+                            confirm=bool(args.get("confirm", False)),
+                            max_steps=int(args.get("max_steps", 25)),
+                        )
                 else:
                     local_results[i] = await self.tool_executor.execute_async(tool_name, args)
             except BaseException as exc:
@@ -444,4 +545,5 @@ class Agent:
 
     async def close(self):
         """Clean up resources."""
+        self.tool_executor.close()
         await self.llm.close()

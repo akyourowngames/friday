@@ -111,6 +111,17 @@ pip install -e ".[voice]"
 python -m ares --voice
 ```
 
+Voice mode is tuned for quick turn-taking: it starts speaking from short natural clauses instead of waiting for a full response, and barge-in is enabled by default. Speak while Ares is talking to stop the current reply and continue with your next request; use `--no-barge-in` when laptop speakers cause echo-triggered interruptions, or `--barge-in` to force it on. Headphones give the most reliable interruption detection because the microphone cannot otherwise distinguish your voice from its own speaker output.
+
+Useful local tuning, without changing code:
+
+```powershell
+$env:ARES_VOICE_SILENCE_TIMEOUT_MS = "420"  # Faster/slower end-of-turn detection
+$env:ARES_VOICE_TTS_CHUNK_CHARS = "90"      # Smaller = faster first speech
+$env:ARES_VOICE_BARGE_IN = "true"
+python -m ares --voice
+```
+
 Run the desktop app:
 
 ```bash

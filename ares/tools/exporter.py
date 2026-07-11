@@ -16,14 +16,20 @@ if TYPE_CHECKING:
 
 from ares.config import CONFIG_PATH, load_config, save_config
 from ares.tools.dates import now_local, now_local_iso
+from ares.actions import ActionLedger
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.people import PeopleStore
 
 EXPORT_PROFILES: dict[str, dict[str, bool]] = {
-    "full": {"config": True, "memories": True, "conversations": True},
-    "memories": {"config": False, "memories": True, "conversations": False},
-    "conversations": {"config": False, "memories": False, "conversations": True},
-    "config": {"config": True, "memories": False, "conversations": False},
+    # People is intentionally excluded from full: it contains explicit third-
+    # party PII and must be exported only through the opt-in people profile.
+    "full": {"config": True, "memories": True, "conversations": True, "actions": True, "people": False},
+    "memories": {"config": False, "memories": True, "conversations": False, "actions": False, "people": False},
+    "conversations": {"config": False, "memories": False, "conversations": True, "actions": False, "people": False},
+    "config": {"config": True, "memories": False, "conversations": False, "actions": False, "people": False},
+    "actions": {"config": False, "memories": False, "conversations": False, "actions": True, "people": False},
+    "people": {"config": False, "memories": False, "conversations": False, "actions": False, "people": True},
 }
 
 
@@ -134,6 +140,8 @@ def export_data(
     *,
     memory_store: MemoryStore,
     conversation_store: ConversationStore | None = None,
+    people_store: PeopleStore | None = None,
+    action_ledger: ActionLedger | None = None,
     config: AppConfig | None = None,
     path: str | Path | None = None,
     profile: str = "full",
@@ -148,7 +156,7 @@ def export_data(
     flags = EXPORT_PROFILES[normalized_profile]
     config_data, redaction_preview = _redact_credentials(app_config.model_dump()) if flags["config"] else ({}, {})
     payload: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "exported_at": now_local_iso(),
         "export_profile": normalized_profile,
         "config": config_data,
@@ -157,6 +165,8 @@ def export_data(
         "memories": memory_store.list_all() if flags["memories"] else [],
         "conversations": [],
         "conversation_messages": [],
+        "actions": action_ledger.list_all() if flags["actions"] and action_ledger is not None else [],
+        "people": people_store.list_all(include_sensitive=True) if flags["people"] and people_store is not None else [],
     }
     if conversation_store is not None and flags["conversations"]:
         payload["conversations"] = conversation_store.list_conversations()
@@ -177,7 +187,11 @@ def import_data(
     *,
     memory_store: MemoryStore,
     conversation_store: ConversationStore | None = None,
+    people_store: PeopleStore | None = None,
+    action_ledger: ActionLedger | None = None,
     import_config: bool = False,
+    import_people: bool = False,
+    import_actions: bool = True,
 ) -> dict[str, int]:
     """Import data from an Ares JSON export."""
     input_path = Path(path).expanduser()
@@ -188,6 +202,8 @@ def import_data(
         "memories": memory_store.import_memories(payload.get("memories", [])),
         "conversations": 0,
         "config": 0,
+        "people": 0,
+        "actions": 0,
     }
 
     if conversation_store is not None:
@@ -195,6 +211,14 @@ def import_data(
             payload.get("conversations", []),
             payload.get("conversation_messages", []),
         )
+
+    # Importing another person's record is an explicit opt-in operation, just
+    # like exporting it. Action provenance is content-free and may be restored
+    # when a ledger is provided.
+    if import_people and people_store is not None:
+        counts["people"] = people_store.import_people(payload.get("people", []))
+    if import_actions and action_ledger is not None:
+        counts["actions"] = action_ledger.import_actions(payload.get("actions", []))
 
     if import_config and payload.get("config"):
         current = load_config()

@@ -90,13 +90,13 @@ async def play_audio_stream(
     stop_event: asyncio.Event,
     sample_rate: int = 24000,
 ) -> None:
-    """Play PCM16 audio chunks from a queue with immediate cancellation support.
+    """Play PCM16 audio chunks while yielding frequently for interruption.
 
-    Uses stream.write() which blocks until the audio device consumes the data,
-    guaranteeing all audio plays before returning. stop_event interrupts by
-    closing the stream from outside.
+    A full sentence can represent several seconds of audio. Writing it in one
+    blocking call starves the VAD/barge-in coroutine until the sentence ends.
+    Feeding the output stream in short PCM blocks lets the event loop observe a
+    user interruption between blocks without introducing gaps.
     """
-    import numpy as np
     import sounddevice as sd
 
     stream = sd.RawOutputStream(
@@ -104,6 +104,7 @@ async def play_audio_stream(
         channels=1,
         dtype="int16",
         blocksize=0,
+        latency="low",
     )
 
     try:
@@ -117,9 +118,15 @@ async def play_audio_stream(
             if chunk is None:
                 break
 
-            # write() blocks until the device consumes the data — no desync
             try:
-                stream.write(chunk)
+                # Mono PCM16: 2 bytes/sample.  Twenty milliseconds limits
+                # cancellation latency without making output choppy.
+                block_bytes = max(2, int(sample_rate * 2 * 0.020))
+                for offset in range(0, len(chunk), block_bytes):
+                    if stop_event.is_set():
+                        return
+                    stream.write(chunk[offset : offset + block_bytes])
+                    await asyncio.sleep(0)
             except Exception:
                 break
     finally:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -18,6 +21,9 @@ from ares.tools.filesystem import (
 )
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.people import PeopleStore, PersonConflictError, PersonResolutionError, mask_email, mask_phone
+from ares.actions import ActionLedger
+from ares.tasks import TaskStore, TaskToolHandlers
 from ares.skills import SkillManager
 from ares.tools.web import fetch_url, fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
@@ -65,21 +71,50 @@ class ToolExecutor:
         conversation_store: ConversationStore | None = None,
         config: AppConfig | None = None,
         mcp_manager: Any | None = None,
+        people_store: PeopleStore | None = None,
+        action_ledger: ActionLedger | None = None,
+        task_store: TaskStore | None = None,
     ):
         self.memory = memory_store
         self.conversations = conversation_store
         self.config = config
         self.mcp_manager = mcp_manager
+        self.session_id: str | None = None
         self.repl = PersistentREPL()
         data_root = None
         if config is not None:
-            from pathlib import Path
             data_root = Path(config.data_dir).expanduser().parent
+        db_path = getattr(memory_store, "db_path", None)
+        if db_path is not None:
+            db_path = Path(db_path)
+            data_root = data_root or db_path.parent
+        elif config is not None:
+            db_path = Path(config.data_dir).expanduser() / "ares.db"
+        shared_connection = getattr(memory_store, "conn", None)
+        self._owns_people_store = people_store is None and db_path is not None
+        self._owns_action_ledger = action_ledger is None and db_path is not None
+        self.people_store = people_store or (
+            PeopleStore(db_path=db_path, connection=shared_connection) if db_path is not None else None
+        )
+        self.action_ledger = action_ledger or (
+            ActionLedger(db_path=db_path, connection=shared_connection) if db_path is not None else None
+        )
+        self.task_store = task_store or (TaskStore(data_root) if data_root is not None else None)
+        self.task_tools = TaskToolHandlers(self.task_store, lambda: self.session_id) if self.task_store is not None else None
+        self.workflow_runner: Any | None = None
         self.cron = CronToolHandlers(CronStore(data_root))
 
     def close(self) -> None:
         """Clean up persistent sessions."""
         self.repl.close()
+        if self._owns_people_store and self.people_store is not None:
+            self.people_store.close()
+        if self._owns_action_ledger and self.action_ledger is not None:
+            self.action_ledger.close()
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Attach local provenance records to the current agent session."""
+        self.session_id = session_id
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool by name with the given arguments. Returns a result string."""
@@ -88,6 +123,11 @@ class ToolExecutor:
             "search_memory": self._search_memory,
             "update_memory": self._update_memory,
             "delete_memory": self._delete_memory,
+            "remember_person": self._remember_person,
+            "search_person": self._search_person,
+            "update_person": self._update_person,
+            "forget_person": self._forget_person,
+            "search_actions": self._search_actions,
             "list_skills": self._list_skills_tool,
             "load_skill": self._load_skill_tool,
             "create_skill": self._create_skill_tool,
@@ -143,6 +183,12 @@ class ToolExecutor:
             "delete_cron_job": self.cron.delete_cron_job,
             "run_cron_job_now": self.cron.run_cron_job_now,
             "get_cron_logs": self.cron.get_cron_logs,
+            "create_task": self._create_task,
+            "list_tasks": self._list_tasks,
+            "get_task_status": self._get_task_status,
+            "update_task": self._update_task,
+            "cancel_task": self._cancel_task,
+            "run_task": self._run_task_unavailable,
             "phone_status": self._phone_status,
             "phone_get_notifications": self._phone_get_notifications,
             "phone_search_contact": self._phone_search_contact,
@@ -157,7 +203,10 @@ class ToolExecutor:
             handler = handlers[tool_name]
         except KeyError as exc:
             raise ValueError(f"Unknown tool: {tool_name}") from exc
-        return handler(arguments)
+        prestate = self._action_prestate(tool_name, arguments)
+        result = handler(arguments)
+        self._record_consequential_action(tool_name, arguments, result, prestate=prestate)
+        return result
 
     async def execute_async(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool, allowing local tools to use async integrations."""
@@ -234,6 +283,308 @@ class ToolExecutor:
             return f"Forgot memory #{fact_id}."
         return f"Memory #{fact_id} was not found."
 
+    # ── People, relationships, and action history ────────────────
+
+    @staticmethod
+    def _json(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _safe_person_view(person: dict[str, Any]) -> dict[str, Any]:
+        """Never send stored contact values or freeform notes back to the model."""
+        return {
+            "person_id": person.get("person_id"),
+            "canonical_name": person.get("canonical_name", ""),
+            "aliases": list(person.get("aliases") or []),
+            "relation": person.get("relation", ""),
+            "has_phone": bool(person.get("has_phone") or person.get("phone")),
+            "has_email": bool(person.get("has_email") or person.get("email")),
+            "phone_hint": person.get("phone_hint") or mask_phone(person.get("phone")),
+            "email_hint": person.get("email_hint") or mask_email(person.get("email")),
+            "important_date_labels": sorted((person.get("important_dates") or {}).keys()),
+            "notes_present": bool(person.get("notes")),
+            "last_referenced_at": person.get("last_referenced_at"),
+            "updated_at": person.get("updated_at"),
+            "source": person.get("source", "manual"),
+            "revision": person.get("revision", 1),
+        }
+
+    def _people_unavailable(self) -> str:
+        return self._json({"ok": False, "error": "People store is unavailable because Ares has no local data path."})
+
+    def _remember_person(self, args: dict) -> str:
+        if self.people_store is None:
+            return self._people_unavailable()
+        if not bool(args.get("confirm", False)):
+            return self._json({
+                "ok": False,
+                "confirm_required": True,
+                "error": "Saving another person's contact information requires explicit confirmation. Re-call with confirm=true only after the user has explicitly asked to remember it.",
+            })
+        try:
+            person = self.people_store.create(
+                args.get("canonical_name", ""),
+                aliases=args.get("aliases") or [],
+                relation=args.get("relation", ""),
+                phone=args.get("phone") or None,
+                email=args.get("email") or None,
+                important_dates=args.get("important_dates") or {},
+                notes=args.get("notes", ""),
+                source=args.get("source", "manual"),
+                confidence=float(args.get("confidence", 1.0)),
+            )
+        except (ValueError, PersonConflictError) as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "action": "remembered", "person": self._safe_person_view(person)})
+
+    def _search_person(self, args: dict) -> str:
+        if self.people_store is None:
+            return self._people_unavailable()
+        try:
+            people = self.people_store.search(
+                args.get("query", ""),
+                limit=int(args.get("limit", 5)),
+                include_sensitive=False,
+            )
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "people": [self._safe_person_view(person) for person in people]})
+
+    def _update_person(self, args: dict) -> str:
+        if self.people_store is None:
+            return self._people_unavailable()
+        if not bool(args.get("confirm", False)):
+            return self._json({
+                "ok": False,
+                "confirm_required": True,
+                "error": "Updating another person's contact information requires explicit confirmation. Re-call with confirm=true after the user approves this exact update.",
+            })
+        updates = {
+            key: args[key]
+            for key in ("canonical_name", "aliases", "relation", "phone", "email", "important_dates", "notes", "source", "confidence")
+            if key in args
+        }
+        if not updates:
+            return self._json({"ok": False, "error": "Provide at least one person field to update."})
+        try:
+            person = self.people_store.update(
+                int(args.get("person_id", 0)),
+                expected_revision=args.get("expected_revision"),
+                **updates,
+            )
+        except (ValueError, PersonConflictError) as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        if person is None:
+            return self._json({"ok": False, "error": "Person not found."})
+        return self._json({"ok": True, "action": "updated", "person": self._safe_person_view(person)})
+
+    def _forget_person(self, args: dict) -> str:
+        if self.people_store is None:
+            return self._people_unavailable()
+        if not bool(args.get("confirm", False)):
+            return self._json({
+                "ok": False,
+                "confirm_required": True,
+                "error": "Forgetting a person permanently deletes their local relationship record. Re-call with confirm=true after explicit user approval.",
+            })
+        try:
+            deleted = self.people_store.delete(int(args.get("person_id", 0)), expected_revision=args.get("expected_revision"))
+        except (ValueError, PersonConflictError) as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": bool(deleted), "action": "forgotten" if deleted else "not_found"})
+
+    def _search_actions(self, args: dict) -> str:
+        if self.action_ledger is None:
+            return self._json({"ok": False, "error": "Action ledger is unavailable because Ares has no local data path."})
+        try:
+            actions = self.action_ledger.search(
+                args.get("query", ""),
+                since=args.get("since"),
+                limit=int(args.get("limit", 20)),
+            )
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "actions": actions})
+
+    def _task_tools_unavailable(self) -> str:
+        return self._json({"ok": False, "error": "Task store is unavailable because Ares has no local data path."})
+
+    def _create_task(self, args: dict) -> str:
+        return self.task_tools.create_task(args) if self.task_tools is not None else self._task_tools_unavailable()
+
+    def _list_tasks(self, args: dict) -> str:
+        return self.task_tools.list_tasks(args) if self.task_tools is not None else self._task_tools_unavailable()
+
+    def _get_task_status(self, args: dict) -> str:
+        return self.task_tools.get_task_status(args) if self.task_tools is not None else self._task_tools_unavailable()
+
+    def _update_task(self, args: dict) -> str:
+        return self.task_tools.update_task(args) if self.task_tools is not None else self._task_tools_unavailable()
+
+    def _cancel_task(self, args: dict) -> str:
+        return self.task_tools.cancel_task(args) if self.task_tools is not None else self._task_tools_unavailable()
+
+    def _run_task_unavailable(self, args: dict) -> str:
+        return self._json({"ok": False, "error": "run_task must be executed through the Ares Agent workflow runner."})
+
+    # ── Consequential-action provenance ───────────────────────────
+
+    @staticmethod
+    def _action_prestate(tool_name: str, args: dict) -> dict[str, Any]:
+        """Capture only filesystem existence needed to classify a completed action."""
+        lowered = str(tool_name).casefold()
+        state: dict[str, Any] = {}
+        try:
+            if lowered in {"write_file", "create_file_from_template", "edit_file", "delete_file"}:
+                state["path_existed"] = Path(str(args.get("path", ""))).expanduser().exists()
+            elif lowered == "move_file":
+                state["destination_existed"] = Path(str(args.get("destination", ""))).expanduser().exists()
+        except (OSError, ValueError):
+            state["path_existed"] = True
+        return state
+
+    @staticmethod
+    def _action_succeeded(result: str) -> bool:
+        text = str(result or "").strip()
+        lowered = text.casefold()
+        if not text or lowered.startswith("error:") or "confirm required" in lowered or "dry run" in lowered:
+            return False
+        try:
+            payload = json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            if payload.get("ok") is False or payload.get("error"):
+                return False
+            if payload.get("sent") is False or payload.get("dialed") is False:
+                return False
+        match = re.search(r"^Exit code:\s*(-?\d+)", text, flags=re.MULTILINE)
+        return not match or int(match.group(1)) == 0
+
+    @staticmethod
+    def _masked_recipient(value: Any) -> str:
+        raw = str(value or "").strip()
+        if "@" in raw:
+            return mask_email(raw)
+        if re.fullmatch(r"[+0-9 ()-]{3,40}", raw):
+            return mask_phone(raw)
+        return raw[:160] or "recipient"
+
+    @staticmethod
+    def _result_json(result: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _command_may_change_state(command: Any) -> bool:
+        """A conservative heuristic; the command itself is never recorded."""
+        text = str(command or "").casefold()
+        return bool(re.search(
+            r"\b(?:mkdir|rmdir|rm|del|move|mv|copy|cp|touch|rename|git\s+(?:commit|push|reset|merge|rebase|checkout)|"
+            r"npm\s+(?:install|ci|publish)|pip\s+install|uv\s+(?:add|sync)|docker\s+(?:build|push|run)|"
+            r"powershell\s+.*(?:remove-item|set-content|new-item)|set-content|add-content)\b|(?:^|\s)>+",
+            text,
+        ))
+
+    def _action_spec(
+        self,
+        tool_name: str,
+        args: dict,
+        result: str,
+        *,
+        prestate: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str, list[str]] | None:
+        """Map completed tool calls to content-free ledger metadata."""
+        lowered = str(tool_name).casefold()
+        base = lowered.rsplit("__", 1)[-1]
+        prestate = prestate or {}
+        path = str(args.get("path") or "")
+        if lowered == "write_file":
+            return ("file_edited" if prestate.get("path_existed") else "file_created", path, "Wrote a local file.", ["file"])
+        if lowered in {"edit_file", "insert_line", "replace_lines", "delete_lines", "append_to_file", "prepend_to_file", "undo_last_edit"}:
+            return ("file_edited", path, "Edited a local file.", ["file"])
+        if lowered == "delete_file":
+            return ("file_deleted", path, "Deleted a local file or directory.", ["file"])
+        if lowered == "move_file":
+            target = f"{args.get('source', '')} -> {args.get('destination', '')}".strip()
+            return ("file_moved", target, "Moved a local file or directory.", ["file"])
+        if lowered == "copy_file":
+            target = f"{args.get('source', '')} -> {args.get('destination', '')}".strip()
+            return ("file_copied", target, "Copied a local file.", ["file"])
+        if lowered == "create_directory":
+            return ("directory_created", path, "Created a local directory.", ["file"])
+        if lowered in {"batch_edit", "batch_file_ops", "glob_apply"}:
+            return ("files_batch_changed", "local filesystem", "Completed a batch file operation.", ["file", "batch"])
+        if lowered == "create_file_from_template":
+            return ("file_created", path, "Created a file from a template.", ["file"])
+        if lowered == "generate_image":
+            return ("image_generated", "generated image", "Generated an image.", ["image"])
+        if lowered in {"resize_image", "convert_image", "crop_image"}:
+            return ("image_edited", str(args.get("output") or args.get("path") or "image"), "Edited an image.", ["image"])
+        if lowered in {"run_command", "terminal_exec"} and self._command_may_change_state(args.get("command") or args.get("command_key")):
+            return ("command_run", str(args.get("cwd") or "working directory"), "Ran a state-changing command.", ["command"])
+        if lowered == "create_cron_job":
+            return ("cron_job_created", str(args.get("name") or "cron job"), "Created a scheduled job.", ["cron"])
+        if lowered == "export_data":
+            return ("export_created", str(args.get("path") or "Ares export"), "Created a local Ares export.", ["export"])
+        if lowered == "phone_send_sms":
+            return ("sms_sent", self._masked_recipient(args.get("number")), "Sent an SMS.", ["phone"])
+        if lowered == "phone_call_number":
+            return ("phone_call_placed", self._masked_recipient(args.get("number")), "Placed a phone call.", ["phone"])
+        if base in {"gmail_send", "gmail_reply"}:
+            return ("email_sent", self._masked_recipient(args.get("to") or args.get("recipient")), "Sent an email.", ["email"])
+        if base == "calendar_create_event":
+            return ("calendar_event_created", str(args.get("calendar_id") or "primary calendar"), "Created a calendar event.", ["calendar"])
+        if lowered == "remember_person":
+            person = self._result_json(result).get("person", {})
+            return ("person_remembered", str(person.get("canonical_name") or "person"), "Saved an explicitly confirmed person record.", ["people"])
+        if lowered == "update_person":
+            person = self._result_json(result).get("person", {})
+            return ("person_updated", str(person.get("canonical_name") or "person"), "Updated an explicitly confirmed person record.", ["people"])
+        if lowered == "forget_person":
+            return ("person_forgotten", f"person #{args.get('person_id', '')}", "Deleted an explicitly confirmed person record.", ["people"])
+        if lowered == "create_task":
+            task = self._result_json(result).get("task", {})
+            return ("task_created", str(task.get("task_id") or "task"), "Created a durable workflow task.", ["workflow"])
+        if lowered == "cancel_task":
+            return ("task_cancelled", str(args.get("task_id") or "task"), "Cancelled a workflow task.", ["workflow"])
+        return None
+
+    def _record_consequential_action(
+        self,
+        tool_name: str,
+        args: dict,
+        result: str,
+        *,
+        prestate: dict[str, Any] | None = None,
+    ) -> int | None:
+        if self.action_ledger is None or not self._action_succeeded(result):
+            return None
+        spec = self._action_spec(tool_name, args, result, prestate=prestate)
+        if spec is None:
+            return None
+        action_type, target, summary, tags = spec
+        try:
+            return self.action_ledger.record(
+                action_type,
+                target=target,
+                summary=summary,
+                tool_name=tool_name,
+                session_id=self.session_id,
+                tags=tags,
+            )
+        except Exception:
+            # Provenance must never turn a successfully completed user action
+            # into an apparent failure. The local action is still authoritative.
+            return None
+
+    def record_external_action(self, tool_name: str, args: dict, result: str) -> int | None:
+        """Record consequential MCP outcomes after Agent dispatch completes."""
+        return self._record_consequential_action(tool_name, args, result)
+
     # ── Skills ─────────────────────────────────────────────────────
 
     def _skill_manager(self) -> SkillManager:
@@ -296,6 +647,8 @@ class ToolExecutor:
         path = export_data(
             memory_store=self.memory,
             conversation_store=self.conversations,
+            people_store=self.people_store,
+            action_ledger=self.action_ledger,
             config=self.config,
             path=args.get("path"),
             profile=args.get("profile", "full"),
@@ -771,15 +1124,53 @@ class ToolExecutor:
             return self._phone_disabled()
         return _kdeconnect_bridge.search_contacts(args["query"])
 
+    def _resolve_phone_recipient(self, value: Any) -> tuple[str, dict[str, Any] | None]:
+        """Resolve an exact saved alias locally without exposing its number to the model."""
+        raw = str(value or "").strip()
+        if not raw:
+            raise PersonResolutionError("A phone number or saved person alias is required.")
+        if re.fullmatch(r"[+0-9 ()-]{3,40}", raw):
+            return raw, None
+        if self.people_store is None:
+            raise PersonResolutionError("People store is unavailable; provide a phone number instead.")
+        person = self.people_store.resolve(raw, require="phone")
+        return str(person["phone"]), person
+
+    @staticmethod
+    def _redact_phone_result(result: str, person: dict[str, Any] | None = None) -> str:
+        """Bridge responses should not echo a saved contact number back to the model."""
+        try:
+            payload = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        if payload.get("number"):
+            payload["number"] = mask_phone(payload["number"])
+        if person is not None:
+            payload["recipient"] = person.get("canonical_name", "saved person")
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
     def _phone_send_sms(self, args: dict) -> str:
         if not self.config or not self.config.phone.enabled:
             return self._phone_disabled()
-        return _kdeconnect_bridge.send_sms(args["number"], args["message"])
+        try:
+            number, person = self._resolve_phone_recipient(args.get("number"))
+        except PersonResolutionError as exc:
+            return self._json({"ok": False, "sent": False, "error": str(exc)})
+        return self._redact_phone_result(_kdeconnect_bridge.send_sms(number, args["message"]), person)
 
     def _phone_call_number(self, args: dict) -> str:
         if not self.config or not self.config.phone.enabled:
             return self._phone_disabled()
-        return _adb_bridge.call_number(args["number"], confirm=bool(args.get("confirm", False)))
+        try:
+            number, person = self._resolve_phone_recipient(args.get("number"))
+        except PersonResolutionError as exc:
+            return self._json({"ok": False, "dialed": False, "error": str(exc)})
+        return self._redact_phone_result(
+            _adb_bridge.call_number(number, confirm=bool(args.get("confirm", False))),
+            person,
+        )
 
     def _phone_launch_app(self, args: dict) -> str:
         """Launch an app on the phone by package name."""

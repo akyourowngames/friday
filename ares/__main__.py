@@ -21,7 +21,7 @@ async def _run_voice(
     voice_name: str | None = None,
     stt_backend: str | None = None,
     tts_backend: str | None = None,
-    barge_in: bool = False,
+    barge_in: bool | None = None,
 ) -> None:
     from ares.voice.agent import run_voice_agent
 
@@ -111,7 +111,12 @@ def main():
     parser.add_argument("--voice-name", default=None, help="Edge TTS voice for --voice")
     parser.add_argument("--stt-backend", choices=["auto", "whisper", "sarvam"], default=None, help="STT backend for --voice")
     parser.add_argument("--tts-backend", choices=["auto", "edge", "sarvam"], default=None, help="TTS backend for --voice")
-    parser.add_argument("--barge-in", action="store_true", help="Allow microphone speech to interrupt TTS playback")
+    parser.add_argument(
+        "--barge-in",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable microphone interruption of TTS (defaults to the saved voice setting)",
+    )
     parser.add_argument("--tts", choices=["edge"], default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default="127.0.0.1", help="Server host for --server")
     parser.add_argument("--port", type=int, default=8765, help="Server port for --server")

@@ -17,6 +17,58 @@ class FactCategory(str, Enum):
     NOTE = "note"
 
 
+class TaskState(str, Enum):
+    """Lifecycle states for durable multi-step workflows."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
+    TaskState.PENDING: frozenset({TaskState.RUNNING, TaskState.CANCELLED}),
+    TaskState.RUNNING: frozenset({
+        TaskState.AWAITING_CONFIRMATION,
+        TaskState.COMPLETED,
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+    }),
+    TaskState.AWAITING_CONFIRMATION: frozenset({TaskState.PENDING, TaskState.CANCELLED}),
+    TaskState.COMPLETED: frozenset(),
+    TaskState.FAILED: frozenset({TaskState.PENDING, TaskState.CANCELLED}),
+    TaskState.CANCELLED: frozenset(),
+}
+
+
+class TaskStep(BaseModel):
+    """One explicit, serializable workflow step."""
+
+    step_id: str
+    tool_name: str
+    arguments: dict = Field(default_factory=dict)
+    description: str = ""
+    verify: dict | None = None
+
+
+class Task(BaseModel):
+    """Public representation of a durable task persisted by ``TaskStore``."""
+
+    task_id: str
+    goal: str
+    plan: list[TaskStep] = Field(default_factory=list)
+    status: TaskState = TaskState.PENDING
+    created_at: str
+    updated_at: str
+    result_summary: str = ""
+    related_person_ids: list[int] = Field(default_factory=list)
+    related_action_ids: list[int] = Field(default_factory=list)
+    session_id: str | None = None
+    revision: int = 1
+
+
 class Memory(BaseModel):
     fact_id: Optional[int] = None
     fact_text: str
@@ -99,14 +151,18 @@ class VoiceConfig(BaseModel):
     stt_model: str = "small"
     stt_language: str = ""
     mic_device: int | str | None = None
-    min_utterance_ms: int = 650
-    silence_timeout_ms: int = 700
+    # Keep the end-of-turn detector responsive without accepting tiny clicks.
+    min_utterance_ms: int = 350
+    silence_timeout_ms: int = 420
     max_utterance_seconds: float = 20.0
-    start_speech_frames: int = 5
-    min_voiced_ms: int = 250
+    start_speech_frames: int = 3
+    min_voiced_ms: int = 180
     min_audio_rms: float = 0.004
-    barge_in_enabled: bool = False
-    post_speech_cooldown_ms: int = 1200
+    barge_in_enabled: bool = True
+    barge_in_delay_ms: int = 350
+    barge_in_min_voiced_ms: int = 300
+    post_speech_cooldown_ms: int = 120
+    tts_chunk_chars: int = 90
     tts_sample_rate: int = 24000
     tts_volume: float = 1.6
     sarvam_stt_model: str = "saaras:v3"

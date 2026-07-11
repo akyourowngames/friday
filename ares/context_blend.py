@@ -224,6 +224,58 @@ def format_memories(memories: list[dict] | None, token_budget: int = 800) -> str
     return truncate_to_tokens("\n".join(lines), token_budget)
 
 
+def format_people(people: list[dict] | None, token_budget: int = 500) -> str:
+    """Format contact-redacted people context for the model.
+
+    Names, relations, aliases, and the fact that a contact method exists are
+    enough to prompt local alias resolution.  Phone/email values, notes, and
+    dates must never be injected into model context.
+    """
+    if not people:
+        return ""
+    lines = [
+        "## People & Relationships:",
+        "These are explicitly saved local relationship records. Contact values stay local; use search_person or a supported action with an exact alias when needed. Never infer or auto-save a person from messages, contacts, or notifications.",
+    ]
+    for person in people:
+        name = str(person.get("canonical_name") or "").strip()
+        if not name:
+            continue
+        details: list[str] = []
+        if person.get("relation"):
+            details.append(str(person["relation"]))
+        aliases = [str(alias) for alias in person.get("aliases", []) if str(alias).strip()]
+        if aliases:
+            details.append("aliases: " + ", ".join(aliases[:4]))
+        availability = []
+        if person.get("has_phone"):
+            availability.append("phone available")
+        if person.get("has_email"):
+            availability.append("email available")
+        if availability:
+            details.append(", ".join(availability))
+        suffix = f" ({'; '.join(details)})" if details else ""
+        lines.append(f"- #{person.get('person_id', '?')}: {name}{suffix}")
+    return truncate_to_tokens("\n".join(lines), token_budget)
+
+
+def format_actions(actions: list[dict] | None, *, title: str, token_budget: int = 500) -> str:
+    """Format bounded provenance entries; action records intentionally lack bodies."""
+    if not actions:
+        return ""
+    lines = [f"## {title}:", "Action history is provenance, not message/content storage."]
+    for action in actions:
+        summary = str(action.get("summary") or "").strip()
+        if not summary:
+            continue
+        created = str(action.get("created_at") or "")
+        action_type = str(action.get("action_type") or "action")
+        target = str(action.get("target") or "").strip()
+        target_text = f" — {target}" if target else ""
+        lines.append(f"- {created} [{action_type}] {summary}{target_text}")
+    return truncate_to_tokens("\n".join(lines), token_budget)
+
+
 def format_summaries(summaries: list[str] | None) -> str:
     """Format recent conversation summaries for context injection."""
     if not summaries:
@@ -250,6 +302,9 @@ def build_context_prompt(
     profile_context: str = "",
     project_context: str = "",
     memories: list[dict] | None = None,
+    people: list[dict] | None = None,
+    recent_actions: list[dict] | None = None,
+    relevant_actions: list[dict] | None = None,
     conversation_summaries: list[str] | None = None,
     previous_session_summary: str | None = None,
     token_budget: int = 2000,
@@ -276,5 +331,19 @@ def build_context_prompt(
     if memories and remaining > 100:
         memory_section = format_memories(memories, token_budget=remaining)
         remaining = _append_section(sections, memory_section, remaining)
+
+    if people and remaining > 100:
+        people_section = format_people(people, token_budget=remaining)
+        remaining = _append_section(sections, people_section, remaining)
+
+    if relevant_actions and remaining > 100:
+        relevant_section = format_actions(relevant_actions, title="Relevant Action History", token_budget=remaining)
+        remaining = _append_section(sections, relevant_section, remaining)
+
+    if recent_actions and remaining > 100:
+        relevant_ids = {action.get("action_id") for action in relevant_actions or []}
+        nonduplicated = [action for action in recent_actions if action.get("action_id") not in relevant_ids]
+        action_section = format_actions(nonduplicated, title="Recent Actions", token_budget=remaining)
+        remaining = _append_section(sections, action_section, remaining)
 
     return "\n\n".join(sections)

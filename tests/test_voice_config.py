@@ -11,9 +11,13 @@ def test_app_config_has_voice_defaults():
     assert config.voice.tts_backend == "auto"
     assert config.voice.tts_voice == DEFAULT_EDGE_VOICE
     assert config.voice.stt_model == "small"
-    assert config.voice.min_utterance_ms == 650
-    assert config.voice.barge_in_enabled is False
-    assert config.voice.post_speech_cooldown_ms == 1200
+    assert config.voice.min_utterance_ms == 350
+    assert config.voice.silence_timeout_ms == 420
+    assert config.voice.barge_in_enabled is True
+    assert config.voice.barge_in_delay_ms == 350
+    assert config.voice.barge_in_min_voiced_ms == 300
+    assert config.voice.post_speech_cooldown_ms == 120
+    assert config.voice.tts_chunk_chars == 90
     assert config.voice.tts_volume == 1.6
 
 
@@ -26,6 +30,10 @@ def test_voice_env_overrides(monkeypatch):
     monkeypatch.setenv("ARES_STT_LANGUAGE", "en")
     monkeypatch.setenv("ARES_MIC_DEVICE", "2")
     monkeypatch.setenv("ARES_TTS_VOLUME", "1.8")
+    monkeypatch.setenv("ARES_VOICE_BARGE_IN", "false")
+    monkeypatch.setenv("ARES_VOICE_BARGE_IN_DELAY_MS", "480")
+    monkeypatch.setenv("ARES_VOICE_BARGE_IN_MIN_VOICED_MS", "420")
+    monkeypatch.setenv("ARES_VOICE_TTS_CHUNK_CHARS", "72")
     monkeypatch.setenv("SARVAM_STT_MODEL", "saaras:v3")
     monkeypatch.setenv("SARVAM_TTS_MODEL", "bulbul:v3")
     monkeypatch.setenv("SARVAM_LANGUAGE_CODE", "hi-IN")
@@ -41,6 +49,10 @@ def test_voice_env_overrides(monkeypatch):
     assert resolved.stt_language == "en"
     assert resolved.mic_device == 2
     assert resolved.tts_volume == 1.8
+    assert resolved.barge_in_enabled is False
+    assert resolved.barge_in_delay_ms == 480
+    assert resolved.barge_in_min_voiced_ms == 420
+    assert resolved.tts_chunk_chars == 72
     assert resolved.sarvam_stt_model == "saaras:v3"
     assert resolved.sarvam_tts_model == "bulbul:v3"
     assert resolved.sarvam_language_code == "hi-IN"

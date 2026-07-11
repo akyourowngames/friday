@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 68
+        assert len(tools) == 79
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -25,6 +25,11 @@ class TestToolDefinitions:
             "search_memory",
             "update_memory",
             "delete_memory",
+            "remember_person",
+            "search_person",
+            "update_person",
+            "forget_person",
+            "search_actions",
             "list_skills",
             "load_skill",
             "create_skill",
@@ -88,21 +93,28 @@ class TestToolDefinitions:
             "delete_cron_job",
             "run_cron_job_now",
             "get_cron_logs",
+            "create_task",
+            "list_tasks",
+            "get_task_status",
+            "update_task",
+            "cancel_task",
+            "run_task",
             "get_current_datetime",
         }
 
-    def test_plain_task_tools_are_not_registered(self):
-        """The unfinished plain task-list feature is intentionally removed."""
+    def test_durable_task_tools_are_registered_without_legacy_aliases(self):
+        """The continuity plan replaces the old unfinished task-list gap."""
         tools = get_tool_definitions()
         names = {t["function"]["name"] for t in tools}
-        assert not {
+        assert {
             "create_task",
             "list_tasks",
-            "search_tasks",
-            "complete_task",
+            "get_task_status",
+            "update_task",
             "cancel_task",
-            "get_due_soon",
-        }.intersection(names)
+            "run_task",
+        }.issubset(names)
+        assert not {"search_tasks", "complete_task", "get_due_soon"}.intersection(names)
 
     def test_tools_have_schemas(self):
         """Each tool has a valid OpenAI-compatible parameters schema."""

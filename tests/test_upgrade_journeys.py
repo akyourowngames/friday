@@ -1,4 +1,4 @@
-"""System-level journeys for the existing 68 Ares tools.
+"""System-level journeys for the established Ares tool surface.
 
 External providers and a real phone are represented by deterministic local
 fixtures; all stateful Ares paths (HTTP parsing, files, SQLite, shells, cron

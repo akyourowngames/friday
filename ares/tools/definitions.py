@@ -65,6 +65,70 @@ def get_tool_definitions() -> list[dict]:
             ["fact_id"],
         ),
         _tool(
+            "remember_person",
+            "Explicitly save a local structured record for another person. This is third-party PII: use only after the user explicitly asks to remember it, and set confirm=true. Never create records from contacts, notifications, or messages.",
+            {
+                "canonical_name": {"type": "string", "description": "The person's canonical name."},
+                "aliases": {"type": "array", "items": {"type": "string"}, "description": "Optional exact names such as mom or Priya aunty."},
+                "relation": {"type": "string", "description": "Optional relation such as mom, cousin, or colleague."},
+                "phone": {"type": "string", "description": "Optional phone number, stored locally only."},
+                "email": {"type": "string", "description": "Optional email address, stored locally only."},
+                "important_dates": {"type": "object", "description": "Optional date-label map, for example birthday or anniversary."},
+                "notes": {"type": "string", "description": "Optional local-only notes."},
+                "source": {"type": "string", "enum": ["manual", "ares-suggested"], "default": "manual"},
+                "confidence": {"type": "number", "default": 1.0},
+                "confirm": {"type": "boolean", "default": False, "description": "Must be true after the user explicitly authorizes saving this person's data."},
+            },
+            ["canonical_name"],
+        ),
+        _tool(
+            "search_person",
+            "Search explicitly saved local people by canonical name, exact alias, relation, or note. Contact values are never echoed; the local executor resolves aliases only when needed for a user-requested action.",
+            {
+                "query": {"type": "string", "description": "Name, alias, relation, or local note to search."},
+                "limit": {"type": "integer", "default": 5},
+            },
+            ["query"],
+        ),
+        _tool(
+            "update_person",
+            "Explicitly update a saved person record. Every modification of third-party PII requires confirm=true after user approval.",
+            {
+                "person_id": {"type": "integer", "description": "Saved person ID."},
+                "canonical_name": {"type": "string"},
+                "aliases": {"type": "array", "items": {"type": "string"}},
+                "relation": {"type": "string"},
+                "phone": {"type": "string", "description": "Pass an empty string to remove a saved phone."},
+                "email": {"type": "string", "description": "Pass an empty string to remove a saved email."},
+                "important_dates": {"type": "object"},
+                "notes": {"type": "string"},
+                "source": {"type": "string", "enum": ["manual", "ares-suggested"]},
+                "confidence": {"type": "number"},
+                "expected_revision": {"type": "integer", "description": "Optional optimistic-concurrency revision."},
+                "confirm": {"type": "boolean", "default": False, "description": "Must be true after explicit user approval for this update."},
+            },
+            ["person_id"],
+        ),
+        _tool(
+            "forget_person",
+            "Permanently delete a local person record. Requires confirm=true after the user explicitly approves deletion.",
+            {
+                "person_id": {"type": "integer", "description": "Saved person ID."},
+                "expected_revision": {"type": "integer"},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            ["person_id"],
+        ),
+        _tool(
+            "search_actions",
+            "Search the local action and artifact ledger for work Ares already performed. Use for references such as that file, the thing I made, yesterday, or 5 days ago. The ledger stores provenance, never message bodies or other private content.",
+            {
+                "query": {"type": "string", "default": "", "description": "Optional action, path, tag, or summary search."},
+                "since": {"type": "string", "description": "Optional ISO or relative lower bound such as yesterday or 5 days ago."},
+                "limit": {"type": "integer", "default": 20},
+            },
+        ),
+        _tool(
             "list_skills",
             "Inspect available reusable skills/playbooks. Use only when the user asks about skills or discovery is necessary; do not narrate skill selection.",
             {
@@ -92,12 +156,12 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "export_data",
-            "Export local Ares memories, conversations, and config to JSON, with selective profiles and redaction preview.",
+            "Export local Ares data to JSON, with selective profiles and redaction preview. People records are excluded from full exports and require the explicit people profile.",
             {
                 "path": {"type": "string", "description": "Optional output JSON path."},
                 "profile": {
                     "type": "string",
-                    "enum": ["full", "memories", "conversations", "config"],
+                    "enum": ["full", "memories", "conversations", "config", "actions", "people"],
                     "default": "full",
                     "description": "Selective export profile.",
                 },
@@ -588,6 +652,44 @@ def get_tool_definitions() -> list[dict]:
         _tool("run_cron_job_now", "Trigger a cron job immediately.", {"job_id": {"type": "string"}}, ["job_id"]),
         _tool("get_cron_logs", "Read recent markdown logs for a cron job.", {"job_id": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, ["job_id"]),
         _tool(
+            "create_task",
+            "Create a durable ordered workflow task. Each plan step must name one tool and its arguments; the guarded runner executes safe/reversible steps automatically and pauses before consequential steps.",
+            {
+                "goal": {"type": "string", "description": "Human-readable workflow goal."},
+                "plan": {"type": "array", "items": {"type": "object"}, "description": "Ordered explicit steps: step_id, tool_name, arguments, optional description, and optional verify object."},
+                "related_person_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional saved people relevant to this task."},
+                "session_id": {"type": "string", "description": "Optional originating session id."},
+            },
+            ["goal", "plan"],
+        ),
+        _tool("list_tasks", "List durable workflow tasks and their current status.", {"statuses": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "default": 20}}),
+        _tool("get_task_status", "Get the status and safe step summary for one durable workflow task.", {"task_id": {"type": "string"}}, ["task_id"]),
+        _tool(
+            "update_task",
+            "Update a pending/failed workflow goal or plan, or retry a failed task. Running and confirmation-paused tasks must be cancelled before editing.",
+            {
+                "task_id": {"type": "string"},
+                "goal": {"type": "string"},
+                "plan": {"type": "array", "items": {"type": "object"}},
+                "related_person_ids": {"type": "array", "items": {"type": "integer"}},
+                "session_id": {"type": "string"},
+                "expected_revision": {"type": "integer"},
+                "retry": {"type": "boolean", "default": False},
+            },
+            ["task_id"],
+        ),
+        _tool("cancel_task", "Cancel a durable workflow task and revoke any active run lease.", {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}}, ["task_id"]),
+        _tool(
+            "run_task",
+            "Run or resume a durable workflow through the guarded runner. If it pauses, review its consolidated consequential-step request; set confirm=true only after the user explicitly approves that exact request.",
+            {
+                "task_id": {"type": "string"},
+                "confirm": {"type": "boolean", "default": False, "description": "Only true after explicit approval of the task's pending confirmation request."},
+                "max_steps": {"type": "integer", "default": 25, "description": "Safety cap for steps run in this invocation."},
+            },
+            ["task_id"],
+        ),
+        _tool(
             "phone_status",
             "PHONE TOOL — the ONLY way to check Android phone status. Do NOT use run_command with kdeconnect-cli or adb for this. Checks KDE Connect and ADB bridge health. No arguments.",
             {},
@@ -607,7 +709,7 @@ def get_tool_definitions() -> list[dict]:
             "phone_send_sms",
             "PHONE TOOL — the ONLY way to send SMS. Do NOT use run_command with kdeconnect-cli for this. Send a real SMS text message through the paired Android phone via KDE Connect. Use only when the user explicitly asks to text this recipient.",
             {
-                "number": {"type": "string", "description": "Recipient phone number."},
+                "number": {"type": "string", "description": "Recipient phone number or one exact explicitly saved person alias such as mom."},
                 "message": {"type": "string", "description": "SMS body to send."},
             },
             ["number", "message"],
@@ -616,7 +718,7 @@ def get_tool_definitions() -> list[dict]:
             "phone_call_number",
             "PHONE TOOL — the ONLY way to make phone calls. Do NOT use run_command with adb for this. Place a real phone call through ADB. Never call unless the user has just explicitly asked for this exact call; confirm=true is required.",
             {
-                "number": {"type": "string", "description": "Phone number to call."},
+                "number": {"type": "string", "description": "Phone number or one exact explicitly saved person alias to call."},
                 "confirm": {"type": "boolean", "default": False, "description": "Must be true after explicit user approval for this exact call."},
             },
             ["number"],

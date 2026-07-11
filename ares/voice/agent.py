@@ -29,7 +29,7 @@ from ares.voice.tts import DEFAULT_EDGE_VOICE, EdgeTTS
 _SAMPLE_RATE = 16000
 _FRAME_MS = 30
 _FRAME_SAMPLES = int(_SAMPLE_RATE * _FRAME_MS / 1000)
-_MAX_SENTENCE_CHARS = 220
+_MAX_SENTENCE_CHARS = 90
 _EXIT_PHRASES = {
     "exit voice mode",
     "quit voice mode",
@@ -64,6 +64,9 @@ def voice_config_from_env(config: VoiceConfig) -> VoiceConfig:
         "ARES_VOICE_MIN_VOICED_MS": ("min_voiced_ms", int),
         "ARES_VOICE_MIN_AUDIO_RMS": ("min_audio_rms", float),
         "ARES_VOICE_BARGE_IN": ("barge_in_enabled", _env_bool),
+        "ARES_VOICE_BARGE_IN_DELAY_MS": ("barge_in_delay_ms", int),
+        "ARES_VOICE_BARGE_IN_MIN_VOICED_MS": ("barge_in_min_voiced_ms", int),
+        "ARES_VOICE_TTS_CHUNK_CHARS": ("tts_chunk_chars", int),
         "ARES_TTS_SAMPLE_RATE": ("tts_sample_rate", int),
         "ARES_TTS_VOLUME": ("tts_volume", float),
         "SARVAM_STT_MODEL": ("sarvam_stt_model", str),
@@ -137,6 +140,19 @@ class MicrophoneFrames:
             self._frames.clear()
             self._buffer = np.array([], dtype=np.float32)
 
+    def unread(self, frames: list[np.ndarray]) -> None:
+        """Return consumed frames to the front of the capture queue.
+
+        Barge-in detection has already consumed the beginning of the user's
+        interruption. Putting those frames back means the next turn starts
+        with the actual spoken words instead of waiting for them to be repeated.
+        """
+        if not frames:
+            return
+        with self._lock:
+            for frame in reversed(frames):
+                self._frames.appendleft(frame)
+
     @property
     def total_frames(self) -> int:
         with self._lock:
@@ -179,6 +195,7 @@ class ContinuousVoiceAgent:
         self.agent = None
         self.energy_threshold = 0.0005
         self.vad = self._load_vad()
+        self._barge_in_occurred = False
 
     def _resolve_backend(self, backend: str, *, local: str) -> str:
         backend = (backend or "auto").lower().strip()
@@ -277,6 +294,9 @@ class ContinuousVoiceAgent:
                 response = await self._respond(text)
                 if response and response.strip():
                     self._remember_exchange(text, response)
+                if self._barge_in_occurred:
+                    self.console.print("[dim cyan]Interrupted — listening to you now...[/dim cyan]")
+                    continue
                 await self._cooldown_after_speech()
         finally:
             self.capture.close()
@@ -444,7 +464,12 @@ class ContinuousVoiceAgent:
 
     def _sentence_ready(self, text: str) -> bool:
         stripped = text.rstrip()
-        return len(stripped) >= _MAX_SENTENCE_CHARS or bool(re.search(r"[.!?]\s*$", stripped))
+        limit = max(48, min(_MAX_SENTENCE_CHARS, int(self.voice_config.tts_chunk_chars)))
+        if len(stripped) >= limit:
+            return True
+        # Commas and clauses are safe early hand-off points.  Waiting for a
+        # complete long sentence is a large part of the perceived voice lag.
+        return len(stripped) >= 36 and bool(re.search(r"(?:[.!?]|[,;:])\s*$", stripped))
 
     async def _tts_play_pipeline(
         self,
@@ -452,7 +477,7 @@ class ContinuousVoiceAgent:
         stop_event: asyncio.Event,
         playback_started: asyncio.Event,
     ) -> None:
-        audio_q: asyncio.Queue[bytes | None] = asyncio.Queue()
+        audio_q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=2)
         play_task = asyncio.create_task(play_audio_stream(audio_q, stop_event, sample_rate=self.tts_sample_rate))
         try:
             while not stop_event.is_set():
@@ -468,7 +493,10 @@ class ContinuousVoiceAgent:
                 try:
                     encoded = await self._synthesize_with_fallback(sentence)
                     if encoded and not stop_event.is_set():
-                        pcm = self._audio_to_pcm(encoded)
+                        # Decoding MP3/WAV is CPU and may invoke an external
+                        # decoder. Keep it off the event loop so VAD can still
+                        # notice a barge-in immediately.
+                        pcm = await asyncio.to_thread(self._audio_to_pcm, encoded)
                         await audio_q.put(pcm)
                         playback_started.set()
                 except Exception as exc:
@@ -493,36 +521,73 @@ class ContinuousVoiceAgent:
                 return
             await asyncio.sleep(0.05)
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(max(0, int(self.voice_config.barge_in_delay_ms)) / 1000)
         consecutive_speech = 0
+        detected: list[np.ndarray] = []
+        required_frames = max(
+            self.voice_config.start_speech_frames,
+            int(np.ceil(max(30, self.voice_config.barge_in_min_voiced_ms) / _FRAME_MS)),
+        )
         while not stop_event.is_set():
             frames = self._read_frames(1)
             if not frames:
                 await asyncio.sleep(0.005)
                 continue
             if self._is_speech(frames[0]):
+                detected.append(frames[0])
                 consecutive_speech += 1
-                if consecutive_speech >= max(3, self.voice_config.start_speech_frames):
+                if consecutive_speech >= required_frames:
+                    # Preserve the opening of the interruption for the next
+                    # listener pass; dropping it makes the user repeat themself.
+                    self.capture.unread(detected)
                     stop_event.set()
-                    self._drain()
+                    self._barge_in_occurred = True
                     return
             else:
                 consecutive_speech = 0
+                detected.clear()
 
     async def _respond(self, text: str) -> str:
         sentence_q: asyncio.Queue[str | None] = asyncio.Queue()
         stop_event = asyncio.Event()
         playback_started = asyncio.Event()
+        self._barge_in_occurred = False
         stream_task = asyncio.create_task(self._stream_to_sentences(text, sentence_q))
         tts_task = asyncio.create_task(self._tts_play_pipeline(sentence_q, stop_event, playback_started))
         barge_task = asyncio.create_task(self._barge_in_watcher(stop_event, playback_started))
         try:
+            # Do not wait for a long LLM/tool turn after the user speaks over
+            # it.  The previous implementation did exactly that, making
+            # "barge-in" feel like it had not worked.
+            done, _pending = await asyncio.wait(
+                {stream_task, barge_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_event.is_set():
+                stream_task.cancel()
+                tts_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stream_task
+                with contextlib.suppress(asyncio.CancelledError):
+                    await tts_task
+                return ""
+
             full_response = await stream_task
             if stop_event.is_set():
                 tts_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await tts_task
-                return full_response
+                return ""
+
+            done, _pending = await asyncio.wait(
+                {tts_task, barge_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_event.is_set():
+                tts_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await tts_task
+                return ""
             await tts_task
             return full_response
         finally:
@@ -585,10 +650,11 @@ async def run_voice_agent(
     *,
     stt_backend: str | None = None,
     tts_backend: str | None = None,
-    barge_in: bool = False,
+    barge_in: bool | None = None,
 ) -> None:
     agent = ContinuousVoiceAgent(voice_name)
-    agent.voice_config.barge_in_enabled = bool(barge_in)
+    if barge_in is not None:
+        agent.voice_config.barge_in_enabled = barge_in
     if stt_backend:
         agent.voice_config.stt_backend = stt_backend
         agent.stt_backend = agent._resolve_backend(stt_backend, local="whisper")
