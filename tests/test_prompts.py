@@ -38,6 +38,15 @@ def test_system_prompt_keeps_skills_internal():
     assert 'Do not say "I can use a skill"' in prompt
 
 
+def test_system_prompt_routes_browser_tasks_to_playwright_not_windows_mcp():
+    prompt = SYSTEM_PROMPT
+
+    assert "For browser or web-page tasks, prefer Playwright MCP tools first" in prompt
+    assert "Do not control\nnormal websites through Windows MCP Snapshot/Click" in prompt
+    assert "mcp__playwright__browser_*" in prompt
+    assert "Never use `mcp__windows__Snapshot`, `Click`, or `Type` for a normal" in prompt
+
+
 def test_store_memory_tool_discourages_junk_memory():
     tools = get_tool_definitions()
     store = next(tool for tool in tools if tool["function"]["name"] == "store_memory")

@@ -32,6 +32,19 @@ Add entries to the `mcp_servers` array in `~/.ares/config.json`.
 }
 ```
 
+### Playwright browser modes
+
+The built-in Playwright entry is rewritten from the local browser settings when Ares starts or a browser mode changes. Use `/browser status` to inspect the active mode, and `/mcp reconnect playwright` if an external surface changed the config.
+
+| Mode | Playwright connection |
+|---|---|
+| `auto` | Prefers an extension token, then a local Chrome CDP endpoint, then Ares' dedicated profile. |
+| `isolated` | `--browser chrome --user-data-dir ~/.ares/data/playwright-profile` |
+| `system` | `--cdp-endpoint http://127.0.0.1:9222` by default |
+| `extension` | `--extension`, with optional `PLAYWRIGHT_MCP_EXTENSION_TOKEN` passed through the child environment |
+
+`/browser launch [port]` starts Chrome with remote debugging for system mode. Close other Chrome windows first, because Chrome protects a profile with a process lock. For real existing tabs and logged-in sessions, install the [official Playwright Extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm) and use extension mode instead of CDP where possible.
+
 ### Filesystem over stdio
 
 ```json

@@ -642,11 +642,24 @@ class MCPClientManager:
             or getattr(tool, "input_schema", None)
             or {"type": "object", "properties": {}}
         )
+        description = str(getattr(tool, "description", "") or "")
+        if server_name == "playwright":
+            description = (
+                "Preferred for browser and web-page automation. Use this before Windows MCP "
+                "for websites, web apps, forms, browser navigation, and page inspection. "
+                + description
+            )
+        elif server_name == "windows":
+            description = (
+                "For native Windows desktop apps, OS dialogs, and non-browser UI only. "
+                "Do not use for normal websites while Playwright MCP is available. "
+                + description
+            )
         return {
             "type": "function",
             "function": {
                 "name": f"mcp__{server_name}__{tool.name}",
-                "description": f"[MCP:{server_name}] {getattr(tool, 'description', '') or ''}",
+                "description": f"[MCP:{server_name}] {description}",
                 "parameters": schema,
             },
         }

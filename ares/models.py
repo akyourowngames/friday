@@ -2,7 +2,8 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from pathlib import Path
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -49,7 +50,9 @@ DEFAULT_MCP_SERVERS: list[dict] = [
             "@playwright/mcp@latest",
             "--browser", "chrome",
             "--caps", "vision,devtools",
-            "--user-data-dir", "~/.ares/data/playwright-profile",
+            # MCP arguments bypass the shell, so this must be a real absolute
+            # path rather than a literal ``~`` directory.
+            "--user-data-dir", str(Path("~/.ares/data/playwright-profile").expanduser()),
             "--viewport-size", "1280x720",
         ],
     },
@@ -200,3 +203,7 @@ class AppConfig(BaseModel):
     cron_max_concurrent: int = 3
     cron_max_iterations: int = 10
     cron_log_retention_days: int = 90
+    browser_mode: Literal["isolated", "system", "extension", "auto"] = "auto"
+    browser_cdp_port: int = Field(default=9222, ge=1, le=65535)
+    browser_chrome_path: str = ""
+    browser_extension_token: str = ""

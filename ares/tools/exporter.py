@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,7 @@ _SECRET_KEY = re.compile(
     r"(?:api[_-]?key|access[_-]?key|token|secret|password|passwd|credential|authorization|private[_-]?key|client[_-]?secret)",
     re.IGNORECASE,
 )
+_PATH_PART = re.compile(r"([^.[\]]+)|\[(\d+)\]")
 
 
 def _redact_credentials(value: Any, *, path: str = "") -> tuple[Any, dict[str, str]]:
@@ -61,6 +63,52 @@ def _redact_credentials(value: Any, *, path: str = "") -> tuple[Any, dict[str, s
             preview.update(child_preview)
         return cleaned_list, preview
     return value, preview
+
+
+def _config_path_steps(path: str) -> list[str | int]:
+    """Parse a redaction-preview path such as ``servers[0].env.token``."""
+    return [
+        int(index) if index else key
+        for key, index in _PATH_PART.findall(path)
+    ]
+
+
+def _restore_redacted_config_values(
+    imported: dict[str, Any], current: dict[str, Any], redacted_paths: list[str],
+) -> None:
+    """Keep local secrets when importing an intentionally redacted config export."""
+    missing = object()
+    for path in redacted_paths:
+        target: Any = imported
+        source: Any = current
+        steps = _config_path_steps(path)
+        if not steps:
+            continue
+        for step in steps[:-1]:
+            if isinstance(step, int):
+                if not isinstance(target, list) or not isinstance(source, list):
+                    target = source = missing
+                    break
+                if step >= len(target) or step >= len(source):
+                    target = source = missing
+                    break
+            else:
+                if not isinstance(target, dict) or not isinstance(source, dict):
+                    target = source = missing
+                    break
+                if step not in target or step not in source:
+                    target = source = missing
+                    break
+            target = target[step]
+            source = source[step]
+        if target is missing or source is missing:
+            continue
+        final = steps[-1]
+        if isinstance(final, int):
+            if isinstance(target, list) and isinstance(source, list) and final < len(target) and final < len(source):
+                target[final] = deepcopy(source[final])
+        elif isinstance(target, dict) and isinstance(source, dict) and final in source:
+            target[final] = deepcopy(source[final])
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
@@ -152,8 +200,11 @@ def import_data(
         current = load_config()
         config_data = current.model_dump()
         config_data.update(payload["config"])
-        config_data["api_key"] = current.api_key
-        config_data["tavily_api_key"] = current.tavily_api_key
+        _restore_redacted_config_values(
+            config_data,
+            current.model_dump(),
+            list(payload.get("secrets_redacted") or []),
+        )
         save_config(AppConfig(**config_data))
         counts["config"] = 1
 

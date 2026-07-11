@@ -28,6 +28,7 @@ from rich.text import Text
 from rich.table import Table
 
 from ares.agent import Agent
+from ares.browser import BrowserManager, VALID_BROWSER_MODES
 from ares.context import ProjectContext
 from ares.context_blend import build_context_prompt
 from ares.conversations import ConversationStore
@@ -39,7 +40,7 @@ from ares.onboarding import OnboardingWizard
 from ares.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
-from ares.config import load_config, save_config
+from ares.config import _ensure_mcp_defaults, load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.skills import SkillManager
@@ -60,7 +61,7 @@ COMPLETER = WordCompleter([
     "/forget", "/export", "/import", "/reset", "/exit",
     "/soul", "/profile", "/context",
     "/skills", "/skills search", "/skills categories", "/skills load",
-    "/setup", "/phone", "/phone status",
+    "/setup", "/browser", "/phone", "/phone status",
     "/tools", "/tools summary", "/tools details", "/tools hidden",
     "/mcp", "/mcp status", "/mcp tools", "/mcp health", "/mcp config",
     "/mcp reconnect", "/mcp reload",
@@ -294,6 +295,7 @@ class AresCLI:
         self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=latest.profile_path)
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        self.browser_manager = BrowserManager(self.config)
         self.project_context = ProjectContext(
             enabled=latest.project_context_enabled,
             max_files=latest.project_context_max_files,
@@ -304,6 +306,7 @@ class AresCLI:
             self.agent.set_model(latest.model)
         self._mcp_config_signature = self._get_mcp_config_signature(latest)
         self._mcp_reconfigure_pending = previous_mcp_signature != self._mcp_config_signature
+        self.browser_manager = BrowserManager(self.config)
 
     async def _refresh_mcp_manager_if_needed(self) -> None:
         """Reconnect integrations after another Ares surface changed them."""
@@ -328,6 +331,48 @@ class AresCLI:
                 await self.mcp_manager.start()
             if hasattr(self.agent, "refresh_tools"):
                 self.agent.refresh_tools()
+
+    def _browser(self) -> BrowserManager:
+        """Return a manager tied to the current shared configuration."""
+        manager = getattr(self, "browser_manager", None)
+        if manager is None or manager.config is not self.config:
+            manager = BrowserManager(self.config)
+            self.browser_manager = manager
+        return manager
+
+    def _set_browser_mode(self, mode: str) -> None:
+        """Persist a browser mode and queue an in-process Playwright reconnect."""
+        normalized = str(mode or "").strip().lower()
+        if normalized not in VALID_BROWSER_MODES:
+            raise ValueError("Browser mode must be isolated, system, extension, or auto.")
+        self.config.browser_mode = normalized
+        _ensure_mcp_defaults(self.config)
+        save_config(self.config)
+        self.browser_manager = BrowserManager(self.config)
+        self._mcp_config_signature = self._get_mcp_config_signature(self.config)
+        self._mcp_reconfigure_pending = True
+        if hasattr(self.agent, "apply_config"):
+            self.agent.apply_config(self.config)
+
+    async def _apply_browser_mode_hint(self, user_input: str) -> None:
+        """Honor a direct request for a real, extension, or clean browser now."""
+        hint = self._browser().get_mode_from_request(user_input)
+        if hint is None or hint == self.config.browser_mode:
+            return
+        self._set_browser_mode(hint)
+        effective = self._browser().resolve_mode()
+        if hint == "system" and effective != "system":
+            self.console.print(
+                "[yellow]System Chrome mode is saved, but CDP is not available yet. "
+                "Using the isolated profile until Chrome is launched with /browser launch.[/yellow]"
+            )
+        elif hint == "system":
+            self.console.print("[yellow]Using system Chrome mode through the available CDP session.[/yellow]")
+        elif hint == "extension":
+            self.console.print("[green]Using Playwright extension mode for your selected existing tab.[/green]")
+        else:
+            self.console.print("[green]Using Ares' isolated Playwright browser profile.[/green]")
+        await self._refresh_mcp_manager_if_needed()
 
     async def _prompt(self) -> str:
         """Read one prompt line from an interactive session or plain stdin."""
@@ -1168,6 +1213,7 @@ class AresCLI:
             table.add_row("/context", "Show active context for this session")
             table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
             table.add_row("/setup", "Run the onboarding wizard again")
+            table.add_row("/browser [status|isolated|system|extension|auto|launch]", "Manage Playwright browser connection mode")
             table.add_row("/phone status", "Check Android phone bridge pairing health")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
             table.add_row("/mcp [status|tools|reconnect|health]", "Manage connected MCP servers and tools")
@@ -1241,6 +1287,79 @@ class AresCLI:
             ).run(re_run=True)
             if completed:
                 self.agent.set_model(self.config.model)
+
+        elif command == "/browser":
+            pieces = arg.split()
+            action = pieces[0].lower() if pieces else "status"
+            manager = self._browser()
+            if action == "status" and len(pieces) == 1:
+                table = Table(title="Browser", border_style="bright_cyan", box=CLI_BOX)
+                table.add_column("Setting", style="cyan", no_wrap=True)
+                table.add_column("Value", ratio=3)
+                cdp_ready = manager.detect_chrome_cdp()
+                extension_ready = manager.detect_extension_available()
+                executable, profile = manager._chrome_paths()
+                table.add_row("Configured mode", self.config.browser_mode)
+                table.add_row("Effective mode", manager.resolve_mode())
+                table.add_row("CDP port", str(self.config.browser_cdp_port))
+                table.add_row("CDP", "[green]available[/green]" if cdp_ready else "[dim]not available[/dim]")
+                table.add_row("Extension", "[green]token configured[/green]" if extension_ready else "[dim]manual approval or token required[/dim]")
+                table.add_row("Chrome", executable)
+                table.add_row("Chrome profile", profile)
+                self.console.print(table)
+            elif action in VALID_BROWSER_MODES and len(pieces) == 1:
+                self._set_browser_mode(action)
+                if action == "system":
+                    self.console.print(
+                        "[yellow]System mode uses Chrome's CDP session and may access your real cookies. "
+                        "Use /browser launch if CDP is not available.[/yellow]"
+                    )
+                elif action == "extension":
+                    if manager.detect_extension_available():
+                        self.console.print("[green]Extension mode will connect to an approved existing browser tab.[/green]")
+                    else:
+                        self.console.print(
+                            "[yellow]Extension mode requires the Playwright Chrome Extension. "
+                            "Without a token, Chrome will ask you to approve each connection.[/yellow]"
+                        )
+                effective = self._browser().resolve_mode()
+                if action == "system" and effective != "system":
+                    self.console.print(
+                        "[yellow]CDP is not available, so Playwright will reconnect in isolated mode until Chrome CDP is ready.[/yellow]"
+                    )
+                else:
+                    self.console.print(f"[green]Browser mode set to {action}; Playwright will reconnect now.[/green]")
+            elif action == "launch" and len(pieces) <= 2:
+                if len(pieces) == 2:
+                    try:
+                        port = int(pieces[1])
+                    except ValueError:
+                        self.console.print("[red]Browser launch port must be a number.[/red]")
+                        return True
+                else:
+                    port = None
+                self.console.print(manager.launch_system_chrome(port))
+                if manager.wait_for_chrome_cdp():
+                    # The system setting may have safely fallen back to
+                    # isolated mode before Chrome existed. Rebuild the MCP
+                    # entry now that the endpoint is actually reachable.
+                    _ensure_mcp_defaults(self.config)
+                    save_config(self.config)
+                    self.browser_manager = BrowserManager(self.config)
+                    self._mcp_config_signature = self._get_mcp_config_signature(self.config)
+                    self._mcp_reconfigure_pending = True
+                    if hasattr(self.agent, "apply_config"):
+                        self.agent.apply_config(self.config)
+                    self.console.print("[green]Chrome CDP is ready; Playwright will reconnect to it now.[/green]")
+                else:
+                    self.console.print(
+                        "[yellow]Chrome CDP was not ready yet. It will remain on the isolated profile; "
+                        "run /mcp reconnect playwright once Chrome finishes starting.[/yellow]"
+                    )
+            else:
+                self.console.print(
+                    "[red]Usage: /browser [status|isolated|system|extension|auto|launch [port]][/red]"
+                )
 
         elif command == "/export":
             path = export_data(
@@ -1427,6 +1546,7 @@ class AresCLI:
 
     async def _process_input(self, user_input: str):
         """Process a user message through the agent and display response."""
+        await self._apply_browser_mode_hint(user_input)
         tool_renderables = []
         tool_started_at: dict[str, list[float]] = {}
         tool_steps: dict[str, list[int]] = {}
@@ -1551,6 +1671,7 @@ class AresCLI:
                                 should_continue = True
                             if not should_continue:
                                 break
+                            await self._refresh_mcp_manager_if_needed()
                             continue
 
                         await self._process_input(user_input)

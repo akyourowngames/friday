@@ -22,9 +22,18 @@ AUTOLOAD_BROAD_TOKENS = {
     "status", "tool", "tools", "window", "windows", "workflow",
 }
 AUTOMATION_ACTION_TOKENS = {
-    "click", "close", "launch", "navigate", "open", "save", "type",
+    "click", "close", "inspect", "launch", "navigate", "open", "save", "type",
     "write",
 }
+BROWSER_AUTOMATION_TOKENS = {
+    "browser", "dashboard", "form", "github", "google", "instagram", "linkedin",
+    "login", "page", "portal", "search", "site", "twitter", "url", "web", "webpage",
+    "website", "youtube",
+}
+BROWSER_WINDOW_EXCEPTIONS = (
+    "actual chrome window", "browser window", "chrome window", "visible desktop",
+    "windows window", "desktop window",
+)
 RECENCY_TOKENS = {
     "current", "latest", "news", "now", "recent", "recommendation",
     "recommendations", "today",
@@ -172,6 +181,8 @@ class SkillManager:
                 return f'matches “{phrase}”'
 
         name_hits, description_hits, example_hits = self._match_tokens(skill, query_tokens)
+        if skill.name == "browser-use" and query_tokens & BROWSER_AUTOMATION_TOKENS:
+            return "matches a browser action request"
         if skill.category.lower() == "automation" and query_tokens & AUTOMATION_ACTION_TOKENS:
             targets = query_tokens - AUTOMATION_ACTION_TOKENS - AUTOLOAD_BROAD_TOKENS
             if targets:
@@ -215,6 +226,24 @@ class SkillManager:
         description = skill.description.lower()
         category = skill.category.lower()
         name_tokens, description_tokens, example_tokens = self._match_tokens(skill, query_tokens)
+
+        # Browser pages are DOM/accessibility tasks, not desktop-coordinate
+        # tasks. Prevent the generic Windows skill from winning an otherwise
+        # ambiguous "open Google/Instagram" request; an explicit request for
+        # the visible browser window remains a native desktop workflow.
+        if (
+            name == "computer-use"
+            and query_tokens & BROWSER_AUTOMATION_TOKENS
+            and not any(phrase in query_l for phrase in BROWSER_WINDOW_EXCEPTIONS)
+        ):
+            return 0
+        if (
+            name == "browser-use"
+            and name not in query_l
+            and name.replace("-", " ") not in query_l
+            and not query_tokens & BROWSER_AUTOMATION_TOKENS
+        ):
+            return 0
 
         if not self._passes_autoload_gate(skill, query_l, query_tokens, name_tokens, description_tokens, example_tokens):
             return 0

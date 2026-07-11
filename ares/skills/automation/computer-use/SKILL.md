@@ -1,9 +1,18 @@
 ---
 name: computer-use
-description: Operate Windows desktop apps through the Windows MCP with reliable observe-act-verify control. Use when the user asks to open an app, inspect an active window, click UI controls, type text, navigate a desktop workflow, save through an app dialog, manage windows, or verify an on-screen result.
+description: Operate native Windows desktop apps through the Windows MCP with reliable observe-act-verify control. Use when the user asks to open or inspect Notepad, File Explorer, Settings, an installer, OBS, a desktop dialog, or another native app window.
 ---
 
 # Computer Use
+
+## Scope: Native Windows Apps Only
+
+Use this skill for native laptop/desktop apps, OS dialogs, system UI, and an
+explicitly requested visible Windows/Chrome window. Do not use this skill for
+normal browser/web automation. Browser tasks should use the `browser-use` skill
+and Playwright MCP because it is faster and DOM/accessibility-aware. Only fall
+back to Windows MCP for browser tasks when Playwright MCP is disconnected or
+cannot access the target.
 
 ## Preconditions
 

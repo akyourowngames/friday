@@ -233,6 +233,7 @@ Built-in skills include:
 | `/soul show/edit` | View or edit Ares' personality file. |
 | `/profile show/edit` | View or edit the user profile file. |
 | `/context` | Show active context. |
+| `/browser [status|isolated|system|extension|auto|launch]` | Select and inspect the Playwright browser connection mode. |
 | `/setup` | Re-run onboarding. |
 | `/export [PATH]` | Export local Ares data. |
 | `/import PATH [--config]` | Import local Ares data. |
@@ -258,6 +259,19 @@ Built-in skills include:
 Ares uses [Windows-MCP](https://github.com/CursorTouch/Windows-MCP) locally through stdio. On its first run, `uvx` downloads the server; later runs use the local cache. The bundled configuration is deliberately restricted to UI interaction tools: snapshots, screenshots, mouse/keyboard input, app/window control, clipboard, and notifications. It does **not** grant the agent the MCP server's PowerShell, registry, or filesystem tools.
 
 Use natural requests such as `open Spotify`, `inspect the Settings window`, or `click the Save button in the open app`. Ares observes the Windows accessibility tree first, then verifies major UI changes with a fresh snapshot. The MCP server controls the real desktop, so requests that send, submit, purchase, delete, share, or change system settings require explicit intent.
+
+### Browser Modes
+
+Ares uses Playwright MCP for websites and web apps; Windows MCP remains for native Windows apps and OS dialogs. `/browser status` shows the configured and effective Playwright connection mode.
+
+| Mode | Use case | Behavior |
+|---|---|---|
+| `auto` (default) | Normal use | Uses the Playwright extension when its token is configured, otherwise an already-open CDP session, then Ares' dedicated browser profile. |
+| `isolated` | Clean/testing session | Starts Playwright with Ares' persistent profile at `~/.ares/data/playwright-profile`. |
+| `system` | Chrome started with CDP | Connects to Chrome at the configured local CDP port. Use `/browser launch` after closing other Chrome windows. |
+| `extension` | Existing logged-in tab | Connects through the official Playwright Chrome Extension and lets you approve a specific existing tab. |
+
+To use the extension mode, install the [official Playwright Extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm), copy the `PLAYWRIGHT_MCP_EXTENSION_TOKEN` shown by it, and store it locally in `browser_extension_token` in `~/.ares/config.json`. The token is passed only to the Playwright MCP child process and is redacted from exports and diagnostics. Without a token, Chrome asks you to approve each connection.
 
 Environment variables can populate config in `ares/config.py`. JSON exports omit secret key fields.
 

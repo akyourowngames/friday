@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile
 
 from pydantic import BaseModel, ValidationError
 
+from ares.browser import BrowserManager
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
     list, while leaving any custom MCP setup untouched.
     """
     if not config.mcp_servers:
-        config.mcp_servers = [s.copy() for s in DEFAULT_MCP_SERVERS]
+        config.mcp_servers = copy.deepcopy(DEFAULT_MCP_SERVERS)
     else:
         legacy_default_names = {"playwright", "github", "fetch"}
         configured_names = {
@@ -48,12 +49,35 @@ def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
         if configured_names and configured_names <= legacy_default_names:
             for server in DEFAULT_MCP_SERVERS:
                 if server["name"] not in configured_names:
-                    config.mcp_servers.append(server.copy())
+                    config.mcp_servers.append(copy.deepcopy(server))
     # v0.1 persisted the former 20-step default. Upgrade that unchanged value
     # so existing users gain enough room for a real desktop workflow.
     if config.agent_max_iterations == 20:
         config.agent_max_iterations = 40
+    _configure_playwright_mcp(config)
     return config
+
+
+def _configure_playwright_mcp(config: AppConfig) -> None:
+    """Apply the selected browser mode to the configured Playwright server.
+
+    The extension token is held in the first-class config field and injected
+    only into the Playwright child process.  Switching away from extension mode
+    removes a previously generated token env entry without touching unrelated
+    user-provided Playwright environment settings.
+    """
+    manager = BrowserManager(config)
+    for server in config.mcp_servers:
+        if not isinstance(server, dict) or server.get("name") != "playwright":
+            continue
+        server["args"] = manager.get_mcp_args()
+        environment = dict(server.get("env") or {})
+        environment.pop("PLAYWRIGHT_MCP_EXTENSION_TOKEN", None)
+        environment.update(manager.get_mcp_env())
+        if environment:
+            server["env"] = environment
+        else:
+            server.pop("env", None)
 
 
 def load_config() -> AppConfig:
@@ -70,7 +94,7 @@ def load_config() -> AppConfig:
             return _ensure_mcp_defaults(config)
         except (OSError, json.JSONDecodeError, TypeError, ValidationError) as exc:
             logger.warning("Failed to load config from %s; using defaults: %s", CONFIG_PATH, exc)
-    return AppConfig()
+    return _ensure_mcp_defaults(AppConfig())
 
 
 def save_config(config: AppConfig) -> None:

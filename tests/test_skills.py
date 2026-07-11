@@ -130,7 +130,7 @@ def test_project_agent_skills_are_discovered_from_cwd(tmp_path, monkeypatch):
 def test_builtin_skills_and_tool_definitions_are_available(tmp_path):
     manager = SkillManager([tmp_path])
     names = {skill.name for skill in manager.list_all()}
-    assert {"code-review", "web-research", "daily-planner", "computer-use"}.issubset(names)
+    assert {"code-review", "web-research", "daily-planner", "computer-use", "browser-use"}.issubset(names)
     assert "auto-load relevant skills silently" in manager.compact_index()
 
     relevant = manager.relevant_skills("Open Notepad, type a note, and save it on my desktop")
@@ -151,13 +151,32 @@ def test_auto_loaded_skills_require_direct_intent_signals(tmp_path):
     assert not mcp_status
     assert "web-research" in {skill.name for skill in latest_news}
 
-    computer_use = next(
-        skill for skill in manager.relevant_skills("open Instagram using MCP")
-        if skill.name == "computer-use"
-    )
-    assert manager.selection_reason(computer_use, "open Instagram using MCP") == (
-        "matches a desktop action request"
-    )
+    browser_skills = {skill.name for skill in manager.relevant_skills("open Instagram using MCP")}
+    assert "browser-use" in browser_skills
+    assert "computer-use" not in browser_skills
+    browser_use = next(skill for skill in manager.relevant_skills("open Instagram using MCP") if skill.name == "browser-use")
+    assert manager.selection_reason(browser_use, "open Instagram using MCP") == "matches a browser action request"
+
+
+def test_browser_and_windows_skills_have_clear_non_overlapping_routes(tmp_path):
+    manager = SkillManager([tmp_path])
+
+    website = {skill.name for skill in manager.relevant_skills("open Google and fill the website form")}
+    native_app = {skill.name for skill in manager.relevant_skills("open Notepad and save a desktop note")}
+    visible_browser_window = {
+        skill.name for skill in manager.relevant_skills("inspect the actual Chrome window on my desktop")
+    }
+
+    assert "browser-use" in website
+    assert "computer-use" not in website
+    assert "computer-use" in native_app
+    assert "browser-use" not in native_app
+    assert "computer-use" in visible_browser_window
+    assert "browser-use" not in visible_browser_window
+    browser_skill = manager.get_skill("browser-use")
+    computer_skill = manager.get_skill("computer-use")
+    assert browser_skill is not None and "Playwright MCP" in browser_skill.content
+    assert computer_skill is not None and "Do not use this skill for\nnormal browser/web automation" in computer_skill.content
 
 
 def test_tool_executor_skill_tools(tmp_path):

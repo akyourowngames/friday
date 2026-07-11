@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from ares.models import AppConfig
 
@@ -73,6 +74,24 @@ def test_load_config_upgrades_legacy_agent_iteration_default(tmp_path, monkeypat
 
     assert loaded.agent_max_iterations == 40
     assert "windows" in {server["name"] for server in loaded.mcp_servers}
+
+
+def test_browser_mode_config_has_safe_defaults_and_validates_port():
+    config = AppConfig()
+
+    assert config.browser_mode == "auto"
+    assert config.browser_cdp_port == 9222
+    assert config.browser_chrome_path == ""
+    assert config.browser_extension_token == ""
+    playwright = next(server for server in config.mcp_servers if server["name"] == "playwright")
+    profile = playwright["args"][playwright["args"].index("--user-data-dir") + 1]
+    assert Path(profile).is_absolute()
+    try:
+        AppConfig(browser_cdp_port=70000)
+    except Exception as exc:
+        assert "browser_cdp_port" in str(exc)
+    else:
+        raise AssertionError("an invalid CDP port must be rejected")
 
 
 def test_telegram_config_defaults_to_disabled_and_parses_allowlist(tmp_path, monkeypatch):

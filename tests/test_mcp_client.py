@@ -92,6 +92,20 @@ def test_manager_converts_mcp_tool_to_openai_schema():
     )
 
 
+def test_playwright_and_windows_tool_schemas_explain_routing():
+    manager = MCPClientManager([])
+    browser = SimpleNamespace(name="browser_snapshot", description="Read the accessibility tree", inputSchema={})
+    desktop = SimpleNamespace(name="Snapshot", description="Read a desktop window", inputSchema={})
+
+    playwright_schema = manager._to_openai_schema("playwright", browser)
+    windows_schema = manager._to_openai_schema("windows", desktop)
+
+    assert "Preferred for browser and web-page automation" in playwright_schema["function"]["description"]
+    assert "before Windows MCP" in playwright_schema["function"]["description"]
+    assert "native Windows desktop apps" in windows_schema["function"]["description"]
+    assert "Do not use for normal websites" in windows_schema["function"]["description"]
+
+
 def test_call_tool_rejects_invalid_name():
     manager = MCPClientManager([])
     result = asyncio.run(manager.call_tool("not_mcp", {}))

@@ -108,8 +108,13 @@ Rules:
 ## Windows Desktop Control
 
 When `mcp__windows__*` tools are available, they control the user's real Windows
-desktop. Use them directly for a clear request to open an app, inspect a visible
-app, click through a UI, type into a desktop app, or manage an app window.
+desktop. Use them for native Windows desktop apps, OS dialogs, system UI, and a
+user's explicitly requested visible desktop/browser window — not normal websites.
+
+For browser or web-page tasks, prefer Playwright MCP tools first. Use Windows MCP
+only for native Windows desktop apps, OS dialogs, and non-browser UI. Do not control
+normal websites through Windows MCP Snapshot/Click unless Playwright is unavailable
+or the user explicitly asks to operate the visible desktop window.
 
 - Start with `mcp__windows__Snapshot` to inspect the active UI and find elements.
   This is the primary observation tool because its structured UI output works
@@ -129,8 +134,13 @@ app, click through a UI, type into a desktop app, or manage an app window.
 Choose the most reliable connected tool for the job. Do not use Computer Use by
 default when a more structured tool can complete the task.
 
-- **Websites and web apps:** prefer Playwright/browser MCP tools when available.
-  Use browser automation for navigation, forms, pages, and web UI verification.
+- **Websites and web apps:** use Playwright/browser MCP tools —
+  `mcp__playwright__browser_*` — first for
+  navigation, login, forms, buttons, page inspection, scraping, and web UI
+  verification. Prefer `browser_snapshot`, `browser_click`, `browser_type`,
+  `browser_navigate`, and `browser_wait_for`; use screenshots only for visual
+  reasoning. Never use `mcp__windows__Snapshot`, `Click`, or `Type` for a normal
+  web page while Playwright is connected.
 - **Native Windows apps and visual desktop workflows:** use Windows Computer Use
   MCP tools. Inspect with a snapshot first and verify state-changing actions.
 - **Local files:** use dedicated filesystem tools to read, write, edit, search,
