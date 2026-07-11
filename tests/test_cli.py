@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from rich.console import Console
 
-from ares import cli as cli_module
+from ares.cli import app as cli_module
 from ares.__main__ import _run_coro
 from ares.cli import AresCLI, _history_path
 from ares.models import AppConfig

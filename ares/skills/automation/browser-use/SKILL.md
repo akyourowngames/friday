@@ -28,9 +28,10 @@ operate the visible desktop/browser window.
 1. Confirm that `mcp__playwright__browser_*` tools are connected. If they are,
    use them before any Windows MCP tool.
 2. Navigate with `mcp__playwright__browser_navigate` when a URL is known.
-3. Observe with `mcp__playwright__browser_snapshot` before interacting and after
-   every meaningful page state change. Prefer DOM/accessibility targets over
-   coordinates.
+3. Observe with `mcp__playwright__browser_snapshot` before interacting. Keep and
+   reuse that snapshot while the page is unchanged; do not take duplicate
+   snapshots just to reconfirm a static page. Prefer DOM/accessibility targets
+   over coordinates.
 4. Interact with `mcp__playwright__browser_click`,
    `mcp__playwright__browser_type`, `mcp__playwright__browser_fill_form`,
    `mcp__playwright__browser_select_option`, and
@@ -40,7 +41,20 @@ operate the visible desktop/browser window.
 6. Use `mcp__playwright__browser_take_screenshot` only when visual reasoning is
    required, such as identifying color, layout, a canvas, an image-only control,
    or a visual error that is absent from the snapshot.
-7. Verify the final page state with a fresh Playwright snapshot or read-back.
+7. Verify with one fresh Playwright snapshot or read-back after navigation,
+   submit, login, a destructive/externally visible action, or an unexpected
+   result. Do not add a round trip after each deterministic keystroke.
+
+## Fast, Safe Paths
+
+- Fill related fields in one `browser_fill_form` call instead of one snapshot
+  and `browser_type` call per field.
+- When a URL is known, navigate directly; do not first open a blank page and
+  type it into an address bar.
+- Use a single named `browser_wait_for` condition after navigation or submit,
+  not repeated generic waits and snapshots.
+- Batch only steps whose targets come from the same unchanged snapshot. If a
+  click changes the page, obtain new evidence before selecting a new target.
 
 ## Fallback
 

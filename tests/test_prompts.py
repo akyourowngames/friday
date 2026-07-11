@@ -47,6 +47,11 @@ def test_system_prompt_routes_browser_tasks_to_playwright_not_windows_mcp():
     assert "Never use `mcp__windows__Snapshot`, `Click`, or `Type` for a normal" in prompt
 
 
+def test_system_prompt_keeps_mcp_verification_fast_and_state_aware():
+    assert "Minimize MCP round trips while preserving verification" in SYSTEM_PROMPT
+    assert "Playwright or Windows snapshot while its UI state is unchanged" in SYSTEM_PROMPT
+
+
 def test_store_memory_tool_discourages_junk_memory():
     tools = get_tool_definitions()
     store = next(tool for tool in tools if tool["function"]["name"] == "store_memory")

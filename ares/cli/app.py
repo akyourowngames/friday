@@ -15,8 +15,6 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.styles import Style
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from rich import box
@@ -50,24 +48,21 @@ from ares.cron import CronScheduler, CronStore
 from ares.cron.toast import CronToastManager
 from ares.session import SessionManager
 from ares.sessions import SessionStore
+from .constants import CLI_BOX, COMPLETER, STYLE, TOOL_OUTPUT_MODES
+from .runtime import clear_current_task_cancellation, history_path, supports_unicode_output
 
-# Styles
-STYLE = Style.from_dict({
-    "prompt": "bold ansicyan",
-})
+# Compatibility exports for integrations that imported CLI internals before the
+# package split. New code should use ``ares.cli.runtime`` directly.
+_history_path = history_path
 
-COMPLETER = WordCompleter([
-    "/help", "/memory", "/memory clean", "/model", "/clear",
-    "/forget", "/export", "/import", "/reset", "/exit",
-    "/soul", "/profile", "/context",
-    "/skills", "/skills search", "/skills categories", "/skills load",
-    "/setup", "/browser", "/phone", "/phone status",
-    "/tools", "/tools summary", "/tools details", "/tools hidden",
-    "/mcp", "/mcp status", "/mcp tools", "/mcp health", "/mcp config",
-    "/mcp reconnect", "/mcp reload",
-], ignore_case=True)
 
-TOOL_OUTPUT_MODES = {"summary", "details", "hidden"}
+def _clear_current_task_cancellation() -> None:
+    """Backward-compatible wrapper around the split runtime helper."""
+    current_task = asyncio.current_task()
+    if current_task is None or not hasattr(current_task, "uncancel"):
+        return
+    while current_task.cancelling():
+        current_task.uncancel()
 
 TOOL_LABELS = {
     "web_search": "web search",
@@ -141,29 +136,6 @@ TOOL_LABELS = {
 }
 
 
-def _history_path() -> str:
-    """Return an expanded prompt history path and ensure its directory exists."""
-    path = Path("~/.ares_history").expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return str(path)
-
-
-def _supports_unicode_output() -> bool:
-    """Return whether stdout is likely to handle emoji and symbols."""
-    encoding = (sys.stdout.encoding or "").lower()
-    return "utf" in encoding
-
-
-def _clear_current_task_cancellation() -> None:
-    """Clear asyncio cancellation state after a cancellation was intentionally handled."""
-    current_task = asyncio.current_task()
-    if current_task is None or not hasattr(current_task, "uncancel"):
-        return
-    while current_task.cancelling():
-        current_task.uncancel()
-
-
-CLI_BOX = box.ROUNDED
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -172,7 +144,7 @@ class AresCLI:
 
     def __init__(self):
         self.console = Console(color_system="auto", highlight=False)
-        self.unicode_output = _supports_unicode_output()
+        self.unicode_output = supports_unicode_output()
         self.icons = {
             "fire": "",
             "thinking": "",
@@ -252,7 +224,7 @@ class AresCLI:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return None
         return PromptSession(
-            history=FileHistory(_history_path()),
+            history=FileHistory(history_path()),
             auto_suggest=AutoSuggestFromHistory(),
             completer=COMPLETER,
             complete_while_typing=True,
@@ -1643,7 +1615,7 @@ class AresCLI:
             try:
                 await self.mcp_manager.start()
             except BaseException:
-                _clear_current_task_cancellation()
+                clear_current_task_cancellation()
             self.agent.refresh_tools()
         if self.cron_scheduler is not None:
             await self.cron_scheduler.start()
@@ -1682,7 +1654,7 @@ class AresCLI:
                     except EOFError:
                         break
                     except asyncio.CancelledError:
-                        _clear_current_task_cancellation()
+                        clear_current_task_cancellation()
                         self._reset_prompt_session()
                         self.console.print(
                             "\n[dim yellow]A background operation cancelled the prompt; recovered. Try again or use /exit to quit.[/dim yellow]\n"

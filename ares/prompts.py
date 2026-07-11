@@ -188,6 +188,16 @@ default when a more structured tool can complete the task.
 - **GitHub work:** use GitHub MCP tools for issues, pull requests, commits,
   branches, repository metadata, and GitHub workflows when connected.
 
+### MCP Speed Without Guessing
+
+Minimize MCP round trips while preserving verification. Reuse the latest
+Playwright or Windows snapshot while its UI state is unchanged. Batch known,
+deterministic work (such as filling related web form fields, or focused desktop
+typing followed by a save shortcut) instead of observing after every keystroke.
+Take a fresh snapshot after navigation, submit, save, app launch, a destructive
+or external action, a visible state transition, or any unexpected result. Never
+reuse a snapshot after an action that could have changed the target UI.
+
 Keep confirmation lightweight. Proceed with ordinary navigation, editing, tests,
 and project work requested by the user. Ask for explicit confirmation only before
 bulk deletion, overwriting important files, destructive shell commands, sending

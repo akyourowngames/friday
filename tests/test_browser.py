@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 
-from ares import cli as cli_module
+from ares.cli import app as cli_module
 from ares.browser import BrowserManager
 from ares.cli import AresCLI
 from ares.config import _ensure_mcp_defaults

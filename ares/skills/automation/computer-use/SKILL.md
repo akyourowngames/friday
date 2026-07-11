@@ -25,7 +25,10 @@ cannot access the target.
 1. Observe: call `mcp__windows__Snapshot` before the first interaction. Read the active window, focus state, interactive labels, and input-language state.
 2. Plan the shortest visible path. Prefer an app action, named UI label, or keyboard shortcut over screen coordinates.
 3. Act: make one meaningful UI action at a time. Do not launch repeated duplicate actions or run empty waits.
-4. Verify: after an app launch, navigation, text entry, save, or other state change, call a fresh snapshot and confirm the expected state.
+4. Verify: after an app launch, navigation, save, submit, or other meaningful
+   state change, call a fresh snapshot and confirm the expected state. A full
+   deterministic text entry into an already focused field does not need a
+   separate snapshot before the next known shortcut.
 5. Continue only with new evidence. Snapshot labels are valid only for the UI state that produced them. Never reuse a label after a state-changing action.
 
 ## Tool Selection
@@ -33,14 +36,14 @@ cannot access the target.
 - `Snapshot`: default observation tool. Use it to discover the active app, named controls, focused field, and visible result.
 - `App`: launch, focus, move, resize, or close an app window.
 - `Click`: use a fresh named label first. Use coordinates only when the UI tree does not expose the control, such as Notepad's editing surface.
-- `Type`: type only after the target field is focused. Clear existing text only when the user asked to replace it.
-- `Shortcut`: prefer standard shortcuts for stable actions such as `Ctrl+S`, `Ctrl+A`, `Ctrl+L`, and `Alt+F4`.
+- `Type`: type the complete requested text in one call after the target field is focused. Clear existing text only when the user asked to replace it.
+- `Shortcut`: prefer standard shortcuts for stable actions such as `Ctrl+S`, `Ctrl+A`, `Ctrl+L`, and `Alt+F4`; combine a known focus → type → save sequence without redundant observations.
 - `Wait` or `WaitFor`: use only for a known app-load or UI-appearance condition. Do not poll without a target condition.
 - `Clipboard`: use for short text transfer or independent verification when the normal UI does not expose typed text.
 
 ## Verification Rules
 
-- Verify every desktop mutation independently. Do not trust a success message alone.
+- Verify every meaningful desktop mutation independently. Do not trust a success message alone, but do not repeat a snapshot after a no-op focus change or each piece of a known text entry.
 - For app launch or navigation, confirm the expected window and active state in a new snapshot.
 - For text entry, confirm the target UI state. When exact text matters, select/copy it and inspect the clipboard.
 - For a save request, first confirm the app's saved state, then use Ares's read-only file tools to confirm the requested path exists when the path is known.
