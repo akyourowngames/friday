@@ -158,6 +158,19 @@ def test_barge_in_cancels_a_long_response_without_waiting_for_completion():
     assert cancelled == {"stream": True, "tts": True}
 
 
+def test_warm_up_transcriber_loads_local_whisper_before_first_turn():
+    async def run():
+        agent = MagicMock(spec=ContinuousVoiceAgent)
+        agent.console = MagicMock()
+        agent.transcriber = MagicMock()
+        await ContinuousVoiceAgent._warm_up_transcriber(agent)
+        return agent.transcriber._ensure_model, agent.console
+
+    ensure_model, console = asyncio.run(run())
+    ensure_model.assert_called_once()
+    console.print.assert_called_once()
+
+
 def test_wait_for_utterance_skips_low_energy_audio():
     async def run():
         agent = MagicMock(spec=ContinuousVoiceAgent)

@@ -275,6 +275,7 @@ class ContinuousVoiceAgent:
         try:
             await self._wait_for_microphone()
             await self._calibrate_energy()
+            await self._warm_up_transcriber()
             while True:
                 self.console.print("[dim cyan]Listening...[/dim cyan]")
                 audio = await self._wait_for_utterance()
@@ -323,6 +324,14 @@ class ContinuousVoiceAgent:
             return
         noise = float(np.median([np.mean(frame**2) for frame in frames]))
         self.energy_threshold = max(0.0005, noise * 6.0)
+
+    async def _warm_up_transcriber(self) -> None:
+        """Load local Whisper before the first real request reaches it."""
+        ensure_model = getattr(self.transcriber, "_ensure_model", None)
+        if not callable(ensure_model):
+            return
+        self.console.print("[dim]Preparing local speech recognition...[/dim]")
+        await asyncio.to_thread(ensure_model)
 
     def _read_frames(self, count: int = 1) -> list[np.ndarray]:
         return self.capture.read(count)
