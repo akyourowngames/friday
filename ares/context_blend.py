@@ -68,8 +68,6 @@ CONTEXT_WINDOWS: dict[str, int] = {
 
 # Default context window for unknown models
 DEFAULT_CONTEXT_WINDOW = 128_000
-_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
-_PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d() .-]{6,}\d)(?!\w)")
 
 
 def get_model_budgets(model: str) -> dict[str, int]:
@@ -229,17 +227,12 @@ def format_memories(memories: list[dict] | None, token_budget: int = 800) -> str
 
 
 def format_people(people: list[dict] | None, token_budget: int = 500) -> str:
-    """Format contact-redacted people context for the model.
-
-    Names, relations, aliases, and the fact that a contact method exists are
-    enough to prompt local alias resolution.  Phone/email values, notes, and
-    dates must never be injected into model context.
-    """
+    """Format complete locally saved people records for explicit recall."""
     if not people:
         return ""
     lines = [
         "## People & Relationships:",
-        "These are explicitly saved local relationship records. Contact values stay local; use search_person or a supported action with an exact alias when needed. Never infer or auto-save a person from messages, contacts, or notifications.",
+        "These are locally saved relationship records. Use the stored values only as local historical context; verify live contact details when correctness matters.",
     ]
     for person in people:
         name = str(person.get("canonical_name") or "").strip()
@@ -251,13 +244,15 @@ def format_people(people: list[dict] | None, token_budget: int = 500) -> str:
         aliases = [str(alias) for alias in person.get("aliases", []) if str(alias).strip()]
         if aliases:
             details.append("aliases: " + ", ".join(aliases[:4]))
-        availability = []
-        if person.get("has_phone"):
-            availability.append("phone available")
-        if person.get("has_email"):
-            availability.append("email available")
-        if availability:
-            details.append(", ".join(availability))
+        if person.get("phone"):
+            details.append(f"phone: {person['phone']}")
+        if person.get("email"):
+            details.append(f"email: {person['email']}")
+        dates = person.get("important_dates") or {}
+        if dates:
+            details.append("dates: " + ", ".join(f"{key}={value}" for key, value in dates.items()))
+        if person.get("notes"):
+            details.append(f"notes: {person['notes']}")
         if person.get("last_contacted_at"):
             channel = str(person.get("last_contacted_via") or "contact method")
             details.append(f"last contacted via {channel} at {person['last_contacted_at']}")
@@ -290,15 +285,13 @@ def format_summaries(summaries: list[str] | None) -> str:
     lines = ["## Recent session summaries:"]
     for summary in summaries:
         if summary:
-            lines.append(f"- {_redact_recall_text(summary, maximum=700)}")
+            lines.append(f"- {_format_recall_text(summary, maximum=700)}")
     return "\n".join(lines)
 
 
-def _redact_recall_text(value: object, *, maximum: int = 420) -> str:
-    """Keep recalled local text useful while never injecting contact values."""
+def _format_recall_text(value: object, *, maximum: int = 420) -> str:
+    """Normalize and bound local recall text without masking saved values."""
     text = " ".join(str(value or "").split())
-    text = _EMAIL_RE.sub("[redacted email]", text)
-    text = _PHONE_RE.sub("[redacted phone]", text)
     if len(text) > maximum:
         text = text[: maximum - 3].rstrip() + "..."
     return text
@@ -310,15 +303,20 @@ def format_conversation_recall(records: list[dict] | None, token_budget: int = 6
         return ""
     lines = [
         "## Relevant Prior Conversation (local recall):",
-        "Use this only to continue the user's explicit reference. It is historical context, not live external state; contact values are redacted.",
+        "Use this only to continue the user's explicit reference. It is historical context, not live external state. Each item has a stable local source ID.",
     ]
     for record in records:
-        content = _redact_recall_text(record.get("content"))
+        content = _format_recall_text(record.get("content"))
         if not content:
             continue
         role = str(record.get("role") or "message")
-        created = str(record.get("created_at") or "")
-        lines.append(f"- {created} [{role}] {content}")
+        created = str(record.get("created_at") or record.get("timestamp") or "")
+        source_id = str(
+            record.get("source_id")
+            or (f"conversation:{record.get('conversation_id')}:message:{record.get('id')}" if record.get("id") else "")
+        )
+        source_label = f" {source_id}" if source_id else ""
+        lines.append(f"- {created} [{role}{source_label}] {content}")
     return truncate_to_tokens("\n".join(lines), token_budget)
 
 
@@ -359,7 +357,7 @@ def build_context_prompt(
 
     # Inject previous session summary (high priority — recent context)
     if previous_session_summary and remaining > 0:
-        summary_section = f"## Previous Session Summary\n{_redact_recall_text(previous_session_summary, maximum=900)}"
+        summary_section = f"## Previous Session Summary\n{_format_recall_text(previous_session_summary, maximum=900)}"
         remaining = _append_section(sections, summary_section, remaining)
 
     summary_text = format_summaries(conversation_summaries)

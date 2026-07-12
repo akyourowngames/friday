@@ -39,12 +39,17 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "search_memory",
-            "Search stored user memories before relying on or updating remembered user facts.",
+            "Search all local recall sources: durable facts, complete saved people records, SQLite conversations, persisted JSONL sessions, and action provenance. Returns exact stored content and stable source IDs.",
             {
-                "query": {"type": "string", "description": "What to search for."},
-                "limit": {"type": "integer", "default": 5},
+                "query": {"type": "string", "description": "What to search for. Empty returns recent local records from selected sources.", "default": ""},
+                "limit": {"type": "integer", "default": 12, "description": "Maximum combined results (1-50)."},
+                "since": {"type": "string", "description": "Optional ISO or relative lower bound such as yesterday or 5 days ago."},
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["facts", "people", "conversations", "sessions", "actions"]},
+                    "description": "Optional sources to search. Defaults to all local recall sources.",
+                },
             },
-            ["query"],
         ),
         _tool(
             "update_memory",
@@ -66,24 +71,23 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "remember_person",
-            "Explicitly save a local structured record for another person. This is third-party PII: use only after the user explicitly asks to remember it, and set confirm=true. Never create records from contacts, notifications, or messages.",
+            "Save a complete local structured record for another person. Search and context return the stored fields exactly as saved.",
             {
                 "canonical_name": {"type": "string", "description": "The person's canonical name."},
                 "aliases": {"type": "array", "items": {"type": "string"}, "description": "Optional exact names such as mom or Priya aunty."},
                 "relation": {"type": "string", "description": "Optional relation such as mom, cousin, or colleague."},
-                "phone": {"type": "string", "description": "Optional phone number, stored locally only."},
-                "email": {"type": "string", "description": "Optional email address, stored locally only."},
+                "phone": {"type": "string", "description": "Optional phone number."},
+                "email": {"type": "string", "description": "Optional email address."},
                 "important_dates": {"type": "object", "description": "Optional date-label map, for example birthday or anniversary."},
-                "notes": {"type": "string", "description": "Optional local-only notes."},
+                "notes": {"type": "string", "description": "Optional notes."},
                 "source": {"type": "string", "enum": ["manual", "ares-suggested"], "default": "manual"},
                 "confidence": {"type": "number", "default": 1.0},
-                "confirm": {"type": "boolean", "default": False, "description": "Must be true after the user explicitly authorizes saving this person's data."},
             },
             ["canonical_name"],
         ),
         _tool(
             "search_person",
-            "Search explicitly saved local people by canonical name, exact alias, relation, or note. Contact values are never echoed; the local executor resolves aliases only when needed for a user-requested action.",
+            "Search saved local people by canonical name, exact alias, relation, or note. Returns the full stored record including phone, email, dates, and notes.",
             {
                 "query": {"type": "string", "description": "Name, alias, relation, or local note to search."},
                 "limit": {"type": "integer", "default": 5},
@@ -92,7 +96,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "update_person",
-            "Explicitly update a saved person record. Every modification of third-party PII requires confirm=true after user approval.",
+            "Update fields on a saved local person record.",
             {
                 "person_id": {"type": "integer", "description": "Saved person ID."},
                 "canonical_name": {"type": "string"},
@@ -105,7 +109,6 @@ def get_tool_definitions() -> list[dict]:
                 "source": {"type": "string", "enum": ["manual", "ares-suggested"]},
                 "confidence": {"type": "number"},
                 "expected_revision": {"type": "integer", "description": "Optional optimistic-concurrency revision."},
-                "confirm": {"type": "boolean", "default": False, "description": "Must be true after explicit user approval for this update."},
             },
             ["person_id"],
         ),
@@ -194,7 +197,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "export_data",
-            "Export local Ares data to JSON, with selective profiles and redaction preview. People records are excluded from full exports and require the explicit people profile.",
+            "Export local Ares data to JSON, with selective profiles and redaction preview. Full exports include saved people records.",
             {
                 "path": {"type": "string", "description": "Optional output JSON path."},
                 "profile": {

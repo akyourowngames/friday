@@ -16,12 +16,13 @@ from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig, PhoneConfig
 from ares.people import PeopleStore, PersonConflictError
+from ares.sessions import SessionStore
 from ares.tasks import TaskConflictError, TaskStore, TaskToolHandlers
 from ares.tools import ToolExecutor
 from ares.tools.renders import get_renderer
 
 
-def test_people_store_resolves_exact_aliases_and_redacts_search_output(tmp_path):
+def test_people_store_resolves_exact_aliases_and_returns_complete_records(tmp_path):
     store = PeopleStore(tmp_path / "ares.db")
     try:
         created = store.create(
@@ -35,13 +36,13 @@ def test_people_store_resolves_exact_aliases_and_redacts_search_output(tmp_path)
         assert store.resolve("mom", require="phone")["phone"] == "+15555550123"
         assert store.resolve("Priya aunty", require="email")["email"] == "priya@example.test"
 
-        safe = store.search("mom", include_sensitive=False)[0]
-        assert safe["has_phone"] is True and safe["has_email"] is True
-        assert safe["phone_hint"].endswith("0123")
-        assert "phone" not in safe and "email" not in safe
+        record = store.search("mom", include_sensitive=True)[0]
+        assert record["phone"] == "+15555550123"
+        assert record["email"] == "priya@example.test"
+        assert record["notes"] == "private family note"
 
         assert store.mark_contacted("mom", channel="email") is True
-        contacted = store.search("mom", include_sensitive=False)[0]
+        contacted = store.search("mom", include_sensitive=True)[0]
         assert contacted["last_contacted_via"] == "email"
         assert contacted["last_contacted_at"]
 
@@ -53,9 +54,9 @@ def test_people_store_resolves_exact_aliases_and_redacts_search_output(tmp_path)
         store.close()
 
 
-def test_executor_requires_explicit_people_confirmation_and_resolves_sms_alias(tmp_path, fake_embedding_provider, monkeypatch):
+def test_executor_returns_complete_people_records_and_resolves_sms_alias(tmp_path, fake_embedding_provider, monkeypatch):
     memory = MemoryStore(db_path=tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
-    executor = ToolExecutor(memory, config=AppConfig(phone=PhoneConfig(enabled=True)))
+    executor = ToolExecutor(memory, config=AppConfig(data_dir=str(tmp_path), phone=PhoneConfig(enabled=True)))
     calls: list[tuple[str, str]] = []
 
     def fake_send(number: str, message: str) -> str:
@@ -64,25 +65,20 @@ def test_executor_requires_explicit_people_confirmation_and_resolves_sms_alias(t
 
     monkeypatch.setattr("ares.tools.executor._kdeconnect_bridge.send_sms", fake_send)
     try:
-        blocked = json.loads(executor.execute("remember_person", {
+        remembered = json.loads(executor.execute("remember_person", {
             "canonical_name": "Rohan Patel", "aliases": ["bro"], "phone": "+15555550999",
         }))
-        assert blocked["confirm_required"] is True
-
-        remembered = json.loads(executor.execute("remember_person", {
-            "canonical_name": "Rohan Patel", "aliases": ["bro"], "phone": "+15555550999", "confirm": True,
-        }))
         assert remembered["ok"] is True
-        assert "+15555550999" not in json.dumps(remembered)
+        assert remembered["person"]["phone"] == "+15555550999"
 
-        update_blocked = json.loads(executor.execute("update_person", {
+        updated = json.loads(executor.execute("update_person", {
             "person_id": remembered["person"]["person_id"], "relation": "brother",
         }))
-        assert update_blocked["confirm_required"] is True
+        assert updated["person"]["relation"] == "brother"
 
         result = executor.execute("phone_send_sms", {"number": "bro", "message": "private message body"})
         assert calls == [("+15555550999", "private message body")]
-        assert "+15555550999" not in result
+        assert "+15555550999" in result
         assert "private message body" not in result
         assert "Rohan Patel" in result
 
@@ -113,16 +109,17 @@ def test_action_ledger_records_provenance_not_file_content_and_supports_relative
         memory.close()
 
 
-def test_people_and_action_renderers_show_useful_metadata_without_contact_values():
+def test_people_and_action_renderers_show_complete_local_people_records():
     console = Console(record=True, width=120)
     people_payload = json.dumps({
         "ok": True,
-        "people": [{"person_id": 1, "canonical_name": "Asha Mehta", "relation": "friend", "aliases": ["asha"], "has_phone": True, "has_email": True}],
+        "people": [{"person_id": 1, "canonical_name": "Asha Mehta", "relation": "friend", "aliases": ["asha"], "phone": "+15555550123", "email": "asha@example.test", "notes": "college friend"}],
     })
     console.print(get_renderer("search_person")(people_payload))
     people_text = console.export_text()
     assert "Asha Mehta" in people_text
-    assert "+15555550123" not in people_text
+    assert "+15555550123" in people_text
+    assert "asha@example.test" in people_text
 
     action_payload = json.dumps({
         "ok": True,
@@ -133,7 +130,7 @@ def test_people_and_action_renderers_show_useful_metadata_without_contact_values
     assert "Wrote a local file." in console.export_text()
 
 
-def test_export_excludes_people_from_full_and_requires_explicit_people_profile(tmp_path, fake_embedding_provider):
+def test_export_full_includes_people_and_people_profile_remains_selective(tmp_path, fake_embedding_provider):
     database = tmp_path / "ares.db"
     memory = MemoryStore(db_path=database, embedding_provider=fake_embedding_provider)
     people = PeopleStore(database)
@@ -145,7 +142,7 @@ def test_export_excludes_people_from_full_and_requires_explicit_people_profile(t
 
         full = export_data(memory_store=memory, people_store=people, action_ledger=actions, path=tmp_path / "full.json")
         full_payload = json.loads(full.read_text(encoding="utf-8"))
-        assert full_payload["people"] == []
+        assert full_payload["people"][0]["phone"] == "+15555550111"
         assert full_payload["actions"]
 
         people_export = export_data(memory_store=memory, people_store=people, action_ledger=actions, path=tmp_path / "people.json", profile="people")
@@ -158,7 +155,7 @@ def test_export_excludes_people_from_full_and_requires_explicit_people_profile(t
         memory.close()
 
 
-def test_agent_context_includes_redacted_people_and_relevant_action_history(tmp_path, fake_embedding_provider):
+def test_agent_context_includes_complete_people_and_relevant_action_history(tmp_path, fake_embedding_provider):
     data_dir = tmp_path / "data"
     memory = MemoryStore(db_path=data_dir / "ares.db", embedding_provider=fake_embedding_provider)
     agent = Agent(memory, config=AppConfig(data_dir=str(data_dir)))
@@ -172,15 +169,15 @@ def test_agent_context_includes_redacted_people_and_relevant_action_history(tmp_
         )
         context = agent.get_context("Can you find that file from 5 days ago?")
         assert "Nina Shah" in context and "friend" in context
-        assert "+15555550777" not in context and "nina@example.test" not in context
-        assert "never expose this note" not in context
+        assert "+15555550777" in context and "nina@example.test" in context
+        assert "never expose this note" in context
         assert "brief.md" in context
     finally:
         agent.tool_executor.close()
         memory.close()
 
 
-def test_agent_continuation_recalls_saved_alias_and_redacts_prior_chat(tmp_path, fake_embedding_provider):
+def test_agent_continuation_recalls_saved_alias_and_raw_prior_chat(tmp_path, fake_embedding_provider):
     data_dir = tmp_path / "data"
     database = data_dir / "ares.db"
     memory = MemoryStore(db_path=database, embedding_provider=fake_embedding_provider)
@@ -196,13 +193,60 @@ def test_agent_continuation_recalls_saved_alias_and_redacts_prior_chat(tmp_path,
         )
         context = agent.get_context("Continue the email to Rohit from 5 days ago")
         assert "Rohit" in context
-        assert "email available" in context
+        assert "rohit@example.test" in context
         assert "Relevant Prior Conversation" in context
-        assert "[redacted email]" in context
-        assert "rohit@example.test" not in context
+        assert "[redacted email]" not in context
+        assert "conversation:" in context
     finally:
         agent.tool_executor.close()
         conversations.close()
+        memory.close()
+
+
+def test_unified_memory_search_reads_jsonl_sessions_and_returns_source_ids(tmp_path, fake_embedding_provider):
+    data_dir = tmp_path / "data"
+    database = data_dir / "ares.db"
+    memory = MemoryStore(db_path=database, embedding_provider=fake_embedding_provider)
+    conversations = ConversationStore(database)
+    sessions = SessionStore(data_dir)
+    executor = ToolExecutor(memory, conversation_store=conversations, session_store=sessions)
+    try:
+        memory.store("Rohit uses Instagram for project updates.", category="relationship")
+        executor.people_store.create("Rohit Verma", aliases=["rohit"], email="rohit@example.test")
+        conversation_id = conversations.start_conversation()
+        conversations.add_message(conversation_id, "user", "Rohit said his project channel is Instagram.")
+        sessions.write_message("sess-rohit", "user", "Rohit Verma is my cousin.")
+        sessions.write_message("sess-rohit", "assistant", "His Instagram ID is @rohit_dev_42.")
+
+        payload = json.loads(executor.execute("search_memory", {"query": "Rohit Instagram", "limit": 12}))
+
+        assert payload["ok"] is True
+        assert payload["counts"]["sessions"] >= 1
+        session_record = next(record for record in payload["results"] if record["source"] == "session")
+        assert session_record["source_id"].startswith("session:sess-rohit:line:")
+        assert "@rohit_dev_42" in json.dumps(payload)
+        assert any(record["source"] == "fact" for record in payload["results"])
+        assert any(record["source"] == "conversation" for record in payload["results"])
+    finally:
+        executor.close()
+        conversations.close()
+        memory.close()
+
+
+def test_agent_continuation_searches_persisted_session_archive(tmp_path, fake_embedding_provider):
+    data_dir = tmp_path / "data"
+    database = data_dir / "ares.db"
+    memory = MemoryStore(db_path=database, embedding_provider=fake_embedding_provider)
+    sessions = SessionStore(data_dir)
+    sessions.write_message("sess-old", "user", "Rohit Verma is my cousin.")
+    sessions.write_message("sess-old", "assistant", "His Instagram ID is @rohit_dev_42.")
+    agent = Agent(memory, config=AppConfig(data_dir=str(data_dir)), session_store=sessions, session_id="sess-current")
+    try:
+        context = agent.get_context("Continue: what was Rohit's Instagram ID from that session?")
+        assert "@rohit_dev_42" in context
+        assert "session:sess-old:line:" in context
+    finally:
+        agent.tool_executor.close()
         memory.close()
 
 

@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from ares.tools.dates import now_local_iso
 
@@ -120,3 +123,156 @@ class SessionStore:
         # Sort by started_at descending, then session_id descending for determinism
         sessions.sort(key=lambda s: (s.get("started_at") or "", s.get("session_id") or ""), reverse=True)
         return sessions
+
+    @staticmethod
+    def _parse_since(value: str | None) -> datetime | None:
+        """Parse an ISO or relative time filter for historical session recall."""
+        if value is None or not str(value).strip():
+            return None
+        text = str(value).strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                import dateparser
+
+                parsed = dateparser.parse(
+                    text,
+                    settings={
+                        "PREFER_DATES_FROM": "past",
+                        "RELATIVE_BASE": datetime.now().astimezone(),
+                        "RETURN_AS_TIMEZONE_AWARE": True,
+                    },
+                )
+            except Exception:
+                parsed = None
+        if parsed is None:
+            raise ValueError(f"Could not parse 'since' value: {value}")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _entry_time(value: object) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return parsed.astimezone(timezone.utc)
+
+    def _session_entries(self, path: Path) -> list[dict[str, Any]]:
+        """Read one append-only JSONL safely, preserving its stable line IDs."""
+        session_id = path.stem
+        entries: list[dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, 1):
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        # Historical files should never make all recall fail.
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    content = entry.get("content")
+                    if not isinstance(content, str) or not content.strip():
+                        continue
+                    entries.append({
+                        "source": "session",
+                        "source_id": f"session:{entry.get('session_id') or session_id}:line:{line_number}",
+                        "session_id": str(entry.get("session_id") or session_id),
+                        "line_number": line_number,
+                        "entry_type": str(entry.get("type") or "message"),
+                        "role": str(entry.get("role") or entry.get("type") or "message"),
+                        "timestamp": str(entry.get("timestamp") or ""),
+                        "content": content,
+                    })
+        except OSError:
+            return []
+        return entries
+
+    @staticmethod
+    def _query_tokens(query: str) -> list[str]:
+        return [token.casefold() for token in re.findall(r"[\w]+", query, flags=re.UNICODE) if len(token) > 1]
+
+    def search_recall(
+        self,
+        query: str = "",
+        *,
+        since: str | None = None,
+        limit: int = 12,
+        roles: list[str] | None = None,
+        context_lines: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Search every persisted session JSONL with stable session/line provenance.
+
+        This intentionally scans the source files rather than relying on a stale
+        side index: sessions written by any Ares version become searchable
+        immediately, and an old session cannot be missed merely because it was
+        never backfilled. Matching considers a small neighboring-turn window so
+        references split across adjacent messages remain recoverable.
+        """
+        bounded_limit = max(1, min(int(limit), 100))
+        context_radius = max(0, min(int(context_lines), 3))
+        query_text = str(query or "").strip()[:500]
+        phrase = query_text.casefold()
+        tokens = self._query_tokens(query_text)
+        since_time = self._parse_since(since)
+        wanted_roles = {str(role).casefold() for role in (roles or []) if str(role).strip()}
+        matches: list[dict[str, Any]] = []
+
+        for path in self.sessions_dir.glob("*.jsonl"):
+            entries = self._session_entries(path)
+            for index, entry in enumerate(entries):
+                if wanted_roles and entry["role"].casefold() not in wanted_roles:
+                    continue
+                entry_time = self._entry_time(entry.get("timestamp"))
+                if since_time is not None and (entry_time is None or entry_time < since_time):
+                    continue
+                start = max(0, index - context_radius)
+                end = min(len(entries), index + context_radius + 1)
+                window_entries = entries[start:end]
+                window_text = "\n".join(item["content"] for item in window_entries).casefold()
+                if not tokens:
+                    score = 1
+                    matched_terms: list[str] = []
+                else:
+                    present = [token for token in tokens if token in window_text]
+                    if not present:
+                        continue
+                    # Exact phrases and all-token windows rank first.  Keeping
+                    # partial-token matches prevents false negatives for a
+                    # remembered name in one turn and the requested detail in
+                    # its neighbor.
+                    score = len(present) * 10
+                    if phrase and phrase in window_text:
+                        score += 1_000
+                    if len(present) == len(tokens):
+                        score += 100
+                    matched_terms = list(dict.fromkeys(present))
+                before = [item["content"] for item in entries[start:index]]
+                after = [item["content"] for item in entries[index + 1:end]]
+                matches.append({
+                    **entry,
+                    "matched_terms": matched_terms,
+                    "score": score,
+                    "context_before": before,
+                    "context_after": after,
+                })
+
+        matches.sort(
+            key=lambda item: (
+                int(item.get("score", 0)),
+                str(item.get("timestamp") or ""),
+                str(item.get("session_id") or ""),
+                int(item.get("line_number", 0)),
+            ),
+            reverse=True,
+        )
+        return matches[:bounded_limit]

@@ -260,6 +260,45 @@ def render_memory_result(content: str) -> Any:
     if not clean:
         return Panel(Text("No memory result.", style="dim"), title="Memory", border_style="green")
 
+    try:
+        payload = json.loads(clean)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict) and "results" in payload:
+        if not payload.get("ok", False):
+            return render_json_status(clean, title="Memory", border_style="green")
+        records = payload.get("results") or []
+        if not records:
+            return Panel(Text("No local recall records found.", style="dim"), title="Memory Search", border_style="green")
+        table = _simple_table("Local Recall", "Source", "Source ID", "Role / Details", "Stored content", border_style="green")
+        table.columns[0].style = "cyan"
+        table.columns[1].style = "dim"
+        table.columns[3].ratio = 5
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            source = str(record.get("source") or "memory")
+            details = str(record.get("role") or record.get("category") or "")
+            stored = str(record.get("content") or "")
+            if source == "person" and isinstance(record.get("person"), dict):
+                person = record["person"]
+                details = "; ".join(part for part in [
+                    str(person.get("relation") or ""),
+                    f"phone={person.get('phone')}" if person.get("phone") else "",
+                    f"email={person.get('email')}" if person.get("email") else "",
+                    f"dates={person.get('important_dates')}" if person.get("important_dates") else "",
+                    f"notes={person.get('notes')}" if person.get("notes") else "",
+                ] if part)
+            table.add_row(
+                source,
+                str(record.get("source_id") or "-"),
+                _clip(details or "-", 320),
+                _clip(stored or "-", 600),
+            )
+        if table.row_count == 0:
+            return Panel(Text("No local recall records found.", style="dim"), title="Memory Search", border_style="green")
+        return Panel(table, title="Memory Search", border_style="green", padding=(0, 1))
+
     rows = []
     for line in clean.splitlines():
         match = re.match(r"^-\s+#(\d+)\s+\[([^,\]]+)(?:,\s*importance=([^\]]+))?\]\s+(.+)$", line.strip())
@@ -293,7 +332,7 @@ def render_memory_result(content: str) -> Any:
 
 
 def render_people_result(content: str) -> Any:
-    """Render contact-redacted people search/create results without exposing PII."""
+    """Render complete local people records."""
     try:
         payload = json.loads(content)
     except (TypeError, json.JSONDecodeError):
@@ -307,24 +346,23 @@ def render_people_result(content: str) -> Any:
         people = [payload["person"]]
     if not isinstance(people, list):
         return render_json_status(content, title="People", border_style="bright_magenta")
-    table = _simple_table("People", "ID", "Name", "Relation", "Aliases", "Contact", border_style="bright_magenta")
+    table = _simple_table("People", "ID", "Name", "Relation", "Aliases", "Phone", "Email", "Dates", "Notes", border_style="bright_magenta")
     table.columns[0].style = "dim"
     table.columns[1].style = "cyan"
-    table.columns[4].ratio = 3
+    table.columns[4].ratio = 2
+    table.columns[7].ratio = 3
     for person in people:
         if not isinstance(person, dict):
             continue
-        contact = []
-        if person.get("has_phone"):
-            contact.append("phone")
-        if person.get("has_email"):
-            contact.append("email")
         table.add_row(
             str(person.get("person_id", "?")),
             _clip(person.get("canonical_name", ""), 80),
             _clip(person.get("relation", "") or "-", 60),
             _clip(", ".join(str(alias) for alias in person.get("aliases", [])[:4]) or "-", 100),
-            ", ".join(contact) or "-",
+            _clip(person.get("phone", "") or "-", 80),
+            _clip(person.get("email", "") or "-", 120),
+            _clip(json.dumps(person.get("important_dates") or {}, ensure_ascii=False) if person.get("important_dates") else "-", 160),
+            _clip(person.get("notes", "") or "-", 300),
         )
     if table.row_count == 0:
         return Panel(Text("No matching people found.", style="dim"), title="People", border_style="bright_magenta")

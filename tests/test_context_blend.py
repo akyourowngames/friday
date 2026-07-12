@@ -57,11 +57,11 @@ class TestFormatters:
         assert "project setup" in result
         assert "login bug" in result
 
-    def test_format_summaries_redacts_contact_values(self):
+    def test_format_summaries_preserves_saved_contact_values(self):
         result = format_summaries(["Contact me at private@example.test or +1 555 555 0123"])
-        assert "private@example.test" not in result
-        assert "+1 555 555 0123" not in result
-        assert "[redacted email]" in result
+        assert "private@example.test" in result
+        assert "+1 555 555 0123" in result
+        assert "[redacted email]" not in result
 
 
 class TestBuildContextPrompt:

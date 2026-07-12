@@ -89,3 +89,36 @@ def test_jsonl_file_is_valid(session_store):
         obj = json.loads(line)
         assert "type" in obj
         assert "timestamp" in obj
+
+
+def test_search_recall_reads_all_sessions_with_stable_provenance_and_neighbor_context(session_store):
+    """A detail split across turns must be retrievable from historical JSONL."""
+    session_store.write_message("sess-rohit", "user", "Rohit Verma is my cousin.")
+    session_store.write_message("sess-rohit", "assistant", "His Instagram ID is @rohit_dev_42.")
+
+    results = session_store.search_recall("Rohit Instagram", limit=5)
+
+    assert results
+    assert all(item["source"] == "session" for item in results)
+    assert all(item["source_id"].startswith("session:sess-rohit:line:") for item in results)
+    assert any(
+        "@rohit_dev_42" in item["content"]
+        or "@rohit_dev_42" in " ".join(item["context_after"] + item["context_before"])
+        for item in results
+    )
+    assert any(set(item["matched_terms"]) == {"rohit", "instagram"} for item in results)
+
+
+def test_search_recall_skips_malformed_historical_lines_without_losing_line_id(session_store):
+    path = session_store.sessions_dir / "sess-legacy.jsonl"
+    path.write_text(
+        "{not valid json}\n"
+        '{"type":"message","role":"user","content":"Nimbus retrieval marker","timestamp":"2026-07-10T10:00:00+00:00","session_id":"sess-legacy"}\n',
+        encoding="utf-8",
+    )
+
+    results = session_store.search_recall("Nimbus", limit=3)
+
+    assert len(results) == 1
+    assert results[0]["source_id"] == "session:sess-legacy:line:2"
+    assert results[0]["content"] == "Nimbus retrieval marker"

@@ -37,8 +37,10 @@ messaging. It is not a general-purpose skill for every user turn.
    respectful draft and label it as a draft.
 4. Do not invent facts, relationships, delivery status, or another person's
    thoughts. Treat tool output as evidence and distinguish sent from delivered.
-5. Never reveal private contact values or copy private message content into
-   durable memory. Use saved aliases through the normal action path.
+5. When the user explicitly asks to retrieve locally saved contact information,
+   return the stored value and its local source ID. Do not invent a contact value
+   or copy communication content into durable memory unless the user asks to
+   remember it.
 
 ## External Actions
 

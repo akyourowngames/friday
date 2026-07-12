@@ -47,7 +47,9 @@ class Agent:
             conversation_store=conversation_store,
             config=config,
             mcp_manager=mcp_manager,
+            session_store=session_store,
         )
+        self._session_store = session_store or self.tool_executor.session_store
         self.mcp_manager = mcp_manager
         self.is_cron_session = is_cron_session
         self.is_voice_session = is_voice_session
@@ -170,14 +172,12 @@ class Agent:
             recent_sessions=getattr(self.config, "memory_session_scope", 3),
         )
 
-        # People context intentionally contains names/relations/aliases and
-        # availability flags only. Phone numbers, email addresses, notes, and
-        # dates remain local and are resolved at dispatch time.
+        # Local people records are included as saved so an explicit request can
+        # retrieve complete contact and relationship information.
         people: list[dict] = []
         if self.people_store:
-            # A named saved person must win over generic recency.  This lets a
-            # continuation such as "email Rohit" use the local alias resolver
-            # without ever placing the address in model context.
+            # A named saved person wins over generic recency so an explicit
+            # reference resolves to the intended saved record first.
             named_people = self.people_store.mentioned_in(user_input, limit=4)
             recent_people = self.people_store.recent_for_context(limit=max(3, min(max_retrieval, 8)))
             seen_people: set[int] = set()
@@ -191,9 +191,15 @@ class Agent:
         relevant_actions: list[dict] = []
         conversation_recall: list[dict] = []
         since = None
-        if self.action_ledger and has_reference_language(user_input):
+        explicit_recall = has_reference_language(user_input)
+        if explicit_recall:
             try:
                 since = extract_since_reference(user_input)
+            except ValueError:
+                since = None
+
+        if self.action_ledger and explicit_recall:
+            try:
                 relevant_actions = self.action_ledger.search(user_input, since=since, limit=max(3, min(max_retrieval, 8)))
                 fallback_actions = self.action_ledger.search(since=since, limit=max(3, min(max_retrieval, 8)))
                 known_action_ids = {action.get("action_id") for action in relevant_actions}
@@ -205,7 +211,7 @@ class Agent:
             except ValueError:
                 relevant_actions = []
 
-        if self.conversation_store is not None and has_reference_language(user_input):
+        if self.conversation_store is not None and explicit_recall:
             try:
                 # Search exact wording first, then fall back to a bounded
                 # recent/time-filtered window so "continue" never becomes a
@@ -224,6 +230,41 @@ class Agent:
                 conversation_recall = conversation_recall[: max(3, min(max_retrieval, 8))]
             except ValueError:
                 conversation_recall = []
+
+        if self._session_store is not None and explicit_recall:
+            try:
+                recall_limit = max(3, min(max_retrieval, 8))
+                session_recall = self._session_store.search_recall(
+                    user_input, since=since, limit=recall_limit
+                )
+                # A reference such as "continue" commonly has no lexical
+                # overlap with the historical answer.  Include a bounded
+                # fallback window so the JSONL archive cannot be skipped.
+                fallback_session_recall = self._session_store.search_recall(
+                    since=since, limit=recall_limit
+                )
+                known_session_sources = {record.get("source_id") for record in session_recall}
+                session_recall.extend(
+                    record for record in fallback_session_recall
+                    if record.get("source_id") not in known_session_sources
+                )
+                # Add stable identifiers to the SQLite records too, then
+                # deduplicate mixed persistence sources by provenance.
+                for record in conversation_recall:
+                    record.setdefault(
+                        "source_id",
+                        f"conversation:{record.get('conversation_id')}:message:{record.get('id')}",
+                    )
+                known_sources = {record.get("source_id") for record in conversation_recall}
+                conversation_recall.extend(
+                    record for record in session_recall
+                    if record.get("source_id") not in known_sources
+                )
+                conversation_recall = conversation_recall[:recall_limit]
+            except ValueError:
+                # An invalid relative-time phrase must not break normal
+                # conversation context; the explicit tool reports it instead.
+                pass
 
         file_action_types = {
             "file_created", "file_edited", "file_deleted", "file_moved", "file_copied",

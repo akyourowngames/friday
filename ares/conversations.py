@@ -224,8 +224,8 @@ class ConversationStore:
     ) -> list[dict]:
         """Return bounded local conversation evidence for explicit recall requests.
 
-        This API intentionally returns raw local records.  ``context_blend``
-        redacts contact values before anything is added to an LLM prompt.
+        This API intentionally returns raw local records.  The local recall
+        context preserves stored values and adds stable provenance IDs.
         """
         bounded = max(1, min(int(limit), 30))
         query_text = str(query or "").strip()[:300]

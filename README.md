@@ -1,47 +1,46 @@
-# Ares
+<div align="center">
 
-**Ares is a terminal-first personal AI assistant with local memory, tool use, skills, scheduling, voice mode, phone control, and an Electron desktop client.**
+# ⚡ Ares
 
-It is built as a local-first assistant: it remembers useful facts, understands the current project, calls tools, runs repeatable skill workflows, and can operate from the terminal, a WebSocket server, voice mode, or the desktop app.
+### A local-first personal AI assistant for your terminal, desktop, voice, phone, and remote chat
 
-| Project | Status |
-|---|---|
-| Package | `ares` |
-| Python | `>=3.11` |
-| Desktop Node | `>=22.12.0` |
-| Primary UI | Rich terminal CLI |
-| Desktop UI | Electron + React |
-| Test suite | `pytest` |
-| License | MIT |
-| Contributions | Pull requests welcome |
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Desktop](https://img.shields.io/badge/Desktop-Electron%20%2B%20React-47848F?logo=electron&logoColor=white)](electron-app)
+[![Protocol](https://img.shields.io/badge/Integrations-MCP-6C47FF)](docs/mcp.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 
-<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/3d90559c-9e33-4b8a-b906-7701e62339a9" />
-<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/2f7a2f7c-d1e7-4637-ac9c-791330cafd96" />
-<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/bc000456-6e62-4bd6-992e-55407bd99fbc" />
-<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/9a863982-2bb8-4df2-891f-43eac560be99" />
+**Remember what matters. Search every saved session. Take action with tools. Keep control local.**
 
+[Quick start](#-quick-start) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Desktop](#-desktop-voice-phone-and-telegram)
 
+</div>
 
-## Highlights
+---
 
-| Area | What Ares can do |
-|---|---|
-| Chat agent | Stream model responses, call tools, keep conversation context, and recover from tool loops. |
-| Local memory | Store durable user facts in SQLite with FTS and vector search. |
-| Skills | Auto-load relevant `SKILL.md` playbooks silently and discover/install validated community skills. |
-| Project context | Read repo guidance and project files such as `README.md`, `pyproject.toml`, `package.json`, `AGENTS.md`, and `CLAUDE.md`. |
-| Filesystem tools | Read, search, write, edit, diff, backup, restore, hash, inspect, and batch-edit files. |
-| Web research | Search the web, fetch URLs/PDF/text, label source quality, and summarize with citations. |
-| Code execution | Run Python and shell commands through persistent REPL sessions. |
-| Scheduling | Create, update, run, inspect, and log recurring cron jobs. |
-| Voice | Optional STT/TTS with local and Sarvam/Edge backends. |
-| Phone bridge | Android status, notifications, contacts, SMS, confirmed calls, app launch, URL open, ADB workflows. |
-| Telegram channel | An allowlisted, persistent Telegram bridge for remote chat, file input, progress, and file delivery from the PC. |
-| Desktop app | Electron + React chat UI, settings, sessions, status, tool cards, and terminal surface. |
-| Windows control | Native app and desktop control through a restricted local Windows MCP integration. |
-| Marketplace | Search trusted skill and MCP registries, inspect plans, and explicitly approve local installs. |
+## ✨ What Ares is
 
-## Quick Start
+Ares is a terminal-first AI assistant that can also run through an Electron desktop app, WebSocket server, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local tool surface.
+
+<table>
+  <tr>
+    <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
+    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 83 local tools for files, code, web research, images, recurring jobs, tasks, phone controls, and more.</td>
+    <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
+  </tr>
+</table>
+
+## 🖼️ Ares in action
+
+<table>
+  <tr>
+    <td width="50%"><img alt="Ares desktop conversation view" src="https://github.com/user-attachments/assets/3d90559c-9e33-4b8a-b906-7701e62339a9" /></td>
+    <td width="50%"><img alt="Ares desktop tools and session view" src="https://github.com/user-attachments/assets/2f7a2f7c-d1e7-4637-ac9c-791330cafd96" /></td>
+  </tr>
+</table>
+
+## 🚀 Quick start
+
+### Terminal
 
 ```bash
 git clone https://github.com/akyourowngames/friday.git
@@ -50,82 +49,7 @@ pip install -e ".[dev]"
 python -m ares
 ```
 
-Run the test suite:
-
-```bash
-python -m pytest -q
-```
-
-Run the WebSocket server:
-
-```bash
-python -m ares --server
-python -m ares --server --port 8766
-ares-server
-```
-
-## Telegram Channel
-
-Telegram runs from the same local Ares process and stores every remote chat in the existing local SQLite database. It uses long polling, so your PC does **not** need a public IP, a webhook, or port forwarding.
-
-1. Create a bot with [@BotFather](https://t.me/BotFather), then run the local setup command. It accepts the token without echoing it and enables the channel:
-
-```powershell
-python -m ares --telegram-setup
-```
-
-   Alternatively, keep the token out of Ares' config by setting it only in the PC environment and enabling the channel in `~/.ares/config.json`:
-
-```json
-{
-  "telegram": {
-    "enabled": true,
-    "allowed_chat_ids": []
-  }
-}
-```
-
-```powershell
-$env:ARES_TELEGRAM_BOT_TOKEN = "123456:replace-with-your-token"
-```
-
-3. Start Ares once, open your bot in Telegram, and send `/start`. Ares replies with the chat ID but keeps the chat locked. On the PC, allow that exact ID:
-
-```powershell
-python -m ares --telegram-authorize 123456789
-```
-
-4. Start the Electron desktop app as usual (it starts the channel with its local server), or run a headless PC service:
-
-```powershell
-python -m ares --server
-# or
-python -m ares --telegram
-```
-
-An authorized chat can send normal messages, documents, photos, and voice notes. Voice notes in English, Hindi, or Hinglish are converted to an English transcript, then Ares answers in English. By default this runs through local multilingual faster-whisper; if `SARVAM_API_KEY` is configured, short Indian-language recordings use Sarvam Saaras first and automatically fall back to local Whisper if that provider is unavailable. `/new` starts a separate remote session, `/status` confirms the channel, and `/file C:\path\to\report.pdf` sends a local file back to that chat. Ares also uploads files it creates when the user explicitly asks it to send the result. Group chats remain disabled by default, and an unknown chat never gets tool access.
-
-Telegram also exposes the marketplace without needing a terminal: `/skills`, `/skills search <topic>`, `/skills info <skill>`, `/skills install <skill>`, `/mcp status`, `/mcp search <topic>`, `/mcp info <server>`, `/mcp add <server>`, `/mcp test [server]`, and `/mcp refresh`. Search results are organized as five numbered cards, so `/mcp info 1` and `/skills install 2` work directly after a search. Cards distinguish already-installed items, registry trust, and registry-published stars/downloads; Ares never invents popularity when a registry does not expose it. Command results are saved into that Telegram chat's normal Ares history, so natural follow-ups such as “what does it do?” retain the selected item context. Search and inspection are read-only. Installing a skill or adding an MCP always shows a review first and requires `/confirm <code>` from the same allowlisted chat within five minutes; `/cancel` discards it. An approved MCP update is saved to the shared Ares config and reconnects MCP tools in the Telegram process.
-
-Run voice mode:
-
-```bash
-pip install -e ".[voice]"
-python -m ares --voice
-```
-
-Voice mode is tuned for quick turn-taking: it starts speaking from short natural clauses instead of waiting for a full response, and barge-in is enabled by default. Speak while Ares is talking to stop the current reply and continue with your next request; use `--no-barge-in` when laptop speakers cause echo-triggered interruptions, or `--barge-in` to force it on. Headphones give the most reliable interruption detection because the microphone cannot otherwise distinguish your voice from its own speaker output.
-
-Useful local tuning, without changing code:
-
-```powershell
-$env:ARES_VOICE_SILENCE_TIMEOUT_MS = "420"  # Faster/slower end-of-turn detection
-$env:ARES_VOICE_TTS_CHUNK_CHARS = "90"      # Smaller = faster first speech
-$env:ARES_VOICE_BARGE_IN = "true"
-python -m ares --voice
-```
-
-Run the desktop app:
+### Desktop app
 
 ```bash
 cd electron-app
@@ -133,243 +57,295 @@ npm install
 npm run dev
 ```
 
-## How Ares Works
+### Voice mode
 
-```mermaid
-flowchart TD
-  CLI["CLI<br/>ares/cli.py"] --> Agent["Agent<br/>ares/agent.py"]
-  Server["WebSocket server<br/>ares/server.py"] --> Agent
-  Voice["Voice mode<br/>ares/voice/agent.py"] --> Agent
-  Desktop["Electron app<br/>electron-app"] --> Server
-
-  Agent --> LLM["LLM client<br/>ares/llm.py"]
-  Agent --> Context["Context blend<br/>soul + profile + project + memory + skills"]
-  Agent --> Tools["Tool executor<br/>ares/tools/executor.py"]
-  Agent --> Memory["SQLite memory<br/>ares/memory.py"]
-  Agent --> Skills["Skill manager<br/>ares/skills.py"]
-  Agent --> Sessions["Session logs<br/>ares/sessions.py"]
-
-  Tools --> Files["Filesystem"]
-  Tools --> Web["Web research"]
-  Tools --> Shell["Shell/Python REPL"]
-  Tools --> Images["Images"]
-  Tools --> Cron["Cron jobs"]
-  Tools --> Phone["Phone bridge"]
-  Tools --> MCP["MCP servers"]
+```bash
+pip install -e ".[voice]"
+python -m ares --voice
 ```
 
-## Core Modules
+### Local server
 
-| Module | Purpose |
-|---|---|
-| `ares/agent.py` | Main agent loop, tool execution, skill/context injection, and streaming. |
-| `ares/cli.py` | Rich terminal UI, slash commands, tool status tables, and response rendering. |
-| `ares/llm.py` | OpenAI-compatible model client. |
-| `ares/memory.py` | SQLite memory store with keyword and vector retrieval. |
-| `ares/context_blend.py` | Token budgeting and context assembly. |
-| `ares/skills.py` | Skill discovery, parsing, linting, relevance scoring, and auto-loading. |
-| `ares/tools/definitions.py` | Tool schemas exposed to the model. |
-| `ares/tools/executor.py` | Tool dispatch and implementation wiring. |
-| `ares/server.py` | WebSocket backend for the desktop app. |
-| `ares/cron/` | Persistent recurring jobs and runner. |
-| `ares/voice/` | Speech input/output subsystem. |
-| `electron-app/` | Electron + React desktop client. |
+```bash
+python -m ares --server --port 8766
+```
 
-## Tool Inventory
+> [!TIP]
+> Start in the terminal first. Use `/setup`, `/model`, `/context`, and `/help` to inspect the active configuration and available controls.
 
-`ares/tools/definitions.py` registers the tool surface, and `ares/tools/executor.py` wires the handlers.
+---
 
-| Category | Tools |
-|---|---|
-| Memory | `store_memory`, `search_memory`, `update_memory`, `delete_memory` |
-| Skills/export | `list_skills`, `load_skill`, `create_skill`, marketplace discovery/install tools, `export_data` |
-| Web | `web_search`, `fetch_url` |
-| Read-only filesystem | `read_file`, `search_files`, `list_directory`, `get_file_info`, `glob_pattern` |
-| File editing | `write_file`, `edit_file`, `create_directory`, `delete_file`, `move_file`, `batch_edit`, `glob_apply`, `insert_line`, `replace_lines`, `delete_lines`, `preview_diff` |
-| File utilities | `backup_file`, `undo_last_edit`, `batch_file_ops`, `find_text`, `append_to_file`, `prepend_to_file`, `compare_files`, `create_file_from_template`, `safe_path_status`, `disk_usage`, `checksum`, `copy_file`, `find_duplicates`, `tail_file`, `head_file`, `count_lines`, `file_tree` |
-| Execution | `run_code`, `run_command`, `terminal_exec` |
-| Images | `generate_image`, `image_info`, `resize_image`, `convert_image`, `crop_image` |
-| Cron | `create_cron_job`, `list_cron_jobs`, `get_cron_job`, `update_cron_job`, `delete_cron_job`, `run_cron_job_now`, `get_cron_logs` |
-| Phone | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number`, `phone_launch_app`, `phone_open_url` |
-| Windows desktop | MCP-powered screen snapshots, app launch/window control, mouse, keyboard, clipboard, and notifications. |
-| Config/time | `update_config`, `get_current_datetime` |
+## 🧭 How it fits together
 
-## Skills
+```mermaid
+flowchart LR
+    User([You]) --> CLI[Rich terminal]
+    User --> Desktop[Electron desktop]
+    User --> Voice[Voice mode]
+    User --> Telegram[Telegram channel]
 
-Ares supports local Agent Skills through `SKILL.md` files. Skills are internal execution guidance: Ares can auto-load relevant skills silently and complete the user request without asking whether it should use one.
+    CLI --> Agent[Ares agent]
+    Desktop --> Server[Local WebSocket server]
+    Server --> Agent
+    Voice --> Agent
+    Telegram --> Agent
 
-| Scope | Location |
-|---|---|
-| User skills | `~/.ares/skills` |
-| Project skills | `.ares/skills` |
-| Agent-standard project skills | `.agents/skills` |
-| Built-in skills | `ares/skills/` |
+    Agent --> Context[Context blend]
+    Agent --> Tools[Tool executor]
+    Agent --> LLM[OpenAI-compatible LLM]
 
-Built-in skills include:
+    Context --> Data[(Local Ares data)]
+    Data --> Facts[Memory + people + conversations]
+    Data --> Sessions[Append-only JSONL sessions]
+    Data --> Tasks[Tasks + actions + cron]
 
-| Skill | Category | Use case |
+    Tools --> Local[Files · shell · code · images]
+    Tools --> Bridges[Phone · web · MCP servers]
+```
+
+## 🧠 Memory that can explain itself
+
+The current recall system is deliberately broader than a single “memory facts” table. A question can search all local evidence sources at once:
+
+| Source | Stored in | Example provenance |
 |---|---|---|
-| `code-review` | coding | Review code for bugs, security issues, maintainability, tests, and conventions. |
-| `codebase-summary` | coding | Summarize a repository, important files, language breakdown, and recent changes. |
-| `project-init` | coding | Scaffold a new project with sensible files and verification. |
-| `web-research` | research | Current web research with source checking and citations. |
-| `research-deep-dive` | research | Multi-source research report generation. |
-| `daily-planner` | productivity | Plan priorities, time blocks, constraints, and next actions. |
-| `daily-standup` | productivity | Build a daily status summary. |
-| `backup-snapshot` | utilities | Snapshot files/folders with checksum verification. |
-| `image-batch-processor` | utilities | Batch resize, convert, rename, or optimize images. |
-| `system-info` | utilities | Gather local debugging environment information. |
-| `computer-use` | automation | Operate Windows desktop apps through MCP with fresh UI snapshots and post-action verification. |
+| Durable facts | SQLite memory store with FTS/vector retrieval | `fact:42` |
+| Saved people | Structured local people records | `person:7` |
+| Conversation history | SQLite conversation messages | `conversation:12:message:88` |
+| Session archive | `~/.ares/data/sessions/*.jsonl` | `session:sess-a1b2:line:18` |
+| Actions | Durable provenance ledger | `action:31` |
 
-## Slash Commands
+`search_memory` reads session JSONL files directly on every lookup rather than depending on a stale side index. It also searches a small neighboring-turn window. That means a question such as “What was Rohit’s Instagram ID?” can recover a name in one historical turn and the ID in the next, then return the exact local source ID that produced the answer.
+
+```text
+Session line 17  User:      Rohit Verma is my cousin.
+Session line 18  Assistant: His Instagram ID is @rohit_dev_42.
+
+search_memory("Rohit Instagram")
+  → session:sess-a1b2:line:18
+  → @rohit_dev_42
+```
+
+> [!NOTE]
+> Local history is evidence, not live external state. Ares preserves what was saved and identifies where it came from; it does not invent a detail that was never written to disk.
+
+### Continuity upgrades
+
+- **Full local recall:** facts, people, conversations, sessions, and actions in one tool result.
+- **Session resilience:** malformed historical JSONL lines are skipped without discarding the rest of a session.
+- **Context continuity:** “continue,” “that session,” and person references can pull relevant archived turns into context.
+- **Structured people:** names, aliases, relationship notes, contact fields, and important dates are stored and retrieved as one local record.
+- **Durable workflows:** task plans, leases, retries, verification steps, and a confirmation-aware runner survive process restarts.
+- **Action provenance:** file, communication, export, and workflow outcomes can be located later without storing arbitrary command bodies.
+
+---
+
+## 🛠️ Capability map
+
+<table>
+  <tr>
+    <th align="left">Area</th>
+    <th align="left">What Ares can do</th>
+  </tr>
+  <tr>
+    <td>🧠 Memory & people</td>
+    <td>Store, search, update, delete, export, and import durable facts; manage complete local person records; search session and conversation history with provenance IDs.</td>
+  </tr>
+  <tr>
+    <td>📁 Files & code</td>
+    <td>Read, search, write, edit, diff, backup, undo, inspect, copy, move, hash, compare, batch-edit, and run persistent Python or shell sessions.</td>
+  </tr>
+  <tr>
+    <td>🌐 Research</td>
+    <td>Search the web, fetch pages and PDFs, label source quality, summarize findings, and use connected MCP browser tools when available.</td>
+  </tr>
+  <tr>
+    <td>🖼️ Images</td>
+    <td>Generate, inspect, resize, convert, crop, and track image assets with local metadata and transformation history.</td>
+  </tr>
+  <tr>
+    <td>⏱️ Automation</td>
+    <td>Create recurring cron jobs, inspect logs, create durable multi-step tasks, resume safe work, and request confirmation for consequential workflow steps.</td>
+  </tr>
+  <tr>
+    <td>📱 Phone bridge</td>
+    <td>Check Android bridge health, read notifications, search contacts, send SMS, place confirmed calls, and launch apps or URLs through KDE Connect and ADB.</td>
+  </tr>
+  <tr>
+    <td>🖥️ Desktop control</td>
+    <td>Use Windows MCP for snapshots, screenshots, application/window control, mouse, keyboard, clipboard, and notifications.</td>
+  </tr>
+  <tr>
+    <td>🔌 Extensibility</td>
+    <td>Discover local and community skills, search MCP registries, review additions, and reconnect integrations from the CLI or Telegram.</td>
+  </tr>
+</table>
+
+### Local tool groups
+
+| Group | Representative tools |
+|---|---|
+| Memory & continuity | `store_memory`, `search_memory`, `remember_person`, `search_person`, `search_actions`, `export_data` |
+| File operations | `read_file`, `search_files`, `write_file`, `edit_file`, `batch_edit`, `preview_diff`, `undo_last_edit`, `find_duplicates` |
+| Runtime | `run_code`, `run_command`, `terminal_exec` |
+| Research & media | `web_search`, `fetch_url`, `generate_image`, `resize_image`, `convert_image`, `crop_image` |
+| Scheduling & workflows | `create_cron_job`, `run_cron_job_now`, `create_task`, `get_task_status`, `run_task` |
+| Phone & device | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number` |
+
+See the complete model-facing inventory in [`ares/tools/definitions.py`](ares/tools/definitions.py).
+
+---
+
+## 🧩 Built-in skills
+
+Skills are local `SKILL.md` playbooks. Ares discovers relevant instructions, loads them silently when appropriate, and keeps them reusable across surfaces.
+
+| Category | Skills |
+|---|---|
+| Ares operations | `export-backup`, `memory-consolidator`, `weekly-review` |
+| Automation | `browser-content-review`, `browser-form-workflow`, `browser-use`, `computer-use` |
+| Coding | `code-review`, `codebase-summary`, `project-init` |
+| Communication | `conversation-conduct` |
+| Productivity | `daily-planner`, `daily-standup` |
+| Research | `research-deep-dive`, `web-research` |
+| Utilities | `backup-snapshot`, `image-batch-processor`, `system-info` |
+
+Skill discovery order:
+
+```text
+~/.ares/skills  →  .ares/skills  →  .agents/skills  →  ares/skills
+```
+
+Useful commands:
+
+```text
+/skills
+/skills search code review
+/skills info memory-consolidator
+/skills create release-checklist
+/skills load browser-use
+```
+
+---
+
+## 🔌 MCP integrations
+
+Ares exposes connected MCP tools to the agent as `mcp__server__tool`. The bundled configuration includes these local integration templates:
+
+| MCP server | What it adds |
+|---|---|
+| Playwright | Browser navigation, inspection, forms, screenshots, and visible web-app control. |
+| GitHub | Repository and GitHub workflow operations when configured with a token. |
+| Fetch | Content retrieval for web pages and documents. |
+| Windows MCP | Native Windows snapshots, app/window controls, mouse/keyboard, clipboard, and notifications. |
+
+Manage connections without editing code:
+
+```text
+/mcp status
+/mcp tools playwright
+/mcp health
+/mcp reconnect windows
+/mcp search browser automation
+/mcp add SERVER
+```
+
+See [MCP configuration and diagnostics](docs/mcp.md) for `stdio`, SSE, and Streamable HTTP server examples, browser modes, and OAuth token storage.
+
+---
+
+## 💬 Desktop, voice, phone, and Telegram
+
+| Surface | Use it for | Start it with |
+|---|---|---|
+| Rich CLI | Fast local chat, slash commands, tools, and logs | `python -m ares` |
+| Electron + React | Persistent sessions, settings, tool cards, and terminal surface | `cd electron-app && npm run dev` |
+| WebSocket server | Serving the desktop client or local integrations | `python -m ares --server` |
+| Voice | Streaming speech, interruption/barge-in, local Whisper or Sarvam/Edge options | `python -m ares --voice` |
+| Telegram | Allowlisted remote chat, files, photos, voice notes, skills, and MCP management | `python -m ares --telegram` |
+
+### Telegram setup
+
+```powershell
+# Create a BotFather bot first, then configure its token locally.
+python -m ares --telegram-setup
+
+# After your bot replies with its chat ID, authorize that exact chat on the PC.
+python -m ares --telegram-authorize 123456789
+```
+
+Telegram uses long polling: no public IP, webhook, or port forwarding is required. Authorized chats can use `/new`, `/status`, `/skills`, `/mcp`, and `/file`; unknown chats never receive tool access.
+
+---
+
+## ⌨️ Everyday commands
 
 | Command | Purpose |
 |---|---|
-| `/help` | Show command table. |
-| `/memory` | Show recent memories. |
-| `/memory search QUERY` | Search stored memories. |
-| `/memory edit ID TEXT` | Update a memory. |
-| `/memory delete ID` or `/forget ID` | Delete a memory. |
-| `/model` or `/model list` | Show current and known models. |
-| `/model MODEL` | Switch model and save config. |
-| `/skills` | List installed skills. |
-| `/skills search QUERY` | Search configured community skill registries. |
-| `/skills install SLUG` | Validate and install a hosted community skill. |
-| `/skills create NAME DESCRIPTION` | Generate a local instruction-only skill. |
-| `/skills info/update/remove NAME` | Inspect, refresh, or remove a skill. |
-| `/skills login/whoami/publish NAME` | Manage ClawHub authentication and publish a local skill. |
-| `/skills load NAME` | Show a skill's full instructions. |
-| `/tools summary/details/hidden` | Control tool activity display. |
-| `/mcp` | Show MCP management commands. |
-| `/mcp status` | Show configured MCP server readiness and diagnostics. |
-| `/mcp tools [SERVER]` | List discovered tools, optionally for one MCP server. |
-| `/mcp reconnect SERVER` | Reconnect one MCP server and refresh its tools. |
-| `/mcp health` | Probe connected MCP servers. |
-| `/mcp reload` | Reload all MCP servers from shared config. |
-| `/mcp config` | Show safe MCP configuration without private values. |
-| `/mcp search QUERY` | Search configured MCP registries. |
-| `/mcp info/add/remove NAME` | Inspect, explicitly configure, or remove an MCP server. |
-| `/mcp list/test [NAME]/refresh` | Show readiness, test a connection, or reload shared MCP config. |
-| `/phone status` | Check Android phone bridge health. |
-| `/soul show/edit` | View or edit Ares' personality file. |
-| `/profile show/edit` | View or edit the user profile file. |
-| `/context` | Show active context. |
-| `/browser [status|isolated|system|extension|auto|launch]` | Select and inspect the Playwright browser connection mode. |
-| `/setup` | Re-run onboarding. |
+| `/help` | Show available controls. |
+| `/memory search QUERY` | Search durable facts and recall sources. |
+| `/context` | Inspect active local context. |
+| `/model` | List or change the configured model. |
+| `/skills` | Discover, inspect, create, install, or manage skills. |
+| `/mcp status` | Inspect MCP readiness and safe diagnostics. |
+| `/browser status` | Inspect the effective Playwright browser connection mode. |
+| `/phone status` | Check KDE Connect/ADB health. |
 | `/export [PATH]` | Export local Ares data. |
-| `/import PATH [--config]` | Import local Ares data. |
-| `/reset` | Reset in-memory chat history. |
-| `/exit` | Exit Ares. |
+| `/import PATH [--config]` | Import a previous local export. |
+| `/soul show` · `/profile show` | Inspect assistant personality and user-profile context. |
 
-## Configuration and Data
+---
 
-| Path | Contents |
-|---|---|
-| `~/.ares/config.json` | Local user configuration. |
-| `~/.ares/data/ares.db` | Memory, embeddings, conversations, summaries, and cron data. |
-| `~/.ares/data/soul.md` | Ares personality file. |
-| `~/.ares/data/profile.md` | User profile file. |
-| `~/.ares/data/sessions/` | Per-session JSONL logs. |
-| `~/.ares/data/mcp_tokens/` | MCP OAuth tokens. |
-| `~/.ares/data/channels/telegram/inbox/` | Documents and media received from Telegram, held locally for the related turn. |
-| `~/.ares/skills/` | User-installed skills. |
-| `~/.ares_history` | CLI prompt history. |
+## 🗂️ Local data layout
 
-### Windows Desktop Control
-
-Ares uses [Windows-MCP](https://github.com/CursorTouch/Windows-MCP) locally through stdio. On its first run, `uvx` downloads the server; later runs use the local cache. The bundled configuration is deliberately restricted to UI interaction tools: snapshots, screenshots, mouse/keyboard input, app/window control, clipboard, and notifications. It does **not** grant the agent the MCP server's PowerShell, registry, or filesystem tools.
-
-Use natural requests such as `open Spotify`, `inspect the Settings window`, or `click the Save button in the open app`. Ares observes the Windows accessibility tree first, then verifies major UI changes with a fresh snapshot. The MCP server controls the real desktop, so requests that send, submit, purchase, delete, share, or change system settings require explicit intent.
-
-### Browser Modes
-
-Ares uses Playwright MCP for websites and web apps; Windows MCP remains for native Windows apps and OS dialogs. `/browser status` shows the configured and effective Playwright connection mode.
-
-| Mode | Use case | Behavior |
-|---|---|---|
-| `auto` (default) | Normal use | Uses the Playwright extension when its token is configured, otherwise an already-open CDP session, then Ares' dedicated browser profile. |
-| `isolated` | Clean/testing session | Starts Playwright with Ares' persistent profile at `~/.ares/data/playwright-profile`. |
-| `system` | Chrome started with CDP | Connects to Chrome at the configured local CDP port. Use `/browser launch` after closing other Chrome windows. |
-| `extension` | Existing logged-in tab | Connects through the official Playwright Chrome Extension and lets you approve a specific existing tab. |
-
-To use the extension mode, install the [official Playwright Extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm), copy the `PLAYWRIGHT_MCP_EXTENSION_TOKEN` shown by it, and store it locally in `browser_extension_token` in `~/.ares/config.json`. The token is passed only to the Playwright MCP child process and is redacted from exports and diagnostics. Without a token, Chrome asks you to approve each connection.
-
-Environment variables can populate config in `ares/config.py`. JSON exports omit secret key fields.
-
-See [MCP configuration and management](docs/mcp.md) for server examples, transport details, and diagnostics. See the [marketplace guide](docs/marketplace.md) for registry configuration, confirmation behavior, and security boundaries.
-
-## Development
-
-Install development dependencies:
-
-```bash
-pip install -e ".[dev]"
+```text
+~/.ares/
+├── config.json                 # Model, bridges, MCP, and surface configuration
+├── data/
+│   ├── ares.db                 # Facts, embeddings, people, conversations, actions, cron
+│   ├── sessions/*.jsonl        # Append-only session archive with line provenance
+│   ├── soul.md                 # Assistant personality
+│   ├── profile.md              # User profile
+│   ├── mcp_tokens/             # OAuth tokens for MCP servers
+│   └── channels/telegram/inbox # Files received for related Telegram turns
+└── skills/                     # User-installed local skills
 ```
 
-Run all tests:
+## 🧪 Development and verification
 
 ```bash
+# Python behavior
 python -m pytest -q
+
+# Desktop production bundle
+cd electron-app
+npm run build
 ```
 
-Run focused tests:
-
-```bash
-python -m pytest tests/test_skills.py tests/test_agent.py -q
-```
-
-Recommended checks before opening a pull request:
-
-| Change type | Required check |
+| Change | Verify with |
 |---|---|
-| Python behavior | Add/update tests and run `python -m pytest -q`. |
-| Tool definitions or executor | Test schema/handler coverage and relevant integration tests. |
-| Skills | Add/update skill tests and verify trigger behavior. |
-| CLI rendering | Add/update CLI renderer tests. |
-| Desktop app | Run relevant `npm` checks from `electron-app/` when UI code changes. |
-| Docs only | Proofread links, commands, and examples. |
+| Memory, sessions, people, or tools | Focused tests plus `python -m pytest -q` |
+| Skill behavior | `python -m pytest tests/test_skills.py tests/test_prompts.py -q` |
+| CLI rendering | Relevant renderer tests |
+| Desktop UI | `cd electron-app && npm run build` |
+| Documentation | Validate links, commands, and code examples |
 
-## Contributing
+## 🔐 Local-first boundaries
 
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Ares stores its local state under `~/.ares` by default.
+- Web search sends queries to the selected provider; connected MCP servers run according to your local configuration.
+- Phone controls operate through your paired Android device.
+- Real-world and destructive actions remain explicit in their relevant tool workflows.
+- Do not commit API keys, OAuth tokens, or secrets. Exported configuration redacts recognized secret fields.
 
-Core expectations:
+## 📚 Further reading
 
-| Rule | Meaning |
-|---|---|
-| Pull requests only | Do not push directly to the main project history. |
-| Tests required | Every behavior change needs a test or a clear explanation for why testing is not applicable. |
-| Deep review | Review the code path, edge cases, security implications, and user experience before requesting merge. |
-| No surprise architecture changes | Large architecture changes need discussion first. Keep PRs focused and incremental. |
-| Local-first privacy | Do not introduce unnecessary external data sharing. |
-
-## Code of Conduct
-
-This project follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Be respectful, constructive, and serious about user safety.
-
-## Privacy and Safety
-
-- Ares stores memories, conversations, skills, config, cron data, soul, and profile files locally by default.
-- Web search sends queries to configured search providers.
-- Phone tools interact with a paired Android phone through KDE Connect and ADB.
-- Shell, code, and filesystem tools run locally and can affect the local machine.
-- Destructive file operations and real phone calls require explicit confirmation in tool schemas/handlers.
-- Secrets should never be committed to the repository.
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Core | Python 3.11+, pydantic, httpx |
-| Terminal UI | Rich, prompt_toolkit |
-| Memory | SQLite, FTS5, sqlite-vec, sentence-transformers/ONNX |
-| Web | Tavily/ddgs, fetch tooling |
-| Images | Pillow, Pollinations.ai |
-| Scheduling | croniter, dateparser, tzlocal |
-| Voice | faster-whisper, Edge TTS, Sarvam AI, WebRTC VAD |
-| Desktop | Electron, React, Zustand, Vite, xterm.js, node-pty |
-| Integrations | MCP SDK, KDE Connect, ADB |
+- [MCP configuration and management](docs/mcp.md)
+- [Marketplace guide](docs/marketplace.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
-MIT.
+[MIT](LICENSE)

@@ -410,7 +410,7 @@ class PeopleStore:
             if len(matched) >= bounded:
                 break
         self._touch(matched)
-        return [self.get(person_id, include_sensitive=False) or {} for person_id in matched]
+        return [self.get(person_id, include_sensitive=True) or {} for person_id in matched]
 
     def mark_contacted(self, reference: str, *, channel: str) -> bool:
         """Record a successful use of a saved alias without exposing its value."""
@@ -511,7 +511,7 @@ class PeopleStore:
         return True
 
     def recent_for_context(self, *, limit: int = 6) -> list[dict[str, Any]]:
-        """Return bounded, contact-redacted entries safe for model context."""
+        """Return bounded complete records for the local assistant context."""
         bounded = max(1, min(int(limit), 20))
         rows = self.conn.execute(
             """
@@ -522,7 +522,7 @@ class PeopleStore:
             """,
             (bounded,),
         ).fetchall()
-        return [self._row_to_person(row, include_sensitive=False) for row in rows]
+        return [self._row_to_person(row, include_sensitive=True) for row in rows]
 
     def list_all(self, *, include_sensitive: bool = True) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM people_meta ORDER BY canonical_name COLLATE NOCASE").fetchall()

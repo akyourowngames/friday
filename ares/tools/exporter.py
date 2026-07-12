@@ -22,9 +22,7 @@ from ares.models import AppConfig
 from ares.people import PeopleStore
 
 EXPORT_PROFILES: dict[str, dict[str, bool]] = {
-    # People is intentionally excluded from full: it contains explicit third-
-    # party PII and must be exported only through the opt-in people profile.
-    "full": {"config": True, "memories": True, "conversations": True, "actions": True, "people": False},
+    "full": {"config": True, "memories": True, "conversations": True, "actions": True, "people": True},
     "memories": {"config": False, "memories": True, "conversations": False, "actions": False, "people": False},
     "conversations": {"config": False, "memories": False, "conversations": True, "actions": False, "people": False},
     "config": {"config": True, "memories": False, "conversations": False, "actions": False, "people": False},
@@ -212,9 +210,8 @@ def import_data(
             payload.get("conversation_messages", []),
         )
 
-    # Importing another person's record is an explicit opt-in operation, just
-    # like exporting it. Action provenance is content-free and may be restored
-    # when a ledger is provided.
+    # Action provenance is content-free and may be restored when a ledger is
+    # provided.  People are restored whenever the chosen payload includes them.
     if import_people and people_store is not None:
         counts["people"] = people_store.import_people(payload.get("people", []))
     if import_actions and action_ledger is not None:

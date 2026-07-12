@@ -24,6 +24,7 @@ from ares.config import save_config
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
 from ares.people import PeopleStore, PersonConflictError, PersonResolutionError, mask_email, mask_phone
 from ares.actions import ActionLedger
+from ares.sessions import SessionStore
 from ares.tasks import TaskStore, TaskToolHandlers
 from ares.skills import SkillManager
 from ares.mcp_registry import MCPRegistryClient
@@ -77,6 +78,7 @@ class ToolExecutor:
         people_store: PeopleStore | None = None,
         action_ledger: ActionLedger | None = None,
         task_store: TaskStore | None = None,
+        session_store: SessionStore | None = None,
     ):
         self.memory = memory_store
         self.conversations = conversation_store
@@ -87,10 +89,12 @@ class ToolExecutor:
         data_root = None
         if config is not None:
             data_root = Path(config.data_dir).expanduser().parent
+        session_data_dir = Path(config.data_dir).expanduser() if config is not None else None
         db_path = getattr(memory_store, "db_path", None)
         if db_path is not None:
             db_path = Path(db_path)
             data_root = data_root or db_path.parent
+            session_data_dir = session_data_dir or db_path.parent
         elif config is not None:
             db_path = Path(config.data_dir).expanduser() / "ares.db"
         shared_connection = getattr(memory_store, "conn", None)
@@ -104,6 +108,7 @@ class ToolExecutor:
         )
         self.task_store = task_store or (TaskStore(data_root) if data_root is not None else None)
         self.task_tools = TaskToolHandlers(self.task_store, lambda: self.session_id) if self.task_store is not None else None
+        self.session_store = session_store or (SessionStore(session_data_dir) if session_data_dir is not None else None)
         self.workflow_runner: Any | None = None
         self.cron = CronToolHandlers(CronStore(data_root))
 
@@ -265,18 +270,131 @@ class ToolExecutor:
         return f"Stored memory #{fact_id}: {content}"
 
     def _search_memory(self, args: dict) -> str:
-        query = args["query"]
-        limit = int(args.get("limit", 5))
-        results = self.memory.search(query, limit=limit)
-        if not results:
-            return f"No matching memories found for '{query}'."
-        lines = [f"Found {len(results)} memories:"]
-        for r in results:
-            lines.append(
-                f"- #{r['fact_id']} [{r.get('category', 'note')}, importance={r.get('importance', 0.5)}] "
-                f"{r['fact_text']}"
+        """Search every local memory surface, including persisted JSONL sessions.
+
+        The session archive is deliberately read directly rather than through an
+        index.  That means old sessions produced by earlier Ares versions are
+        immediately recallable and cannot disappear because an index was never
+        populated or is stale.
+        """
+        query = str(args.get("query", "")).strip()
+        limit = max(1, min(int(args.get("limit", 12)), 50))
+        since = args.get("since")
+        requested_sources = args.get("sources") or ["facts", "people", "conversations", "sessions", "actions"]
+        if isinstance(requested_sources, str):
+            requested_sources = [requested_sources]
+        aliases = {
+            "fact": "facts",
+            "person": "people",
+            "conversation": "conversations",
+            "session": "sessions",
+            "action": "actions",
+        }
+        sources = {aliases.get(str(source).casefold(), str(source).casefold()) for source in requested_sources}
+        allowed_sources = {"facts", "people", "conversations", "sessions", "actions"}
+        unknown = sorted(sources - allowed_sources)
+        if unknown:
+            return self._json({"ok": False, "error": f"Unknown memory source(s): {', '.join(unknown)}."})
+
+        records: list[dict[str, Any]] = []
+        counts = {source: 0 for source in sorted(sources)}
+
+        if "facts" in sources:
+            facts = self.memory.search(query, limit=limit) if query else self.memory.get_recent(limit=limit)
+            for fact in facts:
+                records.append({
+                    "source": "fact",
+                    "source_id": f"fact:{fact['fact_id']}",
+                    "fact_id": fact["fact_id"],
+                    "content": fact.get("fact_text", ""),
+                    "category": fact.get("category", "note"),
+                    "importance": fact.get("importance", 0.5),
+                    "confidence": fact.get("confidence"),
+                    "created_at": fact.get("created_at"),
+                    "updated_at": fact.get("updated_at"),
+                })
+            counts["facts"] = len(facts)
+
+        if "people" in sources and self.people_store is not None:
+            people = (
+                self.people_store.search(query, limit=limit, include_sensitive=True)
+                if query else self.people_store.list_all(include_sensitive=True)[:limit]
             )
-        return "\n".join(lines)
+            for person in people:
+                person_view = self._person_view(person)
+                records.append({
+                    "source": "person",
+                    "source_id": f"person:{person_view.get('person_id')}",
+                    "content": person_view.get("canonical_name", ""),
+                    "person": person_view,
+                    "updated_at": person_view.get("updated_at"),
+                })
+            counts["people"] = len(people)
+
+        if "conversations" in sources and self.conversations is not None:
+            try:
+                conversations = self.conversations.search_recall(query, since=since, limit=limit)
+            except ValueError as exc:
+                return self._json({"ok": False, "error": str(exc)})
+            for record in conversations:
+                records.append({
+                    "source": "conversation",
+                    "source_id": f"conversation:{record.get('conversation_id')}:message:{record.get('id')}",
+                    "conversation_id": record.get("conversation_id"),
+                    "message_id": record.get("id"),
+                    "role": record.get("role"),
+                    "timestamp": record.get("created_at"),
+                    "content": record.get("content", ""),
+                })
+            counts["conversations"] = len(conversations)
+
+        if "sessions" in sources and self.session_store is not None:
+            try:
+                sessions = self.session_store.search_recall(query, since=since, limit=limit)
+            except ValueError as exc:
+                return self._json({"ok": False, "error": str(exc)})
+            records.extend(sessions)
+            counts["sessions"] = len(sessions)
+
+        if "actions" in sources and self.action_ledger is not None:
+            try:
+                actions = self.action_ledger.search(query, since=since, limit=limit)
+            except ValueError as exc:
+                return self._json({"ok": False, "error": str(exc)})
+            for action in actions:
+                records.append({
+                    "source": "action",
+                    "source_id": f"action:{action.get('action_id')}",
+                    "content": action.get("summary", ""),
+                    "action": action,
+                    "timestamp": action.get("created_at"),
+                })
+            counts["actions"] = len(actions)
+
+        # Every source has already ranked its own results.  Preserve source
+        # relevance while ensuring the best scored historical session evidence
+        # wins when a query was split across neighboring turns.
+        records.sort(
+            key=lambda record: (
+                int(record.get("score", 0)),
+                str(record.get("timestamp") or record.get("updated_at") or record.get("created_at") or ""),
+                str(record.get("source_id") or ""),
+            ),
+            reverse=True,
+        )
+        records = records[:limit]
+        payload = {
+            "ok": True,
+            "query": query,
+            "since": since,
+            "sources": sorted(sources),
+            "counts": counts,
+            "result_count": len(records),
+            "results": records,
+        }
+        if not records:
+            payload["message"] = f"No matching local recall records found for '{query}'."
+        return self._json(payload)
 
     def _update_memory(self, args: dict) -> str:
         fact_id = int(args["fact_id"])
@@ -305,20 +423,21 @@ class ToolExecutor:
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     @staticmethod
-    def _safe_person_view(person: dict[str, Any]) -> dict[str, Any]:
-        """Never send stored contact values or freeform notes back to the model."""
+    def _person_view(person: dict[str, Any]) -> dict[str, Any]:
+        """Return the complete local person record for explicit retrieval."""
         return {
             "person_id": person.get("person_id"),
             "canonical_name": person.get("canonical_name", ""),
             "aliases": list(person.get("aliases") or []),
             "relation": person.get("relation", ""),
-            "has_phone": bool(person.get("has_phone") or person.get("phone")),
-            "has_email": bool(person.get("has_email") or person.get("email")),
-            "phone_hint": person.get("phone_hint") or mask_phone(person.get("phone")),
-            "email_hint": person.get("email_hint") or mask_email(person.get("email")),
-            "important_date_labels": sorted((person.get("important_dates") or {}).keys()),
-            "notes_present": bool(person.get("notes")),
+            "phone": person.get("phone") or "",
+            "email": person.get("email") or "",
+            "important_dates": dict(person.get("important_dates") or {}),
+            "notes": person.get("notes") or "",
             "last_referenced_at": person.get("last_referenced_at"),
+            "last_contacted_at": person.get("last_contacted_at"),
+            "last_contacted_via": person.get("last_contacted_via"),
+            "created_at": person.get("created_at"),
             "updated_at": person.get("updated_at"),
             "source": person.get("source", "manual"),
             "revision": person.get("revision", 1),
@@ -330,12 +449,6 @@ class ToolExecutor:
     def _remember_person(self, args: dict) -> str:
         if self.people_store is None:
             return self._people_unavailable()
-        if not bool(args.get("confirm", False)):
-            return self._json({
-                "ok": False,
-                "confirm_required": True,
-                "error": "Saving another person's contact information requires explicit confirmation. Re-call with confirm=true only after the user has explicitly asked to remember it.",
-            })
         try:
             person = self.people_store.create(
                 args.get("canonical_name", ""),
@@ -350,7 +463,7 @@ class ToolExecutor:
             )
         except (ValueError, PersonConflictError) as exc:
             return self._json({"ok": False, "error": str(exc)})
-        return self._json({"ok": True, "action": "remembered", "person": self._safe_person_view(person)})
+        return self._json({"ok": True, "action": "remembered", "person": self._person_view(person)})
 
     def _search_person(self, args: dict) -> str:
         if self.people_store is None:
@@ -359,21 +472,15 @@ class ToolExecutor:
             people = self.people_store.search(
                 args.get("query", ""),
                 limit=int(args.get("limit", 5)),
-                include_sensitive=False,
+                include_sensitive=True,
             )
         except ValueError as exc:
             return self._json({"ok": False, "error": str(exc)})
-        return self._json({"ok": True, "people": [self._safe_person_view(person) for person in people]})
+        return self._json({"ok": True, "people": [self._person_view(person) for person in people]})
 
     def _update_person(self, args: dict) -> str:
         if self.people_store is None:
             return self._people_unavailable()
-        if not bool(args.get("confirm", False)):
-            return self._json({
-                "ok": False,
-                "confirm_required": True,
-                "error": "Updating another person's contact information requires explicit confirmation. Re-call with confirm=true after the user approves this exact update.",
-            })
         updates = {
             key: args[key]
             for key in ("canonical_name", "aliases", "relation", "phone", "email", "important_dates", "notes", "source", "confidence")
@@ -391,7 +498,7 @@ class ToolExecutor:
             return self._json({"ok": False, "error": str(exc)})
         if person is None:
             return self._json({"ok": False, "error": "Person not found."})
-        return self._json({"ok": True, "action": "updated", "person": self._safe_person_view(person)})
+        return self._json({"ok": True, "action": "updated", "person": self._person_view(person)})
 
     def _forget_person(self, args: dict) -> str:
         if self.people_store is None:
@@ -400,7 +507,7 @@ class ToolExecutor:
             return self._json({
                 "ok": False,
                 "confirm_required": True,
-                "error": "Forgetting a person permanently deletes their local relationship record. Re-call with confirm=true after explicit user approval.",
+                "error": "Deleting a saved person permanently removes the local record. Re-call with confirm=true after explicit approval.",
             })
         try:
             deleted = self.people_store.delete(int(args.get("person_id", 0)), expected_revision=args.get("expected_revision"))
@@ -1286,7 +1393,7 @@ class ToolExecutor:
         return _kdeconnect_bridge.search_contacts(args["query"])
 
     def _resolve_phone_recipient(self, value: Any) -> tuple[str, dict[str, Any] | None]:
-        """Resolve an exact saved alias locally without exposing its number to the model."""
+        """Resolve an exact saved alias to its stored phone number."""
         raw = str(value or "").strip()
         if not raw:
             raise PersonResolutionError("A phone number or saved person alias is required.")
@@ -1298,18 +1405,16 @@ class ToolExecutor:
         return str(person["phone"]), person
 
     @staticmethod
-    def _redact_phone_result(result: str, person: dict[str, Any] | None = None) -> str:
-        """Bridge responses should not echo a saved contact number back to the model."""
+    def _phone_result(result: str, person: dict[str, Any] | None = None) -> str:
+        """Attach the resolved local person name without masking bridge results."""
         try:
             payload = json.loads(result)
         except (TypeError, json.JSONDecodeError):
             return result
         if not isinstance(payload, dict):
             return result
-        if payload.get("number"):
-            payload["number"] = mask_phone(payload["number"])
         if person is not None:
-            payload["recipient"] = person.get("canonical_name", "saved person")
+            payload.setdefault("recipient", person.get("canonical_name", "saved person"))
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def _phone_send_sms(self, args: dict) -> str:
@@ -1319,7 +1424,7 @@ class ToolExecutor:
             number, person = self._resolve_phone_recipient(args.get("number"))
         except PersonResolutionError as exc:
             return self._json({"ok": False, "sent": False, "error": str(exc)})
-        return self._redact_phone_result(_kdeconnect_bridge.send_sms(number, args["message"]), person)
+        return self._phone_result(_kdeconnect_bridge.send_sms(number, args["message"]), person)
 
     def _phone_call_number(self, args: dict) -> str:
         if not self.config or not self.config.phone.enabled:
@@ -1328,7 +1433,7 @@ class ToolExecutor:
             number, person = self._resolve_phone_recipient(args.get("number"))
         except PersonResolutionError as exc:
             return self._json({"ok": False, "dialed": False, "error": str(exc)})
-        return self._redact_phone_result(
+        return self._phone_result(
             _adb_bridge.call_number(number, confirm=bool(args.get("confirm", False))),
             person,
         )
