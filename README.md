@@ -28,7 +28,7 @@ It is built as a local-first assistant: it remembers useful facts, understands t
 |---|---|
 | Chat agent | Stream model responses, call tools, keep conversation context, and recover from tool loops. |
 | Local memory | Store durable user facts in SQLite with FTS and vector search. |
-| Skills | Auto-load relevant `SKILL.md` playbooks silently, similar to Claude Code/Codex-style skills. |
+| Skills | Auto-load relevant `SKILL.md` playbooks silently and discover/install validated community skills. |
 | Project context | Read repo guidance and project files such as `README.md`, `pyproject.toml`, `package.json`, `AGENTS.md`, and `CLAUDE.md`. |
 | Filesystem tools | Read, search, write, edit, diff, backup, restore, hash, inspect, and batch-edit files. |
 | Web research | Search the web, fetch URLs/PDF/text, label source quality, and summarize with citations. |
@@ -39,6 +39,7 @@ It is built as a local-first assistant: it remembers useful facts, understands t
 | Telegram channel | An allowlisted, persistent Telegram bridge for remote chat, file input, progress, and file delivery from the PC. |
 | Desktop app | Electron + React chat UI, settings, sessions, status, tool cards, and terminal surface. |
 | Windows control | Native app and desktop control through a restricted local Windows MCP integration. |
+| Marketplace | Search trusted skill and MCP registries, inspect plans, and explicitly approve local installs. |
 
 ## Quick Start
 
@@ -179,7 +180,7 @@ flowchart TD
 | Category | Tools |
 |---|---|
 | Memory | `store_memory`, `search_memory`, `update_memory`, `delete_memory` |
-| Skills/export | `list_skills`, `load_skill`, `create_skill`, `export_data` |
+| Skills/export | `list_skills`, `load_skill`, `create_skill`, marketplace discovery/install tools, `export_data` |
 | Web | `web_search`, `fetch_url` |
 | Read-only filesystem | `read_file`, `search_files`, `list_directory`, `get_file_info`, `glob_pattern` |
 | File editing | `write_file`, `edit_file`, `create_directory`, `delete_file`, `move_file`, `batch_edit`, `glob_apply`, `insert_line`, `replace_lines`, `delete_lines`, `preview_diff` |
@@ -230,7 +231,11 @@ Built-in skills include:
 | `/model` or `/model list` | Show current and known models. |
 | `/model MODEL` | Switch model and save config. |
 | `/skills` | List installed skills. |
-| `/skills search QUERY` | Search skills. |
+| `/skills search QUERY` | Search configured community skill registries. |
+| `/skills install SLUG` | Validate and install a hosted community skill. |
+| `/skills create NAME DESCRIPTION` | Generate a local instruction-only skill. |
+| `/skills info/update/remove NAME` | Inspect, refresh, or remove a skill. |
+| `/skills login/whoami/publish NAME` | Manage ClawHub authentication and publish a local skill. |
 | `/skills load NAME` | Show a skill's full instructions. |
 | `/tools summary/details/hidden` | Control tool activity display. |
 | `/mcp` | Show MCP management commands. |
@@ -240,6 +245,9 @@ Built-in skills include:
 | `/mcp health` | Probe connected MCP servers. |
 | `/mcp reload` | Reload all MCP servers from shared config. |
 | `/mcp config` | Show safe MCP configuration without private values. |
+| `/mcp search QUERY` | Search configured MCP registries. |
+| `/mcp info/add/remove NAME` | Inspect, explicitly configure, or remove an MCP server. |
+| `/mcp list/test [NAME]/refresh` | Show readiness, test a connection, or reload shared MCP config. |
 | `/phone status` | Check Android phone bridge health. |
 | `/soul show/edit` | View or edit Ares' personality file. |
 | `/profile show/edit` | View or edit the user profile file. |
@@ -286,7 +294,7 @@ To use the extension mode, install the [official Playwright Extension](https://c
 
 Environment variables can populate config in `ares/config.py`. JSON exports omit secret key fields.
 
-See [MCP configuration and management](docs/mcp.md) for server examples, transport details, and diagnostics.
+See [MCP configuration and management](docs/mcp.md) for server examples, transport details, and diagnostics. See the [marketplace guide](docs/marketplace.md) for registry configuration, confirmation behavior, and security boundaries.
 
 ## Development
 

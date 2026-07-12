@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 79
+        assert len(tools) == 83
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -33,6 +33,10 @@ class TestToolDefinitions:
             "list_skills",
             "load_skill",
             "create_skill",
+            "search_skill_marketplace",
+            "install_marketplace_skill",
+            "search_mcp_marketplace",
+            "add_marketplace_mcp",
             "export_data",
             "web_search",
             "fetch_url",

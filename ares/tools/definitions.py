@@ -155,6 +155,44 @@ def get_tool_definitions() -> list[dict]:
             ["name", "content"],
         ),
         _tool(
+            "search_skill_marketplace",
+            "Read-only search across configured trusted community skill registries. Use when the user explicitly asks to discover or find a skill; never install a result automatically.",
+            {
+                "query": {"type": "string", "description": "Skill capability to search for."},
+                "registry": {"type": "string", "description": "Optional configured registry name."},
+            },
+            ["query"],
+        ),
+        _tool(
+            "install_marketplace_skill",
+            "Download and install an instruction-only skill from a configured registry after the user explicitly asks to install it. The archive is validated; missing MCP dependencies are reported but never auto-added.",
+            {
+                "slug": {"type": "string", "description": "Registry skill slug."},
+                "registry": {"type": "string", "description": "Optional configured registry name."},
+                "confirm": {"type": "boolean", "default": False, "description": "Must be true after the user explicitly confirms the requested skill installation."},
+            },
+            ["slug"],
+        ),
+        _tool(
+            "search_mcp_marketplace",
+            "Read-only search across configured trusted MCP registries. Use before suggesting an MCP server; discovery alone never executes or configures a server.",
+            {
+                "query": {"type": "string", "description": "MCP capability to search for."},
+                "registry": {"type": "string", "description": "Optional configured registry name."},
+            },
+            ["query"],
+        ),
+        _tool(
+            "add_marketplace_mcp",
+            "Add a reviewed MCP configuration from a configured trusted registry only after explicit user confirmation. Never call with confirm=true unless the user has approved the exact server plan.",
+            {
+                "name": {"type": "string", "description": "Registry MCP server name."},
+                "registry": {"type": "string", "description": "Optional configured registry name."},
+                "confirm": {"type": "boolean", "default": False, "description": "Must be true after the user explicitly approves adding and connecting this MCP server."},
+            },
+            ["name"],
+        ),
+        _tool(
             "export_data",
             "Export local Ares data to JSON, with selective profiles and redaction preview. People records are excluded from full exports and require the explicit people profile.",
             {

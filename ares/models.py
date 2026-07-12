@@ -207,6 +207,79 @@ class TelegramConfig(BaseModel):
     max_audio_duration_seconds: int = Field(default=600, ge=1, le=7200)
 
 
+class SkillRegistry(BaseModel):
+    """A configured, trusted source of community SKILL.md bundles.
+
+    Registry tokens intentionally live only in the shared local config.  The
+    marketplace never reads tokens from downloaded skills or manifests.
+    """
+
+    name: str
+    api_base: str
+    enabled: bool = True
+    auth_token: str = ""
+    priority: int = 0
+    search_limit: int = Field(default=10, ge=1, le=100)
+
+
+class MCPRegistry(BaseModel):
+    """A configured, trusted source of MCP server metadata."""
+
+    name: str
+    api_base: str
+    enabled: bool = True
+    auth_token: str = ""
+    priority: int = 0
+
+
+class SkillDependency(BaseModel):
+    """One declared dependency discovered in a skill's frontmatter."""
+
+    type: Literal["mcp_server", "tool", "skill"] = "mcp_server"
+    name: str
+    required: bool = True
+    auto_install: bool = False
+
+
+def default_skill_registries() -> list[SkillRegistry]:
+    """Return the built-in community skill registry configuration.
+
+    ``openclaw`` remains configurable for compatible/private deployments.  The
+    public ClawHub registry is the primary OpenClaw skills catalog.
+    """
+
+    return [
+        SkillRegistry(
+            name="clawhub",
+            api_base="https://clawhub.ai/api/v1",
+            priority=10,
+        ),
+        SkillRegistry(
+            name="openclaw",
+            api_base="https://api.openclaw.ai/v1",
+            priority=5,
+        ),
+    ]
+
+
+def default_mcp_registries() -> list[MCPRegistry]:
+    """Return safe defaults for the public MCP metadata registries."""
+
+    return [
+        MCPRegistry(
+            name="mcp-registry",
+            api_base="https://registry.modelcontextprotocol.io",
+            priority=10,
+        ),
+        # Smithery's current public Registry API is served from this host.
+        MCPRegistry(
+            name="smithery",
+            api_base="https://api.smithery.ai",
+            priority=5,
+        ),
+    ]
+
+
 class AppConfig(BaseModel):
     # This is deliberately stored beside the rest of the shared Ares config.
     # Both the Electron app and CLI read this file, so completing setup in one
@@ -247,6 +320,8 @@ class AppConfig(BaseModel):
     skills_enabled: bool = True
     skill_dirs: list[str] = Field(default_factory=lambda: ["~/.ares/skills"])
     skill_auto_suggest: bool = True
+    skill_registries: list[SkillRegistry] = Field(default_factory=default_skill_registries)
+    mcp_registries: list[MCPRegistry] = Field(default_factory=default_mcp_registries)
     mcp_servers: list[dict] = Field(
         default_factory=lambda: [s.copy() for s in DEFAULT_MCP_SERVERS],
         description="MCP server configurations for remote Model Context Protocol tools.",

@@ -80,6 +80,26 @@ def test_export_profiles_and_redaction_preview(tmp_path, fake_embedding_provider
     assert config_payload["redaction_preview"]["tavily_api_key"] == "empty"
 
 
+def test_export_redacts_marketplace_registry_tokens(tmp_path, fake_embedding_provider):
+    memory = MemoryStore(db_path=tmp_path / "source.db", embedding_provider=fake_embedding_provider)
+    config = AppConfig()
+    config.skill_registries[0].auth_token = "clawhub-private-token"
+    config.mcp_registries[1].auth_token = "smithery-private-token"
+
+    output = export_data(
+        memory_store=memory,
+        config=config,
+        path=tmp_path / "marketplace-config.json",
+        profile="config",
+    )
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["config"]["skill_registries"][0]["auth_token"] is None
+    assert payload["config"]["mcp_registries"][1]["auth_token"] is None
+    assert "skill_registries[0].auth_token" in payload["secrets_redacted"]
+    assert "mcp_registries[1].auth_token" in payload["secrets_redacted"]
+
+
 def test_import_config_preserves_local_browser_extension_token(tmp_path, fake_embedding_provider, monkeypatch):
     memory = MemoryStore(db_path=tmp_path / "source.db", embedding_provider=fake_embedding_provider)
     exported = export_data(

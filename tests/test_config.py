@@ -84,6 +84,15 @@ def test_browser_mode_config_has_safe_defaults_and_validates_port():
     assert config.browser_chrome_path == ""
     assert config.browser_extension_token == ""
     playwright = next(server for server in config.mcp_servers if server["name"] == "playwright")
+    assert {server["name"] for server in config.mcp_servers} >= {"playwright", "windows"}
+    assert [(registry.name, registry.priority) for registry in config.skill_registries] == [
+        ("clawhub", 10),
+        ("openclaw", 5),
+    ]
+    assert [(registry.name, registry.api_base) for registry in config.mcp_registries] == [
+        ("mcp-registry", "https://registry.modelcontextprotocol.io"),
+        ("smithery", "https://api.smithery.ai"),
+    ]
     profile = playwright["args"][playwright["args"].index("--user-data-dir") + 1]
     assert Path(profile).is_absolute()
     try:

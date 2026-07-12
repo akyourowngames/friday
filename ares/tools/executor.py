@@ -20,11 +20,14 @@ from ares.tools.filesystem import (
     file_tree as _file_tree_impl,
 )
 from ares.memory import MemoryStore
-from ares.models import AppConfig
+from ares.config import save_config
+from ares.models import AppConfig, DEFAULT_MCP_SERVERS
 from ares.people import PeopleStore, PersonConflictError, PersonResolutionError, mask_email, mask_phone
 from ares.actions import ActionLedger
 from ares.tasks import TaskStore, TaskToolHandlers
 from ares.skills import SkillManager
+from ares.mcp_registry import MCPRegistryClient
+from ares.skill_registry import SafeSkillInstaller, SkillRegistryClient, SkillValidationError
 from ares.tools.web import fetch_url, fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
 from ares.tools.filesystem_write import edit_file as _edit_file_impl
@@ -131,6 +134,10 @@ class ToolExecutor:
             "list_skills": self._list_skills_tool,
             "load_skill": self._load_skill_tool,
             "create_skill": self._create_skill_tool,
+            "search_skill_marketplace": self._marketplace_async_required,
+            "install_marketplace_skill": self._marketplace_async_required,
+            "search_mcp_marketplace": self._marketplace_async_required,
+            "add_marketplace_mcp": self._marketplace_async_required,
             "export_data": self._export_data,
             "web_search": self._web_search,
             "fetch_url": self._fetch_url,
@@ -210,6 +217,14 @@ class ToolExecutor:
 
     async def execute_async(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool, allowing local tools to use async integrations."""
+        if tool_name == "search_skill_marketplace":
+            return await self._search_skill_marketplace(arguments)
+        if tool_name == "install_marketplace_skill":
+            return await self._install_marketplace_skill(arguments)
+        if tool_name == "search_mcp_marketplace":
+            return await self._search_mcp_marketplace(arguments)
+        if tool_name == "add_marketplace_mcp":
+            return await self._add_marketplace_mcp(arguments)
         if tool_name == "web_search":
             return await self._web_search_async(arguments)
         if tool_name == "search_files":
@@ -640,6 +655,121 @@ class ToolExecutor:
             category=args.get("category", "general"),
         )
         return f"Created skill '{skill.name}' in category '{skill.category}' at {skill.path}."
+
+    @staticmethod
+    def _marketplace_async_required(_args: dict) -> str:
+        return "Marketplace registry operations require the async agent execution path."
+
+    def _marketplace_config(self) -> AppConfig:
+        if self.config is None:
+            raise RuntimeError("Marketplace configuration is unavailable.")
+        return self.config
+
+    def _marketplace_skills_dir(self) -> Path:
+        config = self._marketplace_config()
+        dirs = list(config.skill_dirs or [])
+        return Path(dirs[0] if dirs else "~/.ares/skills").expanduser()
+
+    async def _search_skill_marketplace(self, args: dict) -> str:
+        config = self._marketplace_config()
+        client = SkillRegistryClient(config.skill_registries)
+        try:
+            results = await client.search(str(args.get("query") or ""), args.get("registry"))
+        except (ValueError, RuntimeError) as exc:
+            return f"Marketplace search failed: {exc}"
+        if not results:
+            errors = "; ".join(f"{name}: {message}" for name, message in client.last_errors.items())
+            return "No marketplace skills found." + (f" Registry notes: {errors}" if errors else "")
+        lines = [f"Marketplace skills ({len(results)}):"]
+        for item in results[:12]:
+            lines.append(
+                f"- {item.reference} [{item.registry}, {item.version}] — {item.description or 'No description.'}"
+            )
+        return "\n".join(lines)
+
+    async def _install_marketplace_skill(self, args: dict) -> str:
+        if not bool(args.get("confirm", False)):
+            return "CONFIRM REQUIRED: Installing a community skill writes instructions to disk. Re-call only after the user explicitly approves this exact skill with confirm=true."
+        config = self._marketplace_config()
+        slug = str(args.get("slug") or "").strip()
+        client = SkillRegistryClient(config.skill_registries)
+        detail = await client.get_skill(slug, args.get("registry"))
+        if detail is None:
+            return f"Skill '{slug}' was not found in configured registries."
+        if detail.suspicious:
+            return "Install blocked: the selected registry skill is flagged suspicious. Ask the user to review the source manually."
+        archive = await client.download(detail.reference, detail.version, detail.registry)
+        if archive is None:
+            return "Install blocked: the registry did not provide a safe hosted ZIP archive."
+        try:
+            installation = SafeSkillInstaller(self._marketplace_skills_dir()).install(
+                archive,
+                provenance={
+                    "registry": detail.registry,
+                    "slug": detail.reference,
+                    "version": detail.version,
+                    "canonical_url": detail.canonical_url,
+                },
+            )
+        except (FileExistsError, SkillValidationError) as exc:
+            return f"Skill was not installed: {exc}"
+        self.skill_manager = SkillManager(skill_dirs=list(config.skill_dirs or []) or None)
+        missing = [
+            dependency.name
+            for dependency in installation.dependencies
+            if dependency.type == "mcp_server"
+            and not any(str(server.get("name") or "").casefold() == dependency.name.casefold() for server in config.mcp_servers)
+        ]
+        suffix = (
+            " Missing MCP dependencies (not added automatically): " + ", ".join(missing) + "."
+            if missing else ""
+        )
+        return f"Installed skill '{installation.skill.name}' at {installation.path}.{suffix}"
+
+    async def _search_mcp_marketplace(self, args: dict) -> str:
+        config = self._marketplace_config()
+        client = MCPRegistryClient(config.mcp_registries)
+        try:
+            results = await client.search(str(args.get("query") or ""), args.get("registry"))
+        except (ValueError, RuntimeError) as exc:
+            return f"MCP marketplace search failed: {exc}"
+        if not results:
+            errors = "; ".join(f"{name}: {message}" for name, message in client.last_errors.items())
+            return "No MCP servers found." + (f" Registry notes: {errors}" if errors else "")
+        lines = [f"MCP marketplace servers ({len(results)}):"]
+        for item in results[:12]:
+            trust = "verified" if item.verified else "registry listing"
+            lines.append(f"- {item.name} [{item.registry}, {trust}] — {item.description or 'No description.'}")
+        return "\n".join(lines)
+
+    async def _add_marketplace_mcp(self, args: dict) -> str:
+        config = self._marketplace_config()
+        source_name = str(args.get("name") or "").strip()
+        existing = {str(server.get("name") or "") for server in config.mcp_servers if isinstance(server, dict)}
+        if source_name in existing:
+            return f"MCP server '{source_name}' is already configured."
+        builtin = next((server for server in DEFAULT_MCP_SERVERS if server["name"] == source_name), None)
+        plan = None
+        if builtin is not None:
+            payload = dict(builtin)
+            source = "Ares built-in configuration"
+        else:
+            client = MCPRegistryClient(config.mcp_registries)
+            plan = await client.get_install_command(source_name, args.get("registry"))
+            if plan is None:
+                return f"No safe install plan was found for MCP server '{source_name}'."
+            payload = plan.as_config(existing_names=existing)
+            source = f"{plan.registry} registry"
+        review = (
+            f"MCP plan for {payload['name']}: source={source}; transport={payload['transport']}; "
+            f"target={payload.get('server_url') or payload.get('command') or '-'}; "
+            f"args={' '.join(payload.get('args') or []) or '-'}"
+        )
+        if not bool(args.get("confirm", False)):
+            return "CONFIRM REQUIRED: " + review + ". Re-call with confirm=true only after the user approves this exact plan."
+        config.mcp_servers.append(payload)
+        save_config(config)
+        return review + ". Added to shared config; use /mcp refresh before calling its tools."
 
     # ── Export ─────────────────────────────────────────────────────
 

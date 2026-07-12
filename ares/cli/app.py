@@ -49,6 +49,7 @@ from ares.cron.toast import CronToastManager
 from ares.session import SessionManager
 from ares.sessions import SessionStore
 from .constants import CLI_BOX, COMPLETER, STYLE, TOOL_OUTPUT_MODES
+from .marketplace import MarketplaceCommandMixin
 from .runtime import clear_current_task_cancellation, history_path, supports_unicode_output
 
 # Compatibility exports for integrations that imported CLI internals before the
@@ -139,7 +140,7 @@ TOOL_LABELS = {
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
-class AresCLI:
+class AresCLI(MarketplaceCommandMixin):
     """The main CLI application for Ares."""
 
     def __init__(self):
@@ -538,10 +539,19 @@ class AresCLI:
         table.add_row("/mcp health", "Probe connected servers and refresh readiness")
         table.add_row("/mcp reload", "Reload every MCP server from the current shared config")
         table.add_row("/mcp config", "Show safe server configuration without private values")
+        table.add_row("/mcp search QUERY", "Discover servers from configured trusted registries")
+        table.add_row("/mcp info NAME", "Inspect a registry server and its safe install plan")
+        table.add_row("/mcp add NAME", "Review, confirm, and add a registry server")
+        table.add_row("/mcp list", "Show configured server readiness")
+        table.add_row("/mcp remove NAME", "Remove a server after confirmation")
+        table.add_row("/mcp test [NAME]", "Health-check all servers or reconnect one")
+        table.add_row("/mcp refresh", "Rebuild MCP connections from shared config")
         self.console.print(table)
 
     async def _handle_mcp_command(self, cmd: str) -> None:
         """Handle async MCP control commands from the interactive CLI loop."""
+        if await self._handle_marketplace_command(cmd):
+            return
         parts = cmd.strip().split()
         action = parts[1].lower() if len(parts) > 1 else "help"
         server_name = parts[2] if len(parts) > 2 else ""
@@ -1183,12 +1193,12 @@ class AresCLI:
             table.add_row("/soul [show|edit]", "View or edit Ares' personality")
             table.add_row("/profile [show|edit]", "View or edit your profile")
             table.add_row("/context", "Show active context for this session")
-            table.add_row("/skills [search|load|categories]", "List, search, and load reusable skills")
+            table.add_row("/skills [search|install|create|update|publish]", "Manage local and marketplace skills")
             table.add_row("/setup", "Run the onboarding wizard again")
             table.add_row("/browser [status|isolated|system|extension|auto|launch]", "Manage Playwright browser connection mode")
             table.add_row("/phone status", "Check Android phone bridge pairing health")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
-            table.add_row("/mcp [status|tools|reconnect|health]", "Manage connected MCP servers and tools")
+            table.add_row("/mcp [search|add|list|test|refresh]", "Discover, configure, and manage MCP servers")
             table.add_row("/skill-name", "Load a skill directly by slash command")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
@@ -1633,9 +1643,17 @@ class AresCLI:
                             continue
 
                         if user_input.strip().startswith("/"):
-                            if user_input.strip().split(maxsplit=1)[0].lower() == "/mcp":
-                                await self._handle_mcp_command(user_input.strip())
-                                continue
+                            root_command = user_input.strip().split(maxsplit=1)[0].lower()
+                            if root_command in {"/mcp", "/skills"}:
+                                try:
+                                    if await self._handle_marketplace_command(user_input.strip()):
+                                        continue
+                                except Exception as exc:
+                                    self.console.print(f"[red]Marketplace command error: {exc}[/red]")
+                                    continue
+                                if root_command == "/mcp":
+                                    await self._handle_mcp_command(user_input.strip())
+                                    continue
                             try:
                                 should_continue = self._handle_command(user_input.strip())
                             except Exception as e:
