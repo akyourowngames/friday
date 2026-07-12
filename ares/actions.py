@@ -21,7 +21,8 @@ _WHITESPACE = re.compile(r"\s+")
 _TAG = re.compile(r"[^a-z0-9_.:-]+")
 _REFERENCE_LANGUAGE = re.compile(
     r"\b(?:that\s+(?:file|thing|image|task)|the\s+(?:file|thing)\s+i\s+(?:made|created)|"
-    r"remember\s+when|yesterday|last\s+(?:week|month)|\d+\s+(?:day|week|month|year)s?\s+ago|from\s+\d+\s+days?\s+ago)\b",
+    r"that\s+(?:email|person)|remember\s+when|continue|resume|send\s+it|same\s+task|"
+    r"yesterday|last\s+(?:week|month)|\d+\s+(?:day|week|month|year)s?\s+ago|from\s+\d+\s+days?\s+ago)\b",
     re.IGNORECASE,
 )
 _RELATIVE_SINCE = re.compile(

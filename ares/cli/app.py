@@ -205,6 +205,7 @@ class AresCLI(MarketplaceCommandMixin):
             session_store=self.session_store,
             session_id=self.session_manager.get_id(),
         )
+        self._session_finalized = False
         self.conversation_history: list[dict] = self.conversation_store.get_recent_messages(
             limit=self.config.max_context_messages
         )
@@ -1145,6 +1146,19 @@ class AresCLI(MarketplaceCommandMixin):
         except Exception as exc:
             self.console.print(f"[dim yellow]Shutdown warning ({label}): {exc}[/dim yellow]")
 
+    def _finalize_session(self) -> None:
+        """Persist a deterministic local summary and close the session once."""
+        if getattr(self, "_session_finalized", False):
+            return
+        self._session_finalized = True
+        try:
+            summary = self.conversation_store.summarize_conversation(self.conversation_id) or ""
+            if summary:
+                self.session_store.write_summary(self.session_manager.get_id(), summary)
+            self.conversation_store.end_conversation(self.conversation_id)
+        except Exception as exc:
+            self.console.print(f"[dim yellow]Shutdown warning (session memory): {exc}[/dim yellow]")
+
     def _edit_file(self, file_path: Path, name: str) -> None:
         """Open a context file in the user's editor, or print its path."""
         import os
@@ -1690,25 +1704,11 @@ class AresCLI(MarketplaceCommandMixin):
                     await self.mcp_manager.close()
                 except Exception as exc:
                     self.console.print(f"[dim yellow]Shutdown warning (MCP): {exc}[/dim yellow]")
+            self._finalize_session()
             try:
                 await self.agent.close()
             except Exception as exc:
                 self.console.print(f"[dim yellow]Shutdown warning (agent): {exc}[/dim yellow]")
             self._cleanup_step("memory store", self.memory_store.close)
-            # Generate session summary, write to JSONL
-            try:
-                summary = self.conversation_store.summarize_conversation(
-                    self.conversation_id
-                )
-                if summary:
-                    self.session_store.write_summary(
-                        self.session_manager.get_id(), summary
-                    )
-            except Exception as exc:
-                self.console.print(f"[dim yellow]Shutdown warning (summary): {exc}[/dim yellow]")
-            self._cleanup_step(
-                "end conversation",
-                lambda: self.conversation_store.end_conversation(self.conversation_id),
-            )
             self._cleanup_step("conversation store", self.conversation_store.close)
             self.console.print("\n[dim]Goodbye.[/dim]\n")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ares.config import get_db_path
@@ -42,6 +44,54 @@ class ConversationStore:
         """)
         self.conn.commit()
         self._ensure_tool_calls_column()
+        self._init_recall_index()
+
+    def _init_recall_index(self) -> None:
+        """Create a local full-text index for durable conversation recall.
+
+        The index deliberately stays inside the same local SQLite database as
+        the conversation rows.  Rebuilding at startup also indexes sessions
+        written by older Ares versions that predate this table.
+        """
+        self.recall_enabled = False
+        try:
+            self.conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS conversation_recall USING fts5(
+                    content,
+                    role UNINDEXED,
+                    conversation_id UNINDEXED,
+                    created_at UNINDEXED
+                )
+                """
+            )
+            self.conn.execute("DELETE FROM conversation_recall")
+            self.conn.execute(
+                """
+                INSERT INTO conversation_recall (rowid, content, role, conversation_id, created_at)
+                SELECT id, content, role, conversation_id, created_at
+                FROM conversation_messages
+                """
+            )
+            self.conn.commit()
+            self.recall_enabled = True
+        except sqlite3.DatabaseError:
+            # SQLite builds without FTS5 still get the deterministic LIKE
+            # fallback in search_recall.
+            self.recall_enabled = False
+
+    def _index_message(self, message_id: int, conversation_id: int, role: str, content: str, created_at: str) -> None:
+        if not self.recall_enabled:
+            return
+        try:
+            self.conn.execute(
+                """INSERT OR REPLACE INTO conversation_recall
+                   (rowid, content, role, conversation_id, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (message_id, content, role, str(conversation_id), created_at),
+            )
+        except sqlite3.DatabaseError:
+            self.recall_enabled = False
 
     def _ensure_tool_calls_column(self) -> None:
         """Add tool_calls column if missing (migration for existing DBs)."""
@@ -70,11 +120,13 @@ class ConversationStore:
 
     def add_message(self, conversation_id: int, role: str, content: str, tool_calls: str | None = None) -> int:
         """Persist one chat message."""
+        created_at = now_local_iso()
         cursor = self.conn.execute(
             """INSERT INTO conversation_messages (conversation_id, role, content, created_at, tool_calls)
                VALUES (?, ?, ?, ?, ?)""",
-            (conversation_id, role, content, now_local_iso(), tool_calls),
+            (conversation_id, role, content, created_at, tool_calls),
         )
+        self._index_message(cursor.lastrowid, conversation_id, role, content, created_at)
         self.conn.commit()
         return cursor.lastrowid
 
@@ -129,6 +181,99 @@ class ConversationStore:
             (limit,),
         ).fetchall()
         return [r["summary"] for r in reversed(rows)]
+
+    @staticmethod
+    def _since_timestamp(since: str | None) -> str | None:
+        if not since or not str(since).strip():
+            return None
+        text = str(since).strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                import dateparser
+
+                parsed = dateparser.parse(
+                    text,
+                    settings={
+                        "PREFER_DATES_FROM": "past",
+                        "RELATIVE_BASE": datetime.now().astimezone(),
+                        "RETURN_AS_TIMEZONE_AWARE": True,
+                    },
+                )
+            except Exception:
+                parsed = None
+        if parsed is None:
+            raise ValueError(f"Could not parse 'since' value: {since}")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    @staticmethod
+    def _fts_query(query: str) -> str:
+        tokens = re.findall(r"[\w]+", query, flags=re.UNICODE)
+        return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+
+    def search_recall(
+        self,
+        query: str = "",
+        *,
+        since: str | None = None,
+        limit: int = 6,
+        exclude_conversation_id: int | None = None,
+    ) -> list[dict]:
+        """Return bounded local conversation evidence for explicit recall requests.
+
+        This API intentionally returns raw local records.  ``context_blend``
+        redacts contact values before anything is added to an LLM prompt.
+        """
+        bounded = max(1, min(int(limit), 30))
+        query_text = str(query or "").strip()[:300]
+        clauses: list[str] = []
+        params: list[object] = []
+        since_timestamp = self._since_timestamp(since)
+        if since_timestamp:
+            clauses.append("m.created_at >= ?")
+            params.append(since_timestamp)
+        if exclude_conversation_id is not None:
+            clauses.append("m.conversation_id != ?")
+            params.append(int(exclude_conversation_id))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        rows: list[sqlite3.Row] = []
+        fts_query = self._fts_query(query_text)
+        if query_text and self.recall_enabled and fts_query:
+            try:
+                fts_clauses = ["conversation_recall MATCH ?", *clauses]
+                rows = self.conn.execute(
+                    f"""
+                    SELECT m.* FROM conversation_recall
+                    JOIN conversation_messages AS m ON m.id = conversation_recall.rowid
+                    WHERE {' AND '.join(fts_clauses)}
+                    ORDER BY conversation_recall.rank, m.created_at DESC, m.id DESC
+                    LIMIT ?
+                    """,
+                    [fts_query, *params, bounded],
+                ).fetchall()
+            except sqlite3.DatabaseError:
+                rows = []
+        if not rows:
+            if query_text:
+                like = f"%{query_text}%"
+                extra = " AND " if clauses else " WHERE "
+                rows = self.conn.execute(
+                    f"""SELECT m.* FROM conversation_messages AS m{where}{extra}
+                       m.content LIKE ? COLLATE NOCASE
+                       ORDER BY m.created_at DESC, m.id DESC LIMIT ?""",
+                    [*params, like, bounded],
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    f"SELECT m.* FROM conversation_messages AS m{where} "
+                    "ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
+                    [*params, bounded],
+                ).fetchall()
+        return [dict(row) for row in rows]
 
     def summarize_conversation(self, conversation_id: int, max_chars: int = 1200) -> str | None:
         """Create a compact local summary from stored messages."""
@@ -213,6 +358,7 @@ class ConversationStore:
                 ),
             )
         self.conn.commit()
+        self._init_recall_index()
         return imported
 
     def list_messages(self) -> list[dict]:
@@ -224,6 +370,11 @@ class ConversationStore:
 
     def delete_conversation(self, conversation_id: int) -> bool:
         """Delete a conversation and all its messages."""
+        if self.recall_enabled:
+            try:
+                self.conn.execute("DELETE FROM conversation_recall WHERE conversation_id = ?", (str(conversation_id),))
+            except sqlite3.DatabaseError:
+                self.recall_enabled = False
         self.conn.execute(
             "DELETE FROM conversation_messages WHERE conversation_id = ?",
             (conversation_id,),

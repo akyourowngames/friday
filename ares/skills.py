@@ -72,6 +72,48 @@ class Skill:
         raw = self.metadata.get("disable-model-invocation", self.metadata.get("disable_model_invocation", False))
         return not _as_bool(raw)
 
+    @property
+    def co_load_with(self) -> tuple[str, ...]:
+        """Return explicitly declared compatible skills for intentional bundles."""
+        raw = self.metadata.get("co-load-with", self.metadata.get("co_load_with", []))
+        if isinstance(raw, str):
+            raw = [part.strip() for part in raw.split(",")]
+        if not isinstance(raw, list):
+            return ()
+        names: list[str] = []
+        for value in raw:
+            name = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+            if name and SKILL_NAME_RE.match(name) and name not in names:
+                names.append(name)
+        return tuple(names)
+
+    @property
+    def co_load_triggers(self) -> tuple[str, ...]:
+        """Return precise phrases required before this skill joins a bundle."""
+        raw = self.metadata.get("co-load-triggers", self.metadata.get("co_load_triggers", []))
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return ()
+        return tuple(
+            phrase for value in raw
+            if (phrase := " ".join(str(value or "").lower().split()))
+        )
+
+    @property
+    def requires_primary(self) -> tuple[str, ...]:
+        """Return primary skills required for this skill to auto-load."""
+        raw = self.metadata.get("requires-primary", self.metadata.get("requires_primary", []))
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return ()
+        return tuple(
+            name for value in raw
+            if (name := str(value or "").strip().lower().replace("_", "-").replace(" ", "-"))
+            and SKILL_NAME_RE.match(name)
+        )
+
     def context_block(self, max_chars: int = 6000) -> str:
         """Render full skill instructions for hidden model context."""
         parts = [
@@ -155,16 +197,75 @@ class SkillManager:
         if not query_tokens and not query_l.strip():
             return []
 
+        # A website/web-app request has one execution route: Playwright.  Words
+        # such as "latest" and "summarize" describe the page task, not a
+        # request to load generic research or code-review playbooks.  Keeping
+        # this route exclusive prevents unrelated skill instructions from
+        # competing with browser evidence and stale-reference recovery.
+        browser_request = (
+            query_tokens & BROWSER_AUTOMATION_TOKENS
+            and not any(phrase in query_l for phrase in BROWSER_WINDOW_EXCEPTIONS)
+        )
+
         scored: list[tuple[int, Skill]] = []
         for skill in self.list_all():
             if not skill.model_invocable:
+                continue
+            if skill.requires_primary and not browser_request:
                 continue
             score = self._relevance_score(skill, query_l, query_tokens)
             if score >= min_score:
                 scored.append((score, skill))
 
         scored.sort(key=lambda item: (-item[0], item[1].category, item[1].name))
-        return [skill for _, skill in scored[: max(0, limit)]]
+        bounded_limit = max(0, limit)
+        if not bounded_limit:
+            return []
+
+        if browser_request:
+            browser_skill = next(
+                (skill for skill in self.list_all() if skill.model_invocable and skill.name == "browser-use"),
+                None,
+            )
+            if browser_skill is not None:
+                # Browser Use is the sole primary route for web pages.  A
+                # companion may join only when it declares compatibility and
+                # independently matches an explicit sub-task (form filling,
+                # drafting a reply, content review, etc.).
+                return self._select_compatible_skills(browser_skill, scored, query_l, bounded_limit)
+
+        if not scored:
+            return []
+        # Default to one focused primary skill.  Extra instructions are added
+        # only through an explicit co-load declaration or a user-named skill.
+        return self._select_compatible_skills(scored[0][1], scored, query_l, bounded_limit)
+
+    @staticmethod
+    def _is_explicitly_named(skill: Skill, query_l: str) -> bool:
+        return skill.name in query_l or skill.name.replace("-", " ") in query_l
+
+    def _select_compatible_skills(
+        self,
+        primary: Skill,
+        scored: list[tuple[int, Skill]],
+        query_l: str,
+        limit: int,
+    ) -> list[Skill]:
+        """Select a primary skill plus only compatible, independently matched peers."""
+        selected = [primary]
+        primary_allows = set(primary.co_load_with)
+        for _score, candidate in scored:
+            if candidate.name == primary.name or len(selected) >= limit:
+                continue
+            compatible = candidate.name in primary_allows or primary.name in set(candidate.co_load_with)
+            explicitly_named = self._is_explicitly_named(candidate, query_l)
+            trigger_matches = not candidate.co_load_triggers or any(
+                trigger in query_l for trigger in candidate.co_load_triggers
+            )
+            primary_matches = not candidate.requires_primary or primary.name in set(candidate.requires_primary)
+            if explicitly_named or (compatible and trigger_matches and primary_matches):
+                selected.append(candidate)
+        return selected
 
     def selection_reason(self, skill: Skill, user_input: str) -> str:
         """Explain the direct request signal that selected a skill."""

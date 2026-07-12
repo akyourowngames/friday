@@ -45,6 +45,21 @@ operate the visible desktop/browser window.
    submit, login, a destructive/externally visible action, or an unexpected
    result. Do not add a round trip after each deterministic keystroke.
 
+## Stale Reference Recovery
+
+Playwright `ref` values belong only to the snapshot that produced them. If an
+interaction reports a stale, invalid, missing, or unknown reference:
+
+1. Do **not** retry the same `ref`.
+2. Take exactly one fresh `browser_snapshot`.
+3. Select a target that exists in that fresh snapshot and make at most one
+   evidence-based retry.
+4. If the fresh snapshot also fails, stop and report the browser state instead
+   of guessing, repeatedly clicking, or switching to unsafe browser code.
+
+Any click, navigation, form submission, or visible page transition can make the
+previous snapshot stale. Re-observe before the next interaction.
+
 ## Fast, Safe Paths
 
 - Fill related fields in one `browser_fill_form` call instead of one snapshot

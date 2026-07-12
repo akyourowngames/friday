@@ -37,7 +37,7 @@ async def test_official_registry_uses_v01_search_parameter():
             200,
             json={
                 "servers": [
-                    {"server": {"name": "io.example/weather", "title": "Weather", "description": "Forecast data", "version": "1.0.0"}},
+                    {"server": {"name": "io.example/weather", "title": "Weather", "description": "Forecast data", "version": "1.0.0", "stats": {"stars": 84, "downloads": 1200}}},
                     {"server": {"name": "io.example/notes", "title": "Notes", "description": "Local notes", "version": "1.0.0"}},
                 ]
             },
@@ -51,6 +51,8 @@ async def test_official_registry_uses_v01_search_parameter():
     results = await client.search("forecast")
 
     assert [item.name for item in results] == ["io.example/notes", "io.example/weather"]
+    assert results[1].stars == 84
+    assert results[1].downloads == 1200
 
 
 @pytest.mark.asyncio

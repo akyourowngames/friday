@@ -58,6 +58,7 @@ async def test_clawhub_search_details_and_versions_normalize_current_api_shapes(
                             },
                             "owner": {"handle": "ares"},
                             "score": 0.9,
+                            "stats": {"stars": 42, "downloads": 900},
                         }
                     ]
                 },
@@ -92,6 +93,8 @@ async def test_clawhub_search_details_and_versions_normalize_current_api_shapes(
     assert detail is not None
     assert detail.dependencies[0].name == "weather-api"
     assert detail.security_status == "clean"
+    assert results[0].stars == 42
+    assert results[0].downloads == 900
     assert versions[0].changelog == "Better data"
 
 

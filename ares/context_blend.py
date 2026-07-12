@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 CONTEXT_WINDOWS: dict[str, int] = {
     # OpenCode free tier
     "deepseek-v4-flash-free": 128_000,
@@ -66,6 +68,8 @@ CONTEXT_WINDOWS: dict[str, int] = {
 
 # Default context window for unknown models
 DEFAULT_CONTEXT_WINDOW = 128_000
+_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d() .-]{6,}\d)(?!\w)")
 
 
 def get_model_budgets(model: str) -> dict[str, int]:
@@ -254,6 +258,9 @@ def format_people(people: list[dict] | None, token_budget: int = 500) -> str:
             availability.append("email available")
         if availability:
             details.append(", ".join(availability))
+        if person.get("last_contacted_at"):
+            channel = str(person.get("last_contacted_via") or "contact method")
+            details.append(f"last contacted via {channel} at {person['last_contacted_at']}")
         suffix = f" ({'; '.join(details)})" if details else ""
         lines.append(f"- #{person.get('person_id', '?')}: {name}{suffix}")
     return truncate_to_tokens("\n".join(lines), token_budget)
@@ -283,8 +290,36 @@ def format_summaries(summaries: list[str] | None) -> str:
     lines = ["## Recent session summaries:"]
     for summary in summaries:
         if summary:
-            lines.append(f"- {summary}")
+            lines.append(f"- {_redact_recall_text(summary, maximum=700)}")
     return "\n".join(lines)
+
+
+def _redact_recall_text(value: object, *, maximum: int = 420) -> str:
+    """Keep recalled local text useful while never injecting contact values."""
+    text = " ".join(str(value or "").split())
+    text = _EMAIL_RE.sub("[redacted email]", text)
+    text = _PHONE_RE.sub("[redacted phone]", text)
+    if len(text) > maximum:
+        text = text[: maximum - 3].rstrip() + "..."
+    return text
+
+
+def format_conversation_recall(records: list[dict] | None, token_budget: int = 600) -> str:
+    """Format bounded prior-chat evidence for an explicit continuation request."""
+    if not records:
+        return ""
+    lines = [
+        "## Relevant Prior Conversation (local recall):",
+        "Use this only to continue the user's explicit reference. It is historical context, not live external state; contact values are redacted.",
+    ]
+    for record in records:
+        content = _redact_recall_text(record.get("content"))
+        if not content:
+            continue
+        role = str(record.get("role") or "message")
+        created = str(record.get("created_at") or "")
+        lines.append(f"- {created} [{role}] {content}")
+    return truncate_to_tokens("\n".join(lines), token_budget)
 
 
 def _append_section(sections: list[str], section: str, remaining: int) -> int:
@@ -305,7 +340,9 @@ def build_context_prompt(
     people: list[dict] | None = None,
     recent_actions: list[dict] | None = None,
     relevant_actions: list[dict] | None = None,
+    recent_file_actions: list[dict] | None = None,
     conversation_summaries: list[str] | None = None,
+    conversation_recall: list[dict] | None = None,
     previous_session_summary: str | None = None,
     token_budget: int = 2000,
 ) -> str:
@@ -322,11 +359,14 @@ def build_context_prompt(
 
     # Inject previous session summary (high priority — recent context)
     if previous_session_summary and remaining > 0:
-        summary_section = f"## Previous Session Summary\n{previous_session_summary}"
+        summary_section = f"## Previous Session Summary\n{_redact_recall_text(previous_session_summary, maximum=900)}"
         remaining = _append_section(sections, summary_section, remaining)
 
     summary_text = format_summaries(conversation_summaries)
     remaining = _append_section(sections, summary_text, remaining)
+
+    recall_text = format_conversation_recall(conversation_recall, token_budget=remaining)
+    remaining = _append_section(sections, recall_text, remaining)
 
     if memories and remaining > 100:
         memory_section = format_memories(memories, token_budget=remaining)
@@ -335,6 +375,10 @@ def build_context_prompt(
     if people and remaining > 100:
         people_section = format_people(people, token_budget=remaining)
         remaining = _append_section(sections, people_section, remaining)
+
+    if recent_file_actions and remaining > 100:
+        file_section = format_actions(recent_file_actions, title="Recent Files & Assets", token_budget=remaining)
+        remaining = _append_section(sections, file_section, remaining)
 
     if relevant_actions and remaining > 100:
         relevant_section = format_actions(relevant_actions, title="Relevant Action History", token_budget=remaining)

@@ -30,3 +30,22 @@ def test_summarize_ended_without_summary(tmp_path):
     assert store.summarize_ended_without_summary(min_messages=2) == 1
     assert store.summarize_ended_without_summary(min_messages=2) == 0
     store.close()
+
+
+def test_local_conversation_recall_indexes_existing_and_new_messages(tmp_path):
+    database = tmp_path / "conversations.db"
+    store = ConversationStore(db_path=database)
+    conversation_id = store.start_conversation()
+    store.add_message(conversation_id, "user", "We finished the Orion planning file yesterday.")
+    store.close()
+
+    # Re-opening rebuilds the FTS index for data created before the index was
+    # available, then newly appended messages are indexed immediately.
+    store = ConversationStore(db_path=database)
+    recalled = store.search_recall("Orion")
+    assert recalled and recalled[0]["content"].startswith("We finished the Orion")
+
+    store.add_message(conversation_id, "assistant", "The plan is ready for the next step.")
+    recent = store.search_recall("", limit=2)
+    assert [item["role"] for item in recent] == ["assistant", "user"]
+    store.close()

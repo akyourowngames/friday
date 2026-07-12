@@ -128,6 +128,8 @@ class PeopleStore:
                 important_dates_json TEXT NOT NULL DEFAULT '{}',
                 notes                TEXT NOT NULL DEFAULT '',
                 last_referenced_at   TEXT,
+                last_contacted_at    TEXT,
+                last_contacted_via   TEXT NOT NULL DEFAULT '',
                 created_at           TEXT NOT NULL,
                 updated_at           TEXT NOT NULL,
                 source               TEXT NOT NULL DEFAULT 'manual',
@@ -136,6 +138,7 @@ class PeopleStore:
             )
             """
         )
+        self._ensure_metadata_columns()
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS person_aliases (
@@ -150,6 +153,18 @@ class PeopleStore:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_people_recent ON people_meta(last_referenced_at DESC, created_at DESC)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_person ON person_aliases(person_id)")
         self.conn.commit()
+
+    def _ensure_metadata_columns(self) -> None:
+        """Migrate contact-status metadata without disturbing saved contacts."""
+        columns = {
+            "last_contacted_at": "TEXT",
+            "last_contacted_via": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in columns.items():
+            try:
+                self.conn.execute(f"SELECT {name} FROM people_meta LIMIT 1")
+            except sqlite3.OperationalError:
+                self.conn.execute(f"ALTER TABLE people_meta ADD COLUMN {name} {definition}")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -183,6 +198,8 @@ class PeopleStore:
             "important_dates": important_dates if isinstance(important_dates, dict) else {},
             "notes": row["notes"] or "",
             "last_referenced_at": row["last_referenced_at"],
+            "last_contacted_at": row["last_contacted_at"],
+            "last_contacted_via": row["last_contacted_via"] or "",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "source": row["source"],
@@ -363,6 +380,55 @@ class PeopleStore:
             raise PersonResolutionError(f"{person['canonical_name']} has no saved email address.")
         self._touch([person["person_id"]])
         return person
+
+    def mentioned_in(self, text: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        """Find explicitly saved names/aliases mentioned in a user request.
+
+        This only matches whole normalized aliases already saved by the user;
+        it never mines names or contact data from conversations or tool output.
+        """
+        normalized_text = normalize_reference(text)
+        if not normalized_text:
+            return []
+        padded = f" {normalized_text} "
+        bounded = max(1, min(int(limit), 20))
+        rows = self.conn.execute(
+            """
+            SELECT p.*, a.alias_normalized FROM people_meta AS p
+            JOIN person_aliases AS a ON a.person_id = p.person_id
+            ORDER BY LENGTH(a.alias_normalized) DESC, p.updated_at DESC
+            """
+        ).fetchall()
+        matched: list[int] = []
+        for row in rows:
+            alias = str(row["alias_normalized"] or "")
+            if len(alias) < 3 or f" {alias} " not in padded:
+                continue
+            person_id = int(row["person_id"])
+            if person_id not in matched:
+                matched.append(person_id)
+            if len(matched) >= bounded:
+                break
+        self._touch(matched)
+        return [self.get(person_id, include_sensitive=False) or {} for person_id in matched]
+
+    def mark_contacted(self, reference: str, *, channel: str) -> bool:
+        """Record a successful use of a saved alias without exposing its value."""
+        normalized_channel = str(channel or "").strip().casefold()
+        if normalized_channel not in {"email", "sms", "phone"}:
+            raise ValueError("channel must be email, sms, or phone")
+        try:
+            person = self.resolve(reference)
+        except PersonResolutionError:
+            return False
+        with self._transaction():
+            self.conn.execute(
+                """UPDATE people_meta
+                   SET last_contacted_at = ?, last_contacted_via = ?, updated_at = ?
+                   WHERE person_id = ?""",
+                (utc_now(), normalized_channel, utc_now(), person["person_id"]),
+            )
+        return True
 
     def update(
         self,

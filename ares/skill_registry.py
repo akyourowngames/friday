@@ -62,6 +62,8 @@ class SkillResult:
     registry: str
     canonical_url: str = ""
     suspicious: bool = False
+    stars: int | None = None
+    downloads: int | None = None
 
     @property
     def reference(self) -> str:
@@ -91,6 +93,8 @@ class SkillDetail:
     suspicious: bool = False
     security_status: str = "unknown"
     metadata: dict[str, Any] = field(default_factory=dict)
+    stars: int | None = None
+    downloads: int | None = None
 
     @property
     def reference(self) -> str:
@@ -339,6 +343,8 @@ class SkillRegistryClient:
             suspicious=suspicious,
             security_status=str(moderation.get("verdict") or moderation.get("status") or "unknown"),
             metadata=dict(metadata),
+            stars=_public_count(payload, data, latest, names=("stars", "starCount", "stargazersCount")),
+            downloads=_public_count(payload, data, latest, names=("downloads", "downloadCount", "installs", "installCount")),
         )
 
     async def _get_versions(self, registry: SkillRegistry, slug: str) -> list[SkillVersion]:
@@ -392,6 +398,8 @@ class SkillRegistryClient:
             registry=registry.name,
             canonical_url=_canonical_skill_url(registry, owner, slug, item),
             suspicious=bool(moderation.get("isSuspicious") or moderation.get("isMalwareBlocked")),
+            stars=_public_count(raw, item, latest, names=("stars", "starCount", "stargazersCount")),
+            downloads=_public_count(raw, item, latest, names=("downloads", "downloadCount", "installs", "installCount")),
         )
 
     async def _request(
@@ -664,6 +672,33 @@ def _owner_name(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("handle") or value.get("name") or value.get("username") or "")
     return str(value or "")
+
+
+def _public_count(*values: Any, names: tuple[str, ...]) -> int | None:
+    """Read an optional public popularity field without inventing one.
+
+    Registries use several shapes and many do not publish popularity at all.
+    A missing value remains ``None`` so callers can say that clearly instead
+    of relabelling search relevance as a star count.
+    """
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        containers = (value, value.get("stats"), value.get("metrics"), value.get("metadata"))
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            for name in names:
+                raw = container.get(name)
+                if isinstance(raw, bool):
+                    continue
+                try:
+                    count = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if count >= 0:
+                    return count
+    return None
 
 
 def _nested(value: dict[str, Any], *keys: str) -> Any:

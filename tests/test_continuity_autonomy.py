@@ -12,6 +12,7 @@ from rich.console import Console
 from ares.actions import ActionLedger
 from ares.agent import Agent
 from ares.autonomy import AutonomousWorkflowRunner
+from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig, PhoneConfig
 from ares.people import PeopleStore, PersonConflictError
@@ -38,6 +39,11 @@ def test_people_store_resolves_exact_aliases_and_redacts_search_output(tmp_path)
         assert safe["has_phone"] is True and safe["has_email"] is True
         assert safe["phone_hint"].endswith("0123")
         assert "phone" not in safe and "email" not in safe
+
+        assert store.mark_contacted("mom", channel="email") is True
+        contacted = store.search("mom", include_sensitive=False)[0]
+        assert contacted["last_contacted_via"] == "email"
+        assert contacted["last_contacted_at"]
 
         with pytest.raises(PersonConflictError):
             store.create("Different Person", aliases=["mom"])
@@ -171,6 +177,53 @@ def test_agent_context_includes_redacted_people_and_relevant_action_history(tmp_
         assert "brief.md" in context
     finally:
         agent.tool_executor.close()
+        memory.close()
+
+
+def test_agent_continuation_recalls_saved_alias_and_redacts_prior_chat(tmp_path, fake_embedding_provider):
+    data_dir = tmp_path / "data"
+    database = data_dir / "ares.db"
+    memory = MemoryStore(db_path=database, embedding_provider=fake_embedding_provider)
+    conversations = ConversationStore(database)
+    agent = Agent(memory, conversation_store=conversations, config=AppConfig(data_dir=str(data_dir)))
+    try:
+        agent.people_store.create("Rohit", aliases=["rohit"], email="rohit@example.test")
+        conversation_id = conversations.start_conversation()
+        conversations.add_exchange(
+            conversation_id,
+            "Please send the project note to Rohit at rohit@example.test.",
+            "I will use the saved contact alias after confirmation.",
+        )
+        context = agent.get_context("Continue the email to Rohit from 5 days ago")
+        assert "Rohit" in context
+        assert "email available" in context
+        assert "Relevant Prior Conversation" in context
+        assert "[redacted email]" in context
+        assert "rohit@example.test" not in context
+    finally:
+        agent.tool_executor.close()
+        conversations.close()
+        memory.close()
+
+
+def test_plain_continue_keeps_recent_recall_when_an_older_turn_matches_the_word(tmp_path, fake_embedding_provider):
+    data_dir = tmp_path / "data"
+    database = data_dir / "ares.db"
+    memory = MemoryStore(db_path=database, embedding_provider=fake_embedding_provider)
+    conversations = ConversationStore(database)
+    agent = Agent(memory, conversation_store=conversations, config=AppConfig(data_dir=str(data_dir)))
+    try:
+        conversation_id = conversations.start_conversation()
+        conversations.add_message(conversation_id, "user", "Continue the old invoice discussion.")
+        conversations.add_message(conversation_id, "user", "The current task is the Aurora release checklist.")
+
+        context = agent.get_context("continue")
+
+        assert "old invoice" in context
+        assert "Aurora release checklist" in context
+    finally:
+        agent.tool_executor.close()
+        conversations.close()
         memory.close()
 
 
@@ -312,6 +365,9 @@ def test_agent_resolves_gmail_alias_before_mcp_without_leaking_email_to_ledger(t
         assert action["target"] == "uma"
         assert "uma@example.test" not in json.dumps(action)
         assert "private email body" not in json.dumps(action)
+        contact = agent.people_store.resolve("uma", require="email")
+        assert contact["last_contacted_via"] == "email"
+        assert contact["last_contacted_at"]
 
         calendar_call = {
             "id": "calendar-1",
@@ -328,6 +384,39 @@ def test_agent_resolves_gmail_alias_before_mcp_without_leaking_email_to_ledger(t
         assert mcp.calls[1][1]["attendees"] == ["uma@example.test"]
         calendar_action = next(item for item in agent.action_ledger.list_all() if item["action_type"] == "calendar_event_created")
         assert "uma@example.test" not in json.dumps(calendar_action)
+    finally:
+        agent.tool_executor.close()
+        memory.close()
+
+
+def test_agent_adds_playwright_stale_ref_recovery_without_blind_retry(tmp_path, fake_embedding_provider):
+    class FakeMCP:
+        tool_definitions: list[dict] = []
+
+        def __init__(self):
+            self.calls = 0
+
+        async def call_tool(self, _name: str, _args: dict) -> str:
+            self.calls += 1
+            return "Error: reference e17 is stale and does not exist."
+
+    data_dir = tmp_path / "data"
+    memory = MemoryStore(db_path=data_dir / "ares.db", embedding_provider=fake_embedding_provider)
+    mcp = FakeMCP()
+    agent = Agent(memory, config=AppConfig(data_dir=str(data_dir)), mcp_manager=mcp)
+    try:
+        call = {
+            "id": "playwright-1",
+            "type": "function",
+            "function": {
+                "name": "mcp__playwright__browser_click",
+                "arguments": json.dumps({"ref": "e17"}),
+            },
+        }
+        result = asyncio.run(agent.process_tool_calls_async([call]))[0]["content"]
+        assert mcp.calls == 1
+        assert "Do not retry that ref" in result
+        assert "fresh browser_snapshot" in result
     finally:
         agent.tool_executor.close()
         memory.close()

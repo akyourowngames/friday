@@ -130,7 +130,10 @@ def test_project_agent_skills_are_discovered_from_cwd(tmp_path, monkeypatch):
 def test_builtin_skills_and_tool_definitions_are_available(tmp_path):
     manager = SkillManager([tmp_path])
     names = {skill.name for skill in manager.list_all()}
-    assert {"code-review", "web-research", "daily-planner", "computer-use", "browser-use"}.issubset(names)
+    assert {
+        "code-review", "web-research", "daily-planner", "computer-use", "browser-use",
+        "browser-form-workflow", "browser-content-review", "conversation-conduct",
+    }.issubset(names)
     assert "auto-load relevant skills silently" in manager.compact_index()
 
     relevant = manager.relevant_skills("Open Notepad, type a note, and save it on my desktop")
@@ -156,6 +159,36 @@ def test_auto_loaded_skills_require_direct_intent_signals(tmp_path):
     assert "computer-use" not in browser_skills
     browser_use = next(skill for skill in manager.relevant_skills("open Instagram using MCP") if skill.name == "browser-use")
     assert manager.selection_reason(browser_use, "open Instagram using MCP") == "matches a browser action request"
+
+
+def test_browser_request_does_not_autoload_generic_research_or_code_skills(tmp_path):
+    manager = SkillManager([tmp_path])
+
+    relevant = manager.relevant_skills(
+        "open Instagram, go to the group, and summarize the latest message"
+    )
+
+    assert [skill.name for skill in relevant] == ["browser-use", "browser-content-review"]
+
+
+def test_skill_selection_uses_only_explicitly_triggered_compatible_companions(tmp_path):
+    manager = SkillManager([tmp_path])
+
+    form = manager.relevant_skills("open the portal and fill the web form, then submit it")
+    assert [skill.name for skill in form] == ["browser-use", "browser-form-workflow"]
+
+    browser_reply = manager.relevant_skills("open the web chat and draft a reply, but do not send it")
+    assert [skill.name for skill in browser_reply] == ["browser-use", "conversation-conduct"]
+
+    standalone_reply = manager.relevant_skills("draft a concise reply to this message")
+    assert [skill.name for skill in standalone_reply] == ["conversation-conduct"]
+
+    plain_browser = manager.relevant_skills("open a website")
+    assert [skill.name for skill in plain_browser] == ["browser-use"]
+
+    assert "browser-form-workflow" not in {
+        skill.name for skill in manager.relevant_skills("what is the latest in news")
+    }
 
 
 def test_browser_and_windows_skills_have_clear_non_overlapping_routes(tmp_path):

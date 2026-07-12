@@ -93,6 +93,10 @@ class Agent:
         self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
         self.tool_executor.skill_manager = self.skill_manager
 
+    def set_session_id(self, session_id: str | None) -> None:
+        """Update local provenance scope when a long-lived surface switches chats."""
+        self._session_id = session_id
+        self.tool_executor.set_session_id(session_id)
 
     def refresh_tools(self) -> None:
         """Refresh the advertised tool list, including connected MCP tools."""
@@ -169,18 +173,67 @@ class Agent:
         # People context intentionally contains names/relations/aliases and
         # availability flags only. Phone numbers, email addresses, notes, and
         # dates remain local and are resolved at dispatch time.
-        people = self.people_store.recent_for_context(limit=max(3, min(max_retrieval, 8))) if self.people_store else []
+        people: list[dict] = []
+        if self.people_store:
+            # A named saved person must win over generic recency.  This lets a
+            # continuation such as "email Rohit" use the local alias resolver
+            # without ever placing the address in model context.
+            named_people = self.people_store.mentioned_in(user_input, limit=4)
+            recent_people = self.people_store.recent_for_context(limit=max(3, min(max_retrieval, 8)))
+            seen_people: set[int] = set()
+            for person in [*named_people, *recent_people]:
+                person_id = int(person.get("person_id", 0) or 0)
+                if person_id and person_id not in seen_people:
+                    seen_people.add(person_id)
+                    people.append(person)
 
         recent_actions = self.action_ledger.recent(limit=5) if self.action_ledger else []
         relevant_actions: list[dict] = []
+        conversation_recall: list[dict] = []
+        since = None
         if self.action_ledger and has_reference_language(user_input):
             try:
                 since = extract_since_reference(user_input)
                 relevant_actions = self.action_ledger.search(user_input, since=since, limit=max(3, min(max_retrieval, 8)))
-                if not relevant_actions and since:
-                    relevant_actions = self.action_ledger.search(since=since, limit=max(3, min(max_retrieval, 8)))
+                fallback_actions = self.action_ledger.search(since=since, limit=max(3, min(max_retrieval, 8)))
+                known_action_ids = {action.get("action_id") for action in relevant_actions}
+                relevant_actions.extend(
+                    action for action in fallback_actions
+                    if action.get("action_id") not in known_action_ids
+                )
+                relevant_actions = relevant_actions[: max(3, min(max_retrieval, 8))]
             except ValueError:
                 relevant_actions = []
+
+        if self.conversation_store is not None and has_reference_language(user_input):
+            try:
+                # Search exact wording first, then fall back to a bounded
+                # recent/time-filtered window so "continue" never becomes a
+                # false negative merely because it has no lexical match.
+                conversation_recall = self.conversation_store.search_recall(
+                    user_input, since=since, limit=max(3, min(max_retrieval, 8))
+                )
+                fallback_recall = self.conversation_store.search_recall(
+                    since=since, limit=max(3, min(max_retrieval, 8))
+                )
+                known_message_ids = {record.get("id") for record in conversation_recall}
+                conversation_recall.extend(
+                    record for record in fallback_recall
+                    if record.get("id") not in known_message_ids
+                )
+                conversation_recall = conversation_recall[: max(3, min(max_retrieval, 8))]
+            except ValueError:
+                conversation_recall = []
+
+        file_action_types = {
+            "file_created", "file_edited", "file_deleted", "file_moved", "file_copied",
+            "directory_created", "files_batch_changed", "image_generated", "image_edited",
+            "export_created",
+        }
+        recent_file_actions = [
+            action for action in [*relevant_actions, *recent_actions]
+            if action.get("action_type") in file_action_types
+        ][:3]
 
         summaries = []
         if self.conversation_store is not None:
@@ -199,7 +252,9 @@ class Agent:
             people=people,
             recent_actions=recent_actions,
             relevant_actions=relevant_actions,
+            recent_file_actions=recent_file_actions,
             conversation_summaries=summaries,
+            conversation_recall=conversation_recall,
             previous_session_summary=prev_summary,
             token_budget=token_budget,
         )
@@ -337,6 +392,7 @@ class Agent:
                             tool_name,
                             self._resolve_external_person_arguments(tool_name, args),
                         )
+                    result = self._with_playwright_recovery(tool_name, result)
                     executor = getattr(self, "tool_executor", None)
                     if executor is not None:
                         executor.record_external_action(tool_name, args, result)
@@ -362,6 +418,31 @@ class Agent:
             tool_calls,
             mcp_results=mcp_results,
             local_results=local_results,
+        )
+
+    @staticmethod
+    def _with_playwright_recovery(tool_name: str, result: str) -> str:
+        """Turn stale Playwright evidence into one deterministic next step.
+
+        The agent must not repeat a click/type with an old accessibility ref:
+        page mutations invalidate it.  Giving the model this compact recovery
+        instruction prevents blind retries while preserving the original error.
+        """
+        lowered_tool = str(tool_name).casefold()
+        text = str(result or "")
+        lowered = text.casefold()
+        is_browser_interaction = lowered_tool.startswith("mcp__playwright__browser_") and any(
+            token in lowered_tool for token in ("click", "type", "fill", "select", "press")
+        )
+        stale_ref = ("ref" in lowered or "reference" in lowered) and any(
+            token in lowered for token in ("stale", "not found", "does not exist", "invalid", "unknown")
+        )
+        if not is_browser_interaction or not stale_ref:
+            return text
+        return (
+            f"{text}\n\nPlaywright recovery: the prior page reference is invalid. "
+            "Do not retry that ref. Take one fresh browser_snapshot, choose a ref from that snapshot, "
+            "and make at most one evidence-based retry. If the snapshot cannot be obtained, stop and report the browser state."
         )
 
     def _process_tool_calls_core(

@@ -44,6 +44,8 @@ class MCPResult:
     title: str = ""
     canonical_url: str = ""
     verified: bool = False
+    stars: int | None = None
+    downloads: int | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ class MCPServerDetail:
     remotes: list[dict[str, Any]] = field(default_factory=list)
     canonical_url: str = ""
     verified: bool = False
+    stars: int | None = None
+    downloads: int | None = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +245,8 @@ class MCPRegistryClient:
             remotes=[dict(item) for item in remotes if isinstance(item, dict)],
             canonical_url=result.canonical_url,
             verified=result.verified,
+            stars=result.stars,
+            downloads=result.downloads,
         )
 
     async def _request(
@@ -411,6 +417,8 @@ def _to_result(registry: MCPRegistry, entry: Any) -> MCPResult | None:
         registry=registry.name,
         canonical_url=str(canonical),
         verified=bool(raw.get("verified") or raw.get("isVerified")),
+        stars=_public_count(raw, names=("stars", "starCount", "stargazersCount")),
+        downloads=_public_count(raw, names=("downloads", "downloadCount", "installs", "installCount")),
     )
 
 
@@ -420,6 +428,26 @@ def _is_official_registry(registry: MCPRegistry) -> bool:
 
 def _is_smithery(registry: MCPRegistry) -> bool:
     return registry.name.casefold() == "smithery" or "smithery.ai" in registry.api_base
+
+
+def _public_count(value: Any, *, names: tuple[str, ...]) -> int | None:
+    """Return registry-published popularity data only; never infer a count."""
+    if not isinstance(value, dict):
+        return None
+    for container in (value, value.get("stats"), value.get("metrics"), value.get("metadata")):
+        if not isinstance(container, dict):
+            continue
+        for name in names:
+            raw = container.get(name)
+            if isinstance(raw, bool):
+                continue
+            try:
+                count = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if count >= 0:
+                return count
+    return None
 
 
 def _safe_https_url(value: str) -> bool:

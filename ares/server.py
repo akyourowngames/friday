@@ -128,6 +128,7 @@ class AresServer:
         self.agent = agent or Agent(
             config=self.config,
             memory_store=self.memory_store,
+            conversation_store=self.conversation_store,
             mcp_manager=self.mcp_manager,
         )
 
@@ -336,6 +337,8 @@ class AresServer:
         else:
             session_id = self.conversation_store.start_conversation()
         self.conversation_id = session_id
+        if hasattr(self.agent, "set_session_id"):
+            self.agent.set_session_id(f"conversation-{session_id}")
         history = self._conversation_history(session_id)
         history = self._sanitize_history(history)
         history = self.context_manager.before_send(history)
@@ -605,8 +608,11 @@ class AresServer:
     async def _handle_new_session(self, websocket: Any) -> None:
         if self.conversation_id:
             try:
-                history = self._conversation_history(self.conversation_id)
-                self.context_manager.after_session(history)
+                # Durable chat recall is indexed at write time.  Keep session
+                # rotation local and non-blocking instead of waiting on an LLM
+                # extraction call while the user starts a new chat.
+                self.conversation_store.summarize_conversation(self.conversation_id)
+                self.conversation_store.end_conversation(self.conversation_id)
             except Exception:
                 pass
         self.conversation_id = None
@@ -636,6 +642,8 @@ class AresServer:
     async def _handle_load_session(self, websocket: Any, message: dict[str, Any]) -> None:
         session_id = int(message.get("session_id") or self.conversation_id)
         self.conversation_id = session_id
+        if hasattr(self.agent, "set_session_id"):
+            self.agent.set_session_id(f"conversation-{session_id}")
         await self._send(
             websocket,
             {

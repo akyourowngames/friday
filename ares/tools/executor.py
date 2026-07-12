@@ -597,8 +597,39 @@ class ToolExecutor:
             return None
 
     def record_external_action(self, tool_name: str, args: dict, result: str) -> int | None:
-        """Record consequential MCP outcomes after Agent dispatch completes."""
-        return self._record_consequential_action(tool_name, args, result)
+        """Record consequential MCP outcomes after Agent dispatch completes.
+
+        For a saved person alias, successful communication also updates local
+        relationship state.  Direct addresses/numbers are intentionally not
+        imported or matched: the user must explicitly save a person first.
+        """
+        action_id = self._record_consequential_action(tool_name, args, result)
+        if action_id is None or self.people_store is None:
+            return action_id
+        spec = self._action_spec(tool_name, args, result)
+        if spec is None:
+            return action_id
+        action_type = spec[0]
+        channel_by_action = {
+            "email_sent": "email",
+            "sms_sent": "sms",
+            "phone_call_placed": "phone",
+        }
+        channel = channel_by_action.get(action_type)
+        if channel is None:
+            return action_id
+        reference = args.get("to") or args.get("recipient") or args.get("number")
+        for candidate in str(reference or "").split(","):
+            alias = candidate.strip()
+            if not alias or "@" in alias:
+                continue
+            try:
+                self.people_store.mark_contacted(alias, channel=channel)
+            except Exception:
+                # Contact-status bookkeeping must never turn a completed
+                # external action into a reported failure.
+                continue
+        return action_id
 
     # ── Skills ─────────────────────────────────────────────────────
 

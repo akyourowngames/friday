@@ -1,8 +1,10 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import ares.channels.telegram as telegram_module
 from ares.channels.store import ChannelStore
 from ares.channels.telegram import TelegramChannel, _split_message, run_telegram_channel
 from ares.channels.audio import EnglishAudioTranscriber, EnglishTranscript
@@ -168,6 +170,105 @@ async def test_unauthorized_start_never_runs_agent(telegram_channel):
     assert api.messages == [
         (999, "Ares is running, but this chat is not authorized. Chat ID: 999. On the PC, add it to telegram.allowed_chat_ids, then restart Ares.", 6)
     ]
+
+
+@pytest.mark.asyncio
+async def test_help_exposes_marketplace_commands_to_an_authorized_chat(telegram_channel):
+    channel, _conversations, api, _state = telegram_channel
+
+    await channel._handle_update(
+        {
+            "update_id": 111,
+            "message": {"message_id": 61, "chat": {"id": 123, "type": "private"}, "text": "/help"},
+        }
+    )
+
+    response = api.messages[-1][1]
+    assert "/skills [list|search|info|install]" in response
+    assert "/mcp [list|search|info|add|test|refresh]" in response
+    assert "/confirm <code>" in response
+
+
+@pytest.mark.asyncio
+async def test_mcp_status_command_does_not_route_through_the_agent(telegram_channel):
+    channel, _conversations, api, _state = telegram_channel
+
+    await channel._handle_update(
+        {
+            "update_id": 112,
+            "message": {"message_id": 62, "chat": {"id": 123, "type": "private"}, "text": "/mcp status"},
+        }
+    )
+
+    assert "No MCP servers are active" in api.messages[-1][1]
+    assert not channel.agent.prompts
+
+
+@pytest.mark.asyncio
+async def test_skills_search_command_uses_registry_and_returns_inspectable_results(telegram_channel, monkeypatch):
+    class FakeSkillRegistry:
+        last_errors = {}
+
+        def __init__(self, _registries):
+            pass
+
+        async def search(self, query):
+            assert query == "research briefs"
+            return [
+                SimpleNamespace(
+                    reference="@ares/research-brief",
+                    name="Research Brief",
+                    slug="research-brief",
+                    version="1.2.0",
+                    registry="clawhub",
+                    description="Creates source-backed research briefs.",
+                    score=0.9,
+                )
+            ]
+
+    monkeypatch.setattr(telegram_module, "SkillRegistryClient", FakeSkillRegistry)
+    channel, conversations, api, _state = telegram_channel
+
+    await channel._handle_update(
+        {
+            "update_id": 113,
+            "message": {"message_id": 63, "chat": {"id": 123, "type": "private"}, "text": "/skills search research briefs"},
+        }
+    )
+
+    response = api.messages[-1][1]
+    assert "@ares/research-brief" in response
+    assert "/skills info 1" in response
+    assert [message["role"] for message in conversations.messages] == ["user", "assistant"]
+    assert conversations.messages[-1]["content"] == response
+
+
+@pytest.mark.asyncio
+async def test_marketplace_result_is_available_to_the_next_natural_language_turn(telegram_channel):
+    channel, conversations, _api, state = telegram_channel
+    channel._active_marketplace_requests[123] = "/mcp info example/weather"
+    await channel._send_marketplace_message(
+        123,
+        "MCP · Weather\n\nWhat it does: Reads forecast data from a weather API.",
+        reply_to=64,
+    )
+    channel._active_marketplace_requests.pop(123, None)
+
+    conversation_id = state.get_conversation_id("telegram", 123)
+    assert conversation_id is not None
+    history = channel._conversation_history(conversation_id)
+    assert history[-1]["content"].startswith("MCP · Weather")
+
+    await channel._handle_update(
+        {
+            "update_id": 114,
+            "message": {"message_id": 65, "chat": {"id": 123, "type": "private"}, "text": "what does it do?"},
+        }
+    )
+
+    _prompt, agent_history = channel.agent.prompts[-1]
+    assert any("Reads forecast data" in item["content"] for item in agent_history)
+    assert [message["role"] for message in conversations.messages][-2:] == ["user", "assistant"]
 
 
 @pytest.mark.asyncio

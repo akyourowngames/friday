@@ -15,6 +15,9 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
+import shlex
+import time
 from collections import defaultdict
 from contextlib import suppress
 from pathlib import Path
@@ -26,10 +29,19 @@ from ares.agent import Agent
 from ares.attachments import build_attachment_context, inspect_attachment
 from ares.channels.audio import AudioTranscriptionError, EnglishAudioTranscriber, EnglishTranscript
 from ares.channels.store import ChannelStore
-from ares.config import get_db_path, load_config
+from ares.config import get_db_path, load_config, save_config
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
+from ares.mcp_registry import MCPRegistryClient
 from ares.models import AppConfig, TelegramConfig
+from ares.skill_registry import (
+    RegistryError as SkillRegistryError,
+    SafeSkillInstaller,
+    SkillRegistryClient,
+    SkillValidationError,
+    marketplace_record,
+)
+from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager
 
 
@@ -38,6 +50,7 @@ logger = logging.getLogger(__name__)
 CHANNEL_NAME = "telegram"
 MAX_TELEGRAM_MESSAGE_CHARS = 4096
 MAX_HISTORY_MESSAGES = 40
+MARKETPLACE_CONFIRMATION_TTL_SECONDS = 5 * 60
 TOOL_TOKEN_RE = re.compile(r"^\[tool:([^:]+):(.*)\]$", re.DOTALL)
 TOOL_START_TOKEN_RE = re.compile(r"^\[tool_start:([^\]]+)\]$")
 FILE_MARKER_RE = re.compile(r"\[\[telegram_file:(.+?)\]\]", re.IGNORECASE)
@@ -254,6 +267,13 @@ class TelegramChannel:
         # parallel.  Telegram conversations remain separate while executions
         # are serialized deterministically.
         self._agent_lock = asyncio.Lock()
+        self.skill_manager = SkillManager(skill_dirs=list(config.skill_dirs or []) or None)
+        # Remote config changes are deliberately two-step.  A Telegram message
+        # may be forwarded, mistyped, or stale; only the originating allowlisted
+        # chat can confirm its own short-lived, reviewable plan.
+        self._pending_marketplace_actions: dict[tuple[int, str], tuple[float, str, str, str | None]] = {}
+        self._marketplace_results: dict[int, dict[str, list[str]]] = {}
+        self._active_marketplace_requests: dict[int, str] = {}
 
     @property
     def running(self) -> bool:
@@ -391,7 +411,12 @@ class TelegramChannel:
                     "Ares is connected to this PC. Send a message, document, photo, or voice note. "
                     "Hindi, English, and Hinglish voice notes are transcribed to English.\n\n"
                     "Commands:\n/new — start a fresh Ares session\n/status — channel status\n"
-                    "/file <path> — upload a local PC file\n/help — show this help",
+                    "/file <path> — upload a local PC file\n"
+                    "/skills [list|search|info|install] — manage skills\n"
+                    "/mcp [list|search|info|add|test|refresh] — manage MCPs\n"
+                    "/confirm <code> — approve the last reviewed install\n/cancel — discard it\n"
+                    "/help — show this help\n\n"
+                    "Examples: /skills search research  •  /mcp search github",
                     reply_to_message_id=reply_to,
                 )
                 return
@@ -409,6 +434,9 @@ class TelegramChannel:
                 return
             if command == "/file":
                 await self._send_requested_file(chat_id, argument, reply_to)
+                return
+            if command in {"/skills", "/mcp", "/confirm", "/cancel"}:
+                await self._handle_marketplace_command(chat_id, command, argument, reply_to)
                 return
             if command and command.startswith("/") and not self._has_attachment(message):
                 await self.api.send_message(chat_id, "Unknown command. Use /help for Telegram commands, or send it as a normal request.", reply_to_message_id=reply_to)
@@ -500,6 +528,14 @@ class TelegramChannel:
             if inspection_context:
                 prompt += "\n\n" + inspection_context
 
+        prompt += (
+            "\n\n## Telegram reply rules\n"
+            "Reply as a compact Telegram message: plain text, short sections, and no Markdown tables. "
+            "Use the conversation history for immediate follow-ups. If the user asks what a recently inspected "
+            "skill or MCP does, answer specifically from that marketplace result; do not replace it with a generic "
+            "catalogue of Ares capabilities. State uncertainty instead of inventing missing registry details."
+        )
+
         if self._file_delivery_requested(text):
             prompt += (
                 "\n\n## Telegram delivery\nThe user explicitly asked for a local file to be uploaded "
@@ -579,6 +615,8 @@ class TelegramChannel:
         if old_id is not None:
             with suppress(Exception):
                 self.conversation_store.end_conversation(old_id)
+        self._marketplace_results.pop(chat_id, None)
+        self._clear_pending_marketplace_actions(chat_id)
         new_id = self.conversation_store.start_conversation()
         self.state_store.set_conversation_id(CHANNEL_NAME, chat_id, new_id)
 
@@ -652,6 +690,360 @@ class TelegramChannel:
     @staticmethod
     def _has_attachment(message: dict[str, Any]) -> bool:
         return any(key in message for key in ("document", "photo", "video", "audio", "voice"))
+
+    async def _handle_marketplace_command(
+        self, chat_id: int, command: str, argument: str, reply_to: int | None
+    ) -> None:
+        """Run the Telegram-safe subset of the local marketplace commands.
+
+        Discovery is read-only.  An install is never implicit: Ares shows the
+        item and makes the user send a short-lived confirmation code before a
+        local file or shared config is changed.
+        """
+        self._active_marketplace_requests[chat_id] = f"{command} {argument}".strip()
+        try:
+            if command == "/cancel":
+                self._clear_pending_marketplace_actions(chat_id)
+                await self._send_marketplace_message(chat_id, "Cancelled pending marketplace actions for this chat.", reply_to)
+                return
+            if command == "/confirm":
+                await self._confirm_marketplace_action(chat_id, argument, reply_to)
+                return
+            try:
+                tokens = shlex.split(argument, posix=True) if argument else []
+            except ValueError as exc:
+                await self._send_marketplace_message(chat_id, f"Invalid command quoting: {exc}", reply_to)
+                return
+            if command == "/skills":
+                await self._telegram_skills_command(chat_id, tokens, reply_to)
+            else:
+                await self._telegram_mcp_command(chat_id, tokens, reply_to)
+        finally:
+            self._active_marketplace_requests.pop(chat_id, None)
+
+    async def _telegram_skills_command(self, chat_id: int, tokens: list[str], reply_to: int | None) -> None:
+        action = tokens[0].casefold() if tokens else "list"
+        if (action in {"list", "ls"} and len(tokens) == 1) or not tokens:
+            skills = self.skill_manager.list_all()
+            if not skills:
+                text = "Skills hub\n\nNo local skills are installed yet.\n\nStart with: /skills search <what you want to achieve>\nExamples: research, code review, daily planning, browser forms"
+            else:
+                categories: dict[str, list[str]] = defaultdict(list)
+                marketplace_count = 0
+                for skill in skills:
+                    categories[skill.category].append(skill.name)
+                    marketplace_count += int(bool(marketplace_record(skill)))
+                category_rows = [
+                    f"• {category} ({len(names)}): {', '.join(names[:4])}{'…' if len(names) > 4 else ''}"
+                    for category, names in sorted(categories.items())
+                ]
+                text = (
+                    f"Skills hub · {len(skills)} installed ({marketplace_count} from marketplace)\n\n"
+                    "By category:\n" + "\n".join(category_rows[:8]) +
+                    "\n\nFind something new: /skills search <goal>\n"
+                    "Examples: /skills search research · /skills search code review"
+                )
+            await self._send_marketplace_message(chat_id, text, reply_to)
+            return
+        if action == "search" and len(tokens) > 1:
+            query = " ".join(tokens[1:])
+            client = SkillRegistryClient(self.config.skill_registries)
+            try:
+                results = await client.search(query)
+            except (ValueError, SkillRegistryError) as exc:
+                await self._send_marketplace_message(chat_id, f"Skill search failed: {exc}", reply_to)
+                return
+            if not results:
+                text = f"No skills found for '{query}'." + _registry_errors(client.last_errors)
+            else:
+                choices = results[:5]
+                self._marketplace_results.setdefault(chat_id, {})["skills"] = [item.reference for item in choices]
+                rows = []
+                for index, item in enumerate(choices, 1):
+                    installed = self.skill_manager.get_skill(item.slug) is not None
+                    availability = "✓ installed" if installed else "available"
+                    rows.append(
+                        f"{index}. {item.name} · {availability}\n"
+                        f"   { _one_line(item.description) or 'No description supplied.'}\n"
+                        f"   {item.registry} · {_community_label(item)}\n"
+                        f"   ID: {item.reference}"
+                    )
+                text = (
+                    f"Best skill matches for “{query}”\n\n" + "\n\n".join(rows) +
+                    "\n\nNext: /skills info 1  ·  Install: /skills install 1\n"
+                    "Numbers refer to this search; you can also use the full skill name."
+                )
+            await self._send_marketplace_message(chat_id, text, reply_to)
+            return
+        if action == "info" and len(tokens) == 2:
+            name = self._resolve_marketplace_result(chat_id, "skills", tokens[1])
+            if name is None:
+                await self._send_marketplace_message(chat_id, "That skill number is not available. Search again with /skills search <goal>.", reply_to)
+                return
+            local = self.skill_manager.get_skill(name)
+            if local is not None:
+                source = marketplace_record(local) or {}
+                text = (
+                    f"Installed skill · {local.name}\nCategory: {local.category}\nVersion: {local.version}\n"
+                    f"Source: {source.get('registry') or 'bundled/local'}\n\n"
+                    f"What it helps with: {_one_line(local.description) or 'No description supplied.'}"
+                )
+                await self._send_marketplace_message(chat_id, text, reply_to)
+                return
+            client = SkillRegistryClient(self.config.skill_registries)
+            try:
+                detail = await client.get_skill(name)
+            except (ValueError, SkillRegistryError) as exc:
+                await self._send_marketplace_message(chat_id, f"Skill lookup failed: {exc}", reply_to)
+                return
+            if detail is None:
+                await self._send_marketplace_message(chat_id, f"Skill '{name}' was not found." + _registry_errors(client.last_errors), reply_to)
+                return
+            dependencies = ", ".join(f"{item.type}:{item.name}" for item in detail.dependencies) or "none declared"
+            text = (
+                f"Skill · {detail.reference}\n\n"
+                f"What it does: {_one_line(detail.description) or 'No description supplied.'}\n"
+                f"Trust: {detail.security_status}{' · flagged' if detail.suspicious else ''}\n"
+                f"Community: {_community_label(detail)}\n"
+                f"Needs: {dependencies}\n\n"
+                f"Install: /skills install {detail.reference}"
+            )
+            await self._send_marketplace_message(chat_id, text, reply_to)
+            return
+        if action == "install" and len(tokens) == 2:
+            name = self._resolve_marketplace_result(chat_id, "skills", tokens[1])
+            if name is None:
+                await self._send_marketplace_message(chat_id, "That skill number is not available. Search again with /skills search <goal>.", reply_to)
+                return
+            await self._review_marketplace_action(chat_id, "skill_install", name, None, reply_to)
+            return
+        await self._send_marketplace_message(chat_id, "Usage: /skills [list|search <goal>|info <name-or-number>|install <name-or-number>]", reply_to)
+
+    async def _telegram_mcp_command(self, chat_id: int, tokens: list[str], reply_to: int | None) -> None:
+        action = tokens[0].casefold() if tokens else "list"
+        manager = getattr(self.agent, "mcp_manager", None)
+        if action in {"list", "ls", "status"} and len(tokens) <= 1:
+            report = manager.readiness_report() if manager is not None else {"servers": {}}
+            servers = report.get("servers") or {}
+            if not servers:
+                text = "MCP hub\n\nNo MCP servers are active. Find an integration with /mcp search <need>.\nExamples: github, calendar, database, browser testing"
+            else:
+                ready = sum(bool(item.get("ready")) for item in servers.values())
+                rows = "\n".join(
+                    f"• {name} · {'ready' if item.get('ready') else 'needs attention'} · {item.get('tools') or 0} tools"
+                    + (f" · {str(item.get('error'))[:90]}" if item.get("error") else "")
+                    for name, item in sorted(servers.items())
+                )
+                text = f"MCP hub · {ready}/{len(servers)} ready\n\n{rows}\n\nDiscover more: /mcp search <need>"
+            await self._send_marketplace_message(chat_id, text, reply_to)
+            return
+        if action == "search" and len(tokens) > 1:
+            query = " ".join(tokens[1:])
+            client = MCPRegistryClient(self.config.mcp_registries)
+            try:
+                results = await client.search(query)
+            except ValueError as exc:
+                await self._send_marketplace_message(chat_id, f"MCP search failed: {exc}", reply_to)
+                return
+            if not results:
+                text = f"No MCP servers found for '{query}'." + _registry_errors(client.last_errors)
+            else:
+                choices = results[:5]
+                self._marketplace_results.setdefault(chat_id, {})["mcp"] = [item.name for item in choices]
+                configured = {str(item.get("name") or "") for item in self.config.mcp_servers if isinstance(item, dict)}
+                rows = []
+                for index, item in enumerate(choices, 1):
+                    availability = "✓ configured" if item.name in configured else "available"
+                    trust = "verified" if item.verified else "registry listing"
+                    rows.append(
+                        f"{index}. {item.title or item.name} · {availability}\n"
+                        f"   {_one_line(item.description) or 'No description supplied.'}\n"
+                        f"   {trust} · {_community_label(item)}"
+                    )
+                text = (
+                    f"Best MCP matches for “{query}”\n\n" + "\n\n".join(rows) +
+                    "\n\nNext: /mcp info 1  ·  Add: /mcp add 1\n"
+                    "Numbers refer to this search; you can also use the full server name."
+                )
+            await self._send_marketplace_message(chat_id, text, reply_to)
+            return
+        if action == "info" and len(tokens) == 2:
+            name = self._resolve_marketplace_result(chat_id, "mcp", tokens[1])
+            if name is None:
+                await self._send_marketplace_message(chat_id, "That MCP number is not available. Search again with /mcp search <need>.", reply_to)
+                return
+            client = MCPRegistryClient(self.config.mcp_registries)
+            try:
+                detail = await client.get_server(name)
+                plan = await client.get_install_command(name) if detail is not None else None
+            except ValueError as exc:
+                await self._send_marketplace_message(chat_id, f"MCP lookup failed: {exc}", reply_to)
+                return
+            if detail is None:
+                await self._send_marketplace_message(chat_id, f"MCP server '{name}' was not found." + _registry_errors(client.last_errors), reply_to)
+                return
+            install = _format_mcp_plan(plan) if plan else "No safe automatic configuration is available."
+            text = (
+                f"MCP · {detail.title or detail.name}\n\n"
+                f"What it does: {_one_line(detail.description) or 'No description supplied.'}\n"
+                f"Trust: {'verified registry entry' if detail.verified else 'registry listing'}\n"
+                f"Community: {_community_label(detail)}\n"
+                f"Setup: {install}\n\n"
+                f"Add: /mcp add {detail.name}"
+            )
+            await self._send_marketplace_message(chat_id, text, reply_to)
+            return
+        if action == "add" and len(tokens) == 2:
+            name = self._resolve_marketplace_result(chat_id, "mcp", tokens[1])
+            if name is None:
+                await self._send_marketplace_message(chat_id, "That MCP number is not available. Search again with /mcp search <need>.", reply_to)
+                return
+            await self._review_marketplace_action(chat_id, "mcp_add", name, None, reply_to)
+            return
+        if action == "test" and len(tokens) <= 2:
+            if manager is None:
+                await self._send_marketplace_message(chat_id, "No MCP manager is active in this Ares process.", reply_to)
+                return
+            report = manager.readiness_report()
+            name = tokens[1] if len(tokens) == 2 else ""
+            servers = report.get("servers") or {}
+            item = servers.get(name) if name else None
+            if name and item is None:
+                text = f"MCP '{name}' is not configured. Run /mcp status to see active servers."
+            elif item is not None:
+                text = f"MCP check · {name}\nStatus: {'ready' if item.get('ready') else 'needs attention'}\nTools: {item.get('tools') or 0}\nDetails: {item.get('error') or 'connection looks healthy'}"
+            else:
+                text = "MCP health\n" + "\n".join(f"• {server}: {'ready' if data.get('ready') else 'needs attention'}" for server, data in sorted(servers.items()))
+            await self._send_marketplace_message(chat_id, text, reply_to)
+            return
+        if action == "refresh" and len(tokens) == 1:
+            if manager is None:
+                await self._send_marketplace_message(chat_id, "No MCP manager is active in this Ares process.", reply_to)
+                return
+            await manager.start()
+            self.agent.refresh_tools()
+            await self._send_marketplace_message(chat_id, "MCP connections refreshed. Run /mcp status for readiness.", reply_to)
+            return
+        await self._send_marketplace_message(chat_id, "Usage: /mcp [list|status|search <need>|info <name-or-number>|add <name-or-number>|test [server]|refresh]", reply_to)
+
+    def _resolve_marketplace_result(self, chat_id: int, kind: str, value: str) -> str | None:
+        """Resolve a numbered result from the most recent search for this chat."""
+        value = str(value or "").strip()
+        if not value.isdecimal():
+            return value or None
+        results = self._marketplace_results.get(chat_id, {}).get(kind, [])
+        index = int(value) - 1
+        return results[index] if 0 <= index < len(results) else None
+
+    async def _send_marketplace_message(self, chat_id: int, text: str, reply_to: int | None) -> None:
+        """Send and persist a compact command result for natural follow-ups.
+
+        Telegram commands bypass the LLM by design.  Persisting their request
+        and result in the shared conversation fixes the otherwise confusing
+        case where a user asks “what does it do?” immediately after `/mcp info`.
+        """
+        text = _telegram_trim(text)
+        request = self._active_marketplace_requests.get(chat_id)
+        if request:
+            session_id = self._conversation_id(chat_id)
+            self.conversation_store.add_message(session_id, "user", request)
+            self.conversation_store.add_message(session_id, "assistant", text)
+        await self.api.send_message(chat_id, text, reply_to_message_id=reply_to)
+
+    async def _review_marketplace_action(self, chat_id: int, action: str, name: str, registry: str | None, reply_to: int | None) -> None:
+        if action == "skill_install":
+            client = SkillRegistryClient(self.config.skill_registries)
+            try:
+                detail = await client.get_skill(name, registry)
+            except (ValueError, SkillRegistryError) as exc:
+                await self._send_marketplace_message(chat_id, f"Skill review failed: {exc}", reply_to)
+                return
+            if detail is None:
+                await self._send_marketplace_message(chat_id, f"Skill '{name}' was not found." + _registry_errors(client.last_errors), reply_to)
+                return
+            if detail.suspicious:
+                await self._send_marketplace_message(chat_id, "Install blocked: this skill is flagged by its registry. Review it manually.", reply_to)
+                return
+            summary = (
+                f"Install skill · {detail.reference}\n\n"
+                f"What it does: {_one_line(detail.description) or 'No description supplied.'}\n"
+                f"Trust: {detail.security_status}\nCommunity: {_community_label(detail)}\n"
+                f"Needs: {', '.join(f'{item.type}:{item.name}' for item in detail.dependencies) or 'none declared'}"
+            )
+        else:
+            existing = {str(item.get("name") or "") for item in self.config.mcp_servers if isinstance(item, dict)}
+            if name in existing:
+                await self._send_marketplace_message(chat_id, f"MCP server '{name}' is already configured.", reply_to)
+                return
+            client = MCPRegistryClient(self.config.mcp_registries)
+            try:
+                plan = await client.get_install_command(name, registry)
+            except ValueError as exc:
+                await self._send_marketplace_message(chat_id, f"MCP review failed: {exc}", reply_to)
+                return
+            if plan is None:
+                await self._send_marketplace_message(chat_id, f"No safe automatic install plan was found for '{name}'.", reply_to)
+                return
+            summary = f"Add MCP · {name}\n\nSetup: {_format_mcp_plan(plan)}\nRequired env: {', '.join(plan.env_requirements) or 'none'}"
+        code = secrets.token_urlsafe(4).replace("-", "").replace("_", "")[:6].upper()
+        self._clear_pending_marketplace_actions(chat_id)
+        self._pending_marketplace_actions[(chat_id, code)] = (time.monotonic() + MARKETPLACE_CONFIRMATION_TTL_SECONDS, action, name, registry)
+        await self._send_marketplace_message(chat_id, f"{summary}\n\nNo changes made. Confirm within 5 minutes: /confirm {code}\nCancel: /cancel", reply_to)
+
+    async def _confirm_marketplace_action(self, chat_id: int, code: str, reply_to: int | None) -> None:
+        key = (chat_id, code.strip().upper())
+        pending = self._pending_marketplace_actions.pop(key, None)
+        if pending is None or pending[0] < time.monotonic():
+            await self._send_marketplace_message(chat_id, "That confirmation code is invalid or expired. Run the install command again to review a fresh plan.", reply_to)
+            return
+        _, action, name, registry = pending
+        if action == "skill_install":
+            client = SkillRegistryClient(self.config.skill_registries)
+            try:
+                detail = await client.get_skill(name, registry)
+                archive = await client.download(detail.reference, detail.version, detail.registry) if detail and not detail.suspicious else None
+            except (ValueError, SkillRegistryError) as exc:
+                await self._send_marketplace_message(chat_id, f"Skill install failed: {exc}", reply_to)
+                return
+            if detail is None or archive is None:
+                await self._send_marketplace_message(chat_id, "The skill is no longer available as a safe hosted archive; nothing was installed.", reply_to)
+                return
+            try:
+                installed = SafeSkillInstaller(Path(self.config.skill_dirs[0]).expanduser()).install(
+                    archive, provenance={"registry": detail.registry, "slug": detail.reference, "version": detail.version, "canonical_url": detail.canonical_url}
+                )
+            except (FileExistsError, SkillValidationError) as exc:
+                await self._send_marketplace_message(chat_id, f"Skill was not installed: {exc}", reply_to)
+                return
+            self.skill_manager = SkillManager(skill_dirs=list(self.config.skill_dirs or []) or None)
+            await self._send_marketplace_message(chat_id, f"Installed skill '{installed.skill.name}' on this PC. It is now available to Ares everywhere.", reply_to)
+            return
+        client = MCPRegistryClient(self.config.mcp_registries)
+        try:
+            plan = await client.get_install_command(name, registry)
+        except ValueError as exc:
+            await self._send_marketplace_message(chat_id, f"MCP install failed: {exc}", reply_to)
+            return
+        if plan is None:
+            await self._send_marketplace_message(chat_id, "The MCP install plan is no longer available; nothing was changed.", reply_to)
+            return
+        current = self._config_provider()
+        existing = {str(item.get("name") or "") for item in current.mcp_servers if isinstance(item, dict)}
+        current.mcp_servers.append(plan.as_config(existing_names=existing))
+        save_config(current)
+        self.config = current
+        self.agent.apply_config(current)
+        previous = getattr(self.agent, "mcp_manager", None)
+        if previous is not None:
+            await previous.close()
+        manager = MCPClientManager(current.mcp_servers, data_dir=current.data_dir)
+        await manager.start()
+        self.agent.set_mcp_manager(manager)
+        await self._send_marketplace_message(chat_id, f"Added MCP '{name}' to the shared Ares config and refreshed this process. Run /mcp status to check it.", reply_to)
+
+    def _clear_pending_marketplace_actions(self, chat_id: int) -> None:
+        for key in [key for key in self._pending_marketplace_actions if key[0] == chat_id]:
+            self._pending_marketplace_actions.pop(key, None)
 
     @staticmethod
     def _command(text: str) -> tuple[str, str]:
@@ -752,6 +1144,50 @@ class _TelegramProgress:
             with suppress(Exception):
                 await self.channel.api.send_chat_action(self.chat_id, "typing")
             await asyncio.sleep(4.0)
+
+
+def _telegram_trim(text: str, limit: int = 3800) -> str:
+    """Keep command responses under Telegram's message limit with a clear tail."""
+    text = str(text or "").strip()
+    return text if len(text) <= limit else text[: limit - 32].rstrip() + "\n… response truncated"
+
+
+def _one_line(text: object, limit: int = 180) -> str:
+    value = " ".join(str(text or "").split())
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+
+def _community_label(item: Any) -> str:
+    """Format registry-provided popularity without confusing rank with stars."""
+    stars = getattr(item, "stars", None)
+    downloads = getattr(item, "downloads", None)
+    parts: list[str] = []
+    if isinstance(stars, int) and stars >= 0:
+        parts.append(f"★ {stars:,}")
+    if isinstance(downloads, int) and downloads >= 0:
+        parts.append(f"↓ {downloads:,}")
+    if parts:
+        return " · ".join(parts)
+    score = getattr(item, "score", None)
+    if isinstance(score, (int, float)) and score > 0:
+        return f"search match {min(int(score * 100), 100)}%"
+    return "popularity not published"
+
+
+def _registry_errors(errors: dict[str, str]) -> str:
+    if not errors:
+        return ""
+    names = ", ".join(sorted(errors)[:3])
+    return f"\nRegistry unavailable: {names}."
+
+
+def _format_mcp_plan(plan: Any) -> str:
+    if plan is None:
+        return "none"
+    if getattr(plan, "server_url", ""):
+        return f"{plan.transport} {plan.server_url}"
+    arguments = " ".join(getattr(plan, "args", ()) or ())
+    return f"{plan.transport}: {plan.command} {arguments}".strip()
 
 
 def _split_message(text: str, limit: int = MAX_TELEGRAM_MESSAGE_CHARS) -> list[str]:
