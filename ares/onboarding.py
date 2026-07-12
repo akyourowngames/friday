@@ -135,7 +135,7 @@ def save_onboarding_data(
     """Persist onboarding once for every Ares surface.
 
     The profile and soul stay user-editable markdown files; the completion flag
-    and model live in the common config used by the CLI and Electron server.
+    and model live in the common config used by every Ares surface.
     """
     profile_manager.write(render_profile(data))
     soul = data.get("personality", "jarvis")

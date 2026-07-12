@@ -56,5 +56,5 @@ This initial changelog is summarized from the repository git history and grouped
 ## 2026-06-27 and Earlier
 
 ### Voice, Tools, Skills, and Core Assistant Work
-- Added design/planning docs for voice, browser control, MCP client, persistent REPL, interactive terminal, context management, web search, file tools, skills, retry/templates, desktop app, proactive memory, and CLI UX.
-- Implemented the core Ares terminal assistant, memory, context, skills, tools, desktop, and support modules reflected in the current README.
+- Added design/planning docs for voice, browser control, MCP client, persistent REPL, context management, web search, file tools, skills, retry/templates, proactive memory, and CLI UX.
+- Implemented the core Ares terminal assistant, memory, context, skills, tools, and support modules reflected in the current README.

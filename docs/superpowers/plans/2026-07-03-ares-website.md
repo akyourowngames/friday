@@ -520,11 +520,6 @@ const features = [
     description: "Hands-free interaction with speech-to-text and text-to-speech",
   },
   {
-    icon: Monitor,
-    title: "Desktop App",
-    description: "Beautiful Electron + React interface with streaming chat",
-  },
-  {
     icon: Zap,
     title: "Skills System",
     description: "Reusable playbooks for any workflow — code review, research, and more",
@@ -740,7 +735,7 @@ const lines = [
   { type: "output", text: "Here's what I know:" },
   { type: "output", text: "  • Prefers dark mode" },
   { type: "output", text: "  • Working on Ares project" },
-  { type: "output", text: "  • Uses Python + Electron" },
+  { type: "output", text: "  • Uses Python + a local-first toolset" },
   { type: "output", text: "  • Wants a Jarvis-like assistant" },
 ];
 

@@ -99,7 +99,7 @@ DEFAULT_MCP_SERVERS: list[dict] = [
         "transport": "stdio",
         "command": "npx",
         "args": [
-            "@playwright/mcp@latest",
+            "@playwright/mcp@0.0.78",
             "--browser", "chrome",
             "--caps", "vision,devtools",
             # MCP arguments bypass the shell, so this must be a real absolute
@@ -107,6 +107,7 @@ DEFAULT_MCP_SERVERS: list[dict] = [
             "--user-data-dir", str(Path("~/.ares/data/playwright-profile").expanduser()),
             "--viewport-size", "1280x720",
         ],
+        "timeout_seconds": 90.0,  # Increased timeout for browser operations
     },
     {
         "name": "github",
@@ -183,6 +184,41 @@ class PhoneConfig(BaseModel):
     store_notification_content: bool = False
     kdeconnect_cli_path: str = ""   # auto-detected if empty
     adb_path: str = ""              # auto-detected if empty
+
+
+class TelephonyConfig(BaseModel):
+    """Provider-backed telephone voice settings.
+
+    Values may be supplied through the local config file or environment
+    variables (``TWILIO_*`` / ``LIVEKIT_*``).  Secret-bearing fields are
+    automatically redacted by Ares exports and diagnostics.
+    """
+
+    enabled: bool = False
+    provider: Literal["twilio"] = "twilio"
+    account_sid: str = ""
+    auth_token: str = ""
+    phone_number: str = ""
+    public_base_url: str = ""
+    voice_webhook_path: str = "/telephony/twilio/voice"
+    status_webhook_path: str = "/telephony/twilio/status"
+    media_stream_url: str = ""
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    # Ares routes phone transcripts through its configured assistant model.
+    # Keep this blank by default: a LiveKit/Twilio deployment must never
+    # silently select an OpenAI Realtime model or require an OpenAI key.
+    realtime_model: str = ""
+    voice: str = ""
+    language: str = "en-US"
+    microphone_device: str = ""
+    speaker_device: str = ""
+    voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    estimated_cost_per_minute_usd: float = Field(default=0.013, ge=0.0, le=100.0)
+    store_recordings: bool = False
+    require_confirmation_for_unknown_numbers: bool = True
+    response_timeout_seconds: float = Field(default=20.0, ge=1.0, le=90.0)
 
 
 class TelegramConfig(BaseModel):
@@ -282,8 +318,8 @@ def default_mcp_registries() -> list[MCPRegistry]:
 
 class AppConfig(BaseModel):
     # This is deliberately stored beside the rest of the shared Ares config.
-    # Both the Electron app and CLI read this file, so completing setup in one
-    # surface never triggers the first-run flow in the other.
+    # Every Ares surface reads this shared file, so completing setup once
+    # never triggers another first-run flow.
     onboarding_completed: bool = False
     model: str = "deepseek-v4-flash-free"
     api_key: str = ""
@@ -308,7 +344,7 @@ class AppConfig(BaseModel):
     project_context_max_files: int = 2
     # Desktop control needs an observe-act-verify loop. Twenty turns is too
     # small for common multi-step tasks such as launching an app and saving.
-    agent_max_iterations: int = 40
+    agent_max_iterations: int = 80
     context_compact_threshold: float = 0.90
     context_protected_tail: int = 20
     tool_output_max_chars: int = 500
@@ -328,6 +364,7 @@ class AppConfig(BaseModel):
     )
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     phone: PhoneConfig = Field(default_factory=PhoneConfig)
+    telephony: TelephonyConfig = Field(default_factory=TelephonyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     cron_enabled: bool = True
     cron_tick_seconds: int = 60
@@ -338,3 +375,4 @@ class AppConfig(BaseModel):
     browser_cdp_port: int = Field(default=9222, ge=1, le=65535)
     browser_chrome_path: str = ""
     browser_extension_token: str = ""
+    block_session_context: bool = False  # Block previous session summary from flowing into new sessions

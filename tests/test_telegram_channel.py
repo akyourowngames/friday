@@ -273,7 +273,7 @@ async def test_marketplace_result_is_available_to_the_next_natural_language_turn
 
 @pytest.mark.asyncio
 async def test_file_command_only_sends_existing_regular_file(telegram_channel, tmp_path):
-    channel, _conversations, api, _state = telegram_channel
+    channel, conversations, api, _state = telegram_channel
     report = tmp_path / "report.txt"
     report.write_text("ready", encoding="utf-8")
 
@@ -290,6 +290,46 @@ async def test_file_command_only_sends_existing_regular_file(telegram_channel, t
 
     assert api.documents == [(123, report.resolve(), "Ares file: report.txt", 7)]
     assert (123, "upload_document") in api.actions
+    assert conversations.messages[-1]["content"] == "Telegram delivery verified: report.txt was uploaded successfully to this Telegram chat."
+
+
+@pytest.mark.asyncio
+async def test_agent_file_delivery_is_persisted_for_follow_up_context(telegram_channel, tmp_path):
+    class DeliveryAgent:
+        def __init__(self, config, report_path):
+            self.config = config
+            self.report_path = report_path
+            self.prompts = []
+
+        async def run_stream(self, prompt, conversation_history):
+            self.prompts.append((prompt, conversation_history))
+            yield f"Report ready.\n[[telegram_file:{self.report_path}]]"
+
+    channel, conversations, api, _state = telegram_channel
+    report = tmp_path / "result.txt"
+    report.write_text("ready", encoding="utf-8")
+    channel.agent = DeliveryAgent(channel.config, report)
+
+    await channel._handle_update(
+        {
+            "update_id": 120,
+            "message": {"message_id": 70, "chat": {"id": 123, "type": "private"}, "text": "send the report file"},
+        }
+    )
+
+    assert api.documents[-1][1] == report.resolve()
+    assert conversations.messages[-1]["content"] == "Telegram delivery verified: result.txt was uploaded successfully to this Telegram chat."
+
+    follow_up = FakeAgent(channel.config)
+    channel.agent = follow_up
+    await channel._handle_update(
+        {
+            "update_id": 121,
+            "message": {"message_id": 71, "chat": {"id": 123, "type": "private"}, "text": "did you send it?"},
+        }
+    )
+
+    assert any("Telegram delivery verified: result.txt" in item["content"] for item in follow_up.prompts[-1][1])
 
 
 @pytest.mark.asyncio

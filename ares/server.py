@@ -1,4 +1,4 @@
-"""WebSocket server for the Ares desktop app."""
+"""Optional local WebSocket API for Ares integrations."""
 
 from __future__ import annotations
 
@@ -171,6 +171,7 @@ class AresServer:
         # Wire terminal display callback to ToolExecutor
         if hasattr(self.agent, "tool_executor"):
             self.agent.tool_executor._terminal_display_callback = self._terminal_display_only
+        self.telephony = getattr(getattr(self.agent, "tool_executor", None), "telephony", None)
 
     async def _push_status_to_clients(self) -> None:
         """Push updated status to all connected websockets."""
@@ -184,9 +185,9 @@ class AresServer:
     async def run_forever(self) -> None:
         """Start the WebSocket server and block until cancelled.
 
-        MCP processes can download packages on their first run.  The desktop
-        needs to become reachable before that work finishes, otherwise
-        Electron treats a healthy-but-slow integration as a failed backend.
+        MCP processes can download packages on their first run. The API must
+        become reachable before that work finishes, so optional integrations
+        do not make a healthy server appear unavailable.
         """
         async with serve(
             self.handle_client,
@@ -195,7 +196,7 @@ class AresServer:
             max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
         ) as ws_server:
             self._server = ws_server
-            print(f"Ares desktop server listening on ws://{self.host}:{self.port}")
+            print(f"Ares local API listening on ws://{self.host}:{self.port}")
             if self.telegram_channel is not None:
                 await self.telegram_channel.start()
             if self.mcp_manager is not None:
@@ -261,6 +262,10 @@ class AresServer:
                 await self._send(websocket, self._status())
             elif msg_type == "get_personal_settings":
                 await self._send(websocket, self._personal_settings())
+            elif msg_type == "get_telephony_settings":
+                await self._send(websocket, self._telephony_settings())
+            elif msg_type == "save_telephony_settings":
+                await self._handle_save_telephony_settings(websocket, message)
             elif msg_type == "save_personal_settings":
                 await self._handle_save_personal_settings(websocket, message)
             elif msg_type == "get_onboarding_state":
@@ -291,10 +296,85 @@ class AresServer:
                 if cmd_id in self._terminal_command_events:
                     self._terminal_output_buffer[cmd_id] = output
                     self._terminal_command_events[cmd_id].set()
+            elif isinstance(msg_type, str) and msg_type.startswith("telephony_"):
+                await self._handle_telephony(websocket, message)
             else:
                 await self._send_error(websocket, f"Unknown message type: {msg_type}")
         except Exception as exc:  # pragma: no cover - guardrail for desktop runtime
             await self._send_error(websocket, str(exc))
+
+    async def _handle_telephony(self, websocket: Any, message: dict[str, Any]) -> None:
+        """Bridge desktop Phone controls to the normal local tool executor."""
+        action = str(message.get("type") or "")
+        tool_names = {
+            "telephony_status": "telephony_status",
+            "telephony_list_calls": "telephony_list_calls",
+            "telephony_list_contacts": "telephony_list_contacts",
+            "telephony_save_contact": "telephony_save_contact",
+            "telephony_call": "telephony_call",
+            "telephony_answer": "telephony_answer",
+            "telephony_hangup": "telephony_hangup",
+            "telephony_mute": "telephony_mute",
+            "telephony_get_call": "telephony_get_call",
+            "telephony_transfer": "telephony_transfer",
+        }
+        tool_name = tool_names.get(action)
+        if tool_name is None:
+            await self._send_error(websocket, f"Unknown telephony action: {action}")
+            return
+        arguments = {key: value for key, value in message.items() if key not in {"type", "request_id"}}
+        raw = self.agent.tool_executor.execute(tool_name, arguments)
+        payload = _safe_json_loads(raw)
+        await self._send(websocket, {"type": "telephony_result", "action": action, "request_id": message.get("request_id"), "payload": payload})
+
+    def _telephony_settings(self) -> dict[str, Any]:
+        telephony = self.config.telephony.model_dump()
+        for key in ("account_sid", "auth_token", "livekit_api_key", "livekit_api_secret"):
+            telephony[key] = ""
+        manager = getattr(getattr(self.agent, "tool_executor", None), "telephony", None)
+        return {
+            "type": "telephony_settings",
+            "settings": telephony,
+            "configured": manager.status() if manager is not None else {"enabled": False},
+        }
+
+    async def _handle_save_telephony_settings(self, websocket: Any, message: dict[str, Any]) -> None:
+        updates = message.get("settings")
+        if not isinstance(updates, dict):
+            await self._send_error(websocket, "Telephony settings must be an object.")
+            return
+        candidate = self.config.model_dump()
+        secret_keys = {"account_sid", "auth_token", "livekit_api_key", "livekit_api_secret"}
+        for key, value in updates.items():
+            if key not in candidate["telephony"]:
+                continue
+            if key in secret_keys and value == "":
+                continue
+            candidate["telephony"][key] = value
+        try:
+            updated = AppConfig.model_validate(candidate, strict=True)
+        except Exception as exc:
+            await self._send_error(websocket, f"Invalid telephony settings: {exc}")
+            return
+        self.config = updated
+        save_config(updated)
+        self._apply_config_to_agent()
+        await self._send(websocket, {"type": "telephony_settings_saved", **self._telephony_settings()})
+
+    def handle_twilio_voice_webhook(self, payload: dict[str, Any]) -> str:
+        """Return TwiML for an inbound call; usable from an HTTP/ASGI adapter."""
+        if self.telephony is None:
+            raise RuntimeError("Telephony is unavailable.")
+        _session, twiml = self.telephony.receive_incoming_call(
+            str(payload.get("From") or ""), str(payload.get("To") or ""), call_sid=str(payload.get("CallSid") or ""),
+        )
+        return twiml
+
+    def handle_twilio_status_webhook(self, call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.telephony is None:
+            raise RuntimeError("Telephony is unavailable.")
+        call = self.telephony.handle_provider_status(call_id, payload)
+        return call.to_dict(include_transcript=False) if call else {"ok": False, "error": "Call session not found."}
 
     async def _handle_chat(self, websocket: Any, message: dict[str, Any]) -> None:
         content = str(message.get("content") or "").strip()
@@ -1085,7 +1165,7 @@ async def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the Ares desktop WebSocket server")
+    parser = argparse.ArgumentParser(description="Run the Ares local WebSocket API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()

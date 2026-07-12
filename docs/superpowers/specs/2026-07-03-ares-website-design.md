@@ -109,7 +109,6 @@ ares-website/
 |---|---------|---------------|-------------|
 | 1 | Memory System | `Brain` | Remembers facts, preferences, and context about you |
 | 2 | Voice Mode | `Mic` | Hands-free interaction with speech-to-text and text-to-speech |
-| 3 | Desktop App | `Monitor` | Beautiful Electron + React interface with streaming chat |
 | 4 | Skills System | `Zap` | Reusable playbooks for any workflow — code review, research, and more |
 | 5 | File Access | `Folder` | Read, write, search, and edit files — all sandboxed locally |
 | 6 | 100% Private | `Shield` | All your data stays on your machine. Zero cloud. Zero tracking. |
@@ -168,7 +167,7 @@ python -m ares
 Here's what I know:
   • Prefers dark mode
   • Working on Ares project
-  • Uses Python + Electron
+  • Uses Python + a local-first toolset
   • Wants a Jarvis-like assistant
 ```
 

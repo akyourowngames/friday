@@ -72,7 +72,7 @@ def test_load_config_upgrades_legacy_agent_iteration_default(tmp_path, monkeypat
 
     loaded = config_module.load_config()
 
-    assert loaded.agent_max_iterations == 40
+    assert loaded.agent_max_iterations == 80
     assert "windows" in {server["name"] for server in loaded.mcp_servers}
 
 

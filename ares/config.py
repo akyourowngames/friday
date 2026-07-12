@@ -52,8 +52,8 @@ def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
                     config.mcp_servers.append(copy.deepcopy(server))
     # v0.1 persisted the former 20-step default. Upgrade that unchanged value
     # so existing users gain enough room for a real desktop workflow.
-    if config.agent_max_iterations == 20:
-        config.agent_max_iterations = 40
+    if config.agent_max_iterations <= 40:
+        config.agent_max_iterations = 80
     _configure_playwright_mcp(config)
     return config
 
@@ -98,7 +98,7 @@ def load_config() -> AppConfig:
 
 
 def save_config(config: AppConfig) -> None:
-    """Atomically save the config shared by the CLI and desktop app."""
+    """Atomically save the config shared by local Ares surfaces."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _write_config_data(config.model_dump())
 
@@ -132,7 +132,7 @@ def update_config_field(path: str, value) -> dict:
 
     Invalid patches never call the writer, preserving the original file bytes
     exactly.  This is important because a config file is the shared control
-    plane for the CLI, desktop app, cron runner, and phone bridge.
+    plane for the CLI, cron runner, Telegram channel, and phone bridge.
     """
     if not CONFIG_PATH.exists():
         return {"ok": False, "error": "Config file not found."}

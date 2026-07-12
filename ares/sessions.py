@@ -72,13 +72,15 @@ class SessionStore:
                 entries.append(json.loads(line))
         return entries
 
-    def get_previous_summary(self, session_id: str) -> str | None:
+    def get_previous_summary(self, session_id: str, block: bool = False) -> str | None:
         """Get the summary from the most recent session before this one.
 
         Lists all JSONL files, sorts by creation time, finds the session
         immediately before the given session_id, reads its last summary entry.
-        Returns None if no previous session or no summary found.
+        Returns None if no previous session, no summary found, or block=True.
         """
+        if block:
+            return None
         sessions = self.list_sessions()
         # Find the session just before the current one
         current_idx = None

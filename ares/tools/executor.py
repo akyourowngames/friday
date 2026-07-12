@@ -64,6 +64,8 @@ from ares.tools.datetime_tool import get_current_datetime_result as _get_current
 from ares.tools import adb_bridge as _adb_bridge
 from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
 from ares.tools.shell_execution import resolve_project_command
+from ares.telephony import TelephonyManager, TelephonyStore
+from ares.telephony.models import CallStatus
 
 
 class ToolExecutor:
@@ -79,6 +81,7 @@ class ToolExecutor:
         action_ledger: ActionLedger | None = None,
         task_store: TaskStore | None = None,
         session_store: SessionStore | None = None,
+        telephony_manager: TelephonyManager | None = None,
     ):
         self.memory = memory_store
         self.conversations = conversation_store
@@ -109,6 +112,19 @@ class ToolExecutor:
         self.task_store = task_store or (TaskStore(data_root) if data_root is not None else None)
         self.task_tools = TaskToolHandlers(self.task_store, lambda: self.session_id) if self.task_store is not None else None
         self.session_store = session_store or (SessionStore(session_data_dir) if session_data_dir is not None else None)
+        self._owns_telephony_manager = telephony_manager is None and db_path is not None
+        self.telephony = telephony_manager or (
+            TelephonyManager(
+                config or AppConfig(data_dir=str(session_data_dir or db_path.parent)),
+                store=TelephonyStore(
+                    db_path,
+                    connection=shared_connection,
+                    data_dir=session_data_dir or db_path.parent,
+                ),
+                memory_store=memory_store,
+                conversation_store=conversation_store,
+            ) if db_path is not None else None
+        )
         self.workflow_runner: Any | None = None
         self.cron = CronToolHandlers(CronStore(data_root))
 
@@ -119,6 +135,8 @@ class ToolExecutor:
             self.people_store.close()
         if self._owns_action_ledger and self.action_ledger is not None:
             self.action_ledger.close()
+        if self._owns_telephony_manager and self.telephony is not None:
+            self.telephony.close()
 
     def set_session_id(self, session_id: str | None) -> None:
         """Attach local provenance records to the current agent session."""
@@ -208,6 +226,16 @@ class ToolExecutor:
             "phone_call_number": self._phone_call_number,
             "phone_launch_app": self._phone_launch_app,
             "phone_open_url": self._phone_open_url,
+            "telephony_status": self._telephony_status,
+            "telephony_call": self._telephony_call,
+            "telephony_answer": self._telephony_answer,
+            "telephony_hangup": self._telephony_hangup,
+            "telephony_mute": self._telephony_mute,
+            "telephony_get_call": self._telephony_get_call,
+            "telephony_list_calls": self._telephony_list_calls,
+            "telephony_list_contacts": self._telephony_list_contacts,
+            "telephony_save_contact": self._telephony_save_contact,
+            "telephony_transfer": self._telephony_transfer,
             "update_config": self._update_config,
             "get_current_datetime": self._get_current_datetime,
         }
@@ -656,6 +684,12 @@ class ToolExecutor:
             return ("sms_sent", self._masked_recipient(args.get("number")), "Sent an SMS.", ["phone"])
         if lowered == "phone_call_number":
             return ("phone_call_placed", self._masked_recipient(args.get("number")), "Placed a phone call.", ["phone"])
+        if lowered == "telephony_call":
+            return ("telephony_call_placed", self._masked_recipient(args.get("recipient")), "Placed a provider-backed phone call.", ["telephony", "phone"])
+        if lowered == "telephony_hangup":
+            return ("telephony_call_ended", str(args.get("call_id") or "call"), "Ended a provider-backed phone call.", ["telephony", "phone"])
+        if lowered == "telephony_transfer":
+            return ("telephony_call_transferred", str(args.get("call_id") or "call"), "Transferred a provider-backed phone call.", ["telephony", "phone"])
         if base in {"gmail_send", "gmail_reply"}:
             return ("email_sent", self._masked_recipient(args.get("to") or args.get("recipient")), "Sent an email.", ["email"])
         if base == "calendar_create_event":
@@ -1457,6 +1491,101 @@ class ToolExecutor:
             import json as _json
             return _json.dumps({"ok": False, "error": "URL is required."})
         return _adb_bridge.launch_url(url)
+
+    # ── Provider-backed telephony ────────────────────────────────
+
+    def _telephony_unavailable(self) -> str:
+        if self.telephony is None:
+            return self._json({"ok": False, "error": "Telephony storage is unavailable because Ares has no local data path."})
+        if not self.telephony.enabled:
+            return self._json({"ok": False, "error": "Telephony is disabled. Enable telephony in local settings and configure Twilio first."})
+        return ""
+
+    def _telephony_status(self, _args: dict) -> str:
+        if self.telephony is None:
+            return self._json({"ok": False, "error": "Telephony storage is unavailable because Ares has no local data path."})
+        return self._json({"ok": True, **self.telephony.status()})
+
+    def _telephony_call(self, args: dict) -> str:
+        unavailable = self._telephony_unavailable()
+        if unavailable:
+            return unavailable
+        try:
+            call = self.telephony.place_call(str(args.get("recipient") or ""), confirm=bool(args.get("confirm", False)))
+        except PermissionError as exc:
+            return self._json({"ok": False, "confirm_required": True, "error": str(exc)})
+        except Exception as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "call": call.to_dict(include_transcript=False)})
+
+    def _telephony_answer(self, args: dict) -> str:
+        unavailable = self._telephony_unavailable()
+        if unavailable:
+            return unavailable
+        call = self.telephony.store.update_call(str(args.get("call_id") or ""), status=CallStatus.IN_PROGRESS)
+        if call is None:
+            return self._json({"ok": False, "error": "Call session not found."})
+        return self._json({"ok": True, "call": call.to_dict(include_transcript=False)})
+
+    def _telephony_hangup(self, args: dict) -> str:
+        unavailable = self._telephony_unavailable()
+        if unavailable:
+            return unavailable
+        try:
+            call = self.telephony.hangup(str(args.get("call_id") or ""))
+        except Exception as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "call": call.to_dict(include_transcript=False)})
+
+    def _telephony_mute(self, args: dict) -> str:
+        unavailable = self._telephony_unavailable()
+        if unavailable:
+            return unavailable
+        try:
+            result = self.telephony.mute(str(args.get("call_id") or ""), bool(args.get("muted", True)))
+        except Exception as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": bool(result.get("ok", False)), "result": result})
+
+    def _telephony_get_call(self, args: dict) -> str:
+        if self.telephony is None:
+            return self._telephony_unavailable()
+        call = self.telephony.store.get_call(str(args.get("call_id") or ""))
+        return self._json({"ok": bool(call), "call": call.to_dict() if call else None, "error": "" if call else "Call session not found."})
+
+    def _telephony_list_calls(self, args: dict) -> str:
+        if self.telephony is None:
+            return self._telephony_unavailable()
+        calls = self.telephony.store.list_calls(int(args.get("limit", 20)))
+        return self._json({"ok": True, "calls": [call.to_dict(include_transcript=False) for call in calls]})
+
+    def _telephony_list_contacts(self, args: dict) -> str:
+        if self.telephony is None:
+            return self._telephony_unavailable()
+        contacts = self.telephony.list_contacts(int(args.get("limit", 100)))
+        return self._json({"ok": True, "contacts": [contact.to_dict() for contact in contacts]})
+
+    def _telephony_save_contact(self, args: dict) -> str:
+        if self.telephony is None:
+            return self._telephony_unavailable()
+        try:
+            contact = self.telephony.add_contact(
+                str(args.get("name") or ""), str(args.get("phone_number") or ""),
+                nickname=str(args.get("nickname") or ""), notes=str(args.get("notes") or ""),
+            )
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "contact": contact.to_dict()})
+
+    def _telephony_transfer(self, args: dict) -> str:
+        unavailable = self._telephony_unavailable()
+        if unavailable:
+            return unavailable
+        try:
+            call = self.telephony.transfer(str(args.get("call_id") or ""), str(args.get("destination") or ""))
+        except Exception as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "call": call.to_dict(include_transcript=False)})
 
     def _update_config(self, args: dict) -> str:
         """Surgically update a single config field."""

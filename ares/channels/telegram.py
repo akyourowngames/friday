@@ -533,7 +533,11 @@ class TelegramChannel:
             "Reply as a compact Telegram message: plain text, short sections, and no Markdown tables. "
             "Use the conversation history for immediate follow-ups. If the user asks what a recently inspected "
             "skill or MCP does, answer specifically from that marketplace result; do not replace it with a generic "
-            "catalogue of Ares capabilities. State uncertainty instead of inventing missing registry details."
+            "catalogue of Ares capabilities. State uncertainty instead of inventing missing registry details.\n\n"
+            "This is an active Ares Telegram channel with verified file upload support. Never say Telegram delivery "
+            "is unavailable, ask for a BotFather token, or suggest setting up a Telegram bot. A later conversation "
+            "entry beginning 'Telegram delivery verified' is authoritative evidence that its named file was uploaded. "
+            "A previous delivery failure applies only to that specific path; it does not mean the channel cannot send files."
         )
 
         if self._file_delivery_requested(text):
@@ -564,7 +568,8 @@ class TelegramChannel:
         elif not paths:
             await self.api.send_message(chat_id, "Done.", reply_to_message_id=reply_to)
         for path in paths:
-            await self._send_local_file(chat_id, path, reply_to)
+            delivery_status = await self._send_local_file(chat_id, path, reply_to)
+            self.conversation_store.add_message(session_id, "assistant", delivery_status)
 
     async def _run_agent(
         self,
@@ -1066,31 +1071,40 @@ class TelegramChannel:
         if not argument:
             await self.api.send_message(chat_id, "Usage: /file C:\\path\\to\\file.ext", reply_to_message_id=reply_to)
             return
-        await self._send_local_file(chat_id, Path(argument.strip().strip('"')).expanduser(), reply_to)
+        delivery_status = await self._send_local_file(chat_id, Path(argument.strip().strip('"')).expanduser(), reply_to)
+        self.conversation_store.add_message(self._conversation_id(chat_id), "assistant", delivery_status)
 
-    async def _send_local_file(self, chat_id: int, path: Path, reply_to: int | None) -> None:
+    async def _send_local_file(self, chat_id: int, path: Path, reply_to: int | None) -> str:
         try:
             resolved = path.resolve(strict=True)
         except (OSError, RuntimeError):
-            await self.api.send_message(chat_id, "That local file was not found.", reply_to_message_id=reply_to)
-            return
+            message = "That local file was not found."
+            await self.api.send_message(chat_id, message, reply_to_message_id=reply_to)
+            return f"Telegram delivery failed: requested path was not found ({path})."
         if not resolved.is_file():
-            await self.api.send_message(chat_id, "That path is not a regular file.", reply_to_message_id=reply_to)
-            return
+            message = "That path is not a regular file."
+            await self.api.send_message(chat_id, message, reply_to_message_id=reply_to)
+            return f"Telegram delivery failed: requested path is not a regular file ({resolved})."
         max_bytes = self._telegram_config().max_outbound_file_bytes
         if resolved.stat().st_size > max_bytes:
+            message = (
+                f"{resolved.name} is larger than the configured {max_bytes // (1024 * 1024)} MB Telegram upload limit."
+            )
             await self.api.send_message(
                 chat_id,
-                f"{resolved.name} is larger than the configured {max_bytes // (1024 * 1024)} MB Telegram upload limit.",
+                message,
                 reply_to_message_id=reply_to,
             )
-            return
+            return f"Telegram delivery failed: {resolved.name} exceeds the configured upload limit."
         try:
             await self.api.send_chat_action(chat_id, "upload_document")
             await self.api.send_document(chat_id, resolved, caption=f"Ares file: {resolved.name}", reply_to_message_id=reply_to)
         except Exception as exc:
             logger.exception("Telegram file upload failed")
-            await self.api.send_message(chat_id, f"I couldn't upload {resolved.name}: {exc}", reply_to_message_id=reply_to)
+            message = f"I couldn't upload {resolved.name}: {exc}"
+            await self.api.send_message(chat_id, message, reply_to_message_id=reply_to)
+            return f"Telegram delivery failed: {resolved.name} could not be uploaded."
+        return f"Telegram delivery verified: {resolved.name} was uploaded successfully to this Telegram chat."
 
     async def _send_text_chunks(self, chat_id: int, text: str, reply_to: int | None) -> None:
         for index, chunk in enumerate(_split_message(text)):

@@ -151,7 +151,7 @@ class BlockingMCPManager:
 @pytest.fixture
 def server(tmp_path, monkeypatch):
     # Server writes must stay inside the test folder: these tests exercise
-    # model/profile persistence and must never redirect a real desktop app.
+    # model/profile persistence and must never redirect a real Ares install.
     from ares import config as config_module
 
     monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.json")
@@ -239,7 +239,7 @@ async def test_chat_accepts_attachment_without_hardcoded_user_prompt(server):
 
 @pytest.mark.asyncio
 async def test_server_listens_before_optional_mcp_startup_finishes(server, monkeypatch):
-    """Slow integrations must not make Electron think the backend is down."""
+    """Slow integrations must not make a healthy local API appear unavailable."""
     entered_server = asyncio.Event()
 
     class FakeWebSocketServer:

@@ -675,25 +675,48 @@ class MCPClientManager:
         timeout = self.servers.get(
             server_name, MCPServerConfig(name=server_name)
         ).timeout_seconds
-        try:
-            result = await asyncio.wait_for(
-                session.call_tool(mcp_tool, arguments=arguments), timeout=timeout
-            )
-            is_error = bool(getattr(result, "isError", getattr(result, "is_error", False)))
-            rendered = self._render_result(result)
-            if is_error:
-                return f"Error: MCP tool '{mcp_tool}' on '{server_name}' reported failure: {rendered}"
-            return rendered
-        except asyncio.TimeoutError:
-            return f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s."
-        except asyncio.CancelledError as exc:
-            _clear_current_task_cancellation()
-            logger.warning(
-                "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
-            )
-            return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. Check the MCP server logs or increase timeout_seconds."
-        except Exception as exc:
-            return f"Error calling MCP tool '{mcp_tool}' on '{server_name}': {exc}"
+
+        # Add retry logic for Playwright MCP calls to handle transient failures
+        max_retries = 2 if server_name == "playwright" else 0
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    session.call_tool(mcp_tool, arguments=arguments), timeout=timeout
+                )
+                is_error = bool(getattr(result, "isError", getattr(result, "is_error", False)))
+                rendered = self._render_result(result)
+                if is_error:
+                    # For Playwright, retry on certain errors that might be transient
+                    if server_name == "playwright" and attempt < max_retries:
+                        error_msg = rendered.lower()
+                        if any(keyword in error_msg for keyword in ["timeout", "browserback", " navigation", "page load"]):
+                            logger.warning("Retrying Playwright MCP call %s (attempt %d/%d)", mcp_tool, attempt + 1, max_retries + 1)
+                            await asyncio.sleep(1.0)
+                            continue
+                    return f"Error: MCP tool '{mcp_tool}' on '{server_name}' reported failure: {rendered}"
+                return rendered
+            except asyncio.TimeoutError:
+                if server_name == "playwright" and attempt < max_retries:
+                    logger.warning("Retrying Playwright MCP call %s after timeout (attempt %d/%d)", mcp_tool, attempt + 1, max_retries + 1)
+                    await asyncio.sleep(1.0)
+                    continue
+                return f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s."
+            except asyncio.CancelledError as exc:
+                _clear_current_task_cancellation()
+                logger.warning(
+                    "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
+                )
+                return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. Check the MCP server logs or increase timeout_seconds."
+            except Exception as exc:
+                if server_name == "playwright" and attempt < max_retries:
+                    logger.warning("Retrying Playwright MCP call %s after error (attempt %d/%d): %s", mcp_tool, attempt + 1, max_retries + 1, exc)
+                    await asyncio.sleep(1.0)
+                    continue
+                return f"Error calling MCP tool '{mcp_tool}' on '{server_name}': {exc}"
+
+        return f"Error: MCP tool '{mcp_tool}' on '{server_name}' failed after {max_retries + 1} attempts"
 
     def _render_result(self, result: Any) -> str:
         structured = getattr(result, "structured_content", None)

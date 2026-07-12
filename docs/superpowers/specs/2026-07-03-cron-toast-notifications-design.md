@@ -293,6 +293,5 @@ def _create_prompt_session(self):
 ## Out of Scope
 
 - Auto-fade / timeout dismiss (user chose manual Esc only)
-- Toast in Electron desktop app (separate feature)
 - Desktop notification integration with toasts (existing `DesktopNotifier` still works independently)
 - Sound on toast

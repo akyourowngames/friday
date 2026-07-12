@@ -64,6 +64,18 @@ async def _run_telegram() -> None:
     await run_telegram_channel()
 
 
+def _run_telephony_webhook(host: str, port: int) -> None:
+    from ares.telephony.webhook import run_twilio_webhook_server
+
+    run_twilio_webhook_server(host=host, port=port)
+
+
+async def _run_telephony_media_gateway(host: str, port: int) -> None:
+    from ares.telephony.media_gateway import run_twilio_media_gateway
+
+    await run_twilio_media_gateway(host=host, port=port)
+
+
 def _authorize_telegram_chat(chat_id: int, *, revoke: bool = False) -> None:
     """Update the strict local allowlist without ever printing the bot token."""
     config = load_config()
@@ -108,6 +120,20 @@ def main():
     parser.add_argument("--telegram-authorize", type=int, metavar="CHAT_ID", help="Allow one Telegram chat ID")
     parser.add_argument("--telegram-revoke", type=int, metavar="CHAT_ID", help="Remove one Telegram chat ID")
     parser.add_argument("--voice", action="store_true", help="Run continuous voice mode (always listening)")
+    parser.add_argument(
+        "--telephony-webhook",
+        action="store_true",
+        help="Run the signed Twilio Voice webhook server (place behind public HTTPS)",
+    )
+    parser.add_argument("--telephony-webhook-host", default="127.0.0.1", help="Bind host for --telephony-webhook")
+    parser.add_argument("--telephony-webhook-port", type=int, default=8080, help="Bind port for --telephony-webhook")
+    parser.add_argument(
+        "--telephony-media-gateway",
+        action="store_true",
+        help="Run the Twilio Media Streams gateway (publish it through public WSS)",
+    )
+    parser.add_argument("--telephony-media-host", default="127.0.0.1", help="Bind host for --telephony-media-gateway")
+    parser.add_argument("--telephony-media-port", type=int, default=8767, help="Bind port for --telephony-media-gateway")
     parser.add_argument("--voice-name", default=None, help="Edge TTS voice for --voice")
     parser.add_argument("--stt-backend", choices=["auto", "whisper", "sarvam"], default=None, help="STT backend for --voice")
     parser.add_argument("--tts-backend", choices=["auto", "edge", "sarvam"], default=None, help="TTS backend for --voice")
@@ -129,8 +155,8 @@ def main():
             _authorize_telegram_chat(args.telegram_authorize)
         elif args.telegram_revoke is not None:
             _authorize_telegram_chat(args.telegram_revoke, revoke=True)
-        elif args.server and args.telegram:
-            parser.error("Use either --server or --telegram. The desktop server also starts Telegram when enabled.")
+        elif sum(bool(value) for value in (args.server, args.telegram, args.voice, args.telephony_webhook, args.telephony_media_gateway)) > 1:
+            parser.error("Choose only one runtime mode. The desktop server starts Telegram when enabled.")
         elif args.server:
             _run_coro(_run_server(args.host, args.port))
         elif args.telegram:
@@ -142,6 +168,10 @@ def main():
                 tts_backend=args.tts_backend,
                 barge_in=args.barge_in,
             ))
+        elif args.telephony_webhook:
+            _run_telephony_webhook(args.telephony_webhook_host, args.telephony_webhook_port)
+        elif args.telephony_media_gateway:
+            _run_coro(_run_telephony_media_gateway(args.telephony_media_host, args.telephony_media_port))
         else:
             _run_coro(_run_cli())
     except asyncio.CancelledError:

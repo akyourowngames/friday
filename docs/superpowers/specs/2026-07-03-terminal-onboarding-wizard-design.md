@@ -336,5 +336,5 @@ None new. Uses existing: `rich`, `prompt_toolkit`, `platform`, `sys`.
 
 ## Scope
 
-- This spec covers the CLI wizard only. The Electron desktop app may want its own onboarding UI later — the data format (profile.md, soul.md) is shared.
+- This spec covers the CLI wizard only. The data format (profile.md, soul.md) is shared by every Ares surface.
 - Voice mode setup is out of scope — handled separately.

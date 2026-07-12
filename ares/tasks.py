@@ -1,7 +1,7 @@
 """Durable, revisioned task storage for resumable guarded workflows.
 
 The implementation intentionally follows the cron store's file-lock + atomic
-replace design.  A task may be touched by the CLI, desktop app, and a runner in
+replace design. A task may be touched by the CLI, Telegram channel, and a runner in
 separate processes, so every mutation is revisioned and active runs carry a
 recoverable lease.
 """

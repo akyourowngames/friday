@@ -2,16 +2,15 @@
 
 # ⚡ Ares
 
-### A local-first personal AI assistant for your terminal, desktop, voice, phone, and remote chat
+### A local-first personal AI assistant for your terminal, voice, phone, and remote chat
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![Desktop](https://img.shields.io/badge/Desktop-Electron%20%2B%20React-47848F?logo=electron&logoColor=white)](electron-app)
 [![Protocol](https://img.shields.io/badge/Integrations-MCP-6C47FF)](docs/mcp.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 
 **Remember what matters. Search every saved session. Take action with tools. Keep control local.**
 
-[Quick start](#-quick-start) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Desktop](#-desktop-voice-phone-and-telegram)
+[Quick start](#-quick-start) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
 
 </div>
 
@@ -19,22 +18,13 @@
 
 ## ✨ What Ares is
 
-Ares is a terminal-first AI assistant that can also run through an Electron desktop app, WebSocket server, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local tool surface.
+Ares is a terminal-first AI assistant with an optional local WebSocket API, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local tool surface.
 
 <table>
   <tr>
     <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
-    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 83 local tools for files, code, web research, images, recurring jobs, tasks, phone controls, and more.</td>
+    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 93 local tools for files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
     <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
-  </tr>
-</table>
-
-## 🖼️ Ares in action
-
-<table>
-  <tr>
-    <td width="50%"><img alt="Ares desktop conversation view" src="https://github.com/user-attachments/assets/3d90559c-9e33-4b8a-b906-7701e62339a9" /></td>
-    <td width="50%"><img alt="Ares desktop tools and session view" src="https://github.com/user-attachments/assets/2f7a2f7c-d1e7-4637-ac9c-791330cafd96" /></td>
   </tr>
 </table>
 
@@ -47,14 +37,6 @@ git clone https://github.com/akyourowngames/friday.git
 cd friday
 pip install -e ".[dev]"
 python -m ares
-```
-
-### Desktop app
-
-```bash
-cd electron-app
-npm install
-npm run dev
 ```
 
 ### Voice mode
@@ -80,13 +62,10 @@ python -m ares --server --port 8766
 ```mermaid
 flowchart LR
     User([You]) --> CLI[Rich terminal]
-    User --> Desktop[Electron desktop]
     User --> Voice[Voice mode]
     User --> Telegram[Telegram channel]
 
     CLI --> Agent[Ares agent]
-    Desktop --> Server[Local WebSocket server]
-    Server --> Agent
     Voice --> Agent
     Telegram --> Agent
 
@@ -172,6 +151,10 @@ search_memory("Rohit Instagram")
     <td>Check Android bridge health, read notifications, search contacts, send SMS, place confirmed calls, and launch apps or URLs through KDE Connect and ADB.</td>
   </tr>
   <tr>
+    <td>☎️ Provider telephony</td>
+    <td>Use Twilio Voice with a LiveKit-compatible media gateway for outbound/inbound calls, interruption-aware Ares conversations, encrypted contacts, local transcripts, summaries, transfers, and call history.</td>
+  </tr>
+  <tr>
     <td>🖥️ Desktop control</td>
     <td>Use Windows MCP for snapshots, screenshots, application/window control, mouse, keyboard, clipboard, and notifications.</td>
   </tr>
@@ -191,6 +174,7 @@ search_memory("Rohit Instagram")
 | Research & media | `web_search`, `fetch_url`, `generate_image`, `resize_image`, `convert_image`, `crop_image` |
 | Scheduling & workflows | `create_cron_job`, `run_cron_job_now`, `create_task`, `get_task_status`, `run_task` |
 | Phone & device | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number` |
+| Provider telephony | `telephony_call`, `telephony_hangup`, `telephony_mute`, `telephony_list_calls`, `telephony_list_contacts`, `telephony_save_contact`, `telephony_transfer` |
 
 See the complete model-facing inventory in [`ares/tools/definitions.py`](ares/tools/definitions.py).
 
@@ -254,15 +238,43 @@ See [MCP configuration and diagnostics](docs/mcp.md) for `stdio`, SSE, and Strea
 
 ---
 
-## 💬 Desktop, voice, phone, and Telegram
+## 💬 Voice, phone, and Telegram
 
 | Surface | Use it for | Start it with |
 |---|---|---|
 | Rich CLI | Fast local chat, slash commands, tools, and logs | `python -m ares` |
-| Electron + React | Persistent sessions, settings, tool cards, and terminal surface | `cd electron-app && npm run dev` |
-| WebSocket server | Serving the desktop client or local integrations | `python -m ares --server` |
+| WebSocket API | Optional local integrations | `python -m ares --server` |
 | Voice | Streaming speech, interruption/barge-in, local Whisper or Sarvam/Edge options | `python -m ares --voice` |
+| Twilio webhook | Signed Voice and status callbacks (behind public HTTPS) | `python -m ares --telephony-webhook` |
+| Twilio media | Bidirectional Media Streams, local Whisper, Ares tools/memory, Edge TTS (behind public WSS) | `python -m ares --telephony-media-gateway` |
 | Telegram | Allowlisted remote chat, files, photos, voice notes, skills, and MCP management | `python -m ares --telegram` |
+
+### Provider-backed phone calls
+
+Install the optional runtime, then enable **Telephony** in desktop Settings. Ares provides both local processes: a signed Twilio callback server and a bidirectional Media Streams gateway. Publish their loopback ports through HTTPS/WSS (for example with a reverse proxy or tunnel), then save the public addresses in `telephony.public_base_url` and `telephony.media_stream_url`. A Twilio-owned E.164 caller number is also required.
+
+```powershell
+pip install -e ".[telephony]"
+
+# Start these in separate terminals. They bind only to the local machine.
+python -m ares --telephony-webhook --telephony-webhook-port 8080
+python -m ares --telephony-media-gateway --telephony-media-port 8767
+```
+
+The media gateway converts Twilio's 8 kHz mu-law stream to local Whisper input, runs the normal Ares agent (including memory and tools), and returns Edge TTS audio to the call. It does not select an OpenAI realtime model. LiveKit project credentials are accepted and verified by locally signing a room token; audio routing to a separate LiveKit room remains an optional deployment integration rather than an implicit external dependency.
+
+Ares stores call sessions, transcripts, summaries, and encrypted telephony contacts locally in `~/.ares/data/ares.db`; the encryption key lives separately at `~/.ares/data/telephony.key`.
+
+```text
+/call Mom
+/call +911234567890 --confirm
+/telephony status
+/contacts
+/recent-calls
+/hangup CALL_ID
+```
+
+Run `/telephony status` to see redacted readiness. It reports missing deployment fields without displaying credentials. No call is placed until you explicitly use `/call`.
 
 ### Telegram setup
 
@@ -303,6 +315,7 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 ├── config.json                 # Model, bridges, MCP, and surface configuration
 ├── data/
 │   ├── ares.db                 # Facts, embeddings, people, conversations, actions, cron
+│   ├── telephony.key           # Local Fernet key for encrypted call-contact numbers
 │   ├── sessions/*.jsonl        # Append-only session archive with line provenance
 │   ├── soul.md                 # Assistant personality
 │   ├── profile.md              # User profile
@@ -316,10 +329,6 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 ```bash
 # Python behavior
 python -m pytest -q
-
-# Desktop production bundle
-cd electron-app
-npm run build
 ```
 
 | Change | Verify with |
@@ -327,7 +336,7 @@ npm run build
 | Memory, sessions, people, or tools | Focused tests plus `python -m pytest -q` |
 | Skill behavior | `python -m pytest tests/test_skills.py tests/test_prompts.py -q` |
 | CLI rendering | Relevant renderer tests |
-| Desktop UI | `cd electron-app && npm run build` |
+| Local API | `python -m pytest tests/test_server.py -q` |
 | Documentation | Validate links, commands, and code examples |
 
 ## 🔐 Local-first boundaries

@@ -61,7 +61,6 @@ Before requesting review, make sure:
 | Memory/context | Memory, context management, and integration tests. |
 | Cron jobs | Store, scheduler, runner, and tool tests. |
 | Phone/voice integrations | Unit tests with mocks; do not require real devices in CI. |
-| Desktop app | Relevant npm checks and manual UI notes when needed. |
 | Documentation | Link/command review and screenshots only when helpful. |
 
 ## Review Standard
@@ -131,4 +130,3 @@ Maintainers should:
 - Prefer small PRs over large rewrites.
 - Reject architecture changes that were not discussed.
 - Protect user privacy and local-first defaults.
-

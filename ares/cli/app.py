@@ -132,6 +132,16 @@ TOOL_LABELS = {
     "phone_call_number": "phone",
     "phone_launch_app": "phone",
     "phone_open_url": "phone",
+    "telephony_status": "telephony",
+    "telephony_call": "telephony call",
+    "telephony_answer": "telephony",
+    "telephony_hangup": "telephony",
+    "telephony_mute": "telephony",
+    "telephony_get_call": "telephony",
+    "telephony_list_calls": "telephony",
+    "telephony_list_contacts": "telephony contacts",
+    "telephony_save_contact": "telephony contacts",
+    "telephony_transfer": "telephony",
     "update_config": "config",
     "get_current_datetime": "clock",
 }
@@ -257,7 +267,7 @@ class AresCLI(MarketplaceCommandMixin):
         )
 
     def _sync_shared_state(self) -> None:
-        """Reload settings saved by the desktop app before handling input."""
+        """Reload settings saved by another local Ares surface before handling input."""
         latest = load_config()
         if latest.model_dump() == self.config.model_dump():
             return
@@ -1211,6 +1221,8 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/setup", "Run the onboarding wizard again")
             table.add_row("/browser [status|isolated|system|extension|auto|launch]", "Manage Playwright browser connection mode")
             table.add_row("/phone status", "Check Android phone bridge pairing health")
+            table.add_row("/call CONTACT|NUMBER [--confirm]", "Place a provider-backed telephone call")
+            table.add_row("/telephony [status|contacts|recent|hangup|mute|unmute]", "Manage Twilio/LiveKit telephony")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
             table.add_row("/mcp [search|add|list|test|refresh]", "Discover, configure, and manage MCP servers")
             table.add_row("/skill-name", "Load a skill directly by slash command")
@@ -1500,6 +1512,47 @@ class AresCLI(MarketplaceCommandMixin):
                     details,
                 )
                 self.console.print(table)
+
+        elif command == "/call":
+            if not arg:
+                self.console.print("[red]Usage: /call CONTACT_OR_NUMBER [--confirm][/red]")
+            else:
+                confirm = arg.endswith(" --confirm")
+                recipient = arg[:-10].strip() if confirm else arg
+                result = self.agent.tool_executor.execute("telephony_call", {"recipient": recipient, "confirm": confirm})
+                self.console.print(get_renderer("telephony_call")(result))
+
+        elif command == "/telephony":
+            pieces = arg.split()
+            action = pieces[0].lower() if pieces else "status"
+            mapping = {
+                "status": ("telephony_status", {}),
+                "contacts": ("telephony_list_contacts", {}),
+                "recent": ("telephony_list_calls", {}),
+                "hangup": ("telephony_hangup", {"call_id": pieces[1] if len(pieces) > 1 else ""}),
+                "mute": ("telephony_mute", {"call_id": pieces[1] if len(pieces) > 1 else "", "muted": True}),
+                "unmute": ("telephony_mute", {"call_id": pieces[1] if len(pieces) > 1 else "", "muted": False}),
+            }
+            if action not in mapping:
+                self.console.print("[red]Usage: /telephony [status|contacts|recent|hangup CALL_ID|mute CALL_ID|unmute CALL_ID][/red]")
+            else:
+                tool_name, arguments = mapping[action]
+                result = self.agent.tool_executor.execute(tool_name, arguments)
+                self.console.print(get_renderer(tool_name)(result))
+
+        elif command in {"/hangup", "/mute", "/unmute", "/recent-calls", "/contacts"}:
+            tool_name, arguments = {
+                "/hangup": ("telephony_hangup", {"call_id": arg}),
+                "/mute": ("telephony_mute", {"call_id": arg, "muted": True}),
+                "/unmute": ("telephony_mute", {"call_id": arg, "muted": False}),
+                "/recent-calls": ("telephony_list_calls", {}),
+                "/contacts": ("telephony_list_contacts", {}),
+            }[command]
+            if command in {"/hangup", "/mute", "/unmute"} and not arg:
+                self.console.print(f"[red]Usage: {command} CALL_ID[/red]")
+            else:
+                result = self.agent.tool_executor.execute(tool_name, arguments)
+                self.console.print(get_renderer(tool_name)(result))
 
         elif command == "/tools":
             if not arg:

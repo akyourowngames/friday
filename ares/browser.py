@@ -131,7 +131,7 @@ class BrowserManager:
         # literal directory named ``~`` instead of Ares' persistent data path.
         profile = str(Path(self.config.data_dir).expanduser() / "playwright-profile")
         return [
-            "@playwright/mcp@latest",
+            "@playwright/mcp@0.0.78",
             "--browser",
             "chrome",
             "--caps",
@@ -140,11 +140,13 @@ class BrowserManager:
             profile,
             "--viewport-size",
             "1280x720",
+            "--timeout",
+            "90000",  # 90 second timeout for browser operations
         ]
 
     def _cdp_args(self) -> list[str]:
         return [
-            "@playwright/mcp@latest",
+            "@playwright/mcp@0.0.78",
             "--cdp-endpoint",
             f"http://127.0.0.1:{self.config.browser_cdp_port}",
             "--caps",
@@ -207,3 +209,19 @@ class BrowserManager:
         if any(phrase in request for phrase in ("isolated", "sandbox", "clean browser")):
             return "isolated"
         return None
+
+    def reset_profile(self) -> str:
+        """Reset the Playwright browser profile to fix corruption issues.
+
+        This removes the persistent browser profile directory, which will be
+        recreated on the next Playwright MCP connection.
+        """
+        import shutil
+        profile = str(Path(self.config.data_dir).expanduser() / "playwright-profile")
+        try:
+            if Path(profile).exists():
+                shutil.rmtree(profile)
+                return f"Playwright profile reset successfully at {profile}"
+            return f"No profile found at {profile} (already clean)"
+        except OSError as exc:
+            return f"Failed to reset Playwright profile: {exc}"

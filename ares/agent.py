@@ -69,6 +69,10 @@ class Agent:
         self.tool_executor.config = self.llm.config
         self.config = self.llm.config
         self.tool_executor.set_session_id(session_id)
+        if getattr(self.tool_executor, "telephony", None) is not None:
+            # Phone transcripts use the normal agent loop, so call-time tool
+            # access and memory behavior remain identical to chat.
+            self.tool_executor.telephony.voice_agent.agent = self
         self.people_store = self.tool_executor.people_store
         self.action_ledger = self.tool_executor.action_ledger
         self.task_store = self.tool_executor.task_store
@@ -283,7 +287,8 @@ class Agent:
         # Read previous session summary from JSONL
         prev_summary = None
         if self._session_id and self._session_store:
-            prev_summary = self._session_store.get_previous_summary(self._session_id)
+            block_context = getattr(self.config, "block_session_context", False)
+            prev_summary = self._session_store.get_previous_summary(self._session_id, block=block_context)
 
         return build_context_prompt(
             soul_context=soul_ctx,
@@ -316,6 +321,8 @@ class Agent:
         self.config = config
         self.llm.config = config
         self.tool_executor.config = config
+        if getattr(self.tool_executor, "telephony", None) is not None:
+            self.tool_executor.telephony.apply_config(config)
         self.set_model(config.model)
 
         data_dir = Path(config.data_dir).expanduser()

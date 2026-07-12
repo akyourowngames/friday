@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 83
+        assert len(tools) == 93
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -89,6 +89,16 @@ class TestToolDefinitions:
             "phone_call_number",
             "phone_launch_app",
             "phone_open_url",
+            "telephony_status",
+            "telephony_call",
+            "telephony_answer",
+            "telephony_hangup",
+            "telephony_mute",
+            "telephony_get_call",
+            "telephony_list_calls",
+            "telephony_list_contacts",
+            "telephony_save_contact",
+            "telephony_transfer",
             "update_config",
             "create_cron_job",
             "list_cron_jobs",

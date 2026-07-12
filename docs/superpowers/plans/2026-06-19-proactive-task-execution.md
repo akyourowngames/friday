@@ -1180,7 +1180,7 @@ In `ares/server.py`, update `run_forever`:
         self.task_executor.start()
         async with serve(self.handle_client, self.host, self.port) as ws_server:
             self._server = ws_server
-            print(f"Ares desktop server listening on ws://{self.host}:{self.port}")
+            print(f"Ares local API listening on ws://{self.host}:{self.port}")
             await asyncio.Future()
 ```
 

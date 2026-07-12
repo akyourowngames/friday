@@ -25,6 +25,7 @@ dependencies = [
     "croniter>=2.0.0",
     "numpy>=1.26",
     "faster-whisper>=1.0",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,11 @@ voice = [
     "sounddevice>=0.4",
     "soundfile>=0.12",
     "webrtcvad>=2.0",
+]
+telephony = [
+    "livekit-agents>=1.0",
+    "edge-tts>=7.0",
+    "soundfile>=0.12",
 ]
 dev = [
     "pytest>=7.0",
