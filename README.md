@@ -10,7 +10,7 @@
 
 **Remember what matters. Search every saved session. Take action with tools. Keep control local.**
 
-[Quick start](#-quick-start) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
+[Quick start](#-quick-start) · [Watchers](#-proactive-watchers) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
 
 </div>
 
@@ -18,12 +18,12 @@
 
 ## ✨ What Ares is
 
-Ares is a terminal-first AI assistant with an optional local WebSocket API, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local tool surface.
+Ares is a terminal-first AI assistant with a separate Next.js power workspace, an optional local WebSocket API, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local tool surface.
 
 <table>
   <tr>
     <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
-    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 93 local tools for files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
+    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 118 local tools for goals, watchers, files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
     <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
   </tr>
 </table>
@@ -46,14 +46,94 @@ pip install -e ".[voice]"
 python -m ares --voice
 ```
 
-### Local server
+### Unified always-on runtime
 
 ```bash
-python -m ares --server --port 8766
+python -m ares --all
+# Desktop API: ws://127.0.0.1:8765
+# Power workspace: http://127.0.0.1:8766
+# Advanced watcher console: http://127.0.0.1:8080
 ```
+
+`--all` owns one agent, one integration manager, one watcher scheduler, the Next.js power workspace, the advanced watcher console, the desktop API, and Telegram when it is enabled. `--server` remains a compatibility alias; watchers are tools used by Ares and are not launched as an independent product process.
+
+### Next.js power workspace
+
+The power workspace is intentionally separate from the public marketing website. It provides one operational surface for streaming Ares chat, reusable file uploads, skills, MCP connections, watcher fleet management, personalization, browser configuration, Telegram setup, and advanced runtime settings. Chat, watcher actions, MCP operations, and settings all use the same running Ares agent and WebSocket protocol.
+
+The production build is bundled with the Python package and served at `http://127.0.0.1:8766` by `python -m ares --all`. For frontend development:
+
+```bash
+cd ares-workspace
+npm install
+npm run dev
+```
+
+`npm run build` creates the static Next.js export and synchronizes it into `ares/workspace/static` for the Python runtime.
 
 > [!TIP]
 > Start in the terminal first. Use `/setup`, `/model`, `/context`, and `/help` to inspect the active configuration and available controls.
+
+---
+
+## 📡 Proactive watchers
+
+Ares can run a durable monitoring fleet over websites, REST/JSON APIs, numeric thresholds, permitted Instagram Graph API endpoints, authenticated Playwright pages, and the results of existing Ares or connected MCP tools. Watchers are part of the normal agent tool plane: you can ask Ares to create, inspect, run, pause, resume, or query them in natural language.
+
+The control plane is local by default and includes:
+
+- A real-time overview, fleet health, incident queue, latency telemetry, delivery-channel health, and persistent settings.
+- SHA-256, text diff, and numeric threshold detection with regex noise suppression and first-run baselines.
+- Concurrent scheduling, cross-process leases, bounded fetch timeouts, exponential retry backoff, auto-pause after repeated failures, and snapshot retention.
+- Telegram, desktop, email, and webhook delivery with per-channel attempt logs and background retries.
+- Optional Ares analysis for suggestions and explicit, auditable webhook-only automatic actions.
+- SSRF protection, private-network opt-in, cross-origin redirect controls, secret redaction, and optional `ARES_WATCHER_API_TOKEN` dashboard authentication.
+- Bounded read-only tool workflows that reuse phone, files, web, browser, and MCP integrations. Consequential steps such as clicks, typing, sending, deletion, or shell execution require global and per-watcher opt-in.
+
+Examples you can ask Ares directly:
+
+```text
+Monitor my Instagram DMs every 5 minutes using my authenticated Playwright session.
+Watch my Android notifications and alert me when a new banking notification appears.
+Create a watcher over the GitHub MCP tool result for open production incidents.
+Show failing watchers and acknowledge the incident from the deployment-status watcher.
+Run the Instagram inbox watcher now and tell me what changed.
+```
+
+The agent exposes `create_watcher`, `list_watchers`, `get_watcher`, `update_watcher`, `run_watcher_now`, fleet/event query tools, pause/resume, acknowledgement, capability discovery, and confirmed deletion. Use `get_watcher_capabilities` when Ares needs to inspect the currently connected MCP tools before building a workflow.
+
+For authenticated DMs, configure `/browser extension` or `/browser system`, sign in normally, and let the browser watcher navigate to or snapshot the inbox. Ares stores the captured signal—not your password—and never automates credential entry. The dashboard’s **Browser / DMs (Playwright)** source includes an Instagram inbox starter recipe; **Ares tool workflow** provides a visible JSON workflow editor for any read-only tool chain.
+
+Terminal controls use short IDs or exact names:
+
+```text
+/monitor add "Production status" https://status.example.com --interval 5m --type website
+/monitor list
+/monitor status ID
+/monitor pause ID
+/monitor resume ID
+/monitor events ID
+/monitor test ID
+/monitor remove ID
+```
+
+Telegram exposes `/monitors`, `/monitor ...`, and `/alerts`. The scheduler starts automatically in Ares when `watcher.enabled` is true. Use `python -m ares --all` for the unified always-on runtime; database leases remain as a defensive guarantee against duplicate checks during upgrades or accidental overlapping processes.
+
+Watcher configuration is stored under the shared `watcher` object in `~/.ares/config.json`. Notification passwords and bot tokens can remain outside the file through `ARES_WATCHER_SMTP_PASSWORD` and `ARES_TELEGRAM_BOT_TOKEN`.
+
+```json
+{
+  "watcher": {
+    "enabled": true,
+    "tool_monitors_enabled": true,
+    "allow_mutating_tool_steps": false,
+    "max_tool_steps": 8,
+    "dashboard": { "enabled": true, "host": "127.0.0.1", "port": 8080 }
+  }
+}
+```
+
+Keep `allow_mutating_tool_steps` off for normal monitoring. Enabling a consequential workflow also requires `"allow_mutating_tools": true` on that specific watcher, and should only be used for an explicitly reviewed automation. Respect the monitored service’s permissions and terms.
 
 ---
 
@@ -114,6 +194,7 @@ search_memory("Rohit Instagram")
 - **Session resilience:** malformed historical JSONL lines are skipped without discarding the rest of a session.
 - **Context continuity:** “continue,” “that session,” and person references can pull relevant archived turns into context.
 - **Structured people:** names, aliases, relationship notes, contact fields, and important dates are stored and retrieved as one local record.
+- **Evidence-backed goals:** multi-level outcomes, due dates, priorities, manual/derived progress, task/action links, and an append-only check-in timeline live in the shared database.
 - **Durable workflows:** task plans, leases, retries, verification steps, and a confirmation-aware runner survive process restarts.
 - **Action provenance:** file, communication, export, and workflow outcomes can be located later without storing arbitrary command bodies.
 
@@ -131,6 +212,10 @@ search_memory("Rohit Instagram")
     <td>Store, search, update, delete, export, and import durable facts; manage complete local person records; search session and conversation history with provenance IDs.</td>
   </tr>
   <tr>
+    <td>🎯 Goals</td>
+    <td>Create, search, revise, pause, decompose, complete, or abandon durable goals; link Tasks and Actions as evidence; explicitly synchronize progress; inspect due, overdue, and timeline state.</td>
+  </tr>
+  <tr>
     <td>📁 Files & code</td>
     <td>Read, search, write, edit, diff, backup, undo, inspect, copy, move, hash, compare, batch-edit, and run persistent Python or shell sessions.</td>
   </tr>
@@ -144,7 +229,7 @@ search_memory("Rohit Instagram")
   </tr>
   <tr>
     <td>⏱️ Automation</td>
-    <td>Create recurring cron jobs, inspect logs, create durable multi-step tasks, resume safe work, and request confirmation for consequential workflow steps.</td>
+    <td>Create recurring cron jobs, run proactive website/API/price watchers, inspect monitoring telemetry and incidents, create durable multi-step tasks, resume safe work, and request confirmation for consequential workflow steps.</td>
   </tr>
   <tr>
     <td>📱 Phone bridge</td>
@@ -169,6 +254,7 @@ search_memory("Rohit Instagram")
 | Group | Representative tools |
 |---|---|
 | Memory & continuity | `store_memory`, `search_memory`, `remember_person`, `search_person`, `search_actions`, `export_data` |
+| Goals & evidence | `create_goal`, `list_goals`, `decompose_goal`, `link_goal_task`, `link_goal_action`, `record_goal_progress`, `sync_goal_progress` |
 | File operations | `read_file`, `search_files`, `write_file`, `edit_file`, `batch_edit`, `preview_diff`, `undo_last_edit`, `find_duplicates` |
 | Runtime | `run_code`, `run_command`, `terminal_exec` |
 | Research & media | `web_search`, `fetch_url`, `generate_image`, `resize_image`, `convert_image`, `crop_image` |
@@ -190,7 +276,7 @@ Skills are local `SKILL.md` playbooks. Ares discovers relevant instructions, loa
 | Automation | `browser-content-review`, `browser-form-workflow`, `browser-use`, `computer-use` |
 | Coding | `code-review`, `codebase-summary`, `project-init` |
 | Communication | `conversation-conduct` |
-| Productivity | `daily-planner`, `daily-standup` |
+| Productivity | `daily-planner`, `daily-standup`, `goal-management`, `goal-check-in` |
 | Research | `research-deep-dive`, `web-research` |
 | Utilities | `backup-snapshot`, `image-batch-processor`, `system-info` |
 
@@ -243,11 +329,12 @@ See [MCP configuration and diagnostics](docs/mcp.md) for `stdio`, SSE, and Strea
 | Surface | Use it for | Start it with |
 |---|---|---|
 | Rich CLI | Fast local chat, slash commands, tools, and logs | `python -m ares` |
-| WebSocket API | Optional local integrations | `python -m ares --server` |
+| Unified runtime | Next.js power workspace, desktop API, MCP tools, Telegram, watcher scheduler, and advanced watcher console | `python -m ares --all` |
+| WebSocket API compatibility alias | Same unified runtime | `python -m ares --server` |
 | Voice | Streaming speech, interruption/barge-in, local Whisper or Sarvam/Edge options | `python -m ares --voice` |
 | Twilio webhook | Signed Voice and status callbacks (behind public HTTPS) | `python -m ares --telephony-webhook` |
 | Twilio media | Bidirectional Media Streams, local Whisper, Ares tools/memory, Edge TTS (behind public WSS) | `python -m ares --telephony-media-gateway` |
-| Telegram | Allowlisted remote chat, files, photos, voice notes, skills, and MCP management | `python -m ares --telegram` |
+| Telegram | Allowlisted remote chat inside the unified runtime | `python -m ares --all` |
 
 ### Provider-backed phone calls
 
@@ -296,6 +383,7 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 |---|---|
 | `/help` | Show available controls. |
 | `/memory search QUERY` | Search durable facts and recall sources. |
+| `/goals [search|show|due]` | Inspect active goals, hierarchy, progress evidence, and deadlines. |
 | `/context` | Inspect active local context. |
 | `/model` | List or change the configured model. |
 | `/skills` | Discover, inspect, create, install, or manage skills. |
@@ -314,7 +402,8 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 ~/.ares/
 ├── config.json                 # Model, bridges, MCP, and surface configuration
 ├── data/
-│   ├── ares.db                 # Facts, embeddings, people, conversations, actions, cron
+│   ├── ares.db                 # Facts, embeddings, people, goals, conversations, actions, cron
+│   ├── watchers.db             # Watchers, snapshots, incidents, checks, and notification attempts
 │   ├── telephony.key           # Local Fernet key for encrypted call-contact numbers
 │   ├── sessions/*.jsonl        # Append-only session archive with line provenance
 │   ├── soul.md                 # Assistant personality
@@ -329,6 +418,12 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 ```bash
 # Python behavior
 python -m pytest -q
+
+# Next.js power workspace
+cd ares-workspace
+npm run lint
+npm run typecheck
+npm run build
 ```
 
 | Change | Verify with |
@@ -337,6 +432,8 @@ python -m pytest -q
 | Skill behavior | `python -m pytest tests/test_skills.py tests/test_prompts.py -q` |
 | CLI rendering | Relevant renderer tests |
 | Local API | `python -m pytest tests/test_server.py -q` |
+| Next.js power workspace | `npm run lint && npm run typecheck && npm run build` from `ares-workspace` |
+| Watcher core or dashboard | `python -m pytest tests/watcher -q` plus `node --check ares/watcher/dashboard/static/app.js` |
 | Documentation | Validate links, commands, and code examples |
 
 ## 🔐 Local-first boundaries
@@ -351,6 +448,8 @@ python -m pytest -q
 
 - [MCP configuration and management](docs/mcp.md)
 - [Marketplace guide](docs/marketplace.md)
+- [Watcher service design](docs/superpowers/specs/2026-07-12-watcher-service-design.md)
+- [Watcher core implementation plan](docs/superpowers/plans/2026-07-12-watcher-core-infrastructure.md)
 - [Contributing guide](CONTRIBUTING.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Changelog](CHANGELOG.md)

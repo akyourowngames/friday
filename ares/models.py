@@ -243,6 +243,48 @@ class TelegramConfig(BaseModel):
     max_audio_duration_seconds: int = Field(default=600, ge=1, le=7200)
 
 
+class WatcherDashboardConfig(BaseModel):
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = Field(default=8080, ge=1, le=65535)
+
+
+class WorkspaceConfig(BaseModel):
+    """Local web workspace served by the unified Ares runtime."""
+
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = Field(default=8766, ge=1, le=65535)
+
+
+class WatcherDefaultsConfig(BaseModel):
+    interval_seconds: int = Field(default=900, ge=20, le=31_536_000)
+    ai_action: Literal["notify", "suggest", "auto"] = "notify"
+    timeout: int = Field(default=30, ge=1, le=120)
+    max_retries: int = Field(default=3, ge=0, le=20)
+
+
+class WatcherConfig(BaseModel):
+    """Shared watcher service configuration for CLI and dashboard runtimes."""
+
+    enabled: bool = True
+    database_path: str = "~/.ares/data/watchers.db"
+    poll_seconds: float = Field(default=5.0, ge=0.5, le=300)
+    max_concurrency: int = Field(default=8, ge=1, le=100)
+    tool_monitors_enabled: bool = True
+    allow_mutating_tool_steps: bool = False
+    max_tool_steps: int = Field(default=8, ge=1, le=25)
+    max_tool_output_chars: int = Field(default=2_000_000, ge=1_000, le=10_000_000)
+    dashboard: WatcherDashboardConfig = Field(default_factory=WatcherDashboardConfig)
+    notifications: dict[str, dict] = Field(default_factory=lambda: {
+        "telegram": {"enabled": False, "chat_id": ""},
+        "desktop": {"enabled": True},
+        "email": {"enabled": False, "smtp_host": "", "smtp_port": 587, "to_address": ""},
+        "webhook": {"enabled": False, "url": ""},
+    })
+    defaults: WatcherDefaultsConfig = Field(default_factory=WatcherDefaultsConfig)
+
+
 class SkillRegistry(BaseModel):
     """A configured, trusted source of community SKILL.md bundles.
 
@@ -366,6 +408,8 @@ class AppConfig(BaseModel):
     phone: PhoneConfig = Field(default_factory=PhoneConfig)
     telephony: TelephonyConfig = Field(default_factory=TelephonyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     cron_enabled: bool = True
     cron_tick_seconds: int = 60
     cron_max_concurrent: int = 3

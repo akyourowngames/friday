@@ -414,6 +414,9 @@ class TelegramChannel:
                     "/file <path> — upload a local PC file\n"
                     "/skills [list|search|info|install] — manage skills\n"
                     "/mcp [list|search|info|add|test|refresh] — manage MCPs\n"
+                    "/monitors — list proactive watchers\n"
+                    "/monitor [add|status|pause|resume|remove|events|test] — control watchers\n"
+                    "/alerts — recent watcher incidents\n"
                     "/confirm <code> — approve the last reviewed install\n/cancel — discard it\n"
                     "/help — show this help\n\n"
                     "Examples: /skills search research  •  /mcp search github",
@@ -435,6 +438,9 @@ class TelegramChannel:
             if command == "/file":
                 await self._send_requested_file(chat_id, argument, reply_to)
                 return
+            if command in {"/monitor", "/monitors", "/alerts"}:
+                await self._handle_watcher_command(chat_id, command, argument, reply_to)
+                return
             if command in {"/skills", "/mcp", "/confirm", "/cancel"}:
                 await self._handle_marketplace_command(chat_id, command, argument, reply_to)
                 return
@@ -443,6 +449,54 @@ class TelegramChannel:
                 return
 
             await self._handle_chat_message(chat_id, message, update, text, reply_to)
+
+    async def _handle_watcher_command(self, chat_id: int, command: str, argument: str, reply_to: int | None) -> None:
+        """Run the same watcher controls exposed by the local terminal."""
+        from ares.watcher.commands import WatcherCommands
+        from ares.watcher.database import resolve_watcher_database_path
+        watcher_tools = getattr(getattr(self.agent, "tool_executor", None), "watcher_tools", None)
+        controller = WatcherCommands(
+            database_path=resolve_watcher_database_path(self.config),
+            defaults=self.config.watcher.defaults,
+            db=watcher_tools.db if watcher_tools is not None else None,
+        )
+        try:
+            if command == "/alerts":
+                events = controller.db.list_events(limit=10, unacknowledged=True)
+                if not events:
+                    text = "Watcher alerts · all clear. No unacknowledged changes."
+                else:
+                    monitors = {item.id:item.name for item in controller.db.list_monitors()}
+                    lines = ["Watcher alerts"] + [f"• {item.severity.upper()} · {monitors.get(item.monitor_id, item.monitor_id[:8])}\n  {item.change_summary or item.event_type}" for item in events]
+                    text = "\n".join(lines)
+                await self.api.send_message(chat_id, _telegram_trim(text), reply_to_message_id=reply_to)
+                return
+            result = controller.execute("list" if command == "/monitors" else argument)
+            action = result["action"]
+            if action == "list":
+                values = result["monitors"]
+                text = "Ares watchers\n" + ("\n".join(f"• {item['id'][:8]} · {item['name']} · {'paused' if not item['enabled'] else item['last_status'] or 'armed'} · {item['interval_seconds']}s" for item in values) if values else "No watchers configured.")
+            elif action == "status":
+                item = result["monitor"]
+                text = f"Watcher · {item['name']}\nStatus: {item['last_status'] or 'armed'}\nEnabled: {item['enabled']}\nChecks: {item['total_checks']} · Changes: {item['total_changes']}\nErrors: {item['error_count']}\nLast: {item['last_checked_at'] or 'never'}"
+            elif action == "events":
+                values = result["events"]
+                text = f"Events · {result['monitor']['name']}\n" + ("\n".join(f"• {item['severity'].upper()} · {item['change_summary'] or item['event_type']}" for item in values) if values else "No changes recorded.")
+            elif action == "test":
+                service = getattr(watcher_tools, "service", None)
+                if service is None:
+                    text = "Watcher runtime is not active. Start Ares with --all."
+                else:
+                    monitor = service.db.get_monitor(result["monitor"]["id"])
+                    event = await service.scheduler.check_monitor(monitor, force=True) if monitor else None
+                    text = f"Watcher check complete · {result['monitor']['name']}\n" + (f"Signal: {event.change_summary}" if event else "No change detected.")
+            else:
+                text = f"Watcher {action} complete · {result['monitor']['name']} ({result['monitor']['id'][:8]})"
+            await self.api.send_message(chat_id, _telegram_trim(text), reply_to_message_id=reply_to)
+        except (ValueError, KeyError) as exc:
+            await self.api.send_message(chat_id, str(exc), reply_to_message_id=reply_to)
+        finally:
+            controller.close()
 
     async def _handle_chat_message(
         self,
@@ -1246,7 +1300,12 @@ async def run_telegram_channel() -> None:
         config_provider=load_config,
     )
     mcp_start_task: asyncio.Task | None = None
+    watcher_service = None
     try:
+        if config.watcher.enabled:
+            from ares.watcher.integration import create_agent_watcher_service
+            watcher_service = create_agent_watcher_service(config, agent)
+            await watcher_service.start()
         if manager is not None:
             async def start_mcp() -> None:
                 try:
@@ -1261,6 +1320,12 @@ async def run_telegram_channel() -> None:
             mcp_start_task = asyncio.create_task(start_mcp(), name="ares-telegram-mcp")
         await channel.run_forever()
     finally:
+        if watcher_service is not None:
+            with suppress(Exception):
+                await watcher_service.stop()
+            setter = getattr(agent.tool_executor, "set_watcher_service", None)
+            if setter is not None:
+                setter(None)
         await channel.stop()
         if mcp_start_task is not None and not mcp_start_task.done():
             mcp_start_task.cancel()

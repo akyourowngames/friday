@@ -1,7 +1,7 @@
 # Ares Watcher Service Design
 
 **Date:** 2026-07-12
-**Status:** Draft
+**Status:** Implemented and extended
 **Author:** Ares Design Session
 
 ---
@@ -9,6 +9,16 @@
 ## Executive Summary
 
 Add a proactive monitoring system to Ares that watches websites, prices, and social media for changes, then notifies the owner through multiple channels (Telegram, Desktop, Email). The system runs as a background service with a web dashboard for management.
+
+### Ares-native implementation amendment — 2026-07-13
+
+The production implementation treats watchers as an Ares capability, not an independent application. The unified `python -m ares --all` runtime owns the desktop API, agent, MCP integrations, enabled Telegram channel, watcher scheduler, and dashboard. The agent itself receives first-class watcher tools for discovery, creation, management, immediate execution, fleet/event queries, and acknowledgement.
+
+The source model is extended beyond the original HTTP-only `CustomWatcher` concept:
+
+- `browser` monitors reuse the configured authenticated Playwright MCP session for navigation and accessibility snapshots, including a visible Instagram DM recipe.
+- `tool` monitors run bounded observation workflows over existing Ares local tools or connected MCP tools, support step-output substitution and JSONPath/regex extraction, and feed the normal snapshot/diff/threshold pipeline.
+- Consequential background steps are denied by default and require both a global configuration opt-in and a per-monitor opt-in. Watcher-management recursion is always rejected.
 
 ---
 

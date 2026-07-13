@@ -20,14 +20,16 @@ from ares.actions import ActionLedger
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.people import PeopleStore
+from ares.goals import GoalStore
 
 EXPORT_PROFILES: dict[str, dict[str, bool]] = {
-    "full": {"config": True, "memories": True, "conversations": True, "actions": True, "people": True},
-    "memories": {"config": False, "memories": True, "conversations": False, "actions": False, "people": False},
-    "conversations": {"config": False, "memories": False, "conversations": True, "actions": False, "people": False},
-    "config": {"config": True, "memories": False, "conversations": False, "actions": False, "people": False},
-    "actions": {"config": False, "memories": False, "conversations": False, "actions": True, "people": False},
-    "people": {"config": False, "memories": False, "conversations": False, "actions": False, "people": True},
+    "full": {"config": True, "memories": True, "conversations": True, "actions": True, "people": True, "goals": True},
+    "memories": {"config": False, "memories": True, "conversations": False, "actions": False, "people": False, "goals": False},
+    "conversations": {"config": False, "memories": False, "conversations": True, "actions": False, "people": False, "goals": False},
+    "config": {"config": True, "memories": False, "conversations": False, "actions": False, "people": False, "goals": False},
+    "actions": {"config": False, "memories": False, "conversations": False, "actions": True, "people": False, "goals": False},
+    "people": {"config": False, "memories": False, "conversations": False, "actions": False, "people": True, "goals": False},
+    "goals": {"config": False, "memories": False, "conversations": False, "actions": False, "people": False, "goals": True},
 }
 
 
@@ -140,6 +142,7 @@ def export_data(
     conversation_store: ConversationStore | None = None,
     people_store: PeopleStore | None = None,
     action_ledger: ActionLedger | None = None,
+    goal_store: GoalStore | None = None,
     config: AppConfig | None = None,
     path: str | Path | None = None,
     profile: str = "full",
@@ -154,7 +157,7 @@ def export_data(
     flags = EXPORT_PROFILES[normalized_profile]
     config_data, redaction_preview = _redact_credentials(app_config.model_dump()) if flags["config"] else ({}, {})
     payload: dict[str, Any] = {
-        "version": 2,
+        "version": 3,
         "exported_at": now_local_iso(),
         "export_profile": normalized_profile,
         "config": config_data,
@@ -165,6 +168,7 @@ def export_data(
         "conversation_messages": [],
         "actions": action_ledger.list_all() if flags["actions"] and action_ledger is not None else [],
         "people": people_store.list_all(include_sensitive=True) if flags["people"] and people_store is not None else [],
+        "goals": goal_store.list_all_for_export() if flags["goals"] and goal_store is not None else [],
     }
     if conversation_store is not None and flags["conversations"]:
         payload["conversations"] = conversation_store.list_conversations()
@@ -187,9 +191,11 @@ def import_data(
     conversation_store: ConversationStore | None = None,
     people_store: PeopleStore | None = None,
     action_ledger: ActionLedger | None = None,
+    goal_store: GoalStore | None = None,
     import_config: bool = False,
     import_people: bool = False,
     import_actions: bool = True,
+    import_goals: bool = True,
 ) -> dict[str, int]:
     """Import data from an Ares JSON export."""
     input_path = Path(path).expanduser()
@@ -202,6 +208,7 @@ def import_data(
         "config": 0,
         "people": 0,
         "actions": 0,
+        "goals": 0,
     }
 
     if conversation_store is not None:
@@ -216,6 +223,8 @@ def import_data(
         counts["people"] = people_store.import_people(payload.get("people", []))
     if import_actions and action_ledger is not None:
         counts["actions"] = action_ledger.import_actions(payload.get("actions", []))
+    if import_goals and goal_store is not None:
+        counts["goals"] = goal_store.import_goals(payload.get("goals", []))
 
     if import_config and payload.get("config"):
         current = load_config()

@@ -10,6 +10,7 @@ STYLE = Style.from_dict({"prompt": "bold ansicyan"})
 COMPLETER = WordCompleter(
     [
         "/help", "/memory", "/memory clean", "/model", "/clear",
+        "/goals", "/goals search", "/goals show", "/goals due",
         "/forget", "/export", "/import", "/reset", "/exit",
         "/soul", "/profile", "/context",
         "/skills", "/skills list", "/skills search", "/skills install", "/skills create",

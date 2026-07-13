@@ -2,6 +2,26 @@
 
 This initial changelog is summarized from the repository git history and grouped by feature area rather than raw commit messages.
 
+## 2026-07-13
+
+### Next.js Power Workspace
+- Added a separate Ares-styled Next.js application for power users with streaming chat, thread controls, reusable file uploads, skills management, MCP server administration, watcher operations, command palette, and responsive navigation.
+- Added a production workspace host to the unified `python -m ares --all` runtime on port 8766 while keeping the public marketing website independent and the advanced watcher console available on port 8080.
+- Connected watcher creation, browser/Instagram DM presets, fleet queries, incident actions, MCP lifecycle operations, uploads, profile/soul personalization, Telegram, browser, model, and monitoring settings to the existing Ares agent and shared configuration.
+- Added source freshness, execution telemetry, reliability, fleet health, and incident views with explicit metric definitions and secret-safe readiness states.
+- Added a static-export synchronization pipeline, packaged frontend fallback, WebSocket protocol coverage, upload safety checks, settings round-trip tests, and rendered browser QA.
+
+### Proactive Watchers
+- Refactored watchers into the normal Ares agent tool plane with 12 first-class tools for capability discovery, lifecycle management, immediate checks, fleet/event queries, acknowledgement, and confirmed deletion.
+- Added authenticated Playwright browser watchers and bounded workflows over existing local/MCP tools, including an Instagram DM starter recipe, phone-notification recipe, output extraction, step chaining, and dual opt-in guards for consequential background actions.
+- Added `python -m ares --all` as the unified desktop API, agent, MCP, Telegram, watcher scheduler, and watcher dashboard runtime; `--server` remains a compatibility alias and the legacy watcher flag now routes to the unified process.
+- Made watcher/dashboard dependencies part of the normal Ares install and exposed Browser/DM and Ares-tool sources directly in the dashboard monitor editor.
+- Added the production watcher core: WAL-backed SQLite history, cross-process leases, website/JSON/Instagram Graph fetchers, hash/diff/threshold detection, concurrent scheduling, retry backoff, failure auto-pause, and retained check telemetry.
+- Added Telegram, desktop, email, and webhook notifications with delivery audit logs and background retries, optional AI change analysis, and explicit webhook-only automatic actions.
+- Added a FastAPI/WebSocket control plane plus a responsive Ares-styled dashboard for fleet health, incidents, telemetry, monitor configuration, and persistent delivery settings.
+- Added terminal and Telegram watcher controls and automatic scheduler startup in the terminal, desktop server, and standalone Telegram runtimes.
+- Added SSRF and redirect protections, control-plane token authentication, and secret-redacted API/WebSocket payloads.
+
 ## 2026-07-07
 
 ### Phone Bridge

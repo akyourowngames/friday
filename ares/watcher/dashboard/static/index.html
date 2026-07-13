@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#080706" />
+  <title>Ares Watcher · Control Plane</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="noise"></div>
+  <aside class="rail">
+    <a class="brand" href="#overview" aria-label="Ares Watcher home"><span class="brand-mark"><i></i><i></i></span><span>ARES<small>WATCHER</small></span></a>
+    <nav>
+      <button class="nav-item active" data-view="overview"><span>01</span><b>Overview</b></button>
+      <button class="nav-item" data-view="monitors"><span>02</span><b>Monitors</b><em id="nav-monitor-count">0</em></button>
+      <button class="nav-item" data-view="incidents"><span>03</span><b>Incidents</b><em id="nav-alert-count">0</em></button>
+      <button class="nav-item" data-view="telemetry"><span>04</span><b>Telemetry</b></button>
+      <button class="nav-item" data-view="settings"><span>05</span><b>Settings</b></button>
+    </nav>
+    <div class="rail-foot"><div class="pulse"></div><div><b>CORE ONLINE</b><small id="rail-latency">SYNCING</small></div></div>
+  </aside>
+  <main class="shell">
+    <header class="topbar">
+      <button class="mobile-menu" aria-label="Toggle navigation">☰</button>
+      <div><span class="coord">CONTROL PLANE / <b id="current-section">OVERVIEW</b></span><h1 id="page-title">WATCHER <em>COMMAND.</em></h1></div>
+      <div class="top-actions"><div class="live-pill"><i></i><span>LIVE FEED</span><b id="clock">--:--:--</b></div><button class="primary" id="add-monitor">+ NEW MONITOR</button></div>
+    </header>
+    <section class="view active" id="view-overview">
+      <div class="status-strip">
+        <div><span>SERVICE STATUS</span><b><i class="dot good"></i> OPERATIONAL</b></div><div><span>SUCCESS / 24H</span><strong id="stat-success">100%</strong></div><div><span>CHECKS / 24H</span><strong id="stat-checks">0</strong></div><div><span>AVG LATENCY</span><strong id="stat-latency">0ms</strong></div>
+      </div>
+      <div class="section-label"><span>01 / FLEET SIGNAL</span><p>A real-time operational picture of every active watcher and delivery path.</p></div>
+      <div class="metric-grid">
+        <article class="metric hero-metric"><span>ACTIVE WATCHERS</span><strong id="metric-active">00</strong><small id="metric-total">OF 0 CONFIGURED</small><div class="orb"><i></i><i></i><b></b></div></article>
+        <article class="metric"><span>OPEN INCIDENTS</span><strong id="metric-alerts">00</strong><small>NEEDS ACKNOWLEDGEMENT</small><div class="micro-bars" id="alert-bars"></div></article>
+        <article class="metric"><span>DEGRADED</span><strong id="metric-failing">00</strong><small>ERROR OR TIMEOUT STATE</small><div class="signal-ring danger"></div></article>
+        <article class="metric"><span>CHANGES CAPTURED</span><strong id="metric-changes">00</strong><small>ALL-TIME EVENT SIGNALS</small><div class="signal-ring"></div></article>
+      </div>
+      <div class="ops-grid">
+        <article class="panel fleet-panel"><div class="panel-head"><div><span>LIVE FLEET</span><h2>MONITOR STATUS</h2></div><button class="text-button" data-jump="monitors">VIEW ALL →</button></div><div id="fleet-compact" class="fleet-list empty-state">No monitors configured.</div></article>
+        <article class="panel event-panel"><div class="panel-head"><div><span>EVENT STREAM</span><h2>RECENT SIGNALS</h2></div><i class="pulse"></i></div><div id="events-compact" class="event-list empty-state">Awaiting the first watcher signal.</div></article>
+      </div>
+    </section>
+    <section class="view" id="view-monitors">
+      <div class="section-label"><span>02 / WATCHER FLEET</span><p>Inspect health, change strategy, schedules, and direct controls.</p></div>
+      <div class="toolbar"><label class="search"><span>⌕</span><input id="monitor-search" placeholder="SEARCH NAME, URL, TYPE…" /></label><div class="filters"><button class="active" data-filter="all">ALL</button><button data-filter="active">ACTIVE</button><button data-filter="paused">PAUSED</button><button data-filter="failing">FAILING</button></div></div>
+      <article class="panel table-panel"><div class="monitor-table-head"><span>WATCHER</span><span>STATUS</span><span>INTERVAL</span><span>LAST CHECK</span><span>LATENCY</span><span>ACTIONS</span></div><div id="monitor-table" class="monitor-table empty-state">No monitors match this view.</div></article>
+    </section>
+    <section class="view" id="view-incidents">
+      <div class="section-label"><span>03 / INCIDENT QUEUE</span><p>Review detected changes, AI analysis, and delivery outcomes.</p></div>
+      <div class="toolbar"><div class="filters severity-filter"><button class="active" data-severity="all">ALL SIGNALS</button><button data-severity="critical">CRITICAL</button><button data-severity="warning">WARNING</button><button data-severity="info">INFO</button></div><button class="text-button" id="ack-all">ACKNOWLEDGE VISIBLE</button></div>
+      <div id="incident-list" class="incident-list empty-state">No incidents recorded.</div>
+    </section>
+    <section class="view" id="view-telemetry">
+      <div class="section-label"><span>04 / SYSTEM TELEMETRY</span><p>Latency, reliability, checks, and notification delivery across the fleet.</p></div>
+      <div class="telemetry-grid"><article class="panel chart-panel"><div class="panel-head"><div><span>CHECK LATENCY</span><h2>LAST 100 RUNS</h2></div><b id="chart-average">Ø 0ms</b></div><div class="chart"><svg id="latency-chart" viewBox="0 0 900 260" preserveAspectRatio="none"><defs><linearGradient id="latency-gradient" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#ff3b20" stop-opacity=".28"/><stop offset="1" stop-color="#ff3b20" stop-opacity="0"/></linearGradient></defs><path class="grid-line" d="M0 40H900 M0 100H900 M0 160H900 M0 220H900"/><path id="latency-area" class="chart-area" d=""/><path id="latency-line" class="chart-line" d=""/></svg></div></article><article class="panel channel-panel"><div class="panel-head"><div><span>DELIVERY PLANE</span><h2>CHANNEL HEALTH</h2></div></div><div id="channel-health" class="channel-list empty-state">No notifications attempted.</div></article></div>
+      <article class="panel run-panel"><div class="panel-head"><div><span>EXECUTION LOG</span><h2>RECENT CHECKS</h2></div></div><div id="run-log" class="run-log empty-state">No check history yet.</div></article>
+    </section>
+    <section class="view" id="view-settings">
+      <div class="section-label"><span>05 / DELIVERY CONFIG</span><p>Control where watcher signals are delivered. Secrets remain redacted after save.</p></div>
+      <form id="settings-form" class="settings-layout">
+        <article class="panel settings-panel"><div class="panel-head"><div><span>LOCAL CHANNEL</span><h2>DESKTOP</h2></div><label class="switch"><input type="checkbox" name="desktop.enabled" aria-label="Enable desktop notifications"><i></i></label></div><div class="settings-body"><p>Native operating-system alerts on this Ares machine.</p><label><span>DISPLAY TIME (SECONDS)</span><input type="number" name="desktop.timeout" min="1" max="60" value="8"></label></div></article>
+        <article class="panel settings-panel"><div class="panel-head"><div><span>MESSAGING CHANNEL</span><h2>TELEGRAM</h2></div><label class="switch"><input type="checkbox" name="telegram.enabled" aria-label="Enable Telegram notifications"><i></i></label></div><div class="settings-body"><label><span>CHAT ID</span><input name="telegram.chat_id" placeholder="Authorized chat ID"></label><label><span>BOT TOKEN</span><input type="password" name="telegram.bot_token" placeholder="Uses ARES_TELEGRAM_BOT_TOKEN when blank"></label></div></article>
+        <article class="panel settings-panel"><div class="panel-head"><div><span>MAIL CHANNEL</span><h2>EMAIL / SMTP</h2></div><label class="switch"><input type="checkbox" name="email.enabled" aria-label="Enable email notifications"><i></i></label></div><div class="settings-body field-pair"><label><span>SMTP HOST</span><input name="email.smtp_host" placeholder="smtp.example.com"></label><label><span>PORT</span><input type="number" name="email.smtp_port" value="587"></label><label><span>USERNAME</span><input name="email.username"></label><label><span>PASSWORD</span><input type="password" name="email.password" placeholder="Uses ARES_WATCHER_SMTP_PASSWORD when blank"></label><label class="wide"><span>DELIVER TO</span><input type="email" name="email.to_address"></label></div></article>
+        <article class="panel settings-panel"><div class="panel-head"><div><span>AUTOMATION CHANNEL</span><h2>WEBHOOK</h2></div><label class="switch"><input type="checkbox" name="webhook.enabled" aria-label="Enable webhook notifications"><i></i></label></div><div class="settings-body"><label><span>HTTPS ENDPOINT</span><input type="url" name="webhook.url" placeholder="https://hooks.example.com/ares"></label><label class="check-line"><input type="checkbox" name="webhook.allow_private_network"><span>Allow explicit private-network delivery</span></label></div></article>
+        <article class="panel settings-meta"><div class="panel-head"><div><span>ARES CONTROL PLANE</span><h2>UNIFIED RUNTIME</h2></div></div><div class="settings-readout"><div><span>POLL CADENCE</span><b id="setting-poll">—</b></div><div><span>MAX CONCURRENCY</span><b id="setting-concurrency">—</b></div><div><span>API TOKEN</span><b id="setting-token">—</b></div><div><span>SIGNAL SOURCES</span><b id="setting-sources">—</b></div></div></article>
+        <div class="settings-save"><span id="settings-state">Changes persist to the shared Ares configuration.</span><button class="primary" type="submit">SAVE DELIVERY CONFIG →</button></div>
+      </form>
+    </section>
+  </main>
+  <div class="modal-backdrop" id="monitor-modal" hidden>
+    <form class="modal" id="monitor-form"><input type="hidden" name="monitor_id"><div class="modal-head"><div><span id="monitor-form-kicker">DEPLOY WATCHER</span><h2 id="monitor-form-title">NEW MONITOR</h2></div><button type="button" class="icon-button" data-close>×</button></div>
+      <div class="form-grid"><label><span>MONITOR NAME</span><input name="name" required maxlength="160" placeholder="Instagram inbox" /></label><label><span>SIGNAL SOURCE</span><select name="type"><option value="website">Website / page</option><option value="custom">API / JSON</option><option value="browser">Browser / DMs (Playwright)</option><option value="tool">Ares tool workflow</option><option value="instagram">Instagram Graph API</option></select></label><label class="wide"><span>TARGET URL</span><input name="url" type="url" required placeholder="https://example.com/status" /></label><label><span>CHECK INTERVAL</span><select name="interval_seconds"><option value="60">Every minute</option><option value="300">Every 5 minutes</option><option value="900" selected>Every 15 minutes</option><option value="3600">Hourly</option><option value="86400">Daily</option></select></label><label><span>AI RESPONSE</span><select name="ai_action"><option value="notify">Notify only</option><option value="suggest">Analyze + suggest</option><option value="auto">Approved webhook action</option></select></label><label class="wide"><span>WORKFLOW / EXTRACTION / DETECTION (JSON)</span><textarea name="config" rows="10" spellcheck="false">{ "change_detection": "diff", "ignore_patterns": [] }</textarea><small id="monitor-config-help">CSS extraction, thresholds, browser recipes, existing Ares tool steps, and notification overrides live here.</small></label></div>
+      <div class="modal-actions"><button type="button" class="ghost" data-close>CANCEL</button><button type="submit" class="primary" id="monitor-submit">DEPLOY MONITOR →</button></div>
+    </form>
+  </div>
+  <div class="modal-backdrop" id="auth-modal" hidden>
+    <form class="modal auth-modal" id="auth-form"><div class="modal-head"><div><span>SECURE CONTROL PLANE</span><h2>AUTHENTICATE</h2></div></div><div class="settings-body"><p>This dashboard requires the local API token configured in <code>ARES_WATCHER_API_TOKEN</code>.</p><label><span>WATCHER API TOKEN</span><input type="password" name="token" required autocomplete="current-password"></label></div><div class="modal-actions"><button type="submit" class="primary">UNLOCK DASHBOARD →</button></div></form>
+  </div>
+  <aside class="drawer" id="detail-drawer" aria-hidden="true"><button class="drawer-close" data-drawer-close>×</button><div id="drawer-content"></div></aside>
+  <div class="toast-stack" id="toasts"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

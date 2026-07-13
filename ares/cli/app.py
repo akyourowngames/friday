@@ -125,6 +125,18 @@ TOOL_LABELS = {
     "delete_cron_job": "scheduler",
     "run_cron_job_now": "scheduler",
     "get_cron_logs": "scheduler logs",
+    "get_watcher_capabilities": "watcher integrations",
+    "create_watcher": "watcher deploy",
+    "list_watchers": "watcher fleet",
+    "get_watcher": "watcher detail",
+    "update_watcher": "watcher config",
+    "pause_watcher": "watcher pause",
+    "resume_watcher": "watcher resume",
+    "run_watcher_now": "watcher check",
+    "list_watcher_events": "watcher incidents",
+    "acknowledge_watcher_event": "watcher incident",
+    "get_watcher_overview": "watcher health",
+    "delete_watcher": "watcher delete",
     "phone_status": "phone",
     "phone_get_notifications": "phone",
     "phone_search_contact": "phone",
@@ -1208,6 +1220,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_column("Description", ratio=4)
             table.add_row("/help", "Show available commands")
             table.add_row("/memory [search|edit|delete|clean]", "Review, manage, and clean memories")
+            table.add_row("/goals [search|show|due]", "Track durable goals, progress, evidence, and hierarchy")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
             table.add_row("/clear", "Clear terminal screen")
@@ -1225,6 +1238,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/telephony [status|contacts|recent|hangup|mute|unmute]", "Manage Twilio/LiveKit telephony")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
             table.add_row("/mcp [search|add|list|test|refresh]", "Discover, configure, and manage MCP servers")
+            table.add_row("/monitor [list|add|status|pause|resume|remove|events|test]", "Control proactive watchers")
             table.add_row("/skill-name", "Load a skill directly by slash command")
             table.add_row("/exit", "Exit Ares")
             self.console.print(table)
@@ -1273,6 +1287,71 @@ class AresCLI(MarketplaceCommandMixin):
                     self.console.print(f"[yellow]Forgot memory #{fact_id}.[/yellow]")
                 else:
                     self.console.print(f"[red]Memory #{fact_id} was not found.[/red]")
+
+        elif command == "/goals":
+            goal_store = getattr(self.agent, "goal_store", None)
+            if goal_store is None:
+                self.console.print("[red]Goal store is unavailable.[/red]")
+            else:
+                def print_goal_table(goals, title):
+                    table = Table(title=title, border_style="bright_red", box=CLI_BOX)
+                    table.add_column("ID", style="bright_red", justify="right", no_wrap=True)
+                    table.add_column("Goal", ratio=4)
+                    table.add_column("Status", no_wrap=True)
+                    table.add_column("Priority", no_wrap=True)
+                    table.add_column("Progress", justify="right", no_wrap=True)
+                    table.add_column("Target", no_wrap=True)
+                    for goal in goals:
+                        status = str(goal.get("status", "active"))
+                        status_style = "green" if status == "completed" else "yellow" if status == "paused" else "red" if goal.get("is_overdue") else "cyan"
+                        table.add_row(
+                            str(goal.get("goal_id", "")), str(goal.get("title", "")),
+                            f"[{status_style}]{status}[/{status_style}]", str(goal.get("priority", "normal")),
+                            f"{int(goal.get('progress_percent', 0))}%", str(goal.get("target_date") or "—"),
+                        )
+                    self.console.print(table if goals else "[dim]No matching goals.[/dim]")
+
+                if not arg:
+                    print_goal_table(goal_store.list_all(statuses=["active"], limit=50), "Active Goals")
+                elif arg == "due":
+                    due = goal_store.due_soon(within_days=7)
+                    overdue = goal_store.overdue()
+                    print_goal_table(overdue, "Overdue Goals")
+                    print_goal_table(due, "Goals Due Within 7 Days")
+                elif arg.startswith("search "):
+                    query = arg.split(maxsplit=1)[1]
+                    print_goal_table(goal_store.search(query, limit=50), f"Goal Search: {query}")
+                elif arg.startswith("show "):
+                    try:
+                        goal_id = int(arg.split(maxsplit=1)[1])
+                        goal = goal_store.get(goal_id)
+                    except ValueError:
+                        goal = None
+                    if goal is None:
+                        self.console.print("[red]Goal not found. Usage: /goals show ID[/red]")
+                    else:
+                        tree = goal_store.tree(goal_id)
+                        links = goal_store.linked_refs(goal_id)
+                        timeline = goal_store.list_events(goal_id, limit=10)
+                        self.console.print(Panel(
+                            f"[bold]{goal['title']}[/bold]\n{goal['description'] or '[dim]No description[/dim]'}\n\n"
+                            f"Status: {goal['status']} · Priority: {goal['priority']} · Progress: {goal['progress_percent']}% ({goal['progress_mode']})\n"
+                            f"Target: {goal['target_date'] or 'none'} · Revision: {goal['revision']}\n"
+                            f"Children: {len(tree.get('children', []))} · Tasks: {len(links['tasks'])} · Actions: {len(links['actions'])}",
+                            title=f"Goal #{goal_id}", border_style="bright_red",
+                        ))
+                        if timeline:
+                            event_table = Table(title="Recent Goal Timeline", border_style="dim", box=CLI_BOX)
+                            event_table.add_column("When", style="dim")
+                            event_table.add_column("Event")
+                            event_table.add_column("Progress", justify="right")
+                            event_table.add_column("Note", ratio=3)
+                            for event in timeline:
+                                progress = "—" if event.get("progress_percent") is None else f"{event['progress_percent']}%"
+                                event_table.add_row(str(event.get("created_at", "")), str(event.get("event_type", "")), progress, str(event.get("note", "")))
+                            self.console.print(event_table)
+                else:
+                    self.console.print("[red]Usage: /goals [search QUERY|show ID|due][/red]")
 
         elif command == "/model":
             if not arg or arg == "list":
@@ -1373,6 +1452,9 @@ class AresCLI(MarketplaceCommandMixin):
             path = export_data(
                 memory_store=self.memory_store,
                 conversation_store=self.conversation_store,
+                people_store=getattr(self.agent, "people_store", None),
+                action_ledger=getattr(self.agent, "action_ledger", None),
+                goal_store=getattr(self.agent, "goal_store", None),
                 config=self.config,
                 path=arg or None,
             )
@@ -1388,6 +1470,9 @@ class AresCLI(MarketplaceCommandMixin):
                     path,
                     memory_store=self.memory_store,
                     conversation_store=self.conversation_store,
+                    people_store=getattr(self.agent, "people_store", None),
+                    action_ledger=getattr(self.agent, "action_ledger", None),
+                    goal_store=getattr(self.agent, "goal_store", None),
                     import_config=import_config,
                 )
                 if import_config:
@@ -1397,6 +1482,7 @@ class AresCLI(MarketplaceCommandMixin):
                     "[green]Imported "
                     f"{counts['memories']} memories, "
                     f"{counts['conversations']} conversations.[/green]"
+                    f" {counts['goals']} goals restored."
                 )
 
         elif command == "/reset":
@@ -1554,6 +1640,58 @@ class AresCLI(MarketplaceCommandMixin):
                 result = self.agent.tool_executor.execute(tool_name, arguments)
                 self.console.print(get_renderer(tool_name)(result))
 
+        elif command in {"/monitor", "/monitors"}:
+            from ares.watcher.commands import WatcherCommands
+            from ares.watcher.database import resolve_watcher_database_path
+            watcher_tools = getattr(self.agent.tool_executor, "watcher_tools", None)
+            controller = WatcherCommands(
+                database_path=resolve_watcher_database_path(self.config),
+                defaults=self.config.watcher.defaults,
+                db=watcher_tools.db if watcher_tools is not None else None,
+            )
+            try:
+                result = controller.execute(arg if command == "/monitor" else "list")
+                action = result["action"]
+                if action == "list":
+                    table = Table(title="Ares Watchers", border_style="bright_red", box=CLI_BOX)
+                    table.add_column("ID", style="red", no_wrap=True); table.add_column("Watcher", ratio=3)
+                    table.add_column("Type"); table.add_column("Status"); table.add_column("Interval", justify="right")
+                    for item in result["monitors"]:
+                        status = "paused" if not item["enabled"] else item["last_status"] or "armed"
+                        table.add_row(item["id"][:8], item["name"], item["type"], status, f"{item['interval_seconds']}s")
+                    self.console.print(table if result["monitors"] else "[dim]No watchers configured. Use /monitor add \"Name\" URL[/dim]")
+                elif action == "events":
+                    table = Table(title=f"Watcher Events · {result['monitor']['name']}", border_style="bright_red", box=CLI_BOX)
+                    table.add_column("When"); table.add_column("Severity"); table.add_column("Change", ratio=4)
+                    for item in result["events"]: table.add_row(item["created_at"], item["severity"], item["change_summary"] or item["event_type"])
+                    self.console.print(table if result["events"] else "[dim]No changes recorded.[/dim]")
+                elif action == "status":
+                    item = result["monitor"]
+                    self.console.print(Panel(
+                        f"[bold]{item['name']}[/bold]\n{item['url'] or item['type']}\n\nStatus: {item['last_status'] or 'armed'} · Enabled: {item['enabled']}\n"
+                        f"Checks: {item['total_checks']} · Changes: {item['total_changes']} · Errors: {item['error_count']}\n"
+                        f"Last check: {item['last_checked_at'] or 'never'} · Next: {item['next_check_at'] or 'next scheduler tick'}",
+                        title=f"Watcher {item['id'][:8]}", border_style="bright_red"))
+                elif action == "test":
+                    monitor_data = result["monitor"]
+                    async def run_manual_check() -> None:
+                        service = getattr(watcher_tools, "service", None)
+                        if service is None:
+                            self.console.print("[red]Watcher runtime is not active. Start Ares with --all.[/red]")
+                            return
+                        monitor = service.db.get_monitor(monitor_data["id"])
+                        event = await service.scheduler.check_monitor(monitor, force=True) if monitor else None
+                        self.console.print(f"[green]Watcher check complete.[/green] {'Change detected.' if event else 'No change detected.'}")
+                    asyncio.create_task(run_manual_check())
+                    self.console.print("[cyan]Manual watcher check dispatched.[/cyan]")
+                else:
+                    item = result["monitor"]
+                    self.console.print(f"[green]Watcher {action} complete:[/green] {item['name']} ({item['id'][:8]})")
+            except (ValueError, KeyError) as exc:
+                self.console.print(f"[red]{exc}[/red]")
+            finally:
+                controller.close()
+
         elif command == "/tools":
             if not arg:
                 mode = getattr(self, "tool_output_mode", "summary")
@@ -1688,6 +1826,11 @@ class AresCLI(MarketplaceCommandMixin):
 
     async def run(self):
         """Main CLI loop."""
+        watcher_service = None
+        if self.config.watcher.enabled:
+            from ares.watcher.integration import create_agent_watcher_service
+            watcher_service = create_agent_watcher_service(self.config, self.agent)
+            await watcher_service.start()
         if self.mcp_manager is not None:
             try:
                 await self.mcp_manager.start()
@@ -1747,6 +1890,14 @@ class AresCLI(MarketplaceCommandMixin):
                         continue
         finally:
             # Cleanup
+            if watcher_service is not None:
+                try:
+                    await watcher_service.stop()
+                    setter = getattr(self.agent.tool_executor, "set_watcher_service", None)
+                    if setter is not None:
+                        setter(None)
+                except Exception as exc:
+                    self.console.print(f"[dim yellow]Shutdown warning (watcher): {exc}[/dim yellow]")
             if self.cron_scheduler is not None:
                 try:
                     await self.cron_scheduler.stop()

@@ -7,6 +7,7 @@ from ares.context_blend import (
     estimate_token_breakdown,
     estimate_tokens,
     format_memories,
+    format_goals,
     format_summaries,
     get_model_budgets,
     truncate_to_tokens,
@@ -62,6 +63,13 @@ class TestFormatters:
         assert "private@example.test" in result
         assert "+1 555 555 0123" in result
         assert "[redacted email]" not in result
+
+    def test_format_goals_includes_progress_mode_and_due_state(self):
+        goal = {"goal_id": 3, "title": "Ship Ares", "status": "active", "priority": "high", "progress_percent": 30, "progress_mode": "derived", "target_date": "2026-07-20", "days_remaining": 4}
+        result = format_goals([goal], [goal], [])
+        assert "Ship Ares" in result
+        assert "30% progress (derived)" in result
+        assert "Due soon" in result
 
 
 class TestBuildContextPrompt:

@@ -52,10 +52,25 @@ def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
     return result.get("value")
 
 
-async def _run_server(host: str, port: int) -> None:
+async def _run_server(
+    host: str,
+    port: int,
+    *,
+    watcher_host: str | None = None,
+    watcher_port: int | None = None,
+    workspace_host: str | None = None,
+    workspace_port: int | None = None,
+) -> None:
     from ares.server import run_server
 
-    await run_server(host=host, port=port)
+    await run_server(
+        host=host,
+        port=port,
+        watcher_dashboard_host=watcher_host,
+        watcher_dashboard_port=watcher_port,
+        workspace_host=workspace_host,
+        workspace_port=workspace_port,
+    )
 
 
 async def _run_telegram() -> None:
@@ -92,7 +107,7 @@ def _authorize_telegram_chat(chat_id: int, *, revoke: bool = False) -> None:
     else:
         print(
             f"Telegram chat {chat_id} is authorized. Start or restart Ares with "
-            "`python -m ares --server` (or `--telegram`) to connect it."
+            "`python -m ares --all` to connect it."
         )
 
 
@@ -107,15 +122,25 @@ def _setup_telegram() -> None:
     config.telegram.enabled = True
     save_config(config)
     print(
-        "Telegram is enabled locally. Start `python -m ares --telegram`, message /start to your bot, "
+        "Telegram is enabled locally. Start `python -m ares --all`, message /start to your bot, "
         "then run `python -m ares --telegram-authorize CHAT_ID`."
     )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Ares personal AI assistant")
-    parser.add_argument("--server", action="store_true", help="Run the desktop WebSocket server")
-    parser.add_argument("--telegram", action="store_true", help="Run the Telegram channel without the desktop UI")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run the unified Ares runtime: power workspace, API, agent tools, MCP, Telegram, and watchers",
+    )
+    parser.add_argument("--server", action="store_true", help="Legacy alias for the unified --all runtime")
+    parser.add_argument("--telegram", action="store_true", help="Legacy alias for the unified --all runtime")
+    parser.add_argument("--watcher", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--watcher-host", default=None, help="Override the unified watcher dashboard bind host")
+    parser.add_argument("--watcher-port", type=int, default=None, help="Override the unified watcher dashboard port")
+    parser.add_argument("--workspace-host", default=None, help="Override the separate power workspace bind host")
+    parser.add_argument("--workspace-port", type=int, default=None, help="Override the separate power workspace port")
     parser.add_argument("--telegram-setup", action="store_true", help="Securely save Telegram channel setup")
     parser.add_argument("--telegram-authorize", type=int, metavar="CHAT_ID", help="Allow one Telegram chat ID")
     parser.add_argument("--telegram-revoke", type=int, metavar="CHAT_ID", help="Remove one Telegram chat ID")
@@ -155,12 +180,17 @@ def main():
             _authorize_telegram_chat(args.telegram_authorize)
         elif args.telegram_revoke is not None:
             _authorize_telegram_chat(args.telegram_revoke, revoke=True)
-        elif sum(bool(value) for value in (args.server, args.telegram, args.voice, args.telephony_webhook, args.telephony_media_gateway)) > 1:
-            parser.error("Choose only one runtime mode. The desktop server starts Telegram when enabled.")
-        elif args.server:
-            _run_coro(_run_server(args.host, args.port))
-        elif args.telegram:
-            _run_coro(_run_telegram())
+        elif args.all or args.server or args.telegram or args.watcher:
+            if args.voice or args.telephony_webhook or args.telephony_media_gateway:
+                parser.error("Voice and telephony gateway processes cannot share the unified runtime process.")
+            _run_coro(_run_server(
+                args.host,
+                args.port,
+                watcher_host=args.watcher_host,
+                watcher_port=args.watcher_port,
+                workspace_host=args.workspace_host,
+                workspace_port=args.workspace_port,
+            ))
         elif args.voice:
             _run_coro(_run_voice(
                 voice_name=args.voice_name,

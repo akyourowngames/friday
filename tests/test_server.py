@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from ares.models import AppConfig
 from ares.server import AresServer, parse_tool_start_token, parse_tool_token
 from ares.skills import SkillManager
+from ares.watcher.tools import WatcherToolHandlers
 
 
 class FakeSocket:
@@ -215,6 +217,56 @@ async def test_skills_websocket_crud(server, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_workspace_settings_and_upload_protocol(server):
+    server.config.mcp_servers = []
+    server.mcp_manager = None
+    socket = FakeSocket()
+    await server.handle_message(socket, json.dumps({"type": "get_workspace_settings"}))
+    settings = next(item for item in socket.messages if item["type"] == "workspace_settings")
+    assert settings["settings"]["workspace"]["port"] == 8766
+
+    await server.handle_message(socket, json.dumps({
+        "type": "save_workspace_settings",
+        "settings": {
+            "identity": {"user_name": "Operator", "assistant_style": "Direct"},
+            "personalization": {"assistant_name": "Ares", "personality": "Decisive"},
+        },
+    }))
+    saved = next(item for item in socket.messages if item["type"] == "workspace_settings_saved")
+    assert saved["settings"]["identity"]["user_name"] == "Operator"
+
+    await server.handle_message(socket, json.dumps({
+        "type": "upload_workspace_file",
+        "file": {
+            "name": "brief.txt", "type": "text/plain",
+            "data": base64.b64encode(b"operator brief").decode("ascii"),
+        },
+    }))
+    uploaded = next(item for item in socket.messages if item["type"] == "workspace_file_uploaded")
+    assert uploaded["file"]["name"] == "brief.txt"
+    assert next(item for item in reversed(socket.messages) if item["type"] == "workspace_files")["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_watcher_control_uses_agent_tool_layer(server, tmp_path):
+    handlers = WatcherToolHandlers(tmp_path / "workspace-watchers.db")
+    server.agent.tool_executor.watcher_tools = handlers
+    socket = FakeSocket()
+    await server.handle_message(socket, json.dumps({
+        "type": "watcher_action", "action": "create",
+        "arguments": {
+            "name": "Authenticated inbox", "type": "browser", "preset": "instagram_dm",
+            "interval_seconds": 120, "ai_action": "notify",
+        },
+    }))
+    state = next(item for item in reversed(socket.messages) if item["type"] == "watcher_state")
+    assert state["overview"]["monitors"] == 1
+    assert state["monitors"][0]["type"] == "browser"
+    assert state["monitors"][0]["config"]["preset"] == "instagram_dm"
+    handlers.close()
+
+
+@pytest.mark.asyncio
 async def test_chat_accepts_attachment_without_hardcoded_user_prompt(server):
     captured = {}
 
@@ -278,14 +330,18 @@ async def test_chat_streams_content_tools_and_done(server):
     assert socket.messages[0]["session_id"] == 1
     assert socket.messages[1]["type"] == "sessions"
     assert socket.messages[1]["sessions"][0]["title"] == "search bitcoin"
-    assert socket.messages[2] == {"type": "content", "text": "I will check. "}
-    assert socket.messages[3]["type"] == "tool_start"
-    assert socket.messages[3]["tool"] == "web_search"
-    assert socket.messages[3]["args"] == {"query": "bitcoin price"}
-    assert socket.messages[4]["type"] == "tool_result"
-    assert socket.messages[5] == {"type": "content", "text": "Bitcoin is moving today."}
-    assert socket.messages[6]["type"] == "response_done"
-    assert socket.messages[6]["content"] == "I will check. Bitcoin is moving today."
+    statuses = [message for message in socket.messages if message["type"] == "response_status"]
+    assert [message["stage"] for message in statuses] == ["thinking", "streaming", "complete"]
+    assert [message["text"] for message in socket.messages if message["type"] == "content"] == [
+        "I will check. ",
+        "Bitcoin is moving today.",
+    ]
+    tool_start = next(message for message in socket.messages if message["type"] == "tool_start")
+    assert tool_start["tool"] == "web_search"
+    assert tool_start["args"] == {"query": "bitcoin price"}
+    assert any(message["type"] == "tool_result" for message in socket.messages)
+    done = next(message for message in socket.messages if message["type"] == "response_done")
+    assert done["content"] == "I will check. Bitcoin is moving today."
     assert [message["role"] for message in server.conversation_store.messages] == [
         "user",
         "assistant",
@@ -408,9 +464,24 @@ async def test_session_messages(server):
     await server.handle_message(socket, json.dumps({"type": "load_session", "session_id": 1}))
 
     assert socket.messages[0]["type"] == "sessions"
+    assert socket.messages[0]["query"] == ""
     assert socket.messages[0]["sessions"][0]["title"] == "New session"
     assert socket.messages[1] == {"type": "session_history", "session_id": 1, "messages": []}
     assert socket.messages[2]["type"] == "session_info"
+
+
+@pytest.mark.asyncio
+async def test_session_search_matches_full_message_content(server):
+    server.conversation_store.add_message(1, "user", "Plan the obsidian migration")
+    server.conversation_store.add_message(1, "assistant", "I will preserve every backlink.")
+    other_id = server.conversation_store.start_conversation()
+    server.conversation_store.add_message(other_id, "user", "Unrelated grocery list")
+    socket = FakeSocket()
+
+    await server.handle_message(socket, json.dumps({"type": "list_sessions", "query": "backlink"}))
+
+    assert socket.messages[0]["query"] == "backlink"
+    assert [item["id"] for item in socket.messages[0]["sessions"]] == [1]
 
 
 def test_trim_history_strips_old_tool_calls():

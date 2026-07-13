@@ -1,5 +1,7 @@
 # Watcher Core Infrastructure Implementation Plan
 
+**Implementation status (2026-07-13): Complete and extended.** The shipped architecture uses lightweight dataclasses plus a WAL-backed SQLite repository rather than introducing SQLAlchemy at every Ares import boundary. It also adds cross-process leases, retained telemetry, notifications, dashboard/API controls, first-class agent tools, authenticated Playwright monitors, and workflows over existing Ares/MCP tools. `python -m ares --all` owns the shared service; the watcher is no longer operated as an independent feature process.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the foundational SQLite schema, models, scheduler, and change detection engine for the Ares Watcher Service.
@@ -1589,7 +1591,7 @@ watcher = [
 
 - [ ] **Step 2: Install dependencies**
 
-Run: `cd friday && pip install -e ".[watcher]"`
+Run: `cd friday && pip install -e .` (the historical `.[watcher]` extra remains an empty compatibility alias)
 
 - [ ] **Step 3: Run all watcher tests**
 

@@ -17,6 +17,12 @@ data/
 electron-app/node_modules/
 electron-app/dist/
 electron-app/release/
+ares-website/
+ares-workspace/node_modules/
+ares-workspace/.next/
+ares-workspace/out/
+ares-workspace/next-env.d.ts
+ares-workspace/tsconfig.tsbuildinfo
 build/
 dist/
 hello.py

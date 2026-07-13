@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ares.conversations import ConversationStore
+    from ares.watcher.service import WatcherService
 
 from ares.tools.exporter import export_data
 from ares.tools.filesystem import (
@@ -26,6 +27,7 @@ from ares.people import PeopleStore, PersonConflictError, PersonResolutionError,
 from ares.actions import ActionLedger
 from ares.sessions import SessionStore
 from ares.tasks import TaskStore, TaskToolHandlers
+from ares.goals import GoalStore, GoalToolHandlers
 from ares.skills import SkillManager
 from ares.mcp_registry import MCPRegistryClient
 from ares.skill_registry import SafeSkillInstaller, SkillRegistryClient, SkillValidationError
@@ -66,6 +68,8 @@ from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
 from ares.tools.shell_execution import resolve_project_command
 from ares.telephony import TelephonyManager, TelephonyStore
 from ares.telephony.models import CallStatus
+from ares.watcher.database import resolve_watcher_database_path
+from ares.watcher.tools import WatcherToolHandlers
 
 
 class ToolExecutor:
@@ -80,6 +84,7 @@ class ToolExecutor:
         people_store: PeopleStore | None = None,
         action_ledger: ActionLedger | None = None,
         task_store: TaskStore | None = None,
+        goal_store: GoalStore | None = None,
         session_store: SessionStore | None = None,
         telephony_manager: TelephonyManager | None = None,
     ):
@@ -111,6 +116,12 @@ class ToolExecutor:
         )
         self.task_store = task_store or (TaskStore(data_root) if data_root is not None else None)
         self.task_tools = TaskToolHandlers(self.task_store, lambda: self.session_id) if self.task_store is not None else None
+        self._owns_goal_store = goal_store is None and db_path is not None
+        self.goal_store = goal_store or (
+            GoalStore(db_path=db_path, connection=shared_connection, task_store=self.task_store)
+            if db_path is not None else None
+        )
+        self.goal_tools = GoalToolHandlers(self.goal_store, self.task_store, self.action_ledger) if self.goal_store is not None else None
         self.session_store = session_store or (SessionStore(session_data_dir) if session_data_dir is not None else None)
         self._owns_telephony_manager = telephony_manager is None and db_path is not None
         self.telephony = telephony_manager or (
@@ -127,20 +138,48 @@ class ToolExecutor:
         )
         self.workflow_runner: Any | None = None
         self.cron = CronToolHandlers(CronStore(data_root))
+        watcher_config = getattr(config, "watcher", None)
+        watcher_path = (
+            resolve_watcher_database_path(config)
+            if watcher_config is not None and config is not None
+            else Path(db_path).with_name("watchers.db") if db_path is not None
+            else Path("~/.ares/data/watchers.db").expanduser()
+        )
+        self.watcher_tools = WatcherToolHandlers(
+            watcher_path,
+            tool_monitors_enabled=bool(getattr(watcher_config, "tool_monitors_enabled", True)),
+            allow_mutating_tool_steps=bool(getattr(watcher_config, "allow_mutating_tool_steps", False)),
+            capabilities_provider=self._watcher_capability_names,
+        )
 
     def close(self) -> None:
         """Clean up persistent sessions."""
         self.repl.close()
+        self.watcher_tools.close()
         if self._owns_people_store and self.people_store is not None:
             self.people_store.close()
         if self._owns_action_ledger and self.action_ledger is not None:
             self.action_ledger.close()
+        if self._owns_goal_store and self.goal_store is not None:
+            self.goal_store.close()
         if self._owns_telephony_manager and self.telephony is not None:
             self.telephony.close()
 
     def set_session_id(self, session_id: str | None) -> None:
         """Attach local provenance records to the current agent session."""
         self.session_id = session_id
+
+    def set_watcher_service(self, service: WatcherService | None) -> None:
+        """Attach the watcher service owned by the current Ares runtime."""
+        self.watcher_tools.set_service(service)
+
+    def _watcher_capability_names(self) -> list[str]:
+        definitions = getattr(self.mcp_manager, "tool_definitions", []) or []
+        return [
+            str(item.get("function", {}).get("name") or "")
+            for item in definitions
+            if item.get("function", {}).get("name")
+        ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool by name with the given arguments. Returns a result string."""
@@ -213,12 +252,37 @@ class ToolExecutor:
             "delete_cron_job": self.cron.delete_cron_job,
             "run_cron_job_now": self.cron.run_cron_job_now,
             "get_cron_logs": self.cron.get_cron_logs,
+            "get_watcher_capabilities": self.watcher_tools.capabilities,
+            "create_watcher": self.watcher_tools.create,
+            "list_watchers": self.watcher_tools.list,
+            "get_watcher": self.watcher_tools.get,
+            "update_watcher": self.watcher_tools.update,
+            "pause_watcher": self.watcher_tools.pause,
+            "resume_watcher": self.watcher_tools.resume,
+            "list_watcher_events": self.watcher_tools.events,
+            "acknowledge_watcher_event": self.watcher_tools.acknowledge,
+            "get_watcher_overview": self.watcher_tools.overview,
+            "delete_watcher": self.watcher_tools.delete,
+            "run_watcher_now": self._watcher_async_required,
             "create_task": self._create_task,
             "list_tasks": self._list_tasks,
             "get_task_status": self._get_task_status,
             "update_task": self._update_task,
             "cancel_task": self._cancel_task,
             "run_task": self._run_task_unavailable,
+            "create_goal": self._create_goal,
+            "update_goal": self._update_goal,
+            "list_goals": self._list_goals,
+            "get_goal_status": self._get_goal_status,
+            "complete_goal": self._complete_goal,
+            "pause_goal": self._pause_goal,
+            "abandon_goal": self._abandon_goal,
+            "decompose_goal": self._decompose_goal,
+            "link_goal_task": self._link_goal_task,
+            "link_goal_action": self._link_goal_action,
+            "sync_goal_progress": self._sync_goal_progress,
+            "record_goal_progress": self._record_goal_progress,
+            "delete_goal": self._delete_goal,
             "phone_status": self._phone_status,
             "phone_get_notifications": self._phone_get_notifications,
             "phone_search_contact": self._phone_search_contact,
@@ -250,6 +314,8 @@ class ToolExecutor:
 
     async def execute_async(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool, allowing local tools to use async integrations."""
+        if tool_name == "run_watcher_now":
+            return await self.watcher_tools.run_now(arguments)
         if tool_name == "search_skill_marketplace":
             return await self._search_skill_marketplace(arguments)
         if tool_name == "install_marketplace_skill":
@@ -577,6 +643,53 @@ class ToolExecutor:
     def _run_task_unavailable(self, args: dict) -> str:
         return self._json({"ok": False, "error": "run_task must be executed through the Ares Agent workflow runner."})
 
+    def _goal_tools_unavailable(self) -> str:
+        return self._json({"ok": False, "error": "Goal store is unavailable because Ares has no local data path."})
+
+    def _goal_call(self, method: str, args: dict) -> str:
+        if self.goal_tools is None:
+            return self._goal_tools_unavailable()
+        return getattr(self.goal_tools, method)(args)
+
+    def _create_goal(self, args: dict) -> str:
+        return self._goal_call("create_goal", args)
+
+    def _update_goal(self, args: dict) -> str:
+        return self._goal_call("update_goal", args)
+
+    def _list_goals(self, args: dict) -> str:
+        return self._goal_call("list_goals", args)
+
+    def _get_goal_status(self, args: dict) -> str:
+        return self._goal_call("get_goal_status", args)
+
+    def _complete_goal(self, args: dict) -> str:
+        return self._goal_call("complete_goal", args)
+
+    def _pause_goal(self, args: dict) -> str:
+        return self._goal_call("pause_goal", args)
+
+    def _abandon_goal(self, args: dict) -> str:
+        return self._goal_call("abandon_goal", args)
+
+    def _decompose_goal(self, args: dict) -> str:
+        return self._goal_call("decompose_goal", args)
+
+    def _link_goal_task(self, args: dict) -> str:
+        return self._goal_call("link_goal_task", args)
+
+    def _link_goal_action(self, args: dict) -> str:
+        return self._goal_call("link_goal_action", args)
+
+    def _sync_goal_progress(self, args: dict) -> str:
+        return self._goal_call("sync_goal_progress", args)
+
+    def _record_goal_progress(self, args: dict) -> str:
+        return self._goal_call("record_goal_progress", args)
+
+    def _delete_goal(self, args: dict) -> str:
+        return self._goal_call("delete_goal", args)
+
     # ── Consequential-action provenance ───────────────────────────
 
     @staticmethod
@@ -707,6 +820,25 @@ class ToolExecutor:
             return ("task_created", str(task.get("task_id") or "task"), "Created a durable workflow task.", ["workflow"])
         if lowered == "cancel_task":
             return ("task_cancelled", str(args.get("task_id") or "task"), "Cancelled a workflow task.", ["workflow"])
+        if lowered in {"create_goal", "complete_goal", "pause_goal", "abandon_goal", "record_goal_progress", "sync_goal_progress"}:
+            goal = self._result_json(result).get("goal", {})
+            action_type = {
+                "create_goal": "goal_created",
+                "complete_goal": "goal_completed",
+                "pause_goal": "goal_paused",
+                "abandon_goal": "goal_abandoned",
+                "record_goal_progress": "goal_progress_recorded",
+                "sync_goal_progress": "goal_progress_synced",
+            }[lowered]
+            return (action_type, str(goal.get("title") or f"goal #{args.get('goal_id', '')}"), f"{action_type.replace('_', ' ').capitalize()}.", ["goal"])
+        if lowered == "decompose_goal":
+            return ("goal_decomposed", f"goal #{args.get('goal_id', '')}", "Decomposed a goal into sub-goals.", ["goal"])
+        if lowered == "link_goal_task":
+            return ("goal_task_linked", f"goal #{args.get('goal_id', '')}", "Linked a durable task to a goal.", ["goal", "workflow"])
+        if lowered == "link_goal_action":
+            return ("goal_action_linked", f"goal #{args.get('goal_id', '')}", "Linked action evidence to a goal.", ["goal", "action"])
+        if lowered == "delete_goal":
+            return ("goal_deleted", f"goal #{args.get('goal_id', '')}", "Deleted a goal.", ["goal"])
         return None
 
     def _record_consequential_action(
@@ -832,6 +964,10 @@ class ToolExecutor:
     def _marketplace_async_required(_args: dict) -> str:
         return "Marketplace registry operations require the async agent execution path."
 
+    @staticmethod
+    def _watcher_async_required(_args: dict) -> str:
+        return "Running a watcher immediately requires the async Ares runtime; start Ares with --all."
+
     def _marketplace_config(self) -> AppConfig:
         if self.config is None:
             raise RuntimeError("Marketplace configuration is unavailable.")
@@ -951,6 +1087,7 @@ class ToolExecutor:
             conversation_store=self.conversations,
             people_store=self.people_store,
             action_ledger=self.action_ledger,
+            goal_store=self.goal_store,
             config=self.config,
             path=args.get("path"),
             profile=args.get("profile", "full"),

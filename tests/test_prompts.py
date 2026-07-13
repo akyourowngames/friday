@@ -52,6 +52,12 @@ def test_system_prompt_keeps_mcp_verification_fast_and_state_aware():
     assert "Playwright or Windows snapshot while its UI state is unchanged" in SYSTEM_PROMPT
 
 
+def test_system_prompt_routes_change_monitoring_to_native_watchers():
+    assert "Use watcher tools—not cron" in SYSTEM_PROMPT
+    assert "preset=instagram_dm" in SYSTEM_PROMPT
+    assert "tool` watchers for bounded read-only workflows" in SYSTEM_PROMPT
+
+
 def test_store_memory_tool_discourages_junk_memory():
     tools = get_tool_definitions()
     store = next(tool for tool in tools if tool["function"]["name"] == "store_memory")

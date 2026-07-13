@@ -261,6 +261,43 @@ def format_people(people: list[dict] | None, token_budget: int = 500) -> str:
     return truncate_to_tokens("\n".join(lines), token_budget)
 
 
+def format_goals(
+    goals: list[dict] | None,
+    due_soon: list[dict] | None = None,
+    overdue: list[dict] | None = None,
+    token_budget: int = 600,
+) -> str:
+    """Format bounded durable goal state with explicit urgency signals."""
+    if not goals and not due_soon and not overdue:
+        return ""
+    lines = [
+        "## Goals:",
+        "Goals are durable user-owned outcomes. Progress is historical planning state, not proof unless linked task/action evidence is shown.",
+    ]
+    for goal in goals or []:
+        goal_id = goal.get("goal_id", "?")
+        title = str(goal.get("title") or "").strip()
+        if not title:
+            continue
+        status = str(goal.get("status") or "active")
+        priority = str(goal.get("priority") or "normal")
+        target = str(goal.get("target_date") or "no target date")
+        progress = int(goal.get("progress_percent", 0) or 0)
+        mode = str(goal.get("progress_mode") or "manual")
+        lines.append(f"- #{goal_id} [{status}, {priority}] {title} — target {target}, {progress}% progress ({mode})")
+    if due_soon:
+        lines.append("Due soon: " + ", ".join(
+            f"#{goal.get('goal_id')} {goal.get('title')} ({goal.get('days_remaining')} days)"
+            for goal in due_soon[:6]
+        ))
+    if overdue:
+        lines.append("Overdue: " + ", ".join(
+            f"#{goal.get('goal_id')} {goal.get('title')} ({abs(int(goal.get('days_remaining', 0) or 0))} days)"
+            for goal in overdue[:6]
+        ))
+    return truncate_to_tokens("\n".join(lines), token_budget)
+
+
 def format_actions(actions: list[dict] | None, *, title: str, token_budget: int = 500) -> str:
     """Format bounded provenance entries; action records intentionally lack bodies."""
     if not actions:
@@ -336,6 +373,9 @@ def build_context_prompt(
     project_context: str = "",
     memories: list[dict] | None = None,
     people: list[dict] | None = None,
+    goals: list[dict] | None = None,
+    goals_due_soon: list[dict] | None = None,
+    goals_overdue: list[dict] | None = None,
     recent_actions: list[dict] | None = None,
     relevant_actions: list[dict] | None = None,
     recent_file_actions: list[dict] | None = None,
@@ -373,6 +413,10 @@ def build_context_prompt(
     if people and remaining > 100:
         people_section = format_people(people, token_budget=remaining)
         remaining = _append_section(sections, people_section, remaining)
+
+    if (goals or goals_due_soon or goals_overdue) and remaining > 100:
+        goal_section = format_goals(goals, goals_due_soon, goals_overdue, token_budget=remaining)
+        remaining = _append_section(sections, goal_section, remaining)
 
     if recent_file_actions and remaining > 100:
         file_section = format_actions(recent_file_actions, title="Recent Files & Assets", token_budget=remaining)

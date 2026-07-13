@@ -76,6 +76,7 @@ class Agent:
         self.people_store = self.tool_executor.people_store
         self.action_ledger = self.tool_executor.action_ledger
         self.task_store = self.tool_executor.task_store
+        self.goal_store = self.tool_executor.goal_store
         self.workflow_runner: AutonomousWorkflowRunner | None = None
         if self.task_store is not None and self.action_ledger is not None:
             self.workflow_runner = AutonomousWorkflowRunner(
@@ -192,6 +193,9 @@ class Agent:
                     people.append(person)
 
         recent_actions = self.action_ledger.recent(limit=5) if self.action_ledger else []
+        active_goals = self.goal_store.list_all(statuses=["active"], limit=8) if self.goal_store else []
+        goals_due_soon = self.goal_store.due_soon(within_days=7) if self.goal_store else []
+        goals_overdue = self.goal_store.overdue() if self.goal_store else []
         relevant_actions: list[dict] = []
         conversation_recall: list[dict] = []
         since = None
@@ -296,6 +300,9 @@ class Agent:
             project_context=project_ctx,
             memories=memories,
             people=people,
+            goals=active_goals,
+            goals_due_soon=goals_due_soon,
+            goals_overdue=goals_overdue,
             recent_actions=recent_actions,
             relevant_actions=relevant_actions,
             recent_file_actions=recent_file_actions,

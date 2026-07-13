@@ -31,7 +31,9 @@ from ares.models import AppConfig
 from ares.onboarding import save_onboarding_data
 from ares.profile import ProfileManager
 from ares.soul import SoulManager
-from ares.tools.mcp_client import MCPClientManager
+from ares.tools.mcp_client import MCPClientManager, MCPServerConfig, redact_mcp_text
+from ares.workspace.settings import render_profile, render_soul, workspace_settings
+from ares.workspace.uploads import WorkspaceUploadStore
 
 
 TOOL_TOKEN_RE = re.compile(r"^\[tool:([^:]+):(.*)\]$", re.DOTALL)
@@ -113,11 +115,25 @@ class AresServer:
         agent: Agent | None = None,
         memory_store: MemoryStore | None = None,
         conversation_store: ConversationStore | None = None,
+        start_watcher_dashboard: bool | None = None,
+        watcher_dashboard_host: str | None = None,
+        watcher_dashboard_port: int | None = None,
+        start_workspace: bool | None = None,
+        workspace_host: str | None = None,
+        workspace_port: int | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self._uses_shared_config = config is None
         self.config = config or load_config()
+        if watcher_dashboard_host:
+            self.config.watcher.dashboard.host = watcher_dashboard_host
+        if watcher_dashboard_port:
+            self.config.watcher.dashboard.port = watcher_dashboard_port
+        if workspace_host:
+            self.config.workspace.host = workspace_host
+        if workspace_port:
+            self.config.workspace.port = workspace_port
         self.memory_store = memory_store or MemoryStore()
         self.conversation_store = conversation_store or ConversationStore()
         self.mcp_manager = (
@@ -149,6 +165,7 @@ class AresServer:
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
         self.profile_manager.ensure_exists()
         self.soul_manager.ensure_exists()
+        self.workspace_uploads = WorkspaceUploadStore(data_dir)
         self._terminal_output_buffer: dict[str, str] = {}
         self._terminal_command_events: dict[str, asyncio.Event] = {}
         self._mcp_start_task: asyncio.Task | None = None
@@ -172,6 +189,17 @@ class AresServer:
         if hasattr(self.agent, "tool_executor"):
             self.agent.tool_executor._terminal_display_callback = self._terminal_display_only
         self.telephony = getattr(getattr(self.agent, "tool_executor", None), "telephony", None)
+        self.watcher_service = None
+        self._watcher_dashboard_enabled = (
+            self._uses_shared_config if start_watcher_dashboard is None else bool(start_watcher_dashboard)
+        )
+        self._watcher_dashboard_server = None
+        self._watcher_dashboard_task: asyncio.Task | None = None
+        self._workspace_enabled = (
+            self._uses_shared_config if start_workspace is None else bool(start_workspace)
+        )
+        self._workspace_server = None
+        self._workspace_task: asyncio.Task | None = None
 
     async def _push_status_to_clients(self) -> None:
         """Push updated status to all connected websockets."""
@@ -197,11 +225,87 @@ class AresServer:
         ) as ws_server:
             self._server = ws_server
             print(f"Ares local API listening on ws://{self.host}:{self.port}")
+            if self._workspace_enabled and self.config.workspace.enabled:
+                self._launch_workspace()
             if self.telegram_channel is not None:
                 await self.telegram_channel.start()
+            if self.config.watcher.enabled:
+                from ares.watcher.integration import create_agent_watcher_service
+                self.watcher_service = create_agent_watcher_service(self.config, self.agent)
+                await self.watcher_service.start()
+                if self._watcher_dashboard_enabled and self.config.watcher.dashboard.enabled:
+                    self._launch_watcher_dashboard()
             if self.mcp_manager is not None:
                 self._mcp_start_task = asyncio.create_task(self._start_mcp_manager())
             await asyncio.Future()
+
+    def _launch_workspace(self) -> None:
+        """Launch the separate power-user workspace in the unified runtime."""
+        if self._workspace_task is not None:
+            return
+        try:
+            import uvicorn
+            from ares.workspace.app import create_workspace_app
+        except ImportError as exc:
+            print(f"Ares workspace is unavailable: {exc}")
+            return
+        watcher = self.config.watcher.dashboard
+        app = create_workspace_app(
+            websocket_host=self.host,
+            websocket_port=self.port,
+            watcher_dashboard_url=f"http://{watcher.host}:{watcher.port}",
+        )
+        workspace = self.config.workspace
+        uvicorn_config = uvicorn.Config(
+            app,
+            host=workspace.host,
+            port=workspace.port,
+            log_level="warning",
+        )
+        self._workspace_server = uvicorn.Server(uvicorn_config)
+        self._workspace_task = asyncio.create_task(
+            self._workspace_server.serve(), name="ares-power-workspace"
+        )
+        print(f"Ares power workspace listening on http://{workspace.host}:{workspace.port}")
+
+    def _launch_watcher_dashboard(self) -> None:
+        """Serve the watcher UI inside the same Ares runtime and service."""
+        if self.watcher_service is None or self._watcher_dashboard_task is not None:
+            return
+        try:
+            import uvicorn
+            from ares.watcher.dashboard import create_app
+        except ImportError as exc:
+            print(f"Ares watcher dashboard is unavailable: {exc}. Install the watcher extra.")
+            return
+
+        dashboard = self.config.watcher.dashboard
+
+        def persist_settings(settings: dict[str, Any]) -> None:
+            self.config.watcher.notifications = settings
+            if self._uses_shared_config:
+                latest = load_config()
+                latest.watcher.notifications = settings
+                save_config(latest)
+
+        app = create_app(
+            service=self.watcher_service,
+            start_scheduler=False,
+            stop_service_on_shutdown=False,
+            settings_saver=persist_settings,
+        )
+        uvicorn_config = uvicorn.Config(
+            app,
+            host=dashboard.host,
+            port=dashboard.port,
+            log_level="warning",
+        )
+        self._watcher_dashboard_server = uvicorn.Server(uvicorn_config)
+        self._watcher_dashboard_task = asyncio.create_task(
+            self._watcher_dashboard_server.serve(),
+            name="ares-watcher-dashboard",
+        )
+        print(f"Ares watcher dashboard listening on http://{dashboard.host}:{dashboard.port}")
 
     async def _start_mcp_manager(self) -> None:
         """Connect optional MCP integrations without delaying desktop startup."""
@@ -246,7 +350,12 @@ class AresServer:
             elif msg_type == "new_session":
                 await self._handle_new_session(websocket)
             elif msg_type == "list_sessions":
-                await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
+                query = str(message.get("query") or "").strip()
+                await self._send(websocket, {
+                    "type": "sessions",
+                    "sessions": self._sessions(query=query),
+                    "query": query,
+                })
             elif msg_type == "load_session":
                 await self._handle_load_session(websocket, message)
             elif msg_type == "set_model":
@@ -284,6 +393,30 @@ class AresServer:
                 await self._handle_delete_skill(websocket, message)
             elif msg_type == "draft_skill":
                 await self._handle_draft_skill(websocket, message)
+            elif msg_type == "get_workspace_settings":
+                await self._send(websocket, self._workspace_settings())
+            elif msg_type == "save_workspace_settings":
+                await self._handle_save_workspace_settings(websocket, message)
+            elif msg_type == "get_mcp_state":
+                await self._send(websocket, self._mcp_state())
+            elif msg_type == "save_mcp_server":
+                await self._handle_save_mcp_server(websocket, message)
+            elif msg_type == "delete_mcp_server":
+                await self._handle_delete_mcp_server(websocket, message)
+            elif msg_type == "reconnect_mcp_server":
+                await self._handle_reconnect_mcp_server(websocket, message)
+            elif msg_type == "probe_mcp_servers":
+                await self._handle_probe_mcp_servers(websocket)
+            elif msg_type == "get_watcher_state":
+                await self._send(websocket, self._watcher_state())
+            elif msg_type == "watcher_action":
+                await self._handle_watcher_action(websocket, message)
+            elif msg_type == "list_workspace_files":
+                await self._send(websocket, self._workspace_files())
+            elif msg_type == "upload_workspace_file":
+                await self._handle_upload_workspace_file(websocket, message)
+            elif msg_type == "delete_workspace_file":
+                await self._handle_delete_workspace_file(websocket, message)
             elif msg_type == "rename_session":
                 await self._handle_rename_session(websocket, message)
             elif msg_type == "delete_session":
@@ -429,10 +562,20 @@ class AresServer:
         self.conversation_store.add_message(session_id, "user", visible_content)
         await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
+        await self._send(
+            websocket,
+            {
+                "type": "response_status",
+                "stage": "thinking",
+                "label": "Ares is thinking",
+                "detail": "Reading context and planning the next step.",
+            },
+        )
 
         response_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         started_tools: list[str] = []
+        response_started = False
 
         max_retries = 3
         for attempt in range(max_retries + 1):
@@ -475,6 +618,17 @@ class AresServer:
                         )
                         continue
 
+                    if not response_started:
+                        response_started = True
+                        await self._send(
+                            websocket,
+                            {
+                                "type": "response_status",
+                                "stage": "streaming",
+                                "label": "Ares is drafting",
+                                "detail": "Streaming the answer token by token.",
+                            },
+                        )
                     response_parts.append(chunk)
                     await self._send(websocket, {"type": "content", "text": chunk})
                 break  # Success, exit retry loop
@@ -515,6 +669,15 @@ class AresServer:
                 "content": full_response,
                 "tool_calls": tool_calls,
                 "session_id": session_id,
+            },
+        )
+        await self._send(
+            websocket,
+            {
+                "type": "response_status",
+                "stage": "complete",
+                "label": "Response complete",
+                "detail": "Saved to this conversation.",
             },
         )
         await self._send(websocket, self._session_info())
@@ -685,6 +848,366 @@ class AresServer:
             "source": source,
         })
 
+    def _workspace_settings(self) -> dict[str, Any]:
+        return {
+            "type": "workspace_settings",
+            "settings": workspace_settings(
+                self.config, self.profile_manager.read(), self.soul_manager.read()
+            ),
+        }
+
+    async def _handle_save_workspace_settings(
+        self, websocket: Any, message: dict[str, Any]
+    ) -> None:
+        settings = message.get("settings")
+        if not isinstance(settings, dict):
+            await self._send_error(websocket, "Workspace settings must be an object.")
+            return
+        candidate = self.config.model_dump()
+        previous = self.config
+
+        model = settings.get("model")
+        if isinstance(model, dict):
+            for incoming, target in {
+                "name": "model",
+                "api_base_url": "api_base_url",
+                "max_context_messages": "max_context_messages",
+                "agent_max_iterations": "agent_max_iterations",
+            }.items():
+                if incoming in model and model[incoming] not in (None, ""):
+                    candidate[target] = model[incoming]
+            if str(model.get("api_key") or "").strip():
+                candidate["api_key"] = str(model["api_key"]).strip()
+
+        telegram = settings.get("telegram")
+        if isinstance(telegram, dict):
+            for key in (
+                "enabled", "allow_group_chats", "show_tool_progress",
+                "audio_transcription_enabled",
+            ):
+                if key in telegram:
+                    candidate["telegram"][key] = telegram[key]
+            if str(telegram.get("bot_token") or "").strip():
+                candidate["telegram"]["bot_token"] = str(telegram["bot_token"]).strip()
+            if "allowed_chat_ids" in telegram:
+                raw_ids = telegram.get("allowed_chat_ids")
+                if isinstance(raw_ids, str):
+                    raw_ids = [item.strip() for item in raw_ids.split(",") if item.strip()]
+                if not isinstance(raw_ids, list):
+                    raw_ids = []
+                try:
+                    candidate["telegram"]["allowed_chat_ids"] = sorted({int(item) for item in raw_ids})
+                except (TypeError, ValueError):
+                    await self._send_error(websocket, "Telegram chat IDs must be whole numbers.")
+                    return
+
+        browser = settings.get("browser")
+        if isinstance(browser, dict):
+            for incoming, target in {
+                "mode": "browser_mode",
+                "cdp_port": "browser_cdp_port",
+                "chrome_path": "browser_chrome_path",
+            }.items():
+                if incoming in browser and browser[incoming] is not None:
+                    candidate[target] = browser[incoming]
+            if str(browser.get("extension_token") or "").strip():
+                candidate["browser_extension_token"] = str(browser["extension_token"]).strip()
+
+        monitoring = settings.get("monitoring")
+        if isinstance(monitoring, dict):
+            for key in (
+                "enabled", "tool_monitors_enabled", "allow_mutating_tool_steps",
+                "poll_seconds", "max_concurrency",
+            ):
+                if key in monitoring:
+                    candidate["watcher"][key] = monitoring[key]
+            if "default_interval_seconds" in monitoring:
+                candidate["watcher"]["defaults"]["interval_seconds"] = monitoring["default_interval_seconds"]
+            if "default_ai_action" in monitoring:
+                candidate["watcher"]["defaults"]["ai_action"] = monitoring["default_ai_action"]
+            for incoming, target in {
+                "dashboard_enabled": "enabled",
+                "dashboard_host": "host",
+                "dashboard_port": "port",
+            }.items():
+                if incoming in monitoring:
+                    candidate["watcher"]["dashboard"][target] = monitoring[incoming]
+
+        workspace = settings.get("workspace")
+        if isinstance(workspace, dict):
+            for key in ("enabled", "host", "port"):
+                if key in workspace:
+                    candidate["workspace"][key] = workspace[key]
+
+        try:
+            updated = AppConfig.model_validate(candidate)
+            # Browser mode changes must be reflected in the Playwright MCP entry.
+            from ares.config import _configure_playwright_mcp
+            _configure_playwright_mcp(updated)
+        except Exception as exc:
+            await self._send_error(websocket, f"Invalid workspace settings: {exc}")
+            return
+
+        identity = settings.get("identity")
+        personalization = settings.get("personalization")
+        advanced = settings.get("advanced")
+        if isinstance(advanced, dict) and bool(settings.get("advanced_mode")):
+            if "profile" in advanced:
+                self.profile_manager.write(str(advanced.get("profile") or ""))
+            if "soul" in advanced:
+                self.soul_manager.write(str(advanced.get("soul") or ""))
+        else:
+            if isinstance(identity, dict):
+                self.profile_manager.write(render_profile(identity))
+                if str(identity.get("user_name") or "").strip():
+                    updated.onboarding_completed = True
+            if isinstance(personalization, dict):
+                self.soul_manager.write(render_soul(personalization))
+
+        self.config = updated
+        self.context_manager.config = updated
+        save_config(updated)
+        self._apply_config_to_agent()
+        if previous.mcp_servers != updated.mcp_servers or previous.data_dir != updated.data_dir:
+            await self._rebuild_mcp_manager()
+
+        restart_required: list[str] = []
+        if previous.telegram != updated.telegram:
+            restart_required.append("telegram")
+        if previous.watcher.enabled != updated.watcher.enabled:
+            restart_required.append("watcher runtime")
+        if previous.watcher.dashboard != updated.watcher.dashboard:
+            restart_required.append("watcher dashboard")
+        if previous.workspace != updated.workspace:
+            restart_required.append("workspace host")
+        await self._send(websocket, {
+            "type": "workspace_settings_saved",
+            "settings": self._workspace_settings()["settings"],
+            "restart_required": restart_required,
+        })
+        await self._send(websocket, self._status())
+        await self._send(websocket, self._mcp_state())
+
+    def _mcp_state(self) -> dict[str, Any]:
+        report = self.mcp_manager.readiness_report() if self.mcp_manager else {
+            "ready": False, "configured": 0, "connected": 0, "tools": 0,
+            "servers": {}, "errors": {},
+        }
+        tools = self.mcp_manager.tools_by_server() if self.mcp_manager else {}
+        config_by_name: dict[str, dict[str, Any]] = {}
+        for raw in self.config.mcp_servers:
+            try:
+                config = MCPServerConfig.model_validate(raw)
+            except Exception:
+                continue
+            config_by_name[config.name] = {
+                "name": config.name,
+                "transport": config.transport,
+                "server_url": redact_mcp_text(config.server_url),
+                "command": config.command,
+                "args": [redact_mcp_text(str(value)) for value in config.args],
+                "env": {key: "" for key in sorted(config.env)},
+                "oauth_client_id": config.oauth_client_id,
+                "oauth_client_secret_configured": bool(config.oauth_client_secret),
+                "oauth_scopes": config.oauth_scopes,
+                "timeout_seconds": config.timeout_seconds,
+            }
+        names = sorted(set(config_by_name) | set(report.get("servers") or {}))
+        servers = []
+        for name in names:
+            servers.append({
+                **config_by_name.get(name, {"name": name}),
+                **dict((report.get("servers") or {}).get(name) or {}),
+                "tools_detail": tools.get(name, []),
+            })
+        return {
+            "type": "mcp_state",
+            "summary": {key: report.get(key, 0) for key in ("ready", "configured", "connected", "tools")},
+            "servers": servers,
+            "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def _handle_save_mcp_server(self, websocket: Any, message: dict[str, Any]) -> None:
+        raw = message.get("server")
+        if not isinstance(raw, dict):
+            await self._send_error(websocket, "MCP server must be an object.")
+            return
+        name = str(raw.get("name") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+            await self._send_error(websocket, "MCP server name may use letters, numbers, dots, dashes, and underscores.")
+            return
+        original_name = str(message.get("original_name") or name)
+        existing = next(
+            (item for item in self.config.mcp_servers if str(item.get("name") or "") == original_name),
+            None,
+        )
+        merged = dict(existing or {})
+        for key in (
+            "name", "server_url", "url", "transport", "command", "args", "oauth_client_id",
+            "oauth_scopes", "timeout_seconds",
+        ):
+            if key in raw:
+                merged[key] = raw[key]
+        if str(raw.get("oauth_client_secret") or "").strip():
+            merged["oauth_client_secret"] = str(raw["oauth_client_secret"]).strip()
+        current_env = dict((existing or {}).get("env") or {})
+        incoming_env = raw.get("env")
+        if isinstance(incoming_env, dict):
+            for key, value in incoming_env.items():
+                if value not in (None, ""):
+                    current_env[str(key)] = str(value)
+                elif str(key) not in current_env:
+                    current_env[str(key)] = ""
+        merged["env"] = current_env
+        try:
+            validated = MCPServerConfig.model_validate(merged).model_dump()
+        except Exception as exc:
+            await self._send_error(websocket, f"Invalid MCP server: {exc}")
+            return
+        others = [
+            item for item in self.config.mcp_servers
+            if str(item.get("name") or "") not in {original_name, name}
+        ]
+        self.config.mcp_servers = [*others, validated]
+        save_config(self.config)
+        await self._rebuild_mcp_manager()
+        await self._send(websocket, {"type": "mcp_server_saved", "name": name})
+        await self._send(websocket, self._mcp_state())
+
+    async def _handle_delete_mcp_server(self, websocket: Any, message: dict[str, Any]) -> None:
+        name = str(message.get("name") or "")
+        if not bool(message.get("confirm")):
+            await self._send_error(websocket, "Confirm MCP server deletion first.")
+            return
+        before = len(self.config.mcp_servers)
+        self.config.mcp_servers = [
+            item for item in self.config.mcp_servers if str(item.get("name") or "") != name
+        ]
+        if len(self.config.mcp_servers) == before:
+            await self._send_error(websocket, "MCP server not found.")
+            return
+        save_config(self.config)
+        await self._rebuild_mcp_manager()
+        await self._send(websocket, {"type": "mcp_server_deleted", "name": name})
+        await self._send(websocket, self._mcp_state())
+
+    async def _handle_reconnect_mcp_server(self, websocket: Any, message: dict[str, Any]) -> None:
+        name = str(message.get("name") or "")
+        if self.mcp_manager is None:
+            await self._send_error(websocket, "No MCP servers are configured.")
+            return
+        result = await self.mcp_manager.reconnect_server(name)
+        if hasattr(self.agent, "refresh_tools"):
+            self.agent.refresh_tools()
+        await self._send(websocket, {"type": "mcp_reconnected", "server": result})
+        await self._send(websocket, self._mcp_state())
+
+    async def _handle_probe_mcp_servers(self, websocket: Any) -> None:
+        if self.mcp_manager is not None:
+            await self.mcp_manager.health_probe()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
+        await self._send(websocket, self._mcp_state())
+
+    def _watcher_handlers(self):
+        return getattr(getattr(self.agent, "tool_executor", None), "watcher_tools", None)
+
+    def _watcher_state(self) -> dict[str, Any]:
+        handlers = self._watcher_handlers()
+        db = handlers.db if handlers is not None else (
+            self.watcher_service.db if self.watcher_service is not None else None
+        )
+        overview = db.overview() if db is not None else {
+            "monitors": 0, "active": 0, "paused": 0, "failing": 0,
+            "unacknowledged_alerts": 0, "delivery_failures": 0, "total_checks": 0,
+            "total_changes": 0, "average_latency_ms": 0, "checks_24h": 0,
+            "success_rate_24h": 100.0,
+        }
+        monitors = [item.public_dict() for item in db.list_monitors()] if db is not None else []
+        events = [item.to_dict() for item in db.list_events(limit=200)] if db is not None else []
+        checks = [item.to_dict() for item in db.list_check_runs(limit=300)] if db is not None else []
+        capabilities: Any = {}
+        if handlers is not None:
+            capabilities = _safe_json_loads(handlers.capabilities({}))
+        dashboard = self.config.watcher.dashboard
+        return {
+            "type": "watcher_state",
+            "running": bool(self.watcher_service and self.watcher_service.scheduler.running),
+            "overview": overview,
+            "monitors": monitors,
+            "events": events,
+            "checks": checks,
+            "capabilities": capabilities,
+            "dashboard_url": f"http://{dashboard.host}:{dashboard.port}",
+            "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def _handle_watcher_action(self, websocket: Any, message: dict[str, Any]) -> None:
+        handlers = self._watcher_handlers()
+        if handlers is None:
+            await self._send(websocket, {
+                "type": "watcher_error",
+                "message": "Watcher tools are unavailable in this Ares runtime.",
+            })
+            return
+        action = str(message.get("action") or "")
+        arguments = message.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            await self._send_error(websocket, "Watcher arguments must be an object.")
+            return
+        methods = {
+            "create": handlers.create,
+            "update": handlers.update,
+            "delete": handlers.delete,
+            "pause": handlers.pause,
+            "resume": handlers.resume,
+            "acknowledge": handlers.acknowledge,
+        }
+        if action == "run":
+            raw = await handlers.run_now(arguments)
+        elif action in methods:
+            raw = methods[action](arguments)
+        else:
+            await self._send_error(websocket, f"Unknown watcher action: {action}")
+            return
+        result = _safe_json_loads(raw)
+        if isinstance(result, str) and result.startswith("Error:"):
+            await self._send(websocket, {"type": "watcher_error", "message": result[6:].strip()})
+        else:
+            await self._send(websocket, {
+                "type": "watcher_action_result", "action": action, "result": result,
+            })
+        await self._send(websocket, self._watcher_state())
+
+    def _workspace_files(self) -> dict[str, Any]:
+        files = self.workspace_uploads.list()
+        return {
+            "type": "workspace_files",
+            "files": files,
+            "count": len(files),
+            "bytes": sum(int(item["size"]) for item in files),
+        }
+
+    async def _handle_upload_workspace_file(self, websocket: Any, message: dict[str, Any]) -> None:
+        try:
+            file = self.workspace_uploads.save(message.get("file"))
+        except (OSError, ValueError) as exc:
+            await self._send(websocket, {"type": "workspace_files_error", "message": str(exc)})
+            return
+        await self._send(websocket, {"type": "workspace_file_uploaded", "file": file})
+        await self._send(websocket, self._workspace_files())
+
+    async def _handle_delete_workspace_file(self, websocket: Any, message: dict[str, Any]) -> None:
+        if not bool(message.get("confirm")):
+            await self._send_error(websocket, "Confirm workspace file deletion first.")
+            return
+        file_id = str(message.get("file_id") or "")
+        deleted = self.workspace_uploads.delete(file_id)
+        await self._send(websocket, {
+            "type": "workspace_file_deleted", "file_id": file_id, "deleted": deleted,
+        })
+        await self._send(websocket, self._workspace_files())
+
     async def _handle_new_session(self, websocket: Any) -> None:
         if self.conversation_id:
             try:
@@ -854,12 +1377,24 @@ class AresServer:
                 "percent": round(used / total * 100, 1) if total > 0 else 0,
                 "breakdown": breakdown,
             }
+        watcher_status: dict[str, Any] = {
+            "enabled": bool(self.config.watcher.enabled),
+            "running": False,
+            "dashboard_url": None,
+        }
+        if self.watcher_service is not None:
+            watcher_status.update(self.watcher_service.db.overview())
+            watcher_status["running"] = bool(self.watcher_service.scheduler.running)
+            if self.config.watcher.dashboard.enabled:
+                dashboard = self.config.watcher.dashboard
+                watcher_status["dashboard_url"] = f"http://{dashboard.host}:{dashboard.port}"
         return {
             "type": "status",
             "model": self.config.model,
             "memory_count": self._memory_count(),
             "session_id": self.conversation_id,
             "context_usage": context_usage,
+            "watchers": watcher_status,
         }
 
     def _onboarding_state(self) -> dict[str, Any]:
@@ -887,6 +1422,7 @@ class AresServer:
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=latest.soul_path)
         self.profile_manager.ensure_exists()
         self.soul_manager.ensure_exists()
+        self.workspace_uploads = WorkspaceUploadStore(data_dir)
         self._apply_config_to_agent()
 
         # A model-only update is cheap.  For MCP/data-root changes, rebuild the
@@ -896,25 +1432,29 @@ class AresServer:
             previous.mcp_servers != latest.mcp_servers
             or previous.data_dir != latest.data_dir
         ):
-            previous_manager = self.mcp_manager
-            self.mcp_manager = (
-                MCPClientManager(latest.mcp_servers, data_dir=latest.data_dir)
-                if latest.mcp_servers
-                else None
-            )
-            if hasattr(self.agent, "set_mcp_manager"):
-                self.agent.set_mcp_manager(self.mcp_manager)
-            else:  # Lightweight fakes used in focused server tests.
-                self.agent.mcp_manager = self.mcp_manager
-                if hasattr(self.agent, "tool_executor"):
-                    self.agent.tool_executor.mcp_manager = self.mcp_manager
-            if previous_manager is not None:
-                with suppress(Exception):
-                    await previous_manager.close()
-            if self.mcp_manager is not None:
-                await self.mcp_manager.start()
-                if hasattr(self.agent, "refresh_tools"):
-                    self.agent.refresh_tools()
+            await self._rebuild_mcp_manager()
+
+    async def _rebuild_mcp_manager(self) -> None:
+        """Replace the live MCP manager after an operator config change."""
+        previous_manager = self.mcp_manager
+        self.mcp_manager = (
+            MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
+            if self.config.mcp_servers
+            else None
+        )
+        if hasattr(self.agent, "set_mcp_manager"):
+            self.agent.set_mcp_manager(self.mcp_manager)
+        else:  # Lightweight fakes used in focused server tests.
+            self.agent.mcp_manager = self.mcp_manager
+            if hasattr(self.agent, "tool_executor"):
+                self.agent.tool_executor.mcp_manager = self.mcp_manager
+        if previous_manager is not None:
+            with suppress(Exception):
+                await previous_manager.close()
+        if self.mcp_manager is not None:
+            await self.mcp_manager.start()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
 
     def _apply_config_to_agent(self) -> None:
         if hasattr(self.agent, "apply_config"):
@@ -973,14 +1513,23 @@ class AresServer:
             sanitized.append({**msg, "content": content})
         return sanitized
 
-    def _sessions(self) -> list[dict[str, Any]]:
+    def _sessions(self, query: str = "") -> list[dict[str, Any]]:
         self.conversation_store.delete_empty_conversations()
         sessions: list[dict[str, Any]] = []
+        normalized_query = query.casefold().strip()
         for row in self.conversation_store.list_conversations():
             item = _as_jsonable(row)
             session_id = int(item.get("id") or item.get("conversation_id"))
             history = self._conversation_history(session_id)
             title = self._session_title(item, history)
+            if normalized_query:
+                searchable = "\n".join([
+                    title,
+                    str(item.get("summary") or ""),
+                    *(str(message.get("content") or "") for message in history),
+                ]).casefold()
+                if normalized_query not in searchable:
+                    continue
             sessions.append(
                 {
                     "id": session_id,
@@ -1133,6 +1682,27 @@ class AresServer:
 
     async def close(self) -> None:
         """Shut down stores."""
+        if self._workspace_server is not None:
+            self._workspace_server.should_exit = True
+        if self._workspace_task is not None:
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._workspace_task, timeout=10)
+            self._workspace_task = None
+            self._workspace_server = None
+        if self._watcher_dashboard_server is not None:
+            self._watcher_dashboard_server.should_exit = True
+        if self._watcher_dashboard_task is not None:
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._watcher_dashboard_task, timeout=10)
+            self._watcher_dashboard_task = None
+            self._watcher_dashboard_server = None
+        if self.watcher_service is not None:
+            with suppress(Exception):
+                await self.watcher_service.stop()
+            setter = getattr(getattr(self.agent, "tool_executor", None), "set_watcher_service", None)
+            if setter is not None:
+                setter(None)
+            self.watcher_service = None
         if self.telegram_channel is not None:
             with suppress(Exception):
                 await self.telegram_channel.stop()
@@ -1156,8 +1726,23 @@ class AresServer:
                         await result
 
 
-async def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
-    server = AresServer(host=host, port=port)
+async def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    watcher_dashboard_host: str | None = None,
+    watcher_dashboard_port: int | None = None,
+    workspace_host: str | None = None,
+    workspace_port: int | None = None,
+) -> None:
+    server = AresServer(
+        host=host,
+        port=port,
+        watcher_dashboard_host=watcher_dashboard_host,
+        watcher_dashboard_port=watcher_dashboard_port,
+        workspace_host=workspace_host,
+        workspace_port=workspace_port,
+    )
     try:
         await server.run_forever()
     finally:
