@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from contextlib import contextmanager
@@ -76,6 +77,13 @@ from ares.watcher.database import resolve_watcher_database_path
 from ares.watcher.tools import WatcherToolHandlers
 
 _SESSION_UNSET = object()
+
+# Search providers and HTTP fallbacks are synchronous libraries.  Never run
+# them directly on the desktop server's event loop: one stalled provider would
+# otherwise freeze every workspace session, even though Telegram/CLI continue
+# to use their own execution paths.
+WEB_SEARCH_BLOCKING_TIMEOUT_SECONDS = 45.0
+WEB_FETCH_TIMEOUT_SECONDS = 30.0
 
 
 class ToolExecutor:
@@ -1217,6 +1225,48 @@ class ToolExecutor:
         payload = self._research_search_payload(args, fetch_top=int(args.get("fetch_top", 3)))
         return payload_to_json(payload)
 
+    @staticmethod
+    def _web_timeout_error(operation: str, timeout: float) -> TimeoutError:
+        return TimeoutError(
+            f"{operation} timed out after {timeout:g}s. Try again with a narrower query or fewer sources."
+        )
+
+    async def _run_blocking_web_search(self, args: dict) -> str:
+        """Run a provider-backed search away from the shared async loop."""
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._web_search, args),
+                timeout=WEB_SEARCH_BLOCKING_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise self._web_timeout_error("Web search", WEB_SEARCH_BLOCKING_TIMEOUT_SECONDS) from exc
+
+    async def _run_blocking_research_payload(self, args: dict, *, fetch_top: int) -> dict[str, Any]:
+        """Keep the synchronous search provider from blocking other chats."""
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._research_search_payload, args, fetch_top=fetch_top),
+                timeout=WEB_SEARCH_BLOCKING_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise self._web_timeout_error("Web search", WEB_SEARCH_BLOCKING_TIMEOUT_SECONDS) from exc
+
+    async def _run_blocking_fetch(self, url: str, *, max_chars: int) -> dict[str, Any]:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(fetch_url, url, max_chars=max_chars),
+                timeout=WEB_FETCH_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "url": url,
+                "title": "",
+                "content": "",
+                "truncated": False,
+                "error": f"Local fetch timed out after {WEB_FETCH_TIMEOUT_SECONDS:g}s.",
+                "fetcher": "local",
+            }
+
     async def _web_search_async(self, args: dict) -> str:
         fetcher = str(args.get("fetcher", "auto") or "auto").lower()
         if fetcher not in {"auto", "mcp", "local"}:
@@ -1225,9 +1275,9 @@ class ToolExecutor:
         max_fetch_chars = int(args.get("max_fetch_chars", 8000))
 
         if fetcher == "local" or fetch_top <= 0:
-            return self._web_search(args)
+            return await self._run_blocking_web_search(args)
 
-        payload = self._research_search_payload(args, fetch_top=0)
+        payload = await self._run_blocking_research_payload(args, fetch_top=0)
 
         fetched: list[dict[str, Any]] = []
         for result in payload.get("results", [])[:fetch_top]:
@@ -1235,13 +1285,18 @@ class ToolExecutor:
             if not url:
                 continue
 
-            page, error = await self._fetch_with_mcp(url, max_fetch_chars)
+            try:
+                page, error = await asyncio.wait_for(
+                    self._fetch_with_mcp(url, max_fetch_chars),
+                    timeout=WEB_FETCH_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                page, error = {}, f"MCP fetch timed out after {WEB_FETCH_TIMEOUT_SECONDS:g}s."
             if error:
                 if fetcher == "mcp":
                     payload.setdefault("errors", []).append(error)
                     continue
-                page = fetch_url(url, max_chars=max_fetch_chars)
-                page["fetcher"] = "local"
+                page = await self._run_blocking_fetch(url, max_chars=max_fetch_chars)
 
             if not page.get("error"):
                 fetched.append({

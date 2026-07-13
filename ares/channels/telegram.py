@@ -19,7 +19,7 @@ import secrets
 import shlex
 import time
 from collections import defaultdict
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import Any, Callable
 
@@ -53,6 +53,7 @@ MAX_HISTORY_MESSAGES = 40
 MARKETPLACE_CONFIRMATION_TTL_SECONDS = 5 * 60
 TOOL_TOKEN_RE = re.compile(r"^\[tool:([^:]+):(.*)\]$", re.DOTALL)
 TOOL_START_TOKEN_RE = re.compile(r"^\[tool_start:([^\]]+)\]$")
+TOOL_PROGRESS_TOKEN_RE = re.compile(r"^\[tool_progress:([^:]+):(.*)\]$", re.DOTALL)
 FILE_MARKER_RE = re.compile(r"\[\[telegram_file:(.+?)\]\]", re.IGNORECASE)
 FILE_REQUEST_RE = re.compile(
     r"\b(?:send|upload|share|attach)\b[\s\S]{0,120}\b(?:file|document|report|output|result|it|this)\b"
@@ -245,6 +246,7 @@ class TelegramChannel:
         state_store: ChannelStore | None = None,
         audio_transcriber: Any | None = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        agent_lock: asyncio.Lock | None = None,
     ) -> None:
         self.config = config
         self.agent = agent
@@ -263,10 +265,9 @@ class TelegramChannel:
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._chat_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-        # Agent state and local tools are not generally safe to execute in
-        # parallel.  Telegram conversations remain separate while executions
-        # are serialized deterministically.
-        self._agent_lock = asyncio.Lock()
+        # Retained for backwards-compatible construction. Per-chat locks keep
+        # order, while the Agent serializes only the shared browser surface.
+        self._agent_lock = agent_lock
         self.skill_manager = SkillManager(skill_dirs=list(config.skill_dirs or []) or None)
         # Remote config changes are deliberately two-step.  A Telegram message
         # may be forwarded, mistyped, or stale; only the originating allowlisted
@@ -615,7 +616,7 @@ class TelegramChannel:
 
         self.conversation_store.add_message(session_id, "user", visible_content)
         try:
-            response, tool_calls = await self._run_agent(prompt, history, status)
+            response, tool_calls = await self._run_agent(prompt, history, status, session_id)
         except Exception as exc:
             logger.exception("Telegram agent turn failed")
             await status.finish("⚠️ Ares could not finish that request.")
@@ -641,16 +642,21 @@ class TelegramChannel:
         prompt: str,
         history: list[dict[str, str]],
         status: "_TelegramProgress",
+        session_id: int,
     ) -> tuple[str, list[dict[str, Any]]]:
         response_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
-        # See the lock comment in __init__. This still keeps a separate
-        # persistent history for each remote chat.
-        async with self._agent_lock:
+        scope_factory = getattr(self.agent, "session_scope", None)
+        scope = scope_factory(f"telegram-{session_id}") if callable(scope_factory) else nullcontext()
+        with scope:
             async for chunk in self.agent.run_stream(prompt, conversation_history=history):
                 start = TOOL_START_TOKEN_RE.match(chunk)
                 if start:
                     await status.event(self._tool_label(start.group(1), "Using"))
+                    continue
+                progress = TOOL_PROGRESS_TOKEN_RE.match(chunk)
+                if progress:
+                    await status.event(self._tool_label(progress.group(1), progress.group(2)))
                     continue
                 result = TOOL_TOKEN_RE.match(chunk)
                 if result:

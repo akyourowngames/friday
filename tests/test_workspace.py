@@ -32,6 +32,31 @@ def test_bundled_next_export_is_available_without_development_out(tmp_path, monk
     assert (static_dir / "_next" / "static").is_dir()
 
 
+def test_workspace_serves_allowed_pdfs_inline_for_local_preview(tmp_path):
+    pdf = tmp_path / "brief.pdf"
+    pdf_bytes = b"%PDF-1.6\nlocal preview\n"
+    pdf.write_bytes(pdf_bytes)
+    app = create_workspace_app(artifact_roots=[tmp_path])
+    with TestClient(app) as client:
+        response = client.get("/api/artifact", params={"path": str(pdf)})
+    assert response.status_code == 200
+    assert response.content == pdf_bytes
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert response.headers["x-frame-options"] == "SAMEORIGIN"
+
+
+def test_workspace_rejects_artifacts_outside_approved_roots(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"%PDF-1.6\n")
+    app = create_workspace_app(artifact_roots=[allowed])
+    with TestClient(app) as client:
+        response = client.get("/api/artifact", params={"path": str(outside)})
+    assert response.status_code == 404
+
+
 def test_workspace_upload_store_persists_and_reuses_safe_files(tmp_path):
     store = WorkspaceUploadStore(tmp_path)
     saved = store.save({

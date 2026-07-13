@@ -1,6 +1,7 @@
 """Regressions for web evidence, durable memory, exports, and time/config."""
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from datetime import datetime, timezone
@@ -13,10 +14,47 @@ import pytest
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.tools import exporter, web
+from ares.tools.executor import ToolExecutor
 from ares.tools.dates import parse_user_datetime
 from ares.tools.datetime_tool import get_current_datetime_result
 from ares.tools.exporter import export_data
 from ares.tools.web import fetch_url, fetch_url_tool, web_search_payload
+
+
+class _ExecutorMemory:
+    db_path = None
+
+
+@pytest.mark.asyncio
+async def test_async_web_search_times_out_without_blocking_other_workspace_tasks(tmp_path, monkeypatch):
+    """A synchronous provider must not be able to freeze the WebSocket loop."""
+    executor = ToolExecutor(_ExecutorMemory(), config=AppConfig(data_dir=str(tmp_path)))
+    started = threading.Event()
+    release = threading.Event()
+    ticked = asyncio.Event()
+
+    def blocked_provider(_args, *, fetch_top):
+        started.set()
+        release.wait(timeout=1)
+        return {"results": [], "errors": []}
+
+    monkeypatch.setattr(executor, "_research_search_payload", blocked_provider)
+    monkeypatch.setattr("ares.tools.executor.WEB_SEARCH_BLOCKING_TIMEOUT_SECONDS", 0.02)
+    ticker = asyncio.create_task(_tick(ticked))
+    try:
+        with pytest.raises(TimeoutError, match="Web search timed out"):
+            await executor._web_search_async({"query": "slow provider", "fetch_top": 0})
+        assert started.is_set()
+        await asyncio.wait_for(ticked.wait(), timeout=0.1)
+    finally:
+        release.set()
+        await ticker
+        executor.close()
+
+
+async def _tick(event):
+    await asyncio.sleep(0)
+    event.set()
 
 
 class _StreamResponse:

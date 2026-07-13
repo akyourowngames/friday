@@ -2,15 +2,16 @@
 
 import asyncio
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 
 from ares.context import ProjectContext
 from ares.context_blend import build_context_prompt, get_model_budgets
 from ares.actions import extract_since_reference, has_reference_language
 from ares.autonomy import AutonomousWorkflowRunner
+from ares.browser_control import BrowserTaskController
 from ares.memory import MemoryStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
@@ -23,6 +24,7 @@ from ares.skills import SkillManager
 from ares.tools.datetime_tool import get_current_datetime_result
 
 _SESSION_UNSET = object()
+ToolProgressCallback = Callable[[str, str], Awaitable[None]]
 
 
 class Agent:
@@ -58,6 +60,10 @@ class Agent:
         )
         self._session_store = session_store or self.tool_executor.session_store
         self.mcp_manager = mcp_manager
+        self.browser_controller = BrowserTaskController()
+        # Browser pages are a single mutable surface. Other MCP servers, local
+        # tools, and LLM turns can safely proceed in parallel across chats.
+        self._playwright_tool_lock = asyncio.Lock()
         self.is_cron_session = is_cron_session
         self.is_voice_session = is_voice_session
         self.refresh_tools()
@@ -156,6 +162,9 @@ class Agent:
                     system_content += f"\n\n{skill_context}"
         if context:
             system_content += f"\n\n## Current Context\n{context}"
+        browser_guidance = self.browser_controller.begin_turn(self.session_id, user_input)
+        if browser_guidance:
+            system_content += f"\n\n{browser_guidance}"
 
         turn_guard = (
             "## Current Turn Guard\n"
@@ -403,6 +412,21 @@ class Agent:
             self.skill_manager = SkillManager(skill_dirs=configured_skill_dirs)
             self.tool_executor.skill_manager = self.skill_manager
 
+    def reload_runtime_content(self) -> None:
+        """Refresh local instructions that may change while ``ares --all`` runs.
+
+        Skills, profile, and soul content are deliberately read from local files
+        at turn time. Replacing the catalog here also picks up created/deleted
+        skills and supporting instruction files without changing an active
+        conversation's memory or cancelling its work.
+        """
+        self.profile_manager.ensure_exists()
+        self.soul_manager.ensure_exists()
+        skill_dirs = list(self.config.skill_dirs or [])
+        self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
+        self.tool_executor.skill_manager = self.skill_manager
+        self.refresh_tools()
+
     @staticmethod
     def _tool_call_args(call: dict) -> dict:
         """Parse tool call arguments into a dict."""
@@ -483,7 +507,64 @@ class Agent:
         """Execute non-MCP tool calls locally and return local metadata."""
         return self._process_tool_calls_core(tool_calls, mcp_results=None)
 
-    async def process_tool_calls_async(self, tool_calls: list[dict]) -> list[dict]:
+    async def _execute_external_tool(self, tool_name: str, args: dict) -> str:
+        """Execute one MCP call, serializing only the shared browser surface."""
+        resolved_args = self._resolve_external_person_arguments(tool_name, args)
+        is_browser = self.browser_controller.is_playwright_tool(tool_name)
+
+        async def execute() -> str:
+            preflight = self.browser_controller.before_call(
+                self.session_id, tool_name, resolved_args
+            )
+            used_cached_snapshot = preflight.cached_result is not None
+            if preflight.cached_result is not None:
+                result = preflight.cached_result
+            elif not preflight.allowed:
+                result = preflight.message
+            elif self.mcp_manager is None:
+                result = "Error: MCP manager is not configured."
+            else:
+                result = await self.mcp_manager.call_tool(tool_name, resolved_args)
+            if not used_cached_snapshot:
+                result = self.browser_controller.after_call(
+                    self.session_id, tool_name, resolved_args, result
+                )
+            if (
+                self.mcp_manager is not None
+                and self.browser_controller.should_recover_stale_ref(
+                    self.session_id, tool_name, resolved_args, result
+                )
+            ):
+                snapshot_tool = "mcp__playwright__browser_snapshot"
+                snapshot = await self.mcp_manager.call_tool(snapshot_tool, {})
+                snapshot = self.browser_controller.after_call(
+                    self.session_id, snapshot_tool, {}, snapshot
+                )
+                executor = getattr(self, "tool_executor", None)
+                if executor is not None:
+                    executor.record_external_action(snapshot_tool, {}, snapshot)
+                if self.browser_controller.result_succeeded(snapshot):
+                    return (
+                        f"{result}\n\nPlaywright recovery: captured one fresh snapshot automatically. "
+                        "Do not retry the old ref. Choose a ref from the snapshot below and make at most one "
+                        f"evidence-based retry.\n\n{snapshot}"
+                    )
+                return (
+                    f"{result}\n\nPlaywright recovery failed to capture a fresh snapshot. "
+                    f"Stop retrying and report the browser blocker.\n\n{snapshot}"
+                )
+            return result
+
+        if is_browser:
+            async with self._playwright_tool_lock:
+                return await execute()
+        return await execute()
+
+    async def process_tool_calls_async(
+        self,
+        tool_calls: list[dict],
+        progress_callback: ToolProgressCallback | None = None,
+    ) -> list[dict]:
         """Execute local and MCP tool calls and return results with metadata."""
         mcp_results: dict[int, str] = {}
         local_results: dict[int, str] = {}
@@ -491,20 +572,19 @@ class Agent:
             tool_name = call.get("function", {}).get("name", "unknown")
             try:
                 args = self._tool_call_args(call)
+                if progress_callback is not None:
+                    await progress_callback(tool_name, "Preparing input")
                 if tool_name.startswith("mcp__"):
-                    if self.mcp_manager is None:
-                        result = "Error: MCP manager is not configured."
-                    else:
-                        result = await self.mcp_manager.call_tool(
-                            tool_name,
-                            self._resolve_external_person_arguments(tool_name, args),
-                        )
-                    result = self._with_playwright_recovery(tool_name, result)
+                    if progress_callback is not None:
+                        await progress_callback(tool_name, "Calling connected tool")
+                    result = await self._execute_external_tool(tool_name, args)
                     executor = getattr(self, "tool_executor", None)
                     if executor is not None:
                         executor.record_external_action(tool_name, args, result)
                     mcp_results[i] = result
                 elif tool_name == "run_task":
+                    if progress_callback is not None:
+                        await progress_callback(tool_name, "Running workflow steps")
                     if getattr(self, "workflow_runner", None) is None:
                         local_results[i] = "Error: Workflow runner is unavailable because local task storage is not configured."
                     else:
@@ -514,6 +594,8 @@ class Agent:
                             max_steps=int(args.get("max_steps", 25)),
                         )
                 else:
+                    if progress_callback is not None:
+                        await progress_callback(tool_name, "Running locally")
                     local_results[i] = await self.tool_executor.execute_async(tool_name, args)
             except BaseException as exc:
                 result = f"Error: {exc}"
@@ -525,31 +607,6 @@ class Agent:
             tool_calls,
             mcp_results=mcp_results,
             local_results=local_results,
-        )
-
-    @staticmethod
-    def _with_playwright_recovery(tool_name: str, result: str) -> str:
-        """Turn stale Playwright evidence into one deterministic next step.
-
-        The agent must not repeat a click/type with an old accessibility ref:
-        page mutations invalidate it.  Giving the model this compact recovery
-        instruction prevents blind retries while preserving the original error.
-        """
-        lowered_tool = str(tool_name).casefold()
-        text = str(result or "")
-        lowered = text.casefold()
-        is_browser_interaction = lowered_tool.startswith("mcp__playwright__browser_") and any(
-            token in lowered_tool for token in ("click", "type", "fill", "select", "press")
-        )
-        stale_ref = ("ref" in lowered or "reference" in lowered) and any(
-            token in lowered for token in ("stale", "not found", "does not exist", "invalid", "unknown")
-        )
-        if not is_browser_interaction or not stale_ref:
-            return text
-        return (
-            f"{text}\n\nPlaywright recovery: the prior page reference is invalid. "
-            "Do not retry that ref. Take one fresh browser_snapshot, choose a ref from that snapshot, "
-            "and make at most one evidence-based retry. If the snapshot cannot be obtained, stop and report the browser state."
         )
 
     def _process_tool_calls_core(
@@ -709,10 +766,42 @@ class Agent:
                     "content": "".join(content_parts),
                     "tool_calls": formatted_calls,
                 })
-                for call in formatted_calls:
-                    tool_name = call.get("function", {}).get("name") or "unknown"
-                    yield f"[tool_start:{tool_name}]"
-                tool_results = await self.process_tool_calls_async(formatted_calls)
+                progress: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+
+                async def report_tool_progress(tool_name: str, detail: str) -> None:
+                    await progress.put((tool_name, detail))
+
+                tool_task = asyncio.create_task(
+                    self.process_tool_calls_async(formatted_calls, report_tool_progress)
+                )
+                active_tools: dict[str, float] = {}
+                try:
+                    while not tool_task.done():
+                        try:
+                            tool_name, detail = await asyncio.wait_for(
+                                progress.get(), timeout=0.75
+                            )
+                            if tool_name not in active_tools:
+                                active_tools[tool_name] = asyncio.get_running_loop().time()
+                                yield f"[tool_start:{tool_name}]"
+                            yield f"[tool_progress:{tool_name}:{detail}]"
+                        except asyncio.TimeoutError:
+                            now = asyncio.get_running_loop().time()
+                            for tool_name, started_at in active_tools.items():
+                                elapsed = max(1, round(now - started_at))
+                                yield f"[tool_progress:{tool_name}:Still working · {elapsed}s]"
+                    while not progress.empty():
+                        tool_name, detail = progress.get_nowait()
+                        if tool_name not in active_tools:
+                            active_tools[tool_name] = asyncio.get_running_loop().time()
+                            yield f"[tool_start:{tool_name}]"
+                        yield f"[tool_progress:{tool_name}:{detail}]"
+                    tool_results = await tool_task
+                finally:
+                    if not tool_task.done():
+                        tool_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await tool_task
                 for tr in tool_results:
                     yield f"[tool:{tr['tool_name']}:{tr['content']}]"
                 messages.extend(self._tool_messages(tool_results))

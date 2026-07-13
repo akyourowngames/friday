@@ -131,6 +131,7 @@ class BrowserManager:
         # literal directory named ``~`` instead of Ares' persistent data path.
         profile = str(Path(self.config.data_dir).expanduser() / "playwright-profile")
         return [
+            "-y",
             "@playwright/mcp@0.0.78",
             "--browser",
             "chrome",
@@ -140,22 +141,31 @@ class BrowserManager:
             profile,
             "--viewport-size",
             "1280x720",
-            "--timeout",
-            "90000",  # 90 second timeout for browser operations
+            # Playwright MCP 0.0.78 does not support the old --timeout flag.
+            # Passing it makes the child exit before the MCP handshake.
+            "--timeout-action",
+            "20000",
+            "--timeout-navigation",
+            "35000",
         ]
 
     def _cdp_args(self) -> list[str]:
         return [
+            "-y",
             "@playwright/mcp@0.0.78",
             "--cdp-endpoint",
             f"http://127.0.0.1:{self.config.browser_cdp_port}",
             "--caps",
             "vision,devtools",
+            "--timeout-action",
+            "20000",
+            "--timeout-navigation",
+            "35000",
         ]
 
     @staticmethod
     def _extension_args() -> list[str]:
-        return ["@playwright/mcp@latest", "--extension"]
+        return ["-y", "@playwright/mcp@latest", "--extension"]
 
     def _chrome_paths(self) -> tuple[str, str]:
         if str(self.config.browser_chrome_path or "").strip():

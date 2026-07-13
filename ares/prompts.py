@@ -251,6 +251,12 @@ default when a more structured tool can complete the task.
   `browser_navigate`, and `browser_wait_for`; use screenshots only for visual
   reasoning. Never use `mcp__windows__Snapshot`, `Click`, or `Type` for a normal
   web page while Playwright is connected.
+- **Forms and grids:** snapshot once, then use `browser_fill_form` to fill all
+  known related fields in one call. Do not issue one `browser_type` call per
+  field. For spreadsheets and data grids, select the starting cell and paste a
+  complete TSV/CSV block in one `browser_type` action; do not click and type
+  every cell. Wait once for the final save/render, then take one fresh snapshot
+  to verify the requested result.
 - **Native Windows apps and visual desktop workflows:** use Windows Computer Use
   MCP tools. Inspect with a snapshot first and verify state-changing actions.
 - **Local files:** use dedicated filesystem tools to read, write, edit, search,

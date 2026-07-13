@@ -676,8 +676,10 @@ class MCPClientManager:
             server_name, MCPServerConfig(name=server_name)
         ).timeout_seconds
 
-        # Add retry logic for Playwright MCP calls to handle transient failures
-        max_retries = 2 if server_name == "playwright" else 0
+        # Retry only genuinely transient Playwright failures. Repeating a bad
+        # accessibility ref or invalid input costs seconds and cannot succeed
+        # without new page evidence, which the Agent handles separately.
+        max_retries = 1 if server_name == "playwright" else 0
         last_error = None
 
         for attempt in range(max_retries + 1):
@@ -710,7 +712,12 @@ class MCPClientManager:
                 )
                 return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. Check the MCP server logs or increase timeout_seconds."
             except Exception as exc:
-                if server_name == "playwright" and attempt < max_retries:
+                error_text = str(exc).casefold()
+                retryable = any(
+                    keyword in error_text
+                    for keyword in ("timeout", "navigation", "page load", "target closed", "connection reset")
+                )
+                if server_name == "playwright" and retryable and attempt < max_retries:
                     logger.warning("Retrying Playwright MCP call %s after error (attempt %d/%d): %s", mcp_tool, attempt + 1, max_retries + 1, exc)
                     await asyncio.sleep(1.0)
                     continue
