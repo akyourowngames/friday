@@ -9,12 +9,13 @@ from typing import Any, AsyncIterator
 from ares.watcher.database import WatcherDatabase
 from ares.watcher.fetchers import ToolRunner
 from ares.watcher.notifier import NotificationDispatcher
-from ares.watcher.scheduler import WatcherScheduler
+from ares.watcher.scheduler import GoalSignalCallback, WatcherScheduler
 
 
 class WatcherService:
     def __init__(self, database_path: str | Path, *, notification_settings: dict[str, Any] | None = None,
                  max_concurrency: int = 8, poll_seconds: float = 5.0,
+                 goal_signal_handler: GoalSignalCallback | None = None,
                  tool_runner: ToolRunner | None = None, allow_mutating_tools: bool = False,
                  max_tool_steps: int = 8, max_tool_output_chars: int = 2_000_000) -> None:
         self.db = WatcherDatabase(database_path)
@@ -24,6 +25,7 @@ class WatcherService:
             self.db,
             notifier=self.notifier,
             on_event=self.publish,
+            goal_signal_handler=goal_signal_handler,
             max_concurrency=max_concurrency,
             tool_runner=tool_runner,
             allow_mutating_tools=allow_mutating_tools,

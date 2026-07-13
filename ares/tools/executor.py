@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from ares.conversations import ConversationStore
@@ -33,6 +34,7 @@ from ares.goals import GoalStore, GoalToolHandlers
 from ares.skills import SkillManager
 from ares.mcp_registry import MCPRegistryClient
 from ares.skill_registry import SafeSkillInstaller, SkillRegistryClient, SkillValidationError
+from ares.tools.research import ResearchWorkspace, json_result
 from ares.tools.web import fetch_url, fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
 from ares.tools.filesystem_write import edit_file as _edit_file_impl
@@ -157,7 +159,14 @@ class ToolExecutor:
             tool_monitors_enabled=bool(getattr(watcher_config, "tool_monitors_enabled", True)),
             allow_mutating_tool_steps=bool(getattr(watcher_config, "allow_mutating_tool_steps", False)),
             capabilities_provider=self._watcher_capability_names,
+            goal_store=self.goal_store,
         )
+        if self.goal_tools is not None:
+            self.goal_tools.watcher_db_provider = lambda: self.watcher_tools.db
+        self.research = ResearchWorkspace(session_data_dir or data_root or Path("~/.ares/data").expanduser())
+        # Set by the local Telegram channel at runtime. Keeping the bridge
+        # unattached by default prevents a web/CLI process from sending files.
+        self.telegram_channel: Any | None = None
 
     def close(self) -> None:
         """Clean up persistent sessions."""
@@ -194,6 +203,10 @@ class ToolExecutor:
         """Attach the watcher service owned by the current Ares runtime."""
         self.watcher_tools.set_service(service)
 
+    def set_telegram_channel(self, channel: Any | None) -> None:
+        """Attach the configured, allowlisted local Telegram channel."""
+        self.telegram_channel = channel
+
     def _watcher_capability_names(self) -> list[str]:
         definitions = getattr(self.mcp_manager, "tool_definitions", []) or []
         return [
@@ -224,6 +237,10 @@ class ToolExecutor:
             "export_data": self._export_data,
             "web_search": self._web_search,
             "fetch_url": self._fetch_url,
+            "download_online_file": self._download_online_file,
+            "extract_document": self._extract_document,
+            "create_research_report": self._create_research_report,
+            "telegram_send_file": self._telegram_async_required,
             "read_file": self._read_file,
             "search_files": self._search_files,
             "list_directory": self._list_directory,
@@ -301,6 +318,11 @@ class ToolExecutor:
             "decompose_goal": self._decompose_goal,
             "link_goal_task": self._link_goal_task,
             "link_goal_action": self._link_goal_action,
+            "link_goal_watcher": self._link_goal_watcher,
+            "unlink_goal_watcher": self._unlink_goal_watcher,
+            "get_goal_signals": self._get_goal_signals,
+            "acknowledge_goal_signal": self._acknowledge_goal_signal,
+            "snooze_goal_signal": self._snooze_goal_signal,
             "sync_goal_progress": self._sync_goal_progress,
             "record_goal_progress": self._record_goal_progress,
             "delete_goal": self._delete_goal,
@@ -347,6 +369,8 @@ class ToolExecutor:
             return await self._add_marketplace_mcp(arguments)
         if tool_name == "web_search":
             return await self._web_search_async(arguments)
+        if tool_name == "telegram_send_file":
+            return await self._telegram_send_file(arguments)
         if tool_name == "search_files":
             return await search_files_async(
                 query=arguments.get("query", ""),
@@ -702,6 +726,21 @@ class ToolExecutor:
     def _link_goal_action(self, args: dict) -> str:
         return self._goal_call("link_goal_action", args)
 
+    def _link_goal_watcher(self, args: dict) -> str:
+        return self._goal_call("link_goal_watcher", args)
+
+    def _unlink_goal_watcher(self, args: dict) -> str:
+        return self._goal_call("unlink_goal_watcher", args)
+
+    def _get_goal_signals(self, args: dict) -> str:
+        return self._goal_call("get_goal_signals", args)
+
+    def _acknowledge_goal_signal(self, args: dict) -> str:
+        return self._goal_call("acknowledge_goal_signal", args)
+
+    def _snooze_goal_signal(self, args: dict) -> str:
+        return self._goal_call("snooze_goal_signal", args)
+
     def _sync_goal_progress(self, args: dict) -> str:
         return self._goal_call("sync_goal_progress", args)
 
@@ -753,6 +792,15 @@ class ToolExecutor:
         if re.fullmatch(r"[+0-9 ()-]{3,40}", raw):
             return mask_phone(raw)
         return raw[:160] or "recipient"
+
+    @staticmethod
+    def _safe_web_target(value: Any) -> str:
+        """Keep signed URLs and query strings out of the provenance ledger."""
+        try:
+            host = (urlparse(str(value or "")).hostname or "").strip().casefold()
+        except (TypeError, ValueError):
+            host = ""
+        return host or "online source"
 
     @staticmethod
     def _result_json(result: str) -> dict[str, Any]:
@@ -814,6 +862,12 @@ class ToolExecutor:
             return ("cron_job_created", str(args.get("name") or "cron job"), "Created a scheduled job.", ["cron"])
         if lowered == "export_data":
             return ("export_created", str(args.get("path") or "Ares export"), "Created a local Ares export.", ["export"])
+        if lowered == "download_online_file":
+            return ("research_file_downloaded", self._safe_web_target(args.get("url")), "Downloaded an online research file locally.", ["research", "file"])
+        if lowered == "create_research_report":
+            return ("research_report_created", "research brief", "Created a cited local research report.", ["research", "report"])
+        if lowered == "telegram_send_file":
+            return ("telegram_file_sent", self._masked_recipient(args.get("chat_id") or "allowlisted Telegram chat"), "Sent a file to an allowlisted Telegram chat.", ["telegram", "file"])
         if lowered == "phone_send_sms":
             return ("sms_sent", self._masked_recipient(args.get("number")), "Sent an SMS.", ["phone"])
         if lowered == "phone_call_number":
@@ -858,6 +912,14 @@ class ToolExecutor:
             return ("goal_task_linked", f"goal #{args.get('goal_id', '')}", "Linked a durable task to a goal.", ["goal", "workflow"])
         if lowered == "link_goal_action":
             return ("goal_action_linked", f"goal #{args.get('goal_id', '')}", "Linked action evidence to a goal.", ["goal", "action"])
+        if lowered == "link_goal_watcher":
+            return ("goal_watcher_linked", f"goal #{args.get('goal_id', '')}", "Linked a proactive watcher to a goal.", ["goal", "watcher"])
+        if lowered == "unlink_goal_watcher":
+            return ("goal_watcher_unlinked", f"goal #{args.get('goal_id', '')}", "Unlinked a proactive watcher from a goal.", ["goal", "watcher"])
+        if lowered == "acknowledge_goal_signal":
+            return ("goal_signal_acknowledged", f"signal #{args.get('signal_id', '')}", "Reviewed a watcher signal linked to a goal.", ["goal", "watcher"])
+        if lowered == "snooze_goal_signal":
+            return ("goal_signal_snoozed", f"signal #{args.get('signal_id', '')}", "Snoozed a watcher signal linked to a goal.", ["goal", "watcher"])
         if lowered == "delete_goal":
             return ("goal_deleted", f"goal #{args.get('goal_id', '')}", "Deleted a goal.", ["goal"])
         return None
@@ -1117,14 +1179,42 @@ class ToolExecutor:
 
     # ── Web tools ──────────────────────────────────────────────────
 
+    @staticmethod
+    def _search_options_from_args(args: dict, *, fetch_top: int) -> dict[str, Any]:
+        """Normalize the extended research-search options at one boundary."""
+        return {
+            "query": args["query"],
+            "max_results": int(args.get("max_results", 5)),
+            "provider": args.get("provider"),
+            "fetch_top": fetch_top,
+            "max_fetch_chars": int(args.get("max_fetch_chars", 8000)),
+            "domains": args.get("domains") or [],
+            "exclude_domains": args.get("exclude_domains") or [],
+            "file_type": str(args.get("file_type") or ""),
+            "search_mode": str(args.get("search_mode") or "web"),
+            "recency_days": args.get("recency_days"),
+            "cache_ttl_seconds": int(args.get("cache_ttl_seconds", 300)),
+        }
+
+    def _research_search_payload(self, args: dict, *, fetch_top: int) -> dict[str, Any]:
+        """Build a cached, filterable payload while retaining old plugin compatibility."""
+        options = self._search_options_from_args(args, fetch_top=fetch_top)
+        try:
+            return web_search_payload(**options)
+        except TypeError as exc:
+            # Existing third-party provider shims may still implement the
+            # legacy six-argument call. Do not make a search unavailable just
+            # because that optional layer has not added filters yet.
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            legacy = {
+                key: options[key]
+                for key in ("query", "max_results", "provider", "fetch_top", "max_fetch_chars")
+            }
+            return web_search_payload(**legacy)
+
     def _web_search(self, args: dict) -> str:
-        payload = web_search_payload(
-            args["query"],
-            max_results=int(args.get("max_results", 5)),
-            provider=args.get("provider"),
-            fetch_top=int(args.get("fetch_top", 3)),
-            max_fetch_chars=int(args.get("max_fetch_chars", 8000)),
-        )
+        payload = self._research_search_payload(args, fetch_top=int(args.get("fetch_top", 3)))
         return payload_to_json(payload)
 
     async def _web_search_async(self, args: dict) -> str:
@@ -1137,13 +1227,7 @@ class ToolExecutor:
         if fetcher == "local" or fetch_top <= 0:
             return self._web_search(args)
 
-        payload = web_search_payload(
-            args["query"],
-            max_results=int(args.get("max_results", 5)),
-            provider=args.get("provider"),
-            fetch_top=0,
-            max_fetch_chars=max_fetch_chars,
-        )
+        payload = self._research_search_payload(args, fetch_top=0)
 
         fetched: list[dict[str, Any]] = []
         for result in payload.get("results", [])[:fetch_top]:
@@ -1224,6 +1308,56 @@ class ToolExecutor:
 
     def _fetch_url(self, args: dict) -> str:
         return fetch_url_tool(args)
+
+    def _download_online_file(self, args: dict) -> str:
+        return json_result(self.research.download(
+            str(args["url"]),
+            filename=str(args.get("filename") or ""),
+            max_bytes=int(args.get("max_bytes", 20 * 1024 * 1024)),
+        ))
+
+    def _extract_document(self, args: dict) -> str:
+        return json_result(self.research.extract_document(
+            path=str(args.get("path") or ""),
+            url=str(args.get("url") or ""),
+            filename=str(args.get("filename") or ""),
+            max_bytes=int(args.get("max_bytes", 20 * 1024 * 1024)),
+            max_chars=int(args.get("max_chars", 30_000)),
+        ))
+
+    def _create_research_report(self, args: dict) -> str:
+        return json_result(self.research.create_report(
+            str(args["query"]),
+            title=str(args.get("title") or ""),
+            max_results=int(args.get("max_results", 8)),
+            fetch_top=int(args.get("fetch_top", 5)),
+            provider=args.get("provider"),
+            domains=args.get("domains") or [],
+            exclude_domains=args.get("exclude_domains") or [],
+            file_type=str(args.get("file_type") or ""),
+            search_mode=str(args.get("search_mode") or "web"),
+            recency_days=args.get("recency_days"),
+        ))
+
+    @staticmethod
+    def _telegram_async_required(_args: dict) -> str:
+        return "telegram_send_file requires asynchronous Ares execution."
+
+    async def _telegram_send_file(self, args: dict) -> str:
+        if args.get("confirm") is not True:
+            return "Confirm required: only send a Telegram file after the user explicitly asks for this delivery."
+        channel = self.telegram_channel
+        if channel is None:
+            return "Error: Telegram delivery is unavailable because the local Telegram channel is not enabled."
+        prestate = self._action_prestate("telegram_send_file", args)
+        result = await channel.deliver_file(
+            path=str(args["path"]),
+            chat_id=args.get("chat_id"),
+            caption=str(args.get("caption") or ""),
+        )
+        serialized = json_result(result)
+        self._record_consequential_action("telegram_send_file", args, serialized, prestate=prestate)
+        return serialized
 
     # ── Filesystem (read) tools ────────────────────────────────────
 

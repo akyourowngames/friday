@@ -6,9 +6,11 @@ import json
 import logging
 import os
 import re
+import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from html import unescape
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 from typing import Any
 
 import httpx
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 BACKEND_PRIORITY = ["bing", "brave", "mojeek", "duckduckgo"]
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+SEARCH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+SEARCH_CACHE_LIMIT = 64
 
 
 def _bounded_results(max_results: int) -> int:
@@ -65,10 +69,102 @@ def _normalize_result(result: dict, *, tavily: bool = False) -> dict[str, Any]:
     return normalized
 
 
+def _normalized_domain(value: str) -> str:
+    return str(value or "").strip().casefold().removeprefix("https://").removeprefix("http://").split("/", 1)[0].strip(".")
+
+
+def _matches_domain(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def _canonical_result_key(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        return urlunparse((parsed.scheme.casefold(), (parsed.netloc or "").casefold(), parsed.path.rstrip("/"), "", "", ""))
+    except Exception:
+        return url.casefold().strip()
+
+
+def _result_resource_type(result: dict[str, Any]) -> str:
+    path = urlparse(str(result.get("url") or "")).path.casefold()
+    if path.endswith(".pdf"):
+        return "pdf"
+    if path.endswith((".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".csv")):
+        return "document"
+    return "web"
+
+
+def _rank_and_filter_results(
+    results: list[dict[str, Any]],
+    *,
+    query: str,
+    domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
+    file_type: str = "",
+) -> list[dict[str, Any]]:
+    """Deduplicate, apply explicit source filters, and expose transparent ranking."""
+    allowed = [_normalized_domain(item) for item in domains or [] if _normalized_domain(item)]
+    blocked = [_normalized_domain(item) for item in exclude_domains or [] if _normalized_domain(item)]
+    requested_type = str(file_type or "").strip().lower().lstrip(".")
+    query_terms = {term for term in re.findall(r"[a-z0-9]{3,}", query.casefold())}
+    kept: dict[str, dict[str, Any]] = {}
+    for item in results:
+        url = str(item.get("url") or "").strip()
+        host = (urlparse(url).hostname or "").casefold().rstrip(".")
+        if not url or (allowed and not any(_matches_domain(host, domain) for domain in allowed)):
+            continue
+        if any(_matches_domain(host, domain) for domain in blocked):
+            continue
+        resource_type = _result_resource_type(item)
+        path = urlparse(url).path.casefold()
+        if requested_type and requested_type not in {resource_type, path.rsplit(".", 1)[-1] if "." in path else ""}:
+            continue
+        text = f"{item.get('title', '')} {item.get('snippet', '')}".casefold()
+        lexical = sum(term in text for term in query_terms)
+        quality = _source_quality(url)["score"]
+        date_bonus = 0.08 if _freshness_label(item) == "dated" else 0.0
+        enriched = {**item, "host": host, "resource_type": resource_type, "rank_score": round(lexical + quality + date_bonus, 3)}
+        key = _canonical_result_key(url)
+        existing = kept.get(key)
+        if existing is None or enriched["rank_score"] > existing["rank_score"]:
+            kept[key] = enriched
+    return sorted(kept.values(), key=lambda item: (-float(item["rank_score"]), str(item.get("title") or "")))
+
+
+def _search_query(query: str, domains: list[str] | None, file_type: str) -> str:
+    pieces = [query.strip()]
+    for domain in domains or []:
+        normalized = _normalized_domain(domain)
+        if normalized:
+            pieces.append(f"site:{normalized}")
+    if file_type:
+        pieces.append(f"filetype:{str(file_type).strip().lstrip('.')}")
+    return " ".join(piece for piece in pieces if piece)
+
+
+def _timelimit(recency_days: int | None) -> str | None:
+    if recency_days is None:
+        return None
+    try:
+        days = int(recency_days)
+    except (TypeError, ValueError):
+        return None
+    if days <= 1:
+        return "d"
+    if days <= 7:
+        return "w"
+    if days <= 31:
+        return "m"
+    return "y"
+
+
 def ddgs_search(
     query: str,
     max_results: int = 5,
     max_retries: int = 2,
+    *,
+    search_mode: str = "web",
+    recency_days: int | None = None,
 ) -> tuple[list[dict[str, str]], list[str]]:
     """Search with ddgs backend failover."""
     if not query.strip():
@@ -81,7 +177,17 @@ def ddgs_search(
     for _attempt in range(max_retries + 1):
         for backend in BACKEND_PRIORITY:
             try:
-                results = ddgs.text(query, max_results=bounded, backend=backend)
+                method = getattr(ddgs, "news", None) if search_mode == "news" else None
+                if callable(method):
+                    try:
+                        results = method(query, max_results=bounded, timelimit=_timelimit(recency_days))
+                    except TypeError:
+                        results = method(query, max_results=bounded)
+                else:
+                    try:
+                        results = ddgs.text(query, max_results=bounded, backend=backend, timelimit=_timelimit(recency_days))
+                    except TypeError:
+                        results = ddgs.text(query, max_results=bounded, backend=backend)
                 normalized = [
                     _normalize_result(r)
                     for r in results
@@ -113,6 +219,10 @@ def tavily_search(
     api_key: str = "",
     search_depth: str = "basic",
     timeout: float = 20.0,
+    include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
+    search_mode: str = "web",
+    recency_days: int | None = None,
 ) -> tuple[list[dict[str, str]], str, list[str]]:
     """Search Tavily's official search endpoint."""
     key = _tavily_api_key(api_key)
@@ -126,6 +236,17 @@ def tavily_search(
         "include_answer": True,
         "include_raw_content": False,
     }
+    if include_domains:
+        payload["include_domains"] = list(include_domains)
+    if exclude_domains:
+        payload["exclude_domains"] = list(exclude_domains)
+    if search_mode == "news":
+        payload["topic"] = "news"
+        if recency_days is not None:
+            try:
+                payload["days"] = max(1, min(int(recency_days), 365))
+            except (TypeError, ValueError):
+                pass
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
@@ -240,12 +361,33 @@ def web_search_payload(
     provider: str | None = None,
     fetch_top: int = 3,
     max_fetch_chars: int = 8000,
+    domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
+    file_type: str = "",
+    search_mode: str = "web",
+    recency_days: int | None = None,
+    cache_ttl_seconds: int = 0,
 ) -> dict[str, Any]:
     """Return structured web search payload with summary, results, AND fetched content.
 
     Automatically fetches the top N results so Ares doesn't need to call fetch_url separately.
     """
     config = load_config()
+    search_mode = str(search_mode or "web").strip().lower()
+    if search_mode not in {"web", "news"}:
+        search_mode = "web"
+    normalized_domains = [_normalized_domain(item) for item in domains or [] if _normalized_domain(item)]
+    normalized_excluded = [_normalized_domain(item) for item in exclude_domains or [] if _normalized_domain(item)]
+    search_query = _search_query(query, normalized_domains, file_type)
+    cache_key = json.dumps({
+        "query": search_query, "provider": provider, "max_results": max_results, "fetch_top": fetch_top,
+        "max_fetch_chars": max_fetch_chars, "exclude_domains": normalized_excluded,
+        "mode": search_mode, "recency": recency_days,
+    }, sort_keys=True)
+    ttl = max(0, min(int(cache_ttl_seconds or 0), 3600))
+    cached = SEARCH_CACHE.get(cache_key)
+    if ttl and cached and (time.monotonic() - cached[0]) < ttl:
+        return {**deepcopy(cached[1]), "cache": {"hit": True, "ttl_seconds": ttl}}
     selected_provider = (provider or config.web_search_provider or "auto").lower()
     errors: list[str] = []
     answer = ""
@@ -254,42 +396,45 @@ def web_search_payload(
 
     if selected_provider == "tavily" or (selected_provider == "auto" and has_tavily_key):
         results, answer, tavily_errors = tavily_search(
-            query,
+            search_query,
             max_results=max_results,
             api_key=config.tavily_api_key,
             search_depth=config.tavily_search_depth,
+            include_domains=normalized_domains,
+            exclude_domains=normalized_excluded,
+            search_mode=search_mode,
+            recency_days=recency_days,
         )
         if results or answer:
             actual_provider = "tavily"
         else:
             errors.extend(tavily_errors)
             if selected_provider == "tavily":
-                return {
-                    "query": query,
-                    "provider": "tavily",
-                    "summary": "No summary available.",
-                    "answer": "",
-                    "results": [],
-                    "source_matrix": [],
-                    "fetched": [],
-                    "errors": errors,
-                }
-            results, ddgs_errors = ddgs_search(query, max_results=max_results)
-            errors.extend(ddgs_errors)
-            actual_provider = "ddgs"
+                # Preserve the structured payload shape even when the caller
+                # explicitly chose an unavailable provider.
+                results = []
+                actual_provider = "tavily"
+            else:
+                results, ddgs_errors = ddgs_search(search_query, max_results=max_results, search_mode=search_mode, recency_days=recency_days)
+                errors.extend(ddgs_errors)
+                actual_provider = "ddgs"
     elif selected_provider == "auto":
-        results, ddgs_errors = ddgs_search(query, max_results=max_results)
+        results, ddgs_errors = ddgs_search(search_query, max_results=max_results, search_mode=search_mode, recency_days=recency_days)
         errors.extend(ddgs_errors)
         actual_provider = "ddgs"
     elif selected_provider == "ddgs":
-        results, ddgs_errors = ddgs_search(query, max_results=max_results)
+        results, ddgs_errors = ddgs_search(search_query, max_results=max_results, search_mode=search_mode, recency_days=recency_days)
         errors.extend(ddgs_errors)
         actual_provider = "ddgs"
     else:
-        results, ddgs_errors = ddgs_search(query, max_results=max_results)
+        results, ddgs_errors = ddgs_search(search_query, max_results=max_results, search_mode=search_mode, recency_days=recency_days)
         errors.append(f"Unknown web search provider '{selected_provider}', used ddgs.")
         errors.extend(ddgs_errors)
         actual_provider = "ddgs"
+
+    results = _rank_and_filter_results(
+        results, query=query, domains=normalized_domains, exclude_domains=normalized_excluded, file_type=file_type,
+    )[:_bounded_results(max_results)]
 
     # Fetch every bounded top result concurrently.  Outcomes retain input
     # order and failures are visible rather than silently omitted.
@@ -323,8 +468,9 @@ def web_search_payload(
             if outcome.get("error"):
                 errors.append(f"Fetch {outcome.get('url') or '<missing URL>'}: {outcome['error']}")
 
-    return {
+    payload = {
         "query": query,
+        "executed_query": search_query,
         "provider": actual_provider,
         "summary": summarize_results(results, answer),
         "answer": answer,
@@ -332,7 +478,20 @@ def web_search_payload(
         "source_matrix": source_matrix(results),
         "fetched": fetched,
         "errors": errors,
+        "search_options": {
+            "mode": search_mode,
+            "recency_days": recency_days,
+            "domains": normalized_domains,
+            "exclude_domains": normalized_excluded,
+            "file_type": str(file_type or "").lstrip("."),
+        },
+        "cache": {"hit": False, "ttl_seconds": ttl},
     }
+    if ttl:
+        if len(SEARCH_CACHE) >= SEARCH_CACHE_LIMIT:
+            SEARCH_CACHE.pop(next(iter(SEARCH_CACHE)), None)
+        SEARCH_CACHE[cache_key] = (time.monotonic(), deepcopy(payload))
+    return payload
 
 
 def web_search(

@@ -217,6 +217,10 @@ class Agent:
 
         recent_actions = self.action_ledger.recent(limit=5) if self.action_ledger else []
         active_goals = self.goal_store.list_all(statuses=["active"], limit=8) if self.goal_store else []
+        if self.goal_store and active_goals:
+            active_goals = self.goal_store.contextualize_goals(
+                active_goals, max_age_hours=48, max_surfaced=3, per_goal=3, mark_surfaced=False,
+            )
         goals_due_soon = self.goal_store.due_soon(within_days=7) if self.goal_store else []
         goals_overdue = self.goal_store.overdue() if self.goal_store else []
         relevant_actions: list[dict] = []
@@ -262,18 +266,34 @@ class Agent:
             except ValueError:
                 conversation_recall = []
 
-        if self._session_store is not None and explicit_recall and not session_id:
+        if self._session_store is not None and explicit_recall:
             try:
                 recall_limit = max(3, min(max_retrieval, 8))
+                scan_limit = min(100, recall_limit * 3) if session_id else recall_limit
                 session_recall = self._session_store.search_recall(
-                    user_input, since=since, limit=recall_limit
+                    user_input, since=since, limit=scan_limit
                 )
                 # A reference such as "continue" commonly has no lexical
                 # overlap with the historical answer.  Include a bounded
                 # fallback window so the JSONL archive cannot be skipped.
                 fallback_session_recall = self._session_store.search_recall(
-                    since=since, limit=recall_limit
+                    since=since, limit=scan_limit
                 )
+                if session_id:
+                    # The current turn is already present in live history and
+                    # can otherwise outrank the older session the user named.
+                    # Explicit continuation recall should search the archive,
+                    # not echo the active session back into its own context.
+                    session_recall = [
+                        record for record in session_recall
+                        if record.get("session_id") != session_id
+                    ]
+                    fallback_session_recall = [
+                        record for record in fallback_session_recall
+                        if record.get("session_id") != session_id
+                    ]
+                session_recall = session_recall[:recall_limit]
+                fallback_session_recall = fallback_session_recall[:recall_limit]
                 known_session_sources = {record.get("source_id") for record in session_recall}
                 session_recall.extend(
                     record for record in fallback_session_recall
@@ -317,7 +337,7 @@ class Agent:
             block_context = getattr(self.config, "block_session_context", False)
             prev_summary = self._session_store.get_previous_summary(session_id, block=block_context)
 
-        return build_context_prompt(
+        prepared_context = build_context_prompt(
             soul_context=soul_ctx,
             profile_context=profile_ctx,
             project_context=project_ctx,
@@ -334,6 +354,15 @@ class Agent:
             previous_session_summary=prev_summary,
             token_budget=token_budget,
         )
+        if self.goal_store and active_goals:
+            surfaced_ids = [
+                int(signal["signal_id"])
+                for goal in active_goals
+                for signal in goal.get("watcher_signals") or []
+                if f"signal #{signal.get('signal_id')} " in prepared_context
+            ]
+            self.goal_store.mark_watcher_signals_surfaced(surfaced_ids)
+        return prepared_context
 
     def set_model(self, model: str) -> None:
         """Switch the underlying chat model."""

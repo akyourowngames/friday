@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from ares.goals import GoalStore
 from ares.watcher.service import WatcherService
 from ares.watcher.tools import WatcherToolHandlers
 
@@ -63,3 +64,27 @@ async def test_run_now_requires_active_runtime(tmp_path):
         assert (await handlers.run_now({"watcher_id": watcher["id"]})).startswith("Error:")
     finally:
         handlers.close()
+
+
+def test_create_watcher_can_link_goal_and_delete_cleans_reference(tmp_path):
+    goals = GoalStore(tmp_path / "ares.db")
+    goal = goals.create("Buy a laptop under budget")
+    handlers = WatcherToolHandlers(tmp_path / "watchers.db", goal_store=goals)
+    try:
+        created = json.loads(handlers.create({
+            "name": "Laptop price",
+            "type": "website",
+            "url": "https://example.com/laptop",
+            "goal_id": goal["goal_id"],
+        }))
+        watcher_id = created["watcher"]["id"]
+        assert created["linked_goal_id"] == goal["goal_id"]
+        assert goals.linked_refs(goal["goal_id"])["watchers"] == [watcher_id]
+        assert json.loads(handlers.get({"watcher_id": watcher_id}))["linked_goals"][0]["goal_id"] == goal["goal_id"]
+
+        deleted = json.loads(handlers.delete({"watcher_id": watcher_id, "confirm": True}))
+        assert deleted["unlinked_goal_ids"] == [goal["goal_id"]]
+        assert goals.linked_refs(goal["goal_id"])["watchers"] == []
+    finally:
+        handlers.close()
+        goals.close()

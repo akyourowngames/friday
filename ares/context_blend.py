@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 CONTEXT_WINDOWS: dict[str, int] = {
     # OpenCode free tier
@@ -272,7 +273,7 @@ def format_goals(
         return ""
     lines = [
         "## Goals:",
-        "Goals are durable user-owned outcomes. Progress is historical planning state, not proof unless linked task/action evidence is shown.",
+        "Goals are durable user-owned outcomes. Watcher signals are observations to review, never permission to change goal state.",
     ]
     for goal in goals or []:
         goal_id = goal.get("goal_id", "?")
@@ -285,6 +286,23 @@ def format_goals(
         progress = int(goal.get("progress_percent", 0) or 0)
         mode = str(goal.get("progress_mode") or "manual")
         lines.append(f"- #{goal_id} [{status}, {priority}] {title} — target {target}, {progress}% progress ({mode})")
+        for signal in (goal.get("watcher_signals") or [])[:3]:
+            severity = str(signal.get("severity") or "info").upper()
+            summary = str(signal.get("event_summary") or "A linked watcher detected a change").strip()[:500]
+            watcher_name = str((signal.get("metadata") or {}).get("watcher_name") or signal.get("watcher_id") or "watcher")
+            created_at = str(signal.get("created_at") or "")
+            age = created_at
+            try:
+                created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                created = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+                seconds = max(0, int((datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds()))
+                age = f"{seconds // 3600}h ago" if seconds >= 3600 else f"{max(1, seconds // 60)}m ago"
+            except (TypeError, ValueError):
+                pass
+            lines.append(
+                f"  - New watcher signal #{signal.get('signal_id')} [{severity}] from {watcher_name}: "
+                f"{summary} — {age}; ask before updating/completing, or snooze/dismiss it"
+            )
     if due_soon:
         lines.append("Due soon: " + ", ".join(
             f"#{goal.get('goal_id')} {goal.get('title')} ({goal.get('days_remaining')} days)"

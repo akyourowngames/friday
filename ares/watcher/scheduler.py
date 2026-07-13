@@ -22,12 +22,14 @@ from ares.watcher.queue import EventQueue
 
 logger = logging.getLogger(__name__)
 EventCallback = Callable[[str, dict[str, Any]], Awaitable[None] | None]
+GoalSignalCallback = Callable[[Event, Monitor], Awaitable[list[dict[str, Any]]] | list[dict[str, Any]]]
 
 
 class WatcherScheduler:
     def __init__(self, db: WatcherDatabase, *, fetchers: dict[str, BaseFetcher] | None = None,
                  notifier: NotificationDispatcher | None = None, analyzer: AIAnalyzer | None = None,
                  on_event: EventCallback | None = None, max_concurrency: int = 8, failure_limit: int = 5,
+                 goal_signal_handler: GoalSignalCallback | None = None,
                  tool_runner: ToolRunner | None = None, allow_mutating_tools: bool = False,
                  max_tool_steps: int = 8, max_tool_output_chars: int = 2_000_000) -> None:
         self.db, self.queue = db, EventQueue(db)
@@ -39,6 +41,7 @@ class WatcherScheduler:
         )
         self.notifier, self.analyzer = notifier, analyzer or AIAnalyzer()
         self.auto_actions, self.on_event = AutoActionExecutor(), on_event
+        self.goal_signal_handler = goal_signal_handler
         self.max_concurrency, self.failure_limit = max(1, max_concurrency), max(1, failure_limit)
         self.running, self._stop = False, asyncio.Event()
         self.instance_id = str(uuid4())
@@ -101,6 +104,7 @@ class WatcherScheduler:
         self.db.update_monitor(monitor)
         self.db.insert_check_run(CheckRun(str(uuid4()),monitor.id,"ok",started,utc_now(),duration,bool(event),result.status_code,int(result.metadata.get("bytes") or 0)))
         if event:
+            goal_signals: list[dict[str, Any]] = []
             analysis = await self.analyzer.analyze(event, monitor)
             if analysis:
                 event.ai_summary, event.ai_analyzed = analysis, True
@@ -109,9 +113,10 @@ class WatcherScheduler:
             if action_result is not None:
                 event.ai_summary = ((event.ai_summary + "\n\n") if event.ai_summary else "") + "Auto-action: " + json.dumps(action_result, ensure_ascii=False)
                 self.db.update_event_analysis(event.id, event.ai_summary)
+            goal_signals = await self._fan_out_goal_signals(event, monitor)
             if self.notifier:
                 await self.notifier.dispatch(event, monitor)
-            await self._emit("alert.created", {"monitor":monitor.public_dict(),"event":event.to_dict()})
+            await self._emit("alert.created", {"monitor":monitor.public_dict(),"event":event.to_dict(),"goal_signals":goal_signals})
         await self._emit("check.completed", {"monitor":monitor.public_dict(),"changed":bool(event),"duration_ms":duration})
         return event
 
@@ -152,9 +157,34 @@ class WatcherScheduler:
             self.queue.add_event(event)
         self.db.update_monitor(monitor)
         self.db.insert_check_run(CheckRun(str(uuid4()),monitor.id,status,started,utc_now(),duration,False,http_status,0,error[:1000]))
-        if event and self.notifier: await self.notifier.dispatch(event, monitor)
+        if event:
+            goal_signals = await self._fan_out_goal_signals(event, monitor)
+            if self.notifier:
+                await self.notifier.dispatch(event, monitor)
+            await self._emit("alert.created", {"monitor":monitor.public_dict(),"event":event.to_dict(),"goal_signals":goal_signals})
         await self._emit("check.failed", {"monitor":monitor.public_dict(),"error":error,"auto_paused":not monitor.enabled})
         return event
+
+    async def _fan_out_goal_signals(self, event: Event, monitor: Monitor) -> list[dict[str, Any]]:
+        """Record linked goal evidence before notification delivery; failures stay non-fatal."""
+        if self.goal_signal_handler is None:
+            return []
+        try:
+            linked = self.goal_signal_handler(event, monitor)
+            goal_signals = await linked if asyncio.iscoroutine(linked) else linked
+        except Exception:
+            logger.exception("Goal signal fan-out failed for watcher event %s", event.id)
+            return []
+        if not goal_signals:
+            return []
+        titles = ", ".join(
+            f"#{item.get('goal_id')} {item.get('goal_title')}" for item in goal_signals[:5]
+        )
+        goal_note = f"Linked goal signal: {titles}. Review and confirm before changing goal state."
+        event.ai_summary = ((event.ai_summary + "\n\n") if event.ai_summary else "") + goal_note
+        event.ai_analyzed = True
+        self.db.update_event_analysis(event.id, event.ai_summary)
+        return goal_signals
 
     async def run_once(self) -> list[Event | None]:
         semaphore = asyncio.Semaphore(self.max_concurrency)

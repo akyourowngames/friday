@@ -294,6 +294,22 @@ async def test_file_command_only_sends_existing_regular_file(telegram_channel, t
 
 
 @pytest.mark.asyncio
+async def test_direct_tool_delivery_uses_only_allowlisted_chat(telegram_channel, tmp_path):
+    channel, _conversations, api, _state = telegram_channel
+    report = tmp_path / "research.md"
+    report.write_text("Cited research", encoding="utf-8")
+
+    delivered = await channel.deliver_file(path=report, caption="Research brief")
+    rejected = await channel.deliver_file(path=report, chat_id=999)
+
+    assert delivered["ok"] is True
+    assert delivered["chat_id"] == 123
+    assert api.documents[-1] == (123, report.resolve(), "Research brief", None)
+    assert rejected["ok"] is False
+    assert "allowlisted" in rejected["error"]
+
+
+@pytest.mark.asyncio
 async def test_agent_file_delivery_is_persisted_for_follow_up_context(telegram_channel, tmp_path):
     class DeliveryAgent:
         def __init__(self, config, report_path):

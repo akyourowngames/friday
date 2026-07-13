@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 118
+        assert len(tools) == 127
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -40,6 +40,10 @@ class TestToolDefinitions:
             "export_data",
             "web_search",
             "fetch_url",
+            "download_online_file",
+            "extract_document",
+            "create_research_report",
+            "telegram_send_file",
             "read_file",
             "search_files",
             "list_directory",
@@ -135,8 +139,13 @@ class TestToolDefinitions:
             "decompose_goal",
             "link_goal_task",
             "link_goal_action",
+            "link_goal_watcher",
+            "unlink_goal_watcher",
             "sync_goal_progress",
             "record_goal_progress",
+            "get_goal_signals",
+            "acknowledge_goal_signal",
+            "snooze_goal_signal",
             "delete_goal",
             "get_current_datetime",
         }
