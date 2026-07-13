@@ -48,6 +48,14 @@ def test_existing_builtin_windows_mcp_gets_snapshot_compatibility_env():
     assert windows["env"]["PYTHONPATH"]
 
 
+def test_windows_mcp_compat_replaces_lone_surrogates_in_text_output():
+    from ares.windows_mcp_compat import _sanitize_result
+
+    result = _sanitize_result(["safe", "broken \ud83d", {"nested": "still \ud83d"}])
+
+    assert result == ["safe", "broken ?", {"nested": "still ?"}]
+
+
 def test_mcp_server_config_defaults():
     config = MCPServerConfig(name="calendar", server_url="https://example.com/mcp")
     assert config.oauth_client_id == ""
