@@ -6,10 +6,10 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAresSocket } from "@/lib/useAresSocket";
 import type {
-  ActivityEvent, AresMessage, ChatMessage, JsonRecord, McpServer, McpState, PendingFile, RuntimeStatus,
+  Artifact, ArtifactPreview, AresMessage, ChatMessage, JsonRecord, McpServer, McpState, PendingFile, RuntimeStatus,
   Session, Skill, TraceEvent, ViewId, WatcherMonitor, WatcherState, WorkspaceFile, WorkspaceSettings,
 } from "@/lib/types";
-import { ChatView } from "./ChatView";
+import { ChatView, MarkdownContent } from "./ChatView";
 import { SettingsHub } from "./SettingsHub";
 
 const emptyWatchers: WatcherState = {
@@ -20,7 +20,11 @@ const emptyWatchers: WatcherState = {
 const emptyMcp: McpState = { summary: { ready: false, configured: 0, connected: 0, tools: 0 }, servers: [] };
 
 type ModalState = { title: string; copy?: string; content: React.ReactNode } | null;
-type Toast = { id: string; title: string; copy: string; tone?: "error" | "warn" };
+type Toast = { id: string; title: string; copy: string; tone?: "error" | "warn"; sessionId?: number };
+type ChatRuntime = {
+  messages: ChatMessage[]; streaming: string; busy: boolean; historyLoading: boolean;
+  traces: TraceEvent[]; phase: "idle" | "thinking" | "streaming"; hydrated: boolean;
+};
 
 function text(value: unknown) { return typeof value === "string" ? value : value === undefined || value === null ? "" : JSON.stringify(value); }
 function number(value: unknown) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
@@ -30,6 +34,8 @@ function uid(prefix = "id") { return `${prefix}-${Date.now()}-${Math.random().to
 const CHAT_CACHE_KEY = "ares.workspace.chat-cache.v1";
 const CHAT_CACHE_LIMIT = 20;
 const CHAT_CACHE_MESSAGE_LIMIT = 240;
+const newRuntime = (messages: ChatMessage[] = [], hydrated = false): ChatRuntime => ({ messages, streaming: "", busy: false, historyLoading: false, traces: [], phase: "idle", hydrated });
+const sessionKey = (id: number) => `session:${id}`;
 
 function normalizeHistory(raw: unknown): ChatMessage[] {
   return array(raw).map(item => {
@@ -38,12 +44,14 @@ function normalizeHistory(raw: unknown): ChatMessage[] {
       const call = tool as Record<string, unknown>;
       return { name: text(call.name || call.tool), content: call.content };
     });
+    const artifacts = array(message.artifacts).map(raw => raw as Artifact);
     return {
       id: typeof message.id === "string" || typeof message.id === "number" ? message.id : uid("cached"),
       role: message.role === "user" ? "user" : "assistant",
       content: text(message.content),
       created_at: text(message.created_at),
       tool_calls: calls,
+      artifacts,
     } as ChatMessage;
   }).slice(-CHAT_CACHE_MESSAGE_LIMIT);
 }
@@ -51,6 +59,27 @@ function normalizeHistory(raw: unknown): ChatMessage[] {
 function Modal({ state, close }: { state: ModalState; close: () => void }) {
   if (!state) return null;
   return <div className="modal-layer is-open" aria-hidden="false"><div className="modal-backdrop" onClick={close} /><div className="modal" role="dialog" aria-modal="true"><div className="modal-head"><div><h2>{state.title}</h2>{state.copy && <p>{state.copy}</p>}</div><button onClick={close} aria-label="Close"><X /></button></div>{state.content}</div></div>;
+}
+
+function ArtifactViewer({ artifact, close }: { artifact: ArtifactPreview | null; close: () => void }) {
+  if (!artifact) return null;
+  const isMarkdown = artifact.mime === "text/markdown" || /\.md$/i.test(artifact.name);
+  return <div className="artifact-layer" role="dialog" aria-modal="true" aria-label={`Preview ${artifact.name}`}>
+    <button className="artifact-backdrop" onClick={close} aria-label="Close artifact preview" />
+    <section className="artifact-viewer">
+      <header><div><small>ARES ARTIFACT</small><strong>{artifact.name}</strong></div><button onClick={close} aria-label="Close"><X /></button></header>
+      <div className="artifact-canvas">
+        {!artifact.content && !artifact.data_url ? <div className="artifact-loading"><i /><span>Loading local preview…</span></div> : null}
+        {/* Data URLs come from the local Ares runtime and cannot use Next image optimization. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        {artifact.data_url && artifact.mime?.startsWith("image/") ? <img src={artifact.data_url} alt={artifact.name} /> : null}
+        {artifact.data_url && artifact.mime === "application/pdf" ? <iframe src={artifact.data_url} title={artifact.name} /> : null}
+        {artifact.content && isMarkdown ? <div className="artifact-markdown"><MarkdownContent>{artifact.content}</MarkdownContent></div> : null}
+        {artifact.content && !isMarkdown ? <pre><code>{artifact.content}</code></pre> : null}
+        {artifact.data_url && !artifact.mime?.startsWith("image/") && artifact.mime !== "application/pdf" ? <a className="artifact-open-link" href={artifact.data_url} download={artifact.name}>Save {artifact.name}</a> : null}
+      </div>
+    </section>
+  </div>;
 }
 
 function FormField({ label, children, wide = false, hint }: { label: string; children: React.ReactNode; wide?: boolean; hint?: string }) {
@@ -62,15 +91,11 @@ export function Workspace() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionId, setSessionId] = useState<number | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [streaming, setStreaming] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [activeChatKey, setActiveChatKey] = useState("draft-initial");
+  const [chatStates, setChatStates] = useState<Record<string, ChatRuntime>>({ "draft-initial": newRuntime([], true) });
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<PendingFile[]>([]);
   const [status, setStatus] = useState<RuntimeStatus>({});
-  const [traces, setTraces] = useState<TraceEvent[]>([]);
   const [watchers, setWatchers] = useState<WatcherState>(emptyWatchers);
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -82,37 +107,56 @@ export function Workspace() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [modal, setModal] = useState<ModalState>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview | null>(null);
   const [threadQuery, setThreadQuery] = useState("");
   const sendRef = useRef<(payload: JsonRecord & { type: string }) => boolean>(() => false);
-  const activeToolIds = useRef<Record<string, { traceId: string; activityId: string }>>({});
+  const activeToolIds = useRef<Record<string, string>>({});
   const sessionIdRef = useRef<number | null>(null);
+  const activeChatKeyRef = useRef(activeChatKey);
+  const chatStatesRef = useRef(chatStates);
+  const sessionsRef = useRef<Session[]>([]);
+  const requestChatRef = useRef<Map<string, string>>(new Map());
+  const prefetchRequestedRef = useRef<Set<number>>(new Set());
   const sessionCacheRef = useRef<Map<number, ChatMessage[]>>(new Map());
-  const streamingStartedRef = useRef(false);
   const threadQueryRef = useRef("");
-  const streamQueueRef = useRef("");
-  const streamFrameRef = useRef<number | null>(null);
+  const streamQueueRef = useRef<Map<string, string>>(new Map());
+  const streamFrameRef = useRef<Map<string, number>>(new Map());
 
-  const enqueueStream = useCallback((chunk: string) => {
-    streamQueueRef.current += chunk;
-    if (streamFrameRef.current !== null) return;
+  const updateChat = useCallback((key: string, updater: (current: ChatRuntime) => ChatRuntime) => {
+    setChatStates(current => {
+      const next = { ...current, [key]: updater(current[key] || newRuntime()) };
+      chatStatesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const enqueueStream = useCallback((key: string, chunk: string) => {
+    streamQueueRef.current.set(key, (streamQueueRef.current.get(key) || "") + chunk);
+    if (streamFrameRef.current.has(key)) return;
     const pump = () => {
-      const queued = streamQueueRef.current;
-      if (!queued) { streamFrameRef.current = null; return; }
+      const queued = streamQueueRef.current.get(key) || "";
+      if (!queued) { streamFrameRef.current.delete(key); return; }
       const size = Math.min(14, Math.max(1, Math.ceil(queued.length / 10)));
-      setStreaming(current => current + queued.slice(0, size));
-      streamQueueRef.current = queued.slice(size);
-      streamFrameRef.current = window.requestAnimationFrame(pump);
+      updateChat(key, current => ({ ...current, streaming: current.streaming + queued.slice(0, size), phase: "streaming" }));
+      streamQueueRef.current.set(key, queued.slice(size));
+      streamFrameRef.current.set(key, window.requestAnimationFrame(pump));
     };
-    streamFrameRef.current = window.requestAnimationFrame(pump);
+    streamFrameRef.current.set(key, window.requestAnimationFrame(pump));
+  }, [updateChat]);
+
+  const stopStream = useCallback((key: string) => {
+    const frame = streamFrameRef.current.get(key);
+    if (frame !== undefined) window.cancelAnimationFrame(frame);
+    streamFrameRef.current.delete(key);
+    streamQueueRef.current.delete(key);
   }, []);
 
   const cacheSession = useCallback((id: number, next: ChatMessage[]) => {
     const cache = sessionCacheRef.current;
-    cache.delete(id);
     cache.set(id, next.slice(-CHAT_CACHE_MESSAGE_LIMIT));
-    while (cache.size > CHAT_CACHE_LIMIT) cache.delete(cache.keys().next().value as number);
     try {
-      window.sessionStorage.setItem(CHAT_CACHE_KEY, JSON.stringify(Object.fromEntries(cache)));
+      const persisted = [...cache.entries()].slice(-CHAT_CACHE_LIMIT);
+      window.sessionStorage.setItem(CHAT_CACHE_KEY, JSON.stringify(Object.fromEntries(persisted)));
     } catch { /* Private browsing and quota limits should never block chat. */ }
   }, []);
 
@@ -121,14 +165,19 @@ export function Workspace() {
       const stored = JSON.parse(window.sessionStorage.getItem(CHAT_CACHE_KEY) || "{}") as Record<string, unknown>;
       for (const [key, value] of Object.entries(stored)) {
         const id = Number(key);
-        if (Number.isInteger(id) && id > 0) sessionCacheRef.current.set(id, normalizeHistory(value));
+        if (Number.isInteger(id) && id > 0) {
+          const messages = normalizeHistory(value);
+          sessionCacheRef.current.set(id, messages);
+          chatStatesRef.current = { ...chatStatesRef.current, [sessionKey(id)]: newRuntime(messages, true) };
+        }
       }
+      setChatStates(chatStatesRef.current);
     } catch { /* A malformed cache is simply treated as empty. */ }
   }, []);
 
-  const toast = useCallback((title: string, copy: string, tone?: Toast["tone"]) => {
+  const toast = useCallback((title: string, copy: string, tone?: Toast["tone"], targetSessionId?: number) => {
     const id = uid("toast");
-    setToasts(current => [...current.slice(-3), { id, title, copy, tone }]);
+    setToasts(current => [...current.slice(-3), { id, title, copy, tone, sessionId: targetSessionId }]);
     window.setTimeout(() => setToasts(current => current.filter(item => item.id !== id)), 4600);
   }, []);
 
@@ -137,12 +186,12 @@ export function Workspace() {
   }, []);
 
   const handleMessage = useCallback((message: AresMessage) => {
+    const requestId = text(message.request_id);
+    const eventSessionId = number(message.session_id);
+    const eventKey = eventSessionId ? sessionKey(eventSessionId) : requestChatRef.current.get(requestId) || activeChatKeyRef.current;
     switch (message.type) {
       case "socket_open": requestInitialState(); break;
       case "session_info": {
-        const nextSessionId = message.session_id === null || message.session_id === undefined ? null : number(message.session_id);
-        sessionIdRef.current = nextSessionId;
-        setSessionId(nextSessionId);
         if (message.model) setStatus(current => ({ ...current, model: text(message.model) }));
         break;
       }
@@ -150,82 +199,95 @@ export function Workspace() {
       case "sessions": {
         const query = text(message.query);
         if (query !== threadQueryRef.current) break;
-        setSessions(array(message.sessions).map(raw => raw as Session));
+        const nextSessions = array(message.sessions).map(raw => raw as Session);
+        setSessions(nextSessions); sessionsRef.current = nextSessions;
+        if (!query) {
+          const missing = nextSessions.map(item => item.id).filter(id => !chatStatesRef.current[sessionKey(id)]?.hydrated && !prefetchRequestedRef.current.has(id));
+          if (missing.length) {
+            missing.forEach(id => prefetchRequestedRef.current.add(id));
+            for (let index = 0; index < missing.length; index += 400) {
+              sendRef.current({ type: "prefetch_sessions", session_ids: missing.slice(index, index + 400) });
+            }
+          }
+        }
+        break;
+      }
+      case "chat_started": {
+        if (!eventSessionId) break;
+        const targetKey = sessionKey(eventSessionId);
+        const sourceKey = requestChatRef.current.get(requestId) || eventKey;
+        requestChatRef.current.set(requestId, targetKey);
+        if (sourceKey !== targetKey) {
+          setChatStates(current => {
+            const source = current[sourceKey] || newRuntime();
+            const next = { ...current, [targetKey]: source };
+            delete next[sourceKey];
+            chatStatesRef.current = next;
+            return next;
+          });
+          if (activeChatKeyRef.current === sourceKey) {
+            activeChatKeyRef.current = targetKey; setActiveChatKey(targetKey);
+            sessionIdRef.current = eventSessionId; setSessionId(eventSessionId);
+          }
+        }
         break;
       }
       case "session_history": {
         const loadedSessionId = number(message.session_id);
         const loadedMessages = normalizeHistory(message.messages);
         cacheSession(loadedSessionId, loadedMessages);
-        if (loadedSessionId === sessionIdRef.current) {
-          setMessages(loadedMessages);
-          setStreaming("");
-          streamQueueRef.current = "";
-          streamingStartedRef.current = false;
-          setHistoryLoading(false);
+        updateChat(sessionKey(loadedSessionId), current => current.busy ? current : { ...current, messages: loadedMessages, streaming: "", historyLoading: false, hydrated: true });
+        break;
+      }
+      case "session_histories": {
+        for (const raw of array(message.histories)) {
+          const history = raw as Record<string, unknown>; const id = number(history.session_id);
+          if (!id) continue;
+          const loadedMessages = normalizeHistory(history.messages);
+          cacheSession(id, loadedMessages);
+          updateChat(sessionKey(id), current => current.busy ? current : { ...current, messages: loadedMessages, historyLoading: false, hydrated: true });
         }
         break;
       }
       case "response_status": {
         const stage = text(message.stage) || "thinking";
-        const label = text(message.label) || (stage === "streaming" ? "Ares is drafting" : stage === "complete" ? "Response complete" : "Ares is thinking");
-        const detail = text(message.detail);
-        const state: ActivityEvent["state"] = stage === "complete" ? "done" : "active";
-        setActivity(current => {
-          const id = `phase-${stage}`;
-          const next = { id, label, detail, kind: (stage === "streaming" ? "streaming" : stage === "complete" ? "system" : "thinking") as ActivityEvent["kind"], state, at: new Date() };
-          const completed = current.map(item => stage !== "thinking" && item.id === "phase-thinking" && item.state === "active" ? { ...item, state: "done" as const } : item);
-          const index = completed.findIndex(item => item.id === id);
-          return index >= 0 ? completed.map((item, itemIndex) => itemIndex === index ? next : item) : [...completed.slice(-7), next];
-        });
+        updateChat(eventKey, current => ({ ...current, phase: stage === "complete" ? "idle" : stage === "streaming" ? "streaming" : "thinking" }));
         break;
       }
-      case "content": {
-        if (!streamingStartedRef.current) {
-          streamingStartedRef.current = true;
-          setActivity(current => {
-            const completed = current.map(item => item.id === "phase-thinking" ? { ...item, state: "done" as const } : item);
-            return completed.some(item => item.id === "phase-streaming") ? completed : [...completed.slice(-7), { id: "phase-streaming", label: "Ares is drafting", detail: "Streaming the answer token by token.", kind: "streaming", state: "active", at: new Date() }];
-          });
-        }
-        enqueueStream(text(message.text));
-        break;
-      }
+      case "content": enqueueStream(eventKey, text(message.text)); break;
       case "response_done": {
-        if (streamFrameRef.current !== null) window.cancelAnimationFrame(streamFrameRef.current);
-        streamFrameRef.current = null; streamQueueRef.current = "";
+        stopStream(eventKey);
         const content = text(message.content);
         const calls = array(message.tool_calls).map(raw => { const call = raw as Record<string, unknown>; return { name: text(call.tool || call.name), content: call.content }; });
-        if (content || calls.length) setMessages(current => {
-          const next = [...current, { id: uid("assistant"), role: "assistant" as const, content, created_at: new Date().toISOString(), tool_calls: calls }];
-          const completedSessionId = number(message.session_id) || sessionIdRef.current;
-          if (completedSessionId) cacheSession(completedSessionId, next);
-          return next;
+        const artifacts = array(message.artifacts).map(raw => raw as Artifact);
+        updateChat(eventKey, current => {
+          const nextMessages = content || calls.length || artifacts.length ? [...current.messages, { id: uid("assistant"), role: "assistant" as const, content, created_at: new Date().toISOString(), tool_calls: calls, artifacts }] : current.messages;
+          if (eventSessionId) cacheSession(eventSessionId, nextMessages);
+          return { ...current, messages: nextMessages, streaming: "", busy: false, phase: "idle", hydrated: true };
         });
-        setActivity(current => {
-          const settled = current.map(item => item.state === "active" ? { ...item, state: "done" as const } : item);
-          return settled.some(item => item.id === "phase-complete") ? settled : [...settled.slice(-7), { id: "phase-complete", label: "Response complete", detail: "Saved to this conversation.", kind: "system", state: "done", at: new Date() }];
-        });
-        setStreaming(""); setBusy(false); break;
+        if (eventSessionId && activeChatKeyRef.current !== eventKey) {
+          const title = sessionsRef.current.find(item => item.id === eventSessionId)?.title || "Background chat";
+          toast("Response ready", `${title} finished while you were elsewhere.`, undefined, eventSessionId);
+        }
+        if (requestId) requestChatRef.current.delete(requestId);
+        break;
       }
       case "tool_start": {
-        const tool = text(message.tool) || "Tool"; const traceId = uid("trace"); const activityId = uid("activity-tool"); activeToolIds.current[tool] = { traceId, activityId };
-        setTraces(current => [...current, { id: traceId, label: tool, detail: "Executing through Ares", state: "active", at: new Date() }]);
-        setActivity(current => [...current.slice(-7), { id: activityId, label: tool, detail: "Tool started", kind: "tool", state: "active", at: new Date() }]);
+        const tool = text(message.tool) || "Tool"; const traceId = uid("trace"); activeToolIds.current[`${eventKey}:${tool}`] = traceId;
+        updateChat(eventKey, current => ({ ...current, traces: [...current.traces, { id: traceId, label: tool, detail: "Executing", state: "active", at: new Date() }] }));
         break;
       }
       case "tool_args": {
-        const tool = text(message.tool); const active = activeToolIds.current[tool]; const detail = text(message.args).slice(0, 180) || "Input prepared";
-        setTraces(current => current.map(item => item.id === active?.traceId ? { ...item, detail } : item));
-        setActivity(current => current.map(item => item.id === active?.activityId ? { ...item, detail: "Input prepared" } : item));
+        const tool = text(message.tool); const active = activeToolIds.current[`${eventKey}:${tool}`]; const detail = text(message.args).slice(0, 180) || "Input prepared";
+        updateChat(eventKey, current => ({ ...current, traces: current.traces.map(item => item.id === active ? { ...item, detail } : item) }));
         break;
       }
       case "tool_result": {
-        const tool = text(message.tool); const active = activeToolIds.current[tool]; delete activeToolIds.current[tool];
-        setTraces(current => current.map(item => item.id === active?.traceId ? { ...item, detail: "Completed", state: "done" } : item));
-        setActivity(current => current.map(item => item.id === active?.activityId ? { ...item, detail: "Completed", state: "done" } : item));
+        const tool = text(message.tool); const mapKey = `${eventKey}:${tool}`; const active = activeToolIds.current[mapKey]; delete activeToolIds.current[mapKey];
+        updateChat(eventKey, current => ({ ...current, traces: current.traces.map(item => item.id === active ? { ...item, detail: "Completed", state: "done" } : item) }));
         break;
       }
+      case "artifact_content": setArtifactPreview({ id: text(message.path), path: text(message.path), name: text(message.name), mime: text(message.mime), content: text(message.content) || undefined, data_url: text(message.data_url) || undefined }); break;
       case "workspace_files": setFiles(array(message.files).map(item => item as WorkspaceFile)); break;
       case "workspace_file_uploaded": setUploading(false); toast("File secured", `${text((message.file as JsonRecord | undefined)?.name) || "File"} is ready across conversations.`); break;
       case "workspace_files_error": setUploading(false); toast("Upload rejected", text(message.message), "error"); break;
@@ -247,14 +309,17 @@ export function Workspace() {
       case "watcher_action_result": setModal(null); toast("Watcher operation complete", `${text(message.action)} applied to the shared fleet.`); break;
       case "watcher_error": toast("Watcher operation failed", text(message.message), "error"); break;
       case "model_updated": setStatus(current => ({ ...current, model: text(message.model) })); break;
-      case "error": setBusy(false); setSavingSettings(false); setStreaming(""); setActivity(current => current.map(item => item.state === "active" ? { ...item, state: "error" as const } : item)); toast("Ares runtime error", text(message.message), "error"); break;
+      case "error": updateChat(eventKey, current => ({ ...current, busy: false, streaming: "", phase: "idle", traces: current.traces.map(item => item.state === "active" ? { ...item, state: "error" as const } : item) })); setSavingSettings(false); toast("Ares runtime error", text(message.message), "error"); break;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enqueueStream, requestInitialState, toast]);
+  }, [cacheSession, enqueueStream, requestInitialState, stopStream, toast, updateChat]);
 
   const { connection, runtime, send, reconnect } = useAresSocket(handleMessage);
   useEffect(() => { sendRef.current = send; }, [send]);
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+  useEffect(() => { activeChatKeyRef.current = activeChatKey; }, [activeChatKey]);
+  useEffect(() => { chatStatesRef.current = chatStates; }, [chatStates]);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
   useEffect(() => { threadQueryRef.current = threadQuery; }, [threadQuery]);
   useEffect(() => {
     if (connection !== "online") return;
@@ -262,7 +327,7 @@ export function Workspace() {
     return () => window.clearTimeout(timer);
   }, [connection, send, threadQuery]);
   useEffect(() => () => {
-    if (streamFrameRef.current !== null) window.cancelAnimationFrame(streamFrameRef.current);
+    streamFrameRef.current.forEach(frame => window.cancelAnimationFrame(frame));
   }, []);
 
   const navigate = useCallback((next: ViewId) => { setView(next); setSidebarOpen(false); if (next === "settings") send({ type: "get_workspace_settings" }); }, [send]);
@@ -277,20 +342,17 @@ export function Workspace() {
   }, []);
 
   const newChat = useCallback(() => {
-    send({ type: "new_session" }); sessionIdRef.current = null; setSessionId(null); setMessages([]); setStreaming("");
-    streamQueueRef.current = ""; streamingStartedRef.current = false; setThreadQuery(""); setBusy(false); setHistoryLoading(false); setActivity([]); setTraces([]); navigate("chat");
-  }, [send, navigate]);
+    const key = uid("draft");
+    updateChat(key, () => newRuntime([], true)); activeChatKeyRef.current = key; setActiveChatKey(key);
+    send({ type: "new_session" }); sessionIdRef.current = null; setSessionId(null); setThreadQuery(""); navigate("chat");
+  }, [send, navigate, updateChat]);
   const loadSession = (id: number) => {
+    const key = sessionKey(id);
     sessionIdRef.current = id;
     setSessionId(id);
+    activeChatKeyRef.current = key; setActiveChatKey(key);
     const cached = sessionCacheRef.current.get(id);
-    setMessages(cached || []);
-    setStreaming("");
-    streamQueueRef.current = "";
-    streamingStartedRef.current = false;
-    setHistoryLoading(!cached);
-    setActivity([]);
-    setTraces([]);
+    updateChat(key, current => current.hydrated || current.busy ? current : { ...current, messages: cached || [], historyLoading: !cached });
     send({ type: "load_session", session_id: id });
     navigate("chat");
   };
@@ -309,19 +371,21 @@ export function Workspace() {
     }
   };
   const sendMessage = (prompt?: string) => {
-    if (busy) return;
+    const key = activeChatKeyRef.current;
+    const currentChat = chatStatesRef.current[key] || newRuntime();
+    if (currentChat.busy) return;
     const content = (prompt ?? input).trim();
     if (!content && !attachments.length) return;
     if (connection !== "online") { toast("Runtime offline", "Reconnect Ares before sending a message.", "error"); return; }
     const payload = attachments.map(item => item.path ? { name: item.name, type: item.type, path: item.path } : { name: item.name, type: item.type, data: item.data });
-    send({ type: "chat", content, session_id: sessionId, attachments: payload });
-    setMessages(current => {
-      const next = [...current, { id: uid("user"), role: "user" as const, content: content || `Attached: ${attachments.map(item => item.name).join(", ")}`, created_at: new Date().toISOString() }];
+    const requestId = uid("request"); requestChatRef.current.set(requestId, key);
+    send({ type: "chat", request_id: requestId, content, session_id: sessionIdRef.current, attachments: payload });
+    updateChat(key, current => {
+      const next = [...current.messages, { id: uid("user"), role: "user" as const, content: content || `Attached: ${attachments.map(item => item.name).join(", ")}`, created_at: new Date().toISOString() }];
       if (sessionIdRef.current) cacheSession(sessionIdRef.current, next);
-      return next;
+      return { ...current, messages: next, busy: true, historyLoading: false, streaming: "", phase: "thinking", traces: [] };
     });
-    setInput(""); setAttachments([]); setBusy(true); setHistoryLoading(false); setStreaming(""); streamQueueRef.current = ""; streamingStartedRef.current = false; setTraces([]);
-    setActivity([{ id: "phase-thinking", label: "Ares is thinking", detail: "Reading your request and preparing the next step.", kind: "thinking", state: "active", at: new Date() }]);
+    setInput(""); setAttachments([]); stopStream(key);
   };
 
   const uploadLibrary = async (incoming: FileList | File[]) => {
@@ -357,6 +421,7 @@ export function Workspace() {
   const userName = String(settingsData.identity?.user_name || "Operator");
   const activeSession = sessions.find(session => session.id === sessionId);
   const visibleSessions = sessions;
+  const activeChat = chatStates[activeChatKey] || newRuntime();
 
   return <>
     <div className={`app-shell ${sidebarOpen ? "sidebar-open" : ""} ${view === "settings" ? "is-settings" : ""}`}>
@@ -364,16 +429,17 @@ export function Workspace() {
         <div className="brand-row"><button className="brand" onClick={() => navigate("chat")}><span className="brand-mark">A</span><span><strong>ARES</strong><small>Personal workspace</small></span></button><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(false)} aria-label="Close navigation"><X /></button></div>
         <button className="new-chat" onClick={newChat}><Plus /><span>New chat</span><kbd>⌘ N</kbd></button>
         <div className="thread-search"><Search /><input value={threadQuery} onChange={event => setThreadQuery(event.target.value)} placeholder="Search every conversation" aria-label="Search chats" />{threadQuery && <button onClick={() => setThreadQuery("")} aria-label="Clear chat search"><X /></button>}</div>
-        <div className="sidebar-section sessions-section"><div className="section-label"><span>Chats</span><button className="tiny-btn" onClick={() => send({ type: "list_sessions" })} aria-label="Refresh chats"><RefreshCw /></button></div><div className="session-list">{visibleSessions.map(session => <button className={`session-item ${session.id === sessionId ? "is-active" : ""}`} key={session.id} onClick={() => loadSession(session.id)}><span><strong>{session.title || "New chat"}</strong><small>{session.message_count} messages</small></span><span className="session-menu" role="button" tabIndex={0} onClick={event => { event.stopPropagation(); sessionMenu(session); }}>•••</span></button>)}{!sessions.length && <div className="sidebar-skeleton" />}{sessions.length > 0 && !visibleSessions.length && <p className="no-chats">No chats found</p>}</div></div>
+        <div className="sidebar-section sessions-section"><div className="section-label"><span>Chats</span><button className="tiny-btn" onClick={() => send({ type: "list_sessions" })} aria-label="Refresh chats"><RefreshCw /></button></div><div className="session-list">{visibleSessions.map(session => { const backgroundBusy = chatStates[sessionKey(session.id)]?.busy; return <button className={`session-item ${session.id === sessionId ? "is-active" : ""} ${backgroundBusy ? "is-running" : ""}`} key={session.id} onClick={() => loadSession(session.id)}><span><strong>{session.title || "New chat"}</strong><small>{backgroundBusy ? "Ares is responding…" : `${session.message_count} messages`}</small></span>{backgroundBusy && <i className="session-running-dot" />}<span className="session-menu" role="button" tabIndex={0} onClick={event => { event.stopPropagation(); sessionMenu(session); }}>•••</span></button>; })}{!sessions.length && <div className="sidebar-skeleton" />}{sessions.length > 0 && !visibleSessions.length && <p className="no-chats">No chats found</p>}</div></div>
         <div className="sidebar-footer"><button className={`nav-item ${view === "settings" ? "is-active" : ""}`} onClick={() => navigate("settings")}><Settings /><span>Settings</span></button><div className="runtime-card"><span className={`connection-dot is-${connection === "online" ? "online" : connection === "offline" ? "offline" : ""}`} /><span><strong>{connection === "online" ? "Ares is ready" : connection === "offline" ? "Ares is offline" : "Connecting"}</strong><small>{connection === "online" ? "Local runtime" : runtime.websocket_url || "ws://localhost:8765"}</small></span><button className="tiny-btn" onClick={() => void reconnect()} aria-label="Reconnect"><RefreshCw /></button></div></div>
       </aside>
       <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />
       <main className="main-stage">
-        {view === "chat" && <><header className="topbar"><div className="topbar-left"><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><strong className="chat-title">{activeSession?.title || "New chat"}</strong></div><div className="topbar-actions"><span className="simple-status"><span className={`connection-dot ${connection === "online" ? "is-online" : "is-offline"}`} />{connection === "online" ? "Ready" : connection}</span><button className="avatar-btn" onClick={() => navigate("settings")} aria-label="Open settings">{userName.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "OP"}</button></div></header><ChatView messages={messages} historyLoading={historyLoading} streaming={streaming} busy={busy} activity={activity} input={input} setInput={setInput} attachments={attachments} removeAttachment={id => setAttachments(current => current.filter(item => item.id !== id))} addFiles={addChatFiles} sendMessage={sendMessage} model={status.model || "Ares model"} traces={traces} /></>}
+        {view === "chat" && <><header className="topbar"><div className="topbar-left"><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><strong className="chat-title">{activeSession?.title || "New chat"}</strong></div><div className="topbar-actions"><span className="simple-status"><span className={`connection-dot ${connection === "online" ? "is-online" : "is-offline"}`} />{connection === "online" ? "Ready" : connection}</span><button className="avatar-btn" onClick={() => navigate("settings")} aria-label="Open settings">{userName.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "OP"}</button></div></header><ChatView messages={activeChat.messages} historyLoading={activeChat.historyLoading} streaming={activeChat.streaming} busy={activeChat.busy} phase={activeChat.phase} input={input} setInput={setInput} attachments={attachments} removeAttachment={id => setAttachments(current => current.filter(item => item.id !== id))} addFiles={addChatFiles} sendMessage={sendMessage} openArtifact={artifact => { setArtifactPreview({ ...artifact }); send({ type: "get_artifact", path: artifact.path }); }} model={status.model || "Ares model"} traces={activeChat.traces} /></>}
         {view === "settings" && <SettingsHub settings={settingsData} savingSettings={savingSettings} saveSettings={next => { setSavingSettings(true); send({ type: "save_workspace_settings", settings: next as unknown as JsonRecord }); }} watchers={watchers} refreshWatchers={() => send({ type: "get_watcher_state" })} createWatcher={() => openWatcherEditor()} editWatcher={openWatcherEditor} watcherAction={(action, arguments_) => send({ type: "watcher_action", action, arguments: arguments_ })} files={files} uploadFiles={uploadLibrary} attachFile={attachLibrary} removeFile={file => { if (window.confirm(`Delete ${file.name} from the local library?`)) send({ type: "delete_workspace_file", file_id: file.id, confirm: true }); }} uploading={uploading} skills={skills} categories={categories} selectedSkill={selectedSkill} selectSkill={skill => { setSelectedSkill(skill); send({ type: "get_skill", name: skill.name }); }} createSkill={() => openSkillEditor(undefined, true)} draftSkill={openSkillDraft} editSkill={skill => openSkillEditor(skill)} removeSkill={skill => { if (window.confirm(`Delete user skill ${skill.name}?`)) send({ type: "delete_skill", name: skill.name }); }} mcp={mcp} probeMcp={() => send({ type: "probe_mcp_servers" })} addMcp={() => openMcpEditor()} editMcp={openMcpEditor} reconnectMcp={server => send({ type: "reconnect_mcp_server", name: server.name })} removeMcp={server => { if (window.confirm(`Remove MCP server ${server.name}? Its tools immediately disappear from Ares and watchers.`)) send({ type: "delete_mcp_server", name: server.name, confirm: true }); }} onSectionChange={section => { if (section === "watchers") send({ type: "get_watcher_state" }); if (section === "files") send({ type: "list_workspace_files" }); if (section === "skills") send({ type: "list_skills" }); if (section === "mcp") send({ type: "get_mcp_state" }); }} close={() => navigate("chat")} />}
       </main>
     </div>
     <Modal state={modal} close={() => setModal(null)} />
-    <div className="toast-stack" aria-live="polite">{toasts.map(item => <div className={`toast ${item.tone || ""}`} key={item.id}><i /><span><strong>{item.title}</strong><small>{item.copy}</small></span><button onClick={() => setToasts(current => current.filter(toastItem => toastItem.id !== item.id))}><X size={13} /></button></div>)}</div>
+    <ArtifactViewer artifact={artifactPreview} close={() => setArtifactPreview(null)} />
+    <div className="toast-stack" aria-live="polite">{toasts.map(item => <div className={`toast ${item.tone || ""} ${item.sessionId ? "is-actionable" : ""}`} key={item.id} role={item.sessionId ? "button" : undefined} tabIndex={item.sessionId ? 0 : undefined} onClick={() => { if (item.sessionId) { loadSession(item.sessionId); setToasts(current => current.filter(toastItem => toastItem.id !== item.id)); } }}><i /><span><strong>{item.title}</strong><small>{item.copy}</small></span><button onClick={event => { event.stopPropagation(); setToasts(current => current.filter(toastItem => toastItem.id !== item.id)); }}><X size={13} /></button></div>)}</div>
   </>;
 }

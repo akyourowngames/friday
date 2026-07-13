@@ -4,7 +4,9 @@ export type JsonRecord = Record<string, unknown>;
 
 export interface AresMessage extends JsonRecord { type: string }
 export interface Session { id: number; title: string; summary?: string; started_at?: string; message_count: number }
-export interface ChatMessage { id?: number | string; role: "user" | "assistant"; content: string; created_at?: string; tool_calls?: ToolCall[] }
+export interface Artifact { id: string; name: string; path: string; mime?: string; kind?: "image" | "markdown" | "pdf" | "file" }
+export interface ChatMessage { id?: number | string; role: "user" | "assistant"; content: string; created_at?: string; tool_calls?: ToolCall[]; artifacts?: Artifact[] }
+export interface ArtifactPreview extends Artifact { content?: string; data_url?: string }
 export interface ToolCall { name: string; content?: unknown; args?: JsonRecord }
 export interface PendingFile { id: string; name: string; type: string; size: number; data?: string; path?: string; libraryId?: string }
 export interface WorkspaceFile { id: string; name: string; type: string; size: number; modified_at: string; path: string }

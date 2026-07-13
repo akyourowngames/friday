@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from ares.conversations import ConversationStore
@@ -54,14 +56,28 @@ class HarnessAgent:
         self.tool_executor = HarnessExecutor(root)
         self.skill_manager = SkillManager([root / "skills"])
         self.mcp_manager = None
+        self.root = root
+        self._session = ContextVar("harness_session", default="none")
+
+    @contextmanager
+    def session_scope(self, session_id):
+        token = self._session.set(session_id)
+        try:
+            yield
+        finally:
+            self._session.reset(token)
 
     async def run_stream(self, message, conversation_history=None):
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(1.2 if "slow" in message.lower() else 0.45)
+        if "artifact" in message.lower():
+            artifact = self.root / "generated-demo.md"
+            artifact.write_text("# Generated brief\n\n- Background chat stayed isolated.\n- **Markdown rendering** is active.\n\n| Check | Result |\n|---|---|\n| Routing | Passed |", encoding="utf-8")
+            yield f'[tool:write_file:{{"output_path":{artifact.as_posix()!r}}}]'.replace("'", '"')
         for chunk in (
             "[tool_start:list_workspace_files]",
             '[tool:list_workspace_files:{"count":3}]',
-            "Harness online. ",
-            "The separate Next.js power workspace is connected to Ares.",
+            f"## {self._session.get()}\n\n",
+            f"Harness answer for **{message}**.\n\n- Streaming is live\n- Chat context is isolated",
         ):
             await asyncio.sleep(0.2)
             yield chunk

@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import pytest
 
@@ -346,6 +348,78 @@ async def test_chat_streams_content_tools_and_done(server):
         "user",
         "assistant",
     ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_chats_keep_streams_and_agent_scope_isolated(server):
+    class ConcurrentAgent:
+        def __init__(self):
+            self.model = "test-model"
+            self.tool_executor = type("ToolExecutor", (), {})()
+            self.llm = FakeLLM()
+            self.scope = ContextVar("test_chat_scope", default="none")
+            self.started = 0
+            self.both_started = asyncio.Event()
+
+        @contextmanager
+        def session_scope(self, session_id):
+            token = self.scope.set(session_id)
+            try:
+                yield
+            finally:
+                self.scope.reset(token)
+
+        async def run_stream(self, message, conversation_history=None):
+            self.started += 1
+            if self.started == 2:
+                self.both_started.set()
+            await asyncio.wait_for(self.both_started.wait(), timeout=1)
+            session = self.scope.get()
+            yield f"{session}:{message}:one "
+            await asyncio.sleep(0)
+            assert self.scope.get() == session
+            yield "two"
+
+        def close(self):
+            pass
+
+    server.agent = ConcurrentAgent()
+    server.conversation_store.messages.extend([
+        {"id": 1, "conversation_id": 1, "role": "user", "content": "first history", "tool_calls": None, "created_at": "now"},
+        {"id": 2, "conversation_id": 2, "role": "user", "content": "second history", "tool_calls": None, "created_at": "now"},
+    ])
+    socket = FakeSocket()
+
+    await asyncio.gather(
+        server.handle_message(socket, json.dumps({"type": "chat", "request_id": "r1", "session_id": 1, "content": "first"})),
+        server.handle_message(socket, json.dumps({"type": "chat", "request_id": "r2", "session_id": 2, "content": "second"})),
+    )
+
+    content_events = [item for item in socket.messages if item["type"] == "content"]
+    assert {item["request_id"] for item in content_events} == {"r1", "r2"}
+    assert all(item["session_id"] == (1 if item["request_id"] == "r1" else 2) for item in content_events)
+    answers = {item["request_id"]: item["content"] for item in socket.messages if item["type"] == "response_done"}
+    assert answers == {
+        "r1": "conversation-1:first:one two",
+        "r2": "conversation-2:second:one two",
+    }
+
+
+@pytest.mark.asyncio
+async def test_prefetch_sessions_returns_histories_without_changing_selection(server):
+    server.conversation_store.add_message(1, "user", "already warm")
+    server.conversation_id = None
+    socket = FakeSocket()
+
+    await server.handle_message(socket, json.dumps({"type": "prefetch_sessions", "session_ids": [1, 1, "bad"]}))
+
+    assert socket.messages == [{
+        "type": "session_histories",
+        "histories": [{"session_id": 1, "messages": [{
+            "id": 1, "role": "user", "content": "already warm", "created_at": "now",
+        }]}],
+    }]
+    assert server.conversation_id is None
 
 
 @pytest.mark.asyncio

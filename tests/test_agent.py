@@ -21,6 +21,26 @@ def agent(tmp_path, fake_embedding_provider):
 
 
 class TestAgent:
+    def test_session_scope_isolates_memory_and_tool_provenance(self, agent, monkeypatch):
+        searches = []
+
+        def search(query, **kwargs):
+            searches.append((query, kwargs))
+            return []
+
+        monkeypatch.setattr(agent.memory_store, "search", search)
+        agent.set_session_id("default-session")
+
+        with agent.session_scope("conversation-42"):
+            assert agent.session_id == "conversation-42"
+            assert agent.tool_executor.session_id == "conversation-42"
+            agent.get_context("isolated fact")
+
+        assert searches[-1][1]["scope"] == "session"
+        assert searches[-1][1]["session_id"] == "conversation-42"
+        assert agent.session_id == "default-session"
+        assert agent.tool_executor.session_id == "default-session"
+
     def test_build_messages_includes_system_prompt(self, agent):
         """Messages include the system prompt."""
         messages = agent.build_messages("Hello", [])

@@ -16,7 +16,9 @@
     "lucide-react": "^1.24.0",
     "next": "16.2.10",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -26,5 +28,7 @@
     "eslint-config-next": "16.2.10",
     "typescript": "^5.9.0"
   },
-  "overrides": { "postcss": "8.5.10" }
+  "overrides": {
+    "postcss": "8.5.10"
+  }
 }

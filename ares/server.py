@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
+import mimetypes
 import re
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 try:  # websockets 13+
@@ -149,6 +152,7 @@ class AresServer:
         )
 
         self._connected_websockets: list = []
+        self._chat_tasks: set[asyncio.Task] = set()
         self.conversation_id = None
         self.conversation_store.delete_empty_conversations()
         self._server = None
@@ -327,7 +331,19 @@ class AresServer:
             await self._send(websocket, self._session_info())
             await self._send(websocket, self._status())
             async for raw in websocket:
-                await self.handle_message(websocket, raw)
+                try:
+                    incoming = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    incoming = {}
+                if incoming.get("type") == "chat":
+                    task = asyncio.create_task(
+                        self.handle_message(websocket, raw),
+                        name=f"ares-chat-{incoming.get('request_id') or id(incoming)}",
+                    )
+                    self._chat_tasks.add(task)
+                    task.add_done_callback(self._chat_tasks.discard)
+                else:
+                    await self.handle_message(websocket, raw)
         except ConnectionClosed:
             pass  # client disconnected (e.g. health-check probe or user closed app)
         finally:
@@ -358,6 +374,10 @@ class AresServer:
                 })
             elif msg_type == "load_session":
                 await self._handle_load_session(websocket, message)
+            elif msg_type == "prefetch_sessions":
+                await self._handle_prefetch_sessions(websocket, message)
+            elif msg_type == "get_artifact":
+                await self._handle_get_artifact(websocket, message)
             elif msg_type == "set_model":
                 await self._handle_set_model(websocket, message)
             elif msg_type == "get_context":
@@ -510,22 +530,23 @@ class AresServer:
         return call.to_dict(include_transcript=False) if call else {"ok": False, "error": "Call session not found."}
 
     async def _handle_chat(self, websocket: Any, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id") or f"request-{id(message)}")
         content = str(message.get("content") or "").strip()
         raw_attachments = message.get("attachments") or []
         if not isinstance(raw_attachments, list):
-            await self._send_error(websocket, "Attachments must be a list")
+            await self._send_error(websocket, "Attachments must be a list", request_id=request_id)
             return
         if not content and not raw_attachments:
-            await self._send_error(websocket, "Message content or an attachment is required")
+            await self._send_error(websocket, "Message content or an attachment is required", request_id=request_id)
             return
 
         try:
             inspections = [inspect_attachment(item) for item in raw_attachments[:10]]
         except ValueError as exc:
-            await self._send_error(websocket, str(exc))
+            await self._send_error(websocket, str(exc), request_id=request_id)
             return
         if sum(item.size for item in inspections) > MAX_TOTAL_ATTACHMENT_BYTES:
-            await self._send_error(websocket, "Attachments exceed the 50 MB total limit")
+            await self._send_error(websocket, "Attachments exceed the 50 MB total limit", request_id=request_id)
             return
 
         visible_content = content or "Attached: " + ", ".join(item.name for item in inspections)
@@ -542,16 +563,18 @@ class AresServer:
 
         session_id = message.get("session_id")
         if session_id:
-            session_id = int(session_id)
+            try:
+                session_id = int(session_id)
+            except (TypeError, ValueError):
+                await self._send_error(websocket, "Invalid session_id", request_id=request_id)
+                return
             # Validate session exists; if not, create a new one
             existing = self.conversation_store.get_messages(session_id)
             if not existing and not self._conversation_exists(session_id):
                 session_id = self.conversation_store.start_conversation()
         else:
             session_id = self.conversation_store.start_conversation()
-        self.conversation_id = session_id
-        if hasattr(self.agent, "set_session_id"):
-            self.agent.set_session_id(f"conversation-{session_id}")
+        event_context = {"session_id": session_id, "request_id": request_id}
         history = self._conversation_history(session_id)
         history = self._sanitize_history(history)
         history = self.context_manager.before_send(history)
@@ -560,8 +583,9 @@ class AresServer:
         # message visible in the sidebar immediately, and keeps it safe if a
         # slow model or integration never returns a final response.
         self.conversation_store.add_message(session_id, "user", visible_content)
-        await self._send(websocket, self._session_info())
+        await self._send(websocket, self._session_info(session_id=session_id, request_id=request_id))
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
+        await self._send(websocket, {"type": "chat_started", **event_context})
         await self._send(
             websocket,
             {
@@ -569,6 +593,7 @@ class AresServer:
                 "stage": "thinking",
                 "label": "Ares is thinking",
                 "detail": "Reading context and planning the next step.",
+                **event_context,
             },
         )
 
@@ -578,78 +603,86 @@ class AresServer:
         response_started = False
 
         max_retries = 3
-        for attempt in range(max_retries + 1):
-            try:
-                async for chunk in self.agent.run_stream(agent_input, conversation_history=history):
-                    tool_start = parse_tool_start_token(chunk)
-                    if tool_start:
-                        started_tools.append(tool_start)
-                        await self._send(
-                            websocket,
-                            {"type": "tool_start", "tool": tool_start, "args": {}},
-                        )
-                        continue
-                    parsed = parse_tool_token(chunk)
-                    if parsed:
-                        tool_name, tool_content = parsed
-                        payload = _safe_json_loads(tool_content)
-                        args = self._tool_args(tool_name, payload)
-                        tool_call = {
-                            "tool": tool_name,
-                            "args": args,
-                            "content": payload,
-                            "at": datetime.now(timezone.utc).isoformat(),
-                        }
-                        tool_calls.append(tool_call)
-                        if tool_name in started_tools:
-                            started_tools.remove(tool_name)
+        scope_factory = getattr(self.agent, "session_scope", None)
+        scope = (
+            scope_factory(f"conversation-{session_id}")
+            if callable(scope_factory)
+            else nullcontext()
+        )
+        with scope:
+            for attempt in range(max_retries + 1):
+                try:
+                    async for chunk in self.agent.run_stream(agent_input, conversation_history=history):
+                        tool_start = parse_tool_start_token(chunk)
+                        if tool_start:
+                            started_tools.append(tool_start)
                             await self._send(
                                 websocket,
-                                {"type": "tool_args", "tool": tool_name, "args": args},
+                                {"type": "tool_start", "tool": tool_start, "args": {}, **event_context},
                             )
-                        else:
+                            continue
+                        parsed = parse_tool_token(chunk)
+                        if parsed:
+                            tool_name, tool_content = parsed
+                            payload = _safe_json_loads(tool_content)
+                            args = self._tool_args(tool_name, payload)
+                            tool_call = {
+                                "tool": tool_name,
+                                "args": args,
+                                "content": payload,
+                                "at": datetime.now(timezone.utc).isoformat(),
+                            }
+                            tool_calls.append(tool_call)
+                            if tool_name in started_tools:
+                                started_tools.remove(tool_name)
+                                await self._send(
+                                    websocket,
+                                    {"type": "tool_args", "tool": tool_name, "args": args, **event_context},
+                                )
+                            else:
+                                await self._send(
+                                    websocket,
+                                    {"type": "tool_start", "tool": tool_name, "args": args, **event_context},
+                                )
                             await self._send(
                                 websocket,
-                                {"type": "tool_start", "tool": tool_name, "args": args},
+                                {"type": "tool_result", "tool": tool_name, "content": payload, **event_context},
                             )
-                        await self._send(
-                            websocket,
-                            {"type": "tool_result", "tool": tool_name, "content": payload},
-                        )
-                        continue
+                            continue
 
-                    if not response_started:
-                        response_started = True
-                        await self._send(
-                            websocket,
-                            {
-                                "type": "response_status",
-                                "stage": "streaming",
-                                "label": "Ares is drafting",
-                                "detail": "Streaming the answer token by token.",
-                            },
-                        )
-                    response_parts.append(chunk)
-                    await self._send(websocket, {"type": "content", "text": chunk})
-                break  # Success, exit retry loop
-            except Exception as exc:
-                error_str = str(exc)
-                is_context_error = (
-                    "400" in error_str
-                    or "too long" in error_str.lower()
-                    or "context" in error_str.lower()
-                    or "token" in error_str.lower()
-                    or "maximum" in error_str.lower()
-                )
-                if is_context_error and attempt < max_retries:
-                    keep = max(4, len(history) // (2 ** (attempt + 1)))
-                    history = history[:1] + history[-keep:]
-                    response_parts.clear()
-                    tool_calls.clear()
-                    started_tools.clear()
-                    continue
-                await self._send_error(websocket, error_str)
-                return
+                        if not response_started:
+                            response_started = True
+                            await self._send(
+                                websocket,
+                                {
+                                    "type": "response_status",
+                                    "stage": "streaming",
+                                    "label": "Ares is drafting",
+                                    "detail": "Streaming the answer token by token.",
+                                    **event_context,
+                                },
+                            )
+                        response_parts.append(chunk)
+                        await self._send(websocket, {"type": "content", "text": chunk, **event_context})
+                    break  # Success, exit retry loop
+                except Exception as exc:
+                    error_str = str(exc)
+                    is_context_error = (
+                        "400" in error_str
+                        or "too long" in error_str.lower()
+                        or "context" in error_str.lower()
+                        or "token" in error_str.lower()
+                        or "maximum" in error_str.lower()
+                    )
+                    if is_context_error and attempt < max_retries:
+                        keep = max(4, len(history) // (2 ** (attempt + 1)))
+                        history = history[:1] + history[-keep:]
+                        response_parts.clear()
+                        tool_calls.clear()
+                        started_tools.clear()
+                        continue
+                    await self._send_error(websocket, error_str, **event_context)
+                    return
 
         full_response = "".join(response_parts).strip()
         import json as _json
@@ -668,7 +701,8 @@ class AresServer:
                 "type": "response_done",
                 "content": full_response,
                 "tool_calls": tool_calls,
-                "session_id": session_id,
+                "artifacts": self._extract_artifacts(full_response, tool_calls),
+                **event_context,
             },
         )
         await self._send(
@@ -678,11 +712,10 @@ class AresServer:
                 "stage": "complete",
                 "label": "Response complete",
                 "detail": "Saved to this conversation.",
+                **event_context,
             },
         )
-        await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
-        await self._send(websocket, self._status())
 
     async def _describe_attached_images(
         self, inspections: list[AttachmentInspection], request: str
@@ -1209,15 +1242,8 @@ class AresServer:
         await self._send(websocket, self._workspace_files())
 
     async def _handle_new_session(self, websocket: Any) -> None:
-        if self.conversation_id:
-            try:
-                # Durable chat recall is indexed at write time.  Keep session
-                # rotation local and non-blocking instead of waiting on an LLM
-                # extraction call while the user starts a new chat.
-                self.conversation_store.summarize_conversation(self.conversation_id)
-                self.conversation_store.end_conversation(self.conversation_id)
-            except Exception:
-                pass
+        # A new composer is only a client selection change. Existing sessions
+        # may still be streaming in the background and must remain writable.
         self.conversation_id = None
         await self._send(websocket, self._session_info())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
@@ -1245,8 +1271,6 @@ class AresServer:
     async def _handle_load_session(self, websocket: Any, message: dict[str, Any]) -> None:
         session_id = int(message.get("session_id") or self.conversation_id)
         self.conversation_id = session_id
-        if hasattr(self.agent, "set_session_id"):
-            self.agent.set_session_id(f"conversation-{session_id}")
         await self._send(
             websocket,
             {
@@ -1256,6 +1280,116 @@ class AresServer:
             },
         )
         await self._send(websocket, self._session_info())
+
+    async def _handle_prefetch_sessions(self, websocket: Any, message: dict[str, Any]) -> None:
+        raw_ids = message.get("session_ids") or []
+        if not isinstance(raw_ids, list):
+            await self._send_error(websocket, "session_ids must be a list")
+            return
+        histories: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for raw_id in raw_ids[:500]:
+            try:
+                session_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if session_id <= 0 or session_id in seen:
+                continue
+            exists = bool(self.conversation_store.get_messages(session_id)) or self._conversation_exists(session_id)
+            if not exists:
+                continue
+            seen.add(session_id)
+            histories.append({
+                "session_id": session_id,
+                "messages": self._conversation_history(session_id),
+            })
+        await self._send(websocket, {"type": "session_histories", "histories": histories})
+
+    async def _handle_get_artifact(self, websocket: Any, message: dict[str, Any]) -> None:
+        requested = str(message.get("path") or "").strip()
+        if not requested:
+            await self._send_error(websocket, "Artifact path is required")
+            return
+        try:
+            path = Path(requested).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            await self._send_error(websocket, "Artifact does not exist")
+            return
+        roots = self._artifact_roots()
+        if not path.is_file() or not any(path.is_relative_to(root) for root in roots):
+            await self._send_error(websocket, "Artifact is outside the Ares workspace")
+            return
+        if path.stat().st_size > 25 * 1024 * 1024:
+            await self._send_error(websocket, "Artifact is larger than the 25 MB preview limit")
+            return
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        payload: dict[str, Any] = {
+            "type": "artifact_content",
+            "path": str(path),
+            "name": path.name,
+            "mime": mime,
+        }
+        text_types = {
+            ".md", ".markdown", ".txt", ".json", ".jsonl", ".yaml", ".yml",
+            ".toml", ".csv", ".tsv", ".py", ".js", ".jsx", ".ts", ".tsx",
+            ".html", ".css", ".scss", ".sql", ".xml", ".svg", ".log",
+        }
+        if path.suffix.lower() in text_types:
+            payload["content"] = path.read_text(encoding="utf-8", errors="replace")
+        else:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            payload["data_url"] = f"data:{mime};base64,{encoded}"
+        await self._send(websocket, payload)
+
+    def _extract_artifacts(
+        self, response: str, tool_calls: list[dict[str, Any]]
+    ) -> list[dict[str, str]]:
+        """Find files created by tools without exposing arbitrary filesystem paths."""
+        candidates: list[str] = []
+
+        def visit(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    visit(child, str(child_key))
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child, key)
+            elif isinstance(value, str):
+                if key.lower() in {"path", "file", "filepath", "file_path", "output", "output_path"}:
+                    candidates.append(value)
+                for match in re.finditer(
+                    r"(?:image saved to|saved to|created at|written to|exported to)\s+([^\r\n]+)",
+                    value,
+                    re.IGNORECASE,
+                ):
+                    candidates.append(match.group(1))
+
+        visit(response)
+        visit(tool_calls)
+        artifacts: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw in candidates:
+            cleaned = raw.strip().strip("`'\" ").split("\n", 1)[0]
+            try:
+                path = Path(cleaned).expanduser().resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            roots = self._artifact_roots()
+            normalized = str(path)
+            if not path.is_file() or normalized in seen or not any(path.is_relative_to(root) for root in roots):
+                continue
+            seen.add(normalized)
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            kind = "image" if mime.startswith("image/") else "markdown" if path.suffix.lower() in {".md", ".markdown"} else "pdf" if mime == "application/pdf" else "file"
+            artifacts.append({"id": normalized, "name": path.name, "path": normalized, "mime": mime, "kind": kind})
+        return artifacts
+
+    def _artifact_roots(self) -> list[Path]:
+        roots = [Path.cwd().resolve(), (Path.home() / ".ares").resolve()]
+        data_dir = str(getattr(self.config, "data_dir", "") or "").strip()
+        if data_dir:
+            roots.append(Path(data_dir).expanduser().resolve())
+        return list(dict.fromkeys(roots))
 
     async def _handle_set_model(self, websocket: Any, message: dict[str, Any]) -> None:
         model = str(message.get("model") or "").strip()
@@ -1336,16 +1470,24 @@ class AresServer:
         if section == "profile":
             await self._send(websocket, self._onboarding_state())
 
-    def _session_info(self) -> dict[str, Any]:
-        return {
+    def _session_info(
+        self, *, session_id: int | None = None, request_id: str | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "type": "session_info",
-            "session_id": self.conversation_id,
+            "session_id": self.conversation_id if session_id is None else session_id,
             "model": self.config.model,
         }
+        if request_id:
+            payload["request_id"] = request_id
+        return payload
 
     def _conversation_exists(self, conversation_id: int) -> bool:
         """Check if a conversation row exists in the database."""
-        row = self.conversation_store.conn.execute(
+        connection = getattr(self.conversation_store, "conn", None)
+        if connection is None:
+            return False
+        row = connection.execute(
             "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
         ).fetchone()
         return row is not None
@@ -1497,6 +1639,9 @@ class AresServer:
                 tool_calls = _safe_json_loads(tool_calls)
             if isinstance(tool_calls, list):
                 msg["tool_calls"] = tool_calls
+            artifacts = self._extract_artifacts(str(content), tool_calls if isinstance(tool_calls, list) else [])
+            if artifacts:
+                msg["artifacts"] = artifacts
             history.append(msg)
         return history
 
@@ -1674,14 +1819,21 @@ class AresServer:
                 "cmd_id": f"display-{id(command)}",
             }))
 
-    async def _send_error(self, websocket: Any, message: str) -> None:
-        await self._send(websocket, {"type": "error", "message": message})
+    async def _send_error(self, websocket: Any, message: str, **context: Any) -> None:
+        await self._send(websocket, {"type": "error", "message": message, **context})
 
     async def _send(self, websocket: Any, payload: dict[str, Any]) -> None:
         await websocket.send(json.dumps(payload, ensure_ascii=False))
 
     async def close(self) -> None:
         """Shut down stores."""
+        pending_chat_tasks = [task for task in self._chat_tasks if not task.done()]
+        for task in pending_chat_tasks:
+            task.cancel()
+        if pending_chat_tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.gather(*pending_chat_tasks, return_exceptions=True)
+        self._chat_tasks.clear()
         if self._workspace_server is not None:
             self._workspace_server.should_exit = True
         if self._workspace_task is not None:

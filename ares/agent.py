@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 
 from ares.context import ProjectContext
 from ares.context_blend import build_context_prompt, get_model_budgets
@@ -19,6 +21,8 @@ from ares.prompts import SYSTEM_PROMPT
 from ares.soul import SoulManager
 from ares.skills import SkillManager
 from ares.tools.datetime_tool import get_current_datetime_result
+
+_SESSION_UNSET = object()
 
 
 class Agent:
@@ -41,7 +45,10 @@ class Agent:
         self.memory_store = memory_store
         self.conversation_store = conversation_store
         self._session_store = session_store
-        self._session_id = session_id
+        self._default_session_id = session_id
+        self._session_context: ContextVar[str | None | object] = ContextVar(
+            f"ares_agent_session_{id(self)}", default=_SESSION_UNSET
+        )
         self.tool_executor = ToolExecutor(
             memory_store=memory_store,
             conversation_store=conversation_store,
@@ -102,8 +109,23 @@ class Agent:
 
     def set_session_id(self, session_id: str | None) -> None:
         """Update local provenance scope when a long-lived surface switches chats."""
-        self._session_id = session_id
+        self._default_session_id = session_id
         self.tool_executor.set_session_id(session_id)
+
+    @property
+    def session_id(self) -> str | None:
+        scoped = self._session_context.get()
+        return self._default_session_id if scoped is _SESSION_UNSET else scoped  # type: ignore[return-value]
+
+    @contextmanager
+    def session_scope(self, session_id: str | None) -> Iterator[None]:
+        """Isolate memory and tool provenance for one concurrent conversation."""
+        token = self._session_context.set(session_id)
+        try:
+            with self.tool_executor.session_scope(session_id):
+                yield
+        finally:
+            self._session_context.reset(token)
 
     def refresh_tools(self) -> None:
         """Refresh the advertised tool list, including connected MCP tools."""
@@ -170,10 +192,11 @@ class Agent:
             project_ctx = self.project_context.get_context(token_budget=project_budget)
 
         # Session-scoped memory search
-        search_scope = "session" if self._session_id else "all"
+        session_id = self.session_id
+        search_scope = "session" if session_id else "all"
         memories = self.memory_store.search(
             user_input, limit=max_retrieval,
-            scope=search_scope, session_id=self._session_id,
+            scope=search_scope, session_id=session_id,
             recent_sessions=getattr(self.config, "memory_session_scope", 3),
         )
 
@@ -219,7 +242,7 @@ class Agent:
             except ValueError:
                 relevant_actions = []
 
-        if self.conversation_store is not None and explicit_recall:
+        if self.conversation_store is not None and explicit_recall and not session_id:
             try:
                 # Search exact wording first, then fall back to a bounded
                 # recent/time-filtered window so "continue" never becomes a
@@ -239,7 +262,7 @@ class Agent:
             except ValueError:
                 conversation_recall = []
 
-        if self._session_store is not None and explicit_recall:
+        if self._session_store is not None and explicit_recall and not session_id:
             try:
                 recall_limit = max(3, min(max_retrieval, 8))
                 session_recall = self._session_store.search_recall(
@@ -285,14 +308,14 @@ class Agent:
         ][:3]
 
         summaries = []
-        if self.conversation_store is not None:
+        if self.conversation_store is not None and not session_id:
             summaries = self.conversation_store.get_recent_summaries(limit=5)
 
         # Read previous session summary from JSONL
         prev_summary = None
-        if self._session_id and self._session_store:
+        if session_id and self._session_store:
             block_context = getattr(self.config, "block_session_context", False)
-            prev_summary = self._session_store.get_previous_summary(self._session_id, block=block_context)
+            prev_summary = self._session_store.get_previous_summary(session_id, block=block_context)
 
         return build_context_prompt(
             soul_context=soul_ctx,

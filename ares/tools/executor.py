@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
     from ares.conversations import ConversationStore
@@ -71,6 +73,8 @@ from ares.telephony.models import CallStatus
 from ares.watcher.database import resolve_watcher_database_path
 from ares.watcher.tools import WatcherToolHandlers
 
+_SESSION_UNSET = object()
+
 
 class ToolExecutor:
     """Executes tool calls locally."""
@@ -92,7 +96,10 @@ class ToolExecutor:
         self.conversations = conversation_store
         self.config = config
         self.mcp_manager = mcp_manager
-        self.session_id: str | None = None
+        self._default_session_id: str | None = None
+        self._session_context: ContextVar[str | None | object] = ContextVar(
+            f"ares_tool_session_{id(self)}", default=_SESSION_UNSET
+        )
         self.repl = PersistentREPL()
         data_root = None
         if config is not None:
@@ -167,7 +174,21 @@ class ToolExecutor:
 
     def set_session_id(self, session_id: str | None) -> None:
         """Attach local provenance records to the current agent session."""
-        self.session_id = session_id
+        self._default_session_id = session_id
+
+    @property
+    def session_id(self) -> str | None:
+        scoped = self._session_context.get()
+        return self._default_session_id if scoped is _SESSION_UNSET else scoped  # type: ignore[return-value]
+
+    @contextmanager
+    def session_scope(self, session_id: str | None) -> Iterator[None]:
+        """Bind provenance to one concurrent agent run without mutating siblings."""
+        token = self._session_context.set(session_id)
+        try:
+            yield
+        finally:
+            self._session_context.reset(token)
 
     def set_watcher_service(self, service: WatcherService | None) -> None:
         """Attach the watcher service owned by the current Ares runtime."""
