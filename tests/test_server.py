@@ -7,6 +7,7 @@ from contextvars import ContextVar
 import pytest
 
 from ares.models import AppConfig
+from ares.goals import GoalStore
 from ares.server import AresServer, parse_tool_start_token, parse_tool_token
 from ares.skills import SkillManager
 from ares.watcher.tools import WatcherToolHandlers
@@ -251,21 +252,28 @@ async def test_workspace_settings_and_upload_protocol(server):
 
 @pytest.mark.asyncio
 async def test_workspace_watcher_control_uses_agent_tool_layer(server, tmp_path):
-    handlers = WatcherToolHandlers(tmp_path / "workspace-watchers.db")
+    goals = GoalStore(tmp_path / "workspace-ares.db")
+    goal = goals.create("Review authenticated inbox")
+    goal = goals.update(goal["goal_id"], progress_percent=20)
+    handlers = WatcherToolHandlers(tmp_path / "workspace-watchers.db", goal_store=goals)
     server.agent.tool_executor.watcher_tools = handlers
     socket = FakeSocket()
     await server.handle_message(socket, json.dumps({
         "type": "watcher_action", "action": "create",
         "arguments": {
             "name": "Authenticated inbox", "type": "browser", "preset": "instagram_dm",
-            "interval_seconds": 120, "ai_action": "notify",
+            "interval_seconds": 120, "ai_action": "notify", "goal_ids": [goal["goal_id"]],
         },
     }))
     state = next(item for item in reversed(socket.messages) if item["type"] == "watcher_state")
     assert state["overview"]["monitors"] == 1
     assert state["monitors"][0]["type"] == "browser"
     assert state["monitors"][0]["config"]["preset"] == "instagram_dm"
+    assert state["monitors"][0]["linked_goals"][0]["title"] == "Review authenticated inbox"
+    assert state["overview"]["goal_linked_watchers"] == 1
+    assert state["goals"][0]["progress_percent"] == 20
     handlers.close()
+    goals.close()
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 import httpx
 import pytest
 
+from ares.goals import GoalStore
 from ares.watcher.dashboard.app import create_app
 from ares.watcher.service import WatcherService
 
@@ -78,3 +79,46 @@ async def test_dashboard_settings_preserve_redacted_secrets(tmp_path):
             assert service.notifier.settings["telegram"]["bot_token"]=="real-secret"
             assert saved[-1]["telegram"]["chat_id"]=="2"
     finally: service.db.close()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_exposes_and_edits_goal_routes(tmp_path):
+    service = WatcherService(tmp_path / "watchers.db", notification_settings={})
+    goals = GoalStore(tmp_path / "ares.db")
+    first = goals.create("Buy launch laptop")
+    first = goals.update(first["goal_id"], progress_percent=35)
+    second = goals.create("Track launch sale", priority="high")
+    app = create_app(service=service, goal_store=goals, start_scheduler=False)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            available = (await client.get("/api/goals")).json()
+            assert {item["goal_id"] for item in available} == {first["goal_id"], second["goal_id"]}
+
+            created = await client.post("/api/monitors", json={
+                "name": "Launch price",
+                "type": "website",
+                "url": "https://example.com/laptop",
+                "interval_seconds": 60,
+                "goal_ids": [first["goal_id"], second["goal_id"]],
+            })
+            assert created.status_code == 201
+            identifier = created.json()["id"]
+            assert {item["goal_id"] for item in created.json()["linked_goals"]} == {
+                first["goal_id"], second["goal_id"],
+            }
+            overview = (await client.get("/api/overview")).json()
+            assert overview["goal_linked_watchers"] == 1
+            assert overview["linked_goals"] == 2
+
+            updated = await client.patch(f"/api/monitors/{identifier}", json={
+                "goal_ids": [second["goal_id"]],
+            })
+            assert [item["goal_id"] for item in updated.json()["linked_goals"]] == [second["goal_id"]]
+            assert goals.linked_refs(first["goal_id"])["watchers"] == []
+
+            removed = await client.delete(f"/api/monitors/{identifier}")
+            assert removed.status_code == 204
+            assert goals.linked_refs(second["goal_id"])["watchers"] == []
+    finally:
+        service.db.close()
+        goals.close()

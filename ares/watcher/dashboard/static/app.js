@@ -1,4 +1,4 @@
-const state = { overview:{}, monitors:[], events:[], checks:[], notifications:[], settings:{}, filter:"all", severity:"all", query:"" };
+const state = { overview:{}, monitors:[], events:[], checks:[], notifications:[], settings:{}, goals:[], filter:"all", severity:"all", query:"" };
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const esc = value => String(value ?? "").replace(/[&<>'"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
@@ -51,6 +51,18 @@ function statusOf(monitor) {
   return ["ok", monitor.last_status ? "HEALTHY" : "ARMED"];
 }
 function monitorName(id) { return state.monitors.find(m=>m.id===id)?.name || "Unknown watcher"; }
+function goalRoute(goals=[], openSignals=[]) {
+  if (!goals.length) return '<span class="goal-unlinked">NO GOAL ROUTE</span>';
+  const visible=goals.slice(0,2).map(goal=>`<span class="goal-chip ${goal.is_overdue?'is-overdue':''}" title="Goal #${esc(goal.goal_id)} · ${esc(goal.status)} · ${esc(goal.progress_percent)}%"><i></i>#${esc(goal.goal_id)} ${esc(goal.title)}</span>`).join('');
+  const overflow=goals.length>2?`<span class="goal-chip">+${goals.length-2}</span>`:'';
+  const pending=openSignals.length?`<span class="goal-signal-count">${openSignals.length} OPEN</span>`:'';
+  return `${visible}${overflow}${pending}`;
+}
+function populateGoalSelect(selected=[]) {
+  const select=$("#monitor-goals"); if(!select)return;
+  const chosen=new Set((selected||[]).map(Number));
+  select.innerHTML=state.goals.length?state.goals.map(goal=>`<option value="${esc(goal.goal_id)}" ${chosen.has(Number(goal.goal_id))?'selected':''} ${['completed','abandoned'].includes(goal.status)?'disabled':''}>#${esc(goal.goal_id)} · ${esc(goal.title)} · ${esc(goal.progress_percent)}% · ${esc(goal.status)}</option>`).join(''):'<option disabled>No durable goals yet — ask Ares to create one first</option>';
+}
 function toast(title, message) {
   const node = document.createElement("div"); node.className="toast";
   node.innerHTML=`<b>${esc(title)}</b>${esc(message)}`; $("#toasts").append(node);
@@ -59,10 +71,10 @@ function toast(title, message) {
 
 async function loadAll(silent=false) {
   try {
-    const [overview,monitors,events,checks,notifications,settings] = await Promise.all([
-      api("/api/overview"),api("/api/monitors"),api("/api/events?limit=200"),api("/api/checks?limit=200"),api("/api/notifications?limit=200"),api("/api/settings")
+    const [overview,monitors,events,checks,notifications,settings,goals] = await Promise.all([
+      api("/api/overview"),api("/api/monitors"),api("/api/events?limit=200"),api("/api/checks?limit=200"),api("/api/notifications?limit=200"),api("/api/settings"),api("/api/goals")
     ]);
-    Object.assign(state,{overview,monitors,events,checks,notifications,settings}); render();
+    Object.assign(state,{overview,monitors,events,checks,notifications,settings,goals}); render();
     $("#rail-latency").textContent=`${overview.average_latency_ms || 0}MS AVG`;
   } catch (error) { if (!silent) toast("CONTROL PLANE ERROR", error.message); }
 }
@@ -75,6 +87,7 @@ function renderOverview() {
   $("#metric-active").textContent=pad(o.active); $("#metric-total").textContent=`OF ${o.monitors||0} CONFIGURED`;
   $("#metric-alerts").textContent=pad(o.unacknowledged_alerts); $("#metric-failing").textContent=pad(o.failing);
   $("#metric-changes").textContent=pad(o.total_changes); $("#nav-monitor-count").textContent=o.monitors||0;
+  $("#metric-goals").textContent=pad(o.linked_goals); $("#metric-goal-copy").textContent=`${o.goal_linked_watchers||0} WATCHERS · ${o.open_goal_signals||0} OPEN SIGNALS`;
   $("#nav-alert-count").textContent=o.unacknowledged_alerts||0;
   $("#alert-bars").innerHTML=Array.from({length:12},(_,i)=>`<i class="${i < Math.min(12,o.unacknowledged_alerts||0)?'hot':''}" style="height:${10+((i*17)%30)}px"></i>`).join("");
 }
@@ -82,26 +95,26 @@ function renderFleet() {
   const compact=$("#fleet-compact"), table=$("#monitor-table");
   if (!state.monitors.length) compact.innerHTML="No monitors configured.";
   else compact.innerHTML=state.monitors.slice(0,5).map(m=>{
-    const [klass,label]=statusOf(m); return `<div class="fleet-row" data-detail="${esc(m.id)}"><div class="fleet-name"><b>${esc(m.name)}</b><small>${esc(m.url||m.type)}</small></div><span class="status ${klass}"><i></i>${label}</span><span class="mono">${interval(m.interval_seconds)}</span><span class="mono">${ago(m.last_checked_at)}</span></div>`;
+    const [klass,label]=statusOf(m); const route=m.linked_goals?.length?`${m.linked_goals.length} GOAL ROUTE${m.linked_goals.length===1?'':'S'}`:'UNLINKED'; return `<div class="fleet-row" data-detail="${esc(m.id)}"><div class="fleet-name"><b>${esc(m.name)}</b><small>${esc(m.url||m.type)} · ${route}</small></div><span class="status ${klass}"><i></i>${label}</span><span class="mono">${interval(m.interval_seconds)}</span><span class="mono">${ago(m.last_checked_at)}</span></div>`;
   }).join("");
   const query=state.query.toLowerCase();
   const filtered=state.monitors.filter(m=>{
-    const match=!query || `${m.name} ${m.url} ${m.type}`.toLowerCase().includes(query);
+    const match=!query || `${m.name} ${m.url} ${m.type} ${(m.linked_goals||[]).map(goal=>goal.title).join(' ')}`.toLowerCase().includes(query);
     const [klass]=statusOf(m); return match && (state.filter==="all" || state.filter===klass || (state.filter==="active"&&m.enabled&&klass!=="error") || (state.filter==="failing"&&klass==="error"));
   });
   if (!filtered.length) { table.innerHTML="No monitors match this view."; table.classList.add("empty-state"); }
   else { table.classList.remove("empty-state"); table.innerHTML=filtered.map(m=>{
-    const [klass,label]=statusOf(m); return `<div class="monitor-row"><div class="watcher-cell" data-detail="${esc(m.id)}"><b>${esc(m.name)}</b><small>${esc(m.type.toUpperCase())} · ${esc(m.url||"NO TARGET")}</small></div><span class="status ${klass}"><i></i>${label}</span><span class="mono">${interval(m.interval_seconds)}</span><span class="mono">${ago(m.last_checked_at)}</span><span class="mono">${m.last_duration_ms==null?'—':m.last_duration_ms+'MS'}</span><div class="row-actions"><button class="icon-action" title="Run now" data-action="check" data-id="${esc(m.id)}">↻</button><button class="icon-action" title="${m.enabled?'Pause':'Resume'}" data-action="${m.enabled?'pause':'resume'}" data-id="${esc(m.id)}">${m.enabled?'Ⅱ':'▶'}</button><button class="icon-action" title="Delete" data-action="delete" data-id="${esc(m.id)}">×</button></div></div>`;
+    const [klass,label]=statusOf(m); return `<div class="monitor-row"><div class="watcher-cell" data-detail="${esc(m.id)}"><b>${esc(m.name)}</b><small>${esc(m.type.toUpperCase())} · ${esc(m.url||"NO TARGET")}</small></div><div class="goal-route more">${goalRoute(m.linked_goals,m.open_goal_signals)}</div><span class="status ${klass}"><i></i>${label}</span><span class="mono">${interval(m.interval_seconds)}</span><span class="mono">${ago(m.last_checked_at)}</span><span class="mono">${m.last_duration_ms==null?'—':m.last_duration_ms+'MS'}</span><div class="row-actions"><button class="icon-action" title="Run now" data-action="check" data-id="${esc(m.id)}">↻</button><button class="icon-action" title="${m.enabled?'Pause':'Resume'}" data-action="${m.enabled?'pause':'resume'}" data-id="${esc(m.id)}">${m.enabled?'Ⅱ':'▶'}</button><button class="icon-action" title="Delete" data-action="delete" data-id="${esc(m.id)}">×</button></div></div>`;
   }).join(""); }
   bindFleetActions();
 }
 function renderEvents() {
   const compact=$("#events-compact");
   if (!state.events.length) compact.innerHTML="Awaiting the first watcher signal.";
-  else compact.innerHTML=state.events.slice(0,5).map(e=>`<div class="event-row"><i class="severity-line ${esc(e.severity)}"></i><div><b>${esc(e.change_summary||e.event_type)}</b><small>${esc(monitorName(e.monitor_id))} · ${esc(e.event_type.toUpperCase())}</small></div><time>${ago(e.created_at)}</time></div>`).join("");
+  else compact.innerHTML=state.events.slice(0,5).map(e=>`<div class="event-row"><i class="severity-line ${esc(e.severity)}"></i><div><b>${esc(e.change_summary||e.event_type)}</b><small>${esc(monitorName(e.monitor_id))} · ${esc(e.event_type.toUpperCase())} · ${(e.goal_signals||[]).length?`${e.goal_signals.length} GOAL ROUTE${e.goal_signals.length===1?'':'S'}`:'UNROUTED'}</small></div><time>${ago(e.created_at)}</time></div>`).join("");
   const visible=state.events.filter(e=>state.severity==="all"||e.severity===state.severity), list=$("#incident-list");
   if (!visible.length) { list.innerHTML="No incidents recorded."; list.classList.add("empty-state"); return; }
-  list.classList.remove("empty-state"); list.innerHTML=visible.map(e=>`<article class="incident ${esc(e.severity)} ${e.acknowledged?'acknowledged':''}" data-event="${esc(e.id)}"><i class="incident-marker"></i><div class="incident-body"><div class="incident-top"><span>${esc(e.severity)} · ${esc(e.event_type.replaceAll('_',' '))}</span><time>${new Date(e.created_at).toLocaleString()}</time></div><h3>${esc(monitorName(e.monitor_id))}</h3><p>${esc(e.change_summary||"A monitored signal changed.")}</p>${e.old_value!=null||e.new_value!=null?`<div class="incident-values"><div><span>PREVIOUS</span><code>${esc(e.old_value||'—')}</code></div><div><span>CURRENT</span><code>${esc(e.new_value||'—')}</code></div></div>`:''}${e.ai_summary?`<div class="ai-note"><b>ARES ANALYSIS</b><br>${esc(e.ai_summary)}</div>`:''}</div><div class="incident-actions">${e.acknowledged?'<button disabled>ACKNOWLEDGED</button>':`<button data-ack="${esc(e.id)}">ACKNOWLEDGE</button>`}<button data-monitor-detail="${esc(e.monitor_id)}">OPEN WATCHER</button></div></article>`).join("");
+  list.classList.remove("empty-state"); list.innerHTML=visible.map(e=>`<article class="incident ${esc(e.severity)} ${e.acknowledged?'acknowledged':''}" data-event="${esc(e.id)}"><i class="incident-marker"></i><div class="incident-body"><div class="incident-top"><span>${esc(e.severity)} · ${esc(e.event_type.replaceAll('_',' '))}</span><time>${new Date(e.created_at).toLocaleString()}</time></div><h3>${esc(monitorName(e.monitor_id))}</h3><p>${esc(e.change_summary||"A monitored signal changed.")}</p>${e.old_value!=null||e.new_value!=null?`<div class="incident-values"><div><span>PREVIOUS</span><code>${esc(e.old_value||'—')}</code></div><div><span>CURRENT</span><code>${esc(e.new_value||'—')}</code></div></div>`:''}${(e.goal_signals||[]).length?`<div class="incident-goals">${goalRoute(e.goal_signals.map(signal=>({goal_id:signal.goal_id,title:signal.goal_title,status:signal.goal_status})),e.goal_signals.filter(signal=>!signal.acknowledged))}</div>`:''}${e.ai_summary?`<div class="ai-note"><b>ARES ANALYSIS</b><br>${esc(e.ai_summary)}</div>`:''}</div><div class="incident-actions">${e.acknowledged?'<button disabled>ACKNOWLEDGED</button>':`<button data-ack="${esc(e.id)}">ACKNOWLEDGE</button>`}<button data-monitor-detail="${esc(e.monitor_id)}">OPEN WATCHER</button></div></article>`).join("");
   $$('[data-ack]').forEach(btn=>btn.onclick=()=>acknowledge(btn.dataset.ack));
   $$('[data-monitor-detail]').forEach(btn=>btn.onclick=()=>openDetail(btn.dataset.monitorDetail));
 }
@@ -145,7 +158,8 @@ async function acknowledge(id) { try { await api(`/api/events/${id}/acknowledge`
 async function openDetail(id) {
   try {
     const data=await api(`/api/monitors/${id}`), m=data.monitor, [klass,label]=statusOf(m), success=data.checks.length?Math.round(data.checks.filter(c=>c.status==='ok').length*100/data.checks.length):100;
-    $("#drawer-content").innerHTML=`<span class="drawer-kicker">${esc(m.type.toUpperCase())} WATCHER / ${esc(m.id.slice(0,8))}</span><h2>${esc(m.name)}</h2><div class="drawer-url">${esc(m.url||'NO TARGET')}</div><div class="detail-stats"><div><span>STATUS</span><b class="${klass}">${label}</b></div><div><span>SUCCESS</span><b>${success}%</b></div><div><span>CHANGES</span><b>${m.total_changes}</b></div></div><div class="drawer-section"><h3>OPERATIONAL STATE</h3><div class="fleet-row"><div class="fleet-name"><b>Last check</b><small>${m.last_checked_at?new Date(m.last_checked_at).toLocaleString():'Never checked'}</small></div><span class="mono">${m.last_duration_ms??'—'}MS</span></div><div class="fleet-row"><div class="fleet-name"><b>Next check</b><small>${m.next_check_at?new Date(m.next_check_at).toLocaleString():'On scheduler tick'}</small></div><span class="mono">${interval(m.interval_seconds)}</span></div>${m.last_error?`<div class="ai-note">${esc(m.last_error)}</div>`:''}</div><div class="drawer-section"><h3>LATEST SNAPSHOT</h3><pre class="config-code">${esc(data.latest_snapshot?JSON.stringify(data.latest_snapshot.metadata,null,2):'No snapshot captured yet.')}</pre></div><div class="drawer-section"><h3>DETECTION CONFIG</h3><pre class="config-code">${esc(JSON.stringify(m.config,null,2))}</pre></div>`;
+    const goalCards=(m.linked_goals||[]).map(goal=>`<div class="goal-link-card"><div><b>#${esc(goal.goal_id)} · ${esc(goal.title)}</b><small>${esc(goal.status.toUpperCase())} · ${esc(goal.priority.toUpperCase())}${goal.target_date?` · TARGET ${esc(goal.target_date)}`:''}${goal.is_overdue?' · OVERDUE':''}</small></div><div class="goal-progress">${esc(goal.progress_percent)}%</div></div>`).join('');
+    $("#drawer-content").innerHTML=`<span class="drawer-kicker">${esc(m.type.toUpperCase())} WATCHER / ${esc(m.id.slice(0,8))}</span><h2>${esc(m.name)}</h2><div class="drawer-url">${esc(m.url||'NO TARGET')}</div><div class="detail-stats"><div><span>STATUS</span><b class="${klass}">${label}</b></div><div><span>SUCCESS</span><b>${success}%</b></div><div><span>CHANGES</span><b>${m.total_changes}</b></div></div><div class="drawer-section"><h3>GOAL RELATIONSHIP</h3><p class="goal-routing-note">This watcher routes observations into ${m.linked_goals?.length||0} durable goal${m.linked_goals?.length===1?'':'s'}. ${m.open_goal_signals?.length||0} signal${m.open_goal_signals?.length===1?' is':'s are'} awaiting review. Goal progress never changes without an explicit Ares action.</p><div class="goal-link-list">${goalCards||'<span class="goal-unlinked">UNLINKED · EDIT THIS WATCHER TO SELECT AN OUTCOME</span>'}</div></div><div class="drawer-section"><h3>OPERATIONAL STATE</h3><div class="fleet-row"><div class="fleet-name"><b>Last check</b><small>${m.last_checked_at?new Date(m.last_checked_at).toLocaleString():'Never checked'}</small></div><span class="mono">${m.last_duration_ms??'—'}MS</span></div><div class="fleet-row"><div class="fleet-name"><b>Next check</b><small>${m.next_check_at?new Date(m.next_check_at).toLocaleString():'On scheduler tick'}</small></div><span class="mono">${interval(m.interval_seconds)}</span></div>${m.last_error?`<div class="ai-note">${esc(m.last_error)}</div>`:''}</div><div class="drawer-section"><h3>LATEST SNAPSHOT</h3><pre class="config-code">${esc(data.latest_snapshot?JSON.stringify(data.latest_snapshot.metadata,null,2):'No snapshot captured yet.')}</pre></div><div class="drawer-section"><h3>DETECTION CONFIG</h3><pre class="config-code">${esc(JSON.stringify(m.config,null,2))}</pre></div>`;
     $("#drawer-content").insertAdjacentHTML('beforeend',`<button class="primary drawer-edit" data-edit-monitor="${esc(m.id)}">EDIT WATCHER CONFIG →</button>`);
     $('[data-edit-monitor]').onclick=()=>openEditor(m.id);
     $("#detail-drawer").classList.add("open"); $("#detail-drawer").setAttribute("aria-hidden","false");
@@ -156,7 +170,7 @@ function openCreate() {
   const form=$("#monitor-form"); form.reset(); form.elements.monitor_id.value=''; form.elements.type.disabled=false;
   $("#monitor-form-kicker").textContent='DEPLOY WATCHER'; $("#monitor-form-title").textContent='NEW MONITOR';
   $("#monitor-submit").textContent='DEPLOY MONITOR →';
-  applyMonitorType('website',true); $("#monitor-modal").hidden=false; form.elements.name.focus();
+  applyMonitorType('website',true); populateGoalSelect(); $("#monitor-modal").hidden=false; form.elements.name.focus();
 }
 function openEditor(id) {
   const monitor=state.monitors.find(item=>item.id===id); if(!monitor)return;
@@ -164,6 +178,7 @@ function openEditor(id) {
   form.elements.type.value=monitor.type; form.elements.type.disabled=true; form.elements.url.value=monitor.url||'';
   applyMonitorType(monitor.type,false);
   form.elements.interval_seconds.value=String(monitor.interval_seconds); form.elements.ai_action.value=monitor.ai_action;
+  populateGoalSelect((monitor.linked_goals||[]).map(goal=>goal.goal_id));
   form.elements.config.value=JSON.stringify(monitor.config,null,2); $("#monitor-form-kicker").textContent='RECONFIGURE WATCHER';
   $("#monitor-form-title").textContent='EDIT MONITOR'; $("#monitor-submit").textContent='SAVE CHANGES →';
   $("#detail-drawer").classList.remove('open'); $("#detail-drawer").setAttribute('aria-hidden','true'); $("#monitor-modal").hidden=false;
@@ -196,7 +211,7 @@ document.addEventListener("DOMContentLoaded",()=>{
   $$('[data-filter]').forEach(btn=>btn.onclick=()=>{$$('[data-filter]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');state.filter=btn.dataset.filter;renderFleet()});
   $$('[data-severity]').forEach(btn=>btn.onclick=()=>{$$('[data-severity]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');state.severity=btn.dataset.severity;renderEvents()});
   $('#ack-all').onclick=async()=>{for(const event of state.events.filter(e=>!e.acknowledged&&(state.severity==='all'||e.severity===state.severity)))await api(`/api/events/${event.id}/acknowledge`,{method:'POST'});await loadAll(true)};
-  $('#monitor-form').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,data=new FormData(form),id=data.get('monitor_id');try{const payload={name:data.get('name'),url:data.get('url'),interval_seconds:Number(data.get('interval_seconds')),ai_action:data.get('ai_action'),config:JSON.parse(data.get('config')||'{}')};if(!id)payload.type=data.get('type');await api(id?`/api/monitors/${id}`:'/api/monitors',{method:id?'PATCH':'POST',body:JSON.stringify(payload)});form.reset();form.elements.type.disabled=false;$('#monitor-modal').hidden=true;toast(id?'WATCHER UPDATED':'WATCHER DEPLOYED',`${payload.name} is ${id?'reconfigured':'armed and scheduled'}.`);await loadAll(true)}catch(error){toast('DEPLOYMENT FAILED',error.message)}};
+  $('#monitor-form').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,data=new FormData(form),id=data.get('monitor_id');try{const payload={name:data.get('name'),url:data.get('url'),interval_seconds:Number(data.get('interval_seconds')),ai_action:data.get('ai_action'),goal_ids:[...form.elements.goal_ids.selectedOptions].map(option=>Number(option.value)),config:JSON.parse(data.get('config')||'{}')};if(!id)payload.type=data.get('type');await api(id?`/api/monitors/${id}`:'/api/monitors',{method:id?'PATCH':'POST',body:JSON.stringify(payload)});form.reset();form.elements.type.disabled=false;$('#monitor-modal').hidden=true;toast(id?'WATCHER UPDATED':'WATCHER DEPLOYED',`${payload.name} is ${id?'reconfigured':'armed and scheduled'} with ${payload.goal_ids.length} goal route${payload.goal_ids.length===1?'':'s'}.`);await loadAll(true)}catch(error){toast('DEPLOYMENT FAILED',error.message)}};
   $('#settings-form').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,read=name=>form.elements[name]?.value||'',checked=name=>Boolean(form.elements[name]?.checked),secret=name=>read(name)||(form.elements[name]?.dataset.secretConfigured?'***REDACTED***':'');const notifications={desktop:{enabled:checked('desktop.enabled'),timeout:Number(read('desktop.timeout')||8)},telegram:{enabled:checked('telegram.enabled'),chat_id:read('telegram.chat_id'),bot_token:secret('telegram.bot_token')},email:{enabled:checked('email.enabled'),smtp_host:read('email.smtp_host'),smtp_port:Number(read('email.smtp_port')||587),username:read('email.username'),password:secret('email.password'),to_address:read('email.to_address'),start_tls:true},webhook:{enabled:checked('webhook.enabled'),url:read('webhook.url'),allow_private_network:checked('webhook.allow_private_network')}};try{await api('/api/settings',{method:'PATCH',body:JSON.stringify({notifications})});toast('DELIVERY CONFIG SAVED','Notification channels are active with the new policy.');await loadAll(true)}catch(error){toast('SETTINGS FAILED',error.message)}};
   $('#auth-form').onsubmit=event=>{event.preventDefault();localStorage.setItem('aresWatcherToken',event.currentTarget.elements.token.value);location.reload()};
   setInterval(()=>$('#clock').textContent=new Date().toLocaleTimeString([], {hour12:false}),1000);

@@ -125,9 +125,10 @@ class WatcherToolHandlers:
         validation_error = self._validation_error(monitor_type, str(url or ""), config)
         if validation_error:
             return f"Error: {validation_error}"
-        goal_id = int(args["goal_id"]) if args.get("goal_id") is not None else None
-        if goal_id is not None and (self.goal_store is None or self.goal_store.get(goal_id) is None):
-            return f"Error: Goal #{goal_id} was not found."
+        try:
+            goal_ids = self._goal_ids(args)
+        except ValueError as exc:
+            return f"Error: {exc}"
         monitor = Monitor(
             id=str(uuid4()),
             name=str(args.get("name") or ""),
@@ -140,16 +141,19 @@ class WatcherToolHandlers:
             enabled=bool(args.get("enabled", True)),
         )
         self.db.insert_monitor(monitor)
-        if goal_id is not None:
+        if goal_ids:
             try:
-                self.goal_store.link(goal_id, link_type="watcher", ref_id=monitor.id)
+                for goal_id in goal_ids:
+                    self.goal_store.link(goal_id, link_type="watcher", ref_id=monitor.id)
             except Exception as exc:
+                self.goal_store.unlink_reference(link_type="watcher", ref_id=monitor.id)
                 self.db.delete_monitor(monitor.id)
                 return f"Error: Watcher creation was rolled back because goal linking failed: {exc}"
         return _json({
             "created": True,
             "watcher": monitor.public_dict(),
-            "linked_goal_id": goal_id,
+            "linked_goal_id": goal_ids[0] if len(goal_ids) == 1 else None,
+            "linked_goal_ids": goal_ids,
             "next_step": "Use run_watcher_now to capture the baseline immediately.",
         })
 
@@ -181,6 +185,12 @@ class WatcherToolHandlers:
         monitor = self._monitor(str(args.get("watcher_id") or ""))
         if monitor is None:
             return "Error: Watcher not found."
+        goal_ids: list[int] | None = None
+        if "goal_ids" in args or "goal_id" in args:
+            try:
+                goal_ids = self._goal_ids(args)
+            except ValueError as exc:
+                return f"Error: {exc}"
         preset_url, preset_config = _browser_preset(str(args.get("preset") or ""))
         if preset_config:
             monitor.type = "browser"
@@ -198,7 +208,23 @@ class WatcherToolHandlers:
         monitor.enabled = bool(monitor.enabled)
         monitor.__post_init__()
         self.db.update_monitor(monitor)
-        return _json({"updated": True, "watcher": monitor.public_dict()})
+        linked_goals: list[dict[str, Any]] = []
+        if goal_ids is not None:
+            current = {
+                int(item["goal_id"])
+                for item in self.goal_store.linked_goals(link_type="watcher", ref_id=monitor.id)
+            } if self.goal_store is not None else set()
+            target = set(goal_ids)
+            for goal_id in current - target:
+                self.goal_store.unlink(goal_id, link_type="watcher", ref_id=monitor.id)
+            for goal_id in target - current:
+                self.goal_store.link(goal_id, link_type="watcher", ref_id=monitor.id)
+            if self.goal_store is not None:
+                linked_goals = [
+                    {"goal_id": item["goal_id"], "title": item["title"], "status": item["status"]}
+                    for item in self.goal_store.linked_goals(link_type="watcher", ref_id=monitor.id)
+                ]
+        return _json({"updated": True, "watcher": monitor.public_dict(), "linked_goals": linked_goals})
 
     def delete(self, args: dict[str, Any]) -> str:
         if not bool(args.get("confirm")):
@@ -261,6 +287,26 @@ class WatcherToolHandlers:
 
     def _monitor(self, watcher_id: str) -> Monitor | None:
         return self.db.get_monitor(watcher_id)
+
+    def _goal_ids(self, args: dict[str, Any]) -> list[int]:
+        raw = args.get("goal_ids")
+        values = raw if isinstance(raw, list) else ([] if raw is None else [raw])
+        if args.get("goal_id") is not None:
+            values = [*values, args["goal_id"]]
+        try:
+            goal_ids = list(dict.fromkeys(int(value) for value in values))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("goal_ids must contain integer goal IDs") from exc
+        if len(goal_ids) > 50:
+            raise ValueError("A watcher can be linked to at most 50 goals")
+        if any(goal_id <= 0 for goal_id in goal_ids):
+            raise ValueError("goal IDs must be positive integers")
+        if goal_ids and self.goal_store is None:
+            raise ValueError("Goal storage is unavailable in this Ares runtime")
+        for goal_id in goal_ids:
+            if self.goal_store.get(goal_id) is None:
+                raise ValueError(f"Goal #{goal_id} was not found")
+        return goal_ids
 
     def _validation_error(self, monitor_type: str, url: str, config: dict[str, Any]) -> str | None:
         if monitor_type == "website" and not url:

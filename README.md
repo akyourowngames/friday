@@ -28,6 +28,13 @@ Ares is a terminal-first AI assistant with a separate Next.js power workspace, a
   </tr>
 </table>
 
+### Latest upgrades
+
+- **Goal-aware monitoring:** link one watcher to multiple goals, review routed signals in both watcher consoles, and keep progress changes explicit instead of automatic.
+- **Research delivery:** search and rank web sources, fetch online pages/PDFs/reports, extract readable content, save sourced artifacts, and deliver supported files through Telegram.
+- **Power workspace:** isolated background chats, smooth token streaming, cached history with skeleton loading, structured tool traces, and built-in previews for Markdown, PDFs, images, and generated files.
+- **One runtime:** `python -m ares --all` starts chat, Telegram, integrations, watchers, the workspace, and the advanced console around the same Ares agent.
+
 ## 🚀 Quick start
 
 ### Terminal
