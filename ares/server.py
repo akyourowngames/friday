@@ -294,6 +294,7 @@ class AresServer:
 
         app = create_app(
             service=self.watcher_service,
+            goal_store=getattr(self.agent, "goal_store", None),
             start_scheduler=False,
             stop_service_on_shutdown=False,
             settings_saver=persist_settings,
@@ -1159,6 +1160,77 @@ class AresServer:
         monitors = [item.public_dict() for item in db.list_monitors()] if db is not None else []
         events = [item.to_dict() for item in db.list_events(limit=200)] if db is not None else []
         checks = [item.to_dict() for item in db.list_check_runs(limit=300)] if db is not None else []
+        goals: list[dict[str, Any]] = []
+        goal_store = getattr(handlers, "goal_store", None)
+        if goal_store is not None:
+            try:
+                raw_goals = goal_store.list_all(limit=500)
+                goals_by_id = {int(goal["goal_id"]): goal for goal in raw_goals}
+                goals = [
+                    {
+                        key: goal.get(key)
+                        for key in (
+                            "goal_id", "title", "status", "priority", "progress_percent",
+                            "target_date", "is_overdue", "days_remaining",
+                        )
+                    }
+                    for goal in raw_goals
+                ]
+                signals = goal_store.list_watcher_signals(include_acknowledged=True, limit=500)
+                signals_by_watcher: dict[str, list[dict[str, Any]]] = {}
+                signals_by_event: dict[str, list[dict[str, Any]]] = {}
+                for signal in signals:
+                    goal = goals_by_id.get(int(signal["goal_id"]), {})
+                    enriched = {
+                        **signal,
+                        "goal_title": goal.get("title", f"Goal #{signal['goal_id']}"),
+                        "goal_status": goal.get("status", "unknown"),
+                    }
+                    signals_by_watcher.setdefault(str(signal["watcher_id"]), []).append(enriched)
+                    signals_by_event.setdefault(str(signal["source_event_id"]), []).append(enriched)
+                enriched_monitors: list[dict[str, Any]] = []
+                for monitor in monitors:
+                    linked = goal_store.linked_goals(link_type="watcher", ref_id=str(monitor["id"]))
+                    open_signals = [
+                        signal for signal in signals_by_watcher.get(str(monitor["id"]), [])
+                        if not signal.get("acknowledged")
+                    ]
+                    enriched_monitors.append({
+                        **monitor,
+                        "linked_goals": [
+                            {
+                                key: goal.get(key)
+                                for key in (
+                                    "goal_id", "title", "status", "priority", "progress_percent",
+                                    "target_date", "is_overdue", "days_remaining",
+                                )
+                            }
+                            for goal in linked
+                        ],
+                        "goal_signal_count": len(signals_by_watcher.get(str(monitor["id"]), [])),
+                        "open_goal_signals": open_signals,
+                    })
+                monitors = enriched_monitors
+                events = [
+                    {**event, "goal_signals": signals_by_event.get(str(event["id"]), [])}
+                    for event in events
+                ]
+                overview = {
+                    **overview,
+                    "goal_linked_watchers": sum(bool(item["linked_goals"]) for item in monitors),
+                    "linked_goals": len({
+                        int(goal["goal_id"])
+                        for monitor in monitors
+                        for goal in monitor["linked_goals"]
+                    }),
+                    "open_goal_signals": sum(
+                        len(item["open_goal_signals"]) for item in monitors
+                    ),
+                }
+            except Exception:
+                # Goal telemetry is additive; watcher operations must remain available
+                # if an older or partially migrated goal store cannot be read.
+                goals = []
         capabilities: Any = {}
         if handlers is not None:
             capabilities = _safe_json_loads(handlers.capabilities({}))
@@ -1170,6 +1242,7 @@ class AresServer:
             "monitors": monitors,
             "events": events,
             "checks": checks,
+            "goals": goals,
             "capabilities": capabilities,
             "dashboard_url": f"http://{dashboard.host}:{dashboard.port}",
             "refreshed_at": datetime.now(timezone.utc).isoformat(),

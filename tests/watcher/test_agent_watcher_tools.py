@@ -88,3 +88,34 @@ def test_create_watcher_can_link_goal_and_delete_cleans_reference(tmp_path):
     finally:
         handlers.close()
         goals.close()
+
+
+def test_watcher_can_route_to_multiple_goals_and_replace_routes(tmp_path):
+    goals = GoalStore(tmp_path / "ares.db")
+    first = goals.create("Buy a laptop under budget")
+    second = goals.create("Track the launch sale")
+    third = goals.create("Compare competing models")
+    handlers = WatcherToolHandlers(tmp_path / "watchers.db", goal_store=goals)
+    try:
+        created = json.loads(handlers.create({
+            "name": "Laptop launch price",
+            "type": "website",
+            "url": "https://example.com/laptop",
+            "goal_ids": [first["goal_id"], second["goal_id"]],
+        }))
+        watcher_id = created["watcher"]["id"]
+        assert created["linked_goal_ids"] == [first["goal_id"], second["goal_id"]]
+
+        updated = json.loads(handlers.update({
+            "watcher_id": watcher_id,
+            "goal_ids": [second["goal_id"], third["goal_id"]],
+        }))
+        assert {item["goal_id"] for item in updated["linked_goals"]} == {
+            second["goal_id"], third["goal_id"],
+        }
+        assert goals.linked_refs(first["goal_id"])["watchers"] == []
+        assert goals.linked_refs(second["goal_id"])["watchers"] == [watcher_id]
+        assert goals.linked_refs(third["goal_id"])["watchers"] == [watcher_id]
+    finally:
+        handlers.close()
+        goals.close()

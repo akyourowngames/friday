@@ -28,10 +28,21 @@ export interface WatcherMonitor {
   ai_action: string; ai_prompt?: string; enabled: boolean; last_checked_at?: string;
   next_check_at?: string; last_status?: string; error_count: number; total_checks: number;
   total_changes: number; last_duration_ms?: number; last_error?: string;
+  linked_goals?: WatcherGoal[]; goal_signal_count?: number; open_goal_signals?: WatcherGoalSignal[];
+}
+export interface WatcherGoal {
+  goal_id: number; title: string; status: string; priority: string; progress_percent: number;
+  target_date?: string; is_overdue?: boolean; days_remaining?: number; watcher_ids?: string[];
+}
+export interface WatcherGoalSignal {
+  signal_id: number; goal_id: number; watcher_id: string; source_event_id: string; event_type: string;
+  event_summary: string; severity: string; created_at: string; acknowledged: boolean;
+  goal_title?: string; goal_status?: string; snoozed_until?: string;
 }
 export interface WatcherEvent {
   id: string; monitor_id: string; event_type: string; change_summary?: string; severity: string;
   notified: boolean; acknowledged: boolean; ai_summary?: string; created_at: string;
+  goal_signals?: WatcherGoalSignal[];
 }
 export interface WatcherCheck {
   id: string; monitor_id: string; status: string; started_at: string; finished_at: string;
@@ -41,10 +52,11 @@ export interface WatcherOverview {
   monitors: number; active: number; paused: number; failing: number; unacknowledged_alerts: number;
   delivery_failures: number; total_checks: number; total_changes: number; average_latency_ms: number;
   checks_24h: number; success_rate_24h: number;
+  goal_linked_watchers?: number; linked_goals?: number; open_goal_signals?: number;
 }
 export interface WatcherState {
   running: boolean; overview: WatcherOverview; monitors: WatcherMonitor[]; events: WatcherEvent[];
-  checks: WatcherCheck[]; capabilities?: JsonRecord; dashboard_url?: string; refreshed_at?: string;
+  checks: WatcherCheck[]; goals?: WatcherGoal[]; capabilities?: JsonRecord; dashboard_url?: string; refreshed_at?: string;
 }
 export interface RuntimeStatus {
   model?: string; memory_count?: number; session_id?: number | null;

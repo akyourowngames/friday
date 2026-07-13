@@ -30,6 +30,7 @@ class MonitorPayload(BaseModel):
     ai_prompt: str | None = Field(default=None, max_length=4000)
     enabled: bool = True
     config: dict[str, Any] = Field(default_factory=dict)
+    goal_ids: list[int] = Field(default_factory=list)
 
 
 class MonitorPatch(BaseModel):
@@ -40,6 +41,7 @@ class MonitorPatch(BaseModel):
     ai_prompt: str | None = Field(default=None, max_length=4000)
     enabled: bool | None = None
     config: dict[str, Any] | None = None
+    goal_ids: list[int] | None = None
 
 
 class SettingsPatch(BaseModel):
@@ -49,7 +51,8 @@ class SettingsPatch(BaseModel):
 def create_app(*, service: WatcherService | None = None, database_path: str | Path | None = None,
                notification_settings: dict[str, Any] | None = None, start_scheduler: bool = True,
                api_token: str | None = None, stop_service_on_shutdown: bool | None = None,
-               settings_saver: Callable[[dict[str, Any]], None] | None = None) -> FastAPI:
+               settings_saver: Callable[[dict[str, Any]], None] | None = None,
+               goal_store: Any | None = None, close_goal_store_on_shutdown: bool = False) -> FastAPI:
     owned = service is None
     should_stop = owned if stop_service_on_shutdown is None else stop_service_on_shutdown
     watcher = service or WatcherService(database_path or Path("~/.ares/data/watchers.db").expanduser(), notification_settings=notification_settings)
@@ -62,9 +65,89 @@ def create_app(*, service: WatcherService | None = None, database_path: str | Pa
         yield
         if should_stop:
             await watcher.stop()
+        if close_goal_store_on_shutdown and goal_store is not None:
+            goal_store.close()
 
     app = FastAPI(title="Ares Watcher Control Plane", version="1.0.0", lifespan=lifespan)
     app.state.watcher = watcher
+    app.state.goal_store = goal_store
+
+    def goal_summary(goal: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: goal.get(key)
+            for key in (
+                "goal_id", "title", "status", "priority", "progress_percent",
+                "target_date", "is_overdue", "days_remaining",
+            )
+        }
+
+    def validate_goal_ids(values: list[int] | None) -> list[int]:
+        ids = list(dict.fromkeys(int(value) for value in (values or [])))
+        if len(ids) > 50:
+            raise HTTPException(422, "A watcher can be linked to at most 50 goals")
+        if any(value <= 0 for value in ids):
+            raise HTTPException(422, "Goal IDs must be positive integers")
+        if ids and goal_store is None:
+            raise HTTPException(503, "Goal storage is unavailable in this runtime")
+        missing = [value for value in ids if goal_store.get(value) is None]
+        if missing:
+            raise HTTPException(404, f"Goal #{missing[0]} was not found")
+        return ids
+
+    def set_goal_links(monitor_id: str, goal_ids: list[int]) -> None:
+        if goal_store is None:
+            return
+        current = {
+            int(goal["goal_id"])
+            for goal in goal_store.linked_goals(link_type="watcher", ref_id=monitor_id)
+        }
+        target = set(goal_ids)
+        for goal_id in current - target:
+            goal_store.unlink(goal_id, link_type="watcher", ref_id=monitor_id)
+        for goal_id in target - current:
+            goal_store.link(goal_id, link_type="watcher", ref_id=monitor_id)
+
+    def public_monitor(monitor: Monitor) -> dict[str, Any]:
+        payload = monitor.public_dict()
+        if goal_store is None:
+            return {**payload, "linked_goals": [], "goal_signal_count": 0, "open_goal_signals": []}
+        linked = goal_store.linked_goals(link_type="watcher", ref_id=monitor.id)
+        signals = goal_store.list_watcher_signals(
+            watcher_id=monitor.id, include_acknowledged=True, limit=500,
+        )
+        open_signals = [signal for signal in signals if not signal.get("acknowledged")]
+        return {
+            **payload,
+            "linked_goals": [goal_summary(goal) for goal in linked],
+            "goal_signal_count": len(signals),
+            "open_goal_signals": open_signals,
+        }
+
+    def public_event(event: Any) -> dict[str, Any]:
+        payload = event.to_dict()
+        signals = [] if goal_store is None else goal_store.list_watcher_signals(
+            source_event_id=event.id, include_acknowledged=True, limit=100,
+        )
+        for signal in signals:
+            goal = goal_store.get(int(signal["goal_id"]))
+            signal["goal_title"] = goal["title"] if goal else f"Goal #{signal['goal_id']}"
+            signal["goal_status"] = goal["status"] if goal else "unknown"
+        return {**payload, "goal_signals": signals}
+
+    def public_overview() -> dict[str, Any]:
+        payload = watcher.db.overview()
+        monitors = watcher.db.list_monitors()
+        decorated = [public_monitor(monitor) for monitor in monitors]
+        return {
+            **payload,
+            "goal_linked_watchers": sum(bool(item["linked_goals"]) for item in decorated),
+            "linked_goals": len({
+                int(goal["goal_id"])
+                for monitor in decorated
+                for goal in monitor["linked_goals"]
+            }),
+            "open_goal_signals": sum(len(item["open_goal_signals"]) for item in decorated),
+        }
 
     @app.middleware("http")
     async def local_auth(request: Request, call_next):
@@ -84,7 +167,16 @@ def create_app(*, service: WatcherService | None = None, database_path: str | Pa
 
     @app.get("/api/overview")
     async def overview():
-        return watcher.db.overview()
+        return public_overview()
+
+    @app.get("/api/goals")
+    async def goals():
+        if goal_store is None:
+            return []
+        return [
+            {**goal_summary(goal), "watcher_ids": goal_store.linked_refs(int(goal["goal_id"]))["watchers"]}
+            for goal in goal_store.list_all(limit=500)
+        ]
 
     @app.get("/api/capabilities")
     async def capabilities():
@@ -100,37 +192,54 @@ def create_app(*, service: WatcherService | None = None, database_path: str | Pa
         values = watcher.db.list_monitors(enabled_only=enabled is True)
         if enabled is False:
             values = [item for item in values if not item.enabled]
-        return [item.public_dict() for item in values]
+        return [public_monitor(item) for item in values]
 
     @app.post("/api/monitors", status_code=201)
     async def create_monitor(payload: MonitorPayload):
-        monitor = Monitor(id=str(uuid4()), **payload.model_dump())
+        values = payload.model_dump()
+        goal_ids = validate_goal_ids(values.pop("goal_ids", []))
+        monitor = Monitor(id=str(uuid4()), **values)
         watcher.db.insert_monitor(monitor)
-        await watcher.publish("monitor.created", {"monitor": monitor.public_dict()})
-        return monitor.public_dict()
+        try:
+            set_goal_links(monitor.id, goal_ids)
+        except Exception as exc:
+            if goal_store is not None:
+                goal_store.unlink_reference(link_type="watcher", ref_id=monitor.id)
+            watcher.db.delete_monitor(monitor.id)
+            raise HTTPException(409, f"Watcher creation was rolled back because goal linking failed: {exc}") from exc
+        result = public_monitor(monitor)
+        await watcher.publish("monitor.created", {"monitor": result})
+        return result
 
     @app.get("/api/monitors/{monitor_id}")
     async def monitor_detail(monitor_id: str):
         monitor = _monitor_or_404(watcher, monitor_id)
         snapshot = watcher.db.get_latest_snapshot(monitor_id)
-        return {"monitor": monitor.public_dict(), "latest_snapshot": snapshot.to_dict() if snapshot else None,
-                "events": [item.to_dict() for item in watcher.db.list_events(monitor_id, limit=30)],
+        return {"monitor": public_monitor(monitor), "latest_snapshot": snapshot.to_dict() if snapshot else None,
+                "events": [public_event(item) for item in watcher.db.list_events(monitor_id, limit=30)],
                 "checks": [item.to_dict() for item in watcher.db.list_check_runs(monitor_id, limit=100)]}
 
     @app.patch("/api/monitors/{monitor_id}")
     async def update_monitor(monitor_id: str, payload: MonitorPatch):
         monitor = _monitor_or_404(watcher, monitor_id)
-        for key, value in payload.model_dump(exclude_unset=True).items():
+        values = payload.model_dump(exclude_unset=True)
+        goal_ids = validate_goal_ids(values.pop("goal_ids")) if "goal_ids" in values else None
+        for key, value in values.items():
             setattr(monitor, key, _merge_redacted(monitor.config, value) if key == "config" else value)
         monitor.__post_init__()
         watcher.db.update_monitor(monitor)
-        await watcher.publish("monitor.updated", {"monitor": monitor.public_dict()})
-        return monitor.public_dict()
+        if goal_ids is not None:
+            set_goal_links(monitor.id, goal_ids)
+        result = public_monitor(monitor)
+        await watcher.publish("monitor.updated", {"monitor": result})
+        return result
 
     @app.delete("/api/monitors/{monitor_id}", status_code=204)
     async def delete_monitor(monitor_id: str):
         if not watcher.db.delete_monitor(monitor_id):
             raise HTTPException(404, "Monitor not found")
+        if goal_store is not None:
+            goal_store.unlink_reference(link_type="watcher", ref_id=monitor_id)
         await watcher.publish("monitor.deleted", {"monitor_id": monitor_id})
 
     @app.post("/api/monitors/{monitor_id}/pause")
@@ -150,7 +259,7 @@ def create_app(*, service: WatcherService | None = None, database_path: str | Pa
     @app.get("/api/events")
     async def events(monitor_id: str | None = None, severity: str | None = None, unacknowledged: bool = False,
                      limit: int = Query(100, ge=1, le=500)):
-        return [item.to_dict() for item in watcher.db.list_events(monitor_id, limit=limit, severity=severity, unacknowledged=unacknowledged)]
+        return [public_event(item) for item in watcher.db.list_events(monitor_id, limit=limit, severity=severity, unacknowledged=unacknowledged)]
 
     @app.post("/api/events/{event_id}/acknowledge")
     async def acknowledge(event_id: str):
@@ -193,7 +302,7 @@ def create_app(*, service: WatcherService | None = None, database_path: str | Pa
             await websocket.close(code=4401)
             return
         await websocket.accept()
-        await websocket.send_json({"type": "connected", "payload": {"overview": watcher.db.overview()}})
+        await websocket.send_json({"type": "connected", "payload": {"overview": public_overview()}})
         subscription = watcher.subscribe()
         pending = asyncio.create_task(anext(subscription))
         try:
@@ -249,9 +358,17 @@ def run_dashboard(host: str = "127.0.0.1", port: int = 8080, database_path: str 
                   notification_settings: dict[str, Any] | None = None, max_concurrency: int = 8,
                   poll_seconds: float = 5.0) -> None:
     import uvicorn
+    from ares.goals import GoalStore
     service = WatcherService(database_path or Path("~/.ares/data/watchers.db").expanduser(),
                              notification_settings=notification_settings, max_concurrency=max_concurrency, poll_seconds=poll_seconds)
+    goal_store = GoalStore()
     def persist_settings(settings: dict[str, Any]) -> None:
         from ares.config import load_config, save_config
         config = load_config(); config.watcher.notifications = settings; save_config(config)
-    uvicorn.run(create_app(service=service, stop_service_on_shutdown=True, settings_saver=persist_settings), host=host, port=port, log_level="info")
+    uvicorn.run(create_app(
+        service=service,
+        stop_service_on_shutdown=True,
+        settings_saver=persist_settings,
+        goal_store=goal_store,
+        close_goal_store_on_shutdown=True,
+    ), host=host, port=port, log_level="info")

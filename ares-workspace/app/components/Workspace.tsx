@@ -403,7 +403,50 @@ export function Workspace() {
   function openWatcherEditor(monitor?: WatcherMonitor) {
     const formId = "watcher-editor-form";
     const config = JSON.stringify(monitor?.config || (monitor?.type === "browser" ? { preset: "instagram_dm", navigate: true, change_detection: "diff" } : {}), null, 2);
-    setModal({ title: monitor ? "Edit watcher" : "Deploy watcher", copy: "Watchers are first-class Ares tools and may use existing MCP capabilities.", content: <form id={formId} onSubmit={event => { event.preventDefault(); const data = new FormData(event.currentTarget); let parsed: JsonRecord = {}; try { parsed = JSON.parse(String(data.get("config") || "{}")) as JsonRecord; } catch { toast("Invalid watcher config", "Config must be valid JSON.", "error"); return; } const args: JsonRecord = { name: String(data.get("name") || ""), type: String(data.get("type") || "website"), preset: String(data.get("preset") || "") || undefined, url: String(data.get("url") || "") || undefined, interval_seconds: Number(data.get("interval_seconds") || 900), ai_action: String(data.get("ai_action") || "notify"), ai_prompt: String(data.get("ai_prompt") || "") || undefined, config: parsed, enabled: true }; if (monitor) args.watcher_id = monitor.id; send({ type: "watcher_action", action: monitor ? "update" : "create", arguments: args }); }}><div className="modal-body"><div className="field-grid"><FormField label="Name"><input name="name" defaultValue={monitor?.name || ""} required autoFocus /></FormField><FormField label="Type"><select name="type" defaultValue={monitor?.type || "website"}><option value="website">Public website</option><option value="browser">Authenticated browser / DMs</option><option value="custom">REST / JSON endpoint</option><option value="tool">Ares or MCP tool workflow</option><option value="instagram">Instagram Graph API</option></select></FormField><FormField label="Quick preset"><select name="preset" defaultValue={String(monitor?.config?.preset || "")}><option value="">Custom configuration</option><option value="instagram_dm">Authenticated Instagram DMs</option><option value="browser_page">Authenticated browser page</option></select></FormField><FormField label="Cadence (seconds)"><input name="interval_seconds" type="number" min={20} defaultValue={monitor?.interval_seconds || 900} /></FormField><FormField label="Target URL" wide hint="Instagram DM preset fills the inbox URL automatically when this is blank."><input name="url" defaultValue={monitor?.url || ""} placeholder="https://…" /></FormField><FormField label="On change"><select name="ai_action" defaultValue={monitor?.ai_action || "notify"}><option value="notify">Notify</option><option value="suggest">Analyze and suggest</option><option value="auto">Auto action</option></select></FormField><FormField label="AI analysis prompt"><textarea name="ai_prompt" defaultValue={monitor?.ai_prompt || ""} placeholder="How Ares should judge and summarize a change." /></FormField><FormField label="Fetcher / workflow config (JSON)" wide><textarea className="code-field" name="config" defaultValue={config} spellCheck={false} /></FormField></div></div><div className="modal-foot"><button type="button" className="secondary-btn" onClick={() => setModal(null)}>Cancel</button><button type="submit" className="primary-btn">{monitor ? "Save watcher" : "Deploy watcher"}</button></div></form> });
+    const selectedGoalIds = (monitor?.linked_goals || []).map(goal => String(goal.goal_id));
+    setModal({
+      title: monitor ? "Edit watcher" : "Deploy watcher",
+      copy: "Route observations into durable goals while keeping progress changes explicit and reviewable.",
+      content: <form id={formId} onSubmit={event => {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        let parsed: JsonRecord = {};
+        try { parsed = JSON.parse(String(data.get("config") || "{}")) as JsonRecord; }
+        catch { toast("Invalid watcher config", "Config must be valid JSON.", "error"); return; }
+        const args: JsonRecord = {
+          name: String(data.get("name") || ""),
+          type: String(data.get("type") || "website"),
+          preset: String(data.get("preset") || "") || undefined,
+          url: String(data.get("url") || "") || undefined,
+          interval_seconds: Number(data.get("interval_seconds") || 900),
+          ai_action: String(data.get("ai_action") || "notify"),
+          ai_prompt: String(data.get("ai_prompt") || "") || undefined,
+          goal_ids: data.getAll("goal_ids").map(value => Number(value)),
+          config: parsed,
+          enabled: true,
+        };
+        if (monitor) args.watcher_id = monitor.id;
+        send({ type: "watcher_action", action: monitor ? "update" : "create", arguments: args });
+      }}>
+        <div className="modal-body"><div className="field-grid">
+          <FormField label="Name"><input name="name" defaultValue={monitor?.name || ""} required autoFocus /></FormField>
+          <FormField label="Type"><select name="type" defaultValue={monitor?.type || "website"}><option value="website">Public website</option><option value="browser">Authenticated browser / DMs</option><option value="custom">REST / JSON endpoint</option><option value="tool">Ares or MCP tool workflow</option><option value="instagram">Instagram Graph API</option></select></FormField>
+          <FormField label="Quick preset"><select name="preset" defaultValue={String(monitor?.config?.preset || "")}><option value="">Custom configuration</option><option value="instagram_dm">Authenticated Instagram DMs</option><option value="browser_page">Authenticated browser page</option></select></FormField>
+          <FormField label="Cadence (seconds)"><input name="interval_seconds" type="number" min={20} defaultValue={monitor?.interval_seconds || 900} /></FormField>
+          <FormField label="Target URL" wide hint="Instagram DM preset fills the inbox URL automatically when this is blank."><input name="url" defaultValue={monitor?.url || ""} placeholder="https://…" /></FormField>
+          <FormField label="On change"><select name="ai_action" defaultValue={monitor?.ai_action || "notify"}><option value="notify">Notify</option><option value="suggest">Analyze and suggest</option><option value="auto">Auto action</option></select></FormField>
+          <FormField label="AI analysis prompt"><textarea name="ai_prompt" defaultValue={monitor?.ai_prompt || ""} placeholder="How Ares should judge and summarize a change." /></FormField>
+          <FormField label="Linked goals" wide hint="Select multiple outcomes. Signals become goal evidence; watcher checks never mutate goal progress automatically.">
+            <select className="goal-picker" name="goal_ids" multiple size={Math.min(7, Math.max(3, watchers.goals?.length || 3))} defaultValue={selectedGoalIds}>
+              {(watchers.goals || []).map(goal => <option key={goal.goal_id} value={goal.goal_id}>#{goal.goal_id} · {goal.title} · {goal.progress_percent}% · {goal.status}</option>)}
+            </select>
+            {!watchers.goals?.length && <p className="field-hint">No goals yet. Ask Ares to create an outcome, then refresh watcher state.</p>}
+          </FormField>
+          <FormField label="Fetcher / workflow config (JSON)" wide><textarea className="code-field" name="config" defaultValue={config} spellCheck={false} /></FormField>
+        </div></div>
+        <div className="modal-foot"><button type="button" className="secondary-btn" onClick={() => setModal(null)}>Cancel</button><button type="submit" className="primary-btn">{monitor ? "Save watcher" : "Deploy watcher"}</button></div>
+      </form>,
+    });
   }
 
   function openSkillEditor(skill?: Skill, createMode = false) {
