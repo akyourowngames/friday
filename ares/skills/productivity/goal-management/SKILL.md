@@ -2,10 +2,11 @@
 name: goal-management
 description: Capture, structure, decompose, connect, and review durable Ares goals with evidence-backed progress.
 category: productivity
-version: 1.0.0
+version: 1.1.0
 examples:
   - prompt: "Track my goal to ship the watcher engine by July 25."
   - prompt: "Break my launch goal into milestones and connect the implementation task."
+  - prompt: "Watch this laptop price and tie the alert to my purchase goal."
 test_commands:
   - "python -m pytest tests/test_goals.py tests/test_skills.py"
 ---
@@ -30,6 +31,14 @@ test_commands:
 - Use `record_goal_progress` for timestamped check-ins, blockers, wins, and revised estimates.
 - Use `sync_goal_progress` only on explicit request. Explain that derived progress uses child, task, and action evidence.
 - Never mark completion from inference alone. Ask the user to confirm completion.
+
+## Observe with watchers
+- Link an existing watcher with `link_goal_watcher`, or pass `goal_id` while creating one.
+- Treat every watcher signal as an observation requiring review, never as permission to change progress or status.
+- State the detected change and linked goal, then ask whether to update, complete, snooze, or dismiss.
+- On confirmation, pass `resolves_signal_id` to `update_goal` or `complete_goal` so resolution is durable and atomic.
+- Use `snooze_goal_signal` for "not now". Use `acknowledge_goal_signal` when reviewed without a goal mutation.
+- One watcher may support several goals. Resolve every goal-specific signal before the source watcher incident is reconciled.
 
 ## Review
 1. Call `list_goals` with `include_due=true`.

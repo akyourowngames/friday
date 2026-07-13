@@ -157,7 +157,7 @@ def export_data(
     flags = EXPORT_PROFILES[normalized_profile]
     config_data, redaction_preview = _redact_credentials(app_config.model_dump()) if flags["config"] else ({}, {})
     payload: dict[str, Any] = {
-        "version": 3,
+        "version": 4,
         "exported_at": now_local_iso(),
         "export_profile": normalized_profile,
         "config": config_data,

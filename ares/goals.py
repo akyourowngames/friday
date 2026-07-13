@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from uuid import uuid4
 
 from ares.config import get_db_path
 from ares.sqlite_utils import connect_sqlite
@@ -24,7 +25,8 @@ _WHITESPACE = re.compile(r"\s+")
 _STATUSES = {"active", "paused", "completed", "abandoned"}
 _PRIORITIES = {"low", "normal", "high"}
 _SOURCES = {"manual", "ares-suggested", "import"}
-_LINK_TYPES = {"task", "action"}
+_LINK_TYPES = {"task", "action", "watcher"}
+_SIGNAL_RESOLUTIONS = {"dismissed", "reviewed", "goal_updated", "goal_completed"}
 
 
 class GoalConflictError(ValueError):
@@ -151,10 +153,41 @@ class GoalStore:
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (goal_id) REFERENCES goals_meta(goal_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS goal_watcher_signals (
+                signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL,
+                watcher_id TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'change',
+                event_summary TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                severity TEXT NOT NULL DEFAULT 'info',
+                created_at TEXT NOT NULL,
+                acknowledged INTEGER NOT NULL DEFAULT 0,
+                acknowledged_at TEXT,
+                resolution TEXT,
+                resolution_note TEXT NOT NULL DEFAULT '',
+                surfaced_count INTEGER NOT NULL DEFAULT 0,
+                last_surfaced_at TEXT,
+                snoozed_until TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY (goal_id) REFERENCES goals_meta(goal_id) ON DELETE CASCADE
+            );
             CREATE INDEX IF NOT EXISTS idx_goals_status ON goals_meta(status, target_date);
             CREATE INDEX IF NOT EXISTS idx_goals_parent ON goals_meta(parent_goal_id);
             CREATE INDEX IF NOT EXISTS idx_goal_events_goal ON goal_events(goal_id, event_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_goal_signals_unack
+                ON goal_watcher_signals(goal_id, acknowledged, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_goal_signals_watcher
+                ON goal_watcher_signals(watcher_id, created_at DESC);
             """
+        )
+        self._migrate_signal_schema()
+        self.conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_signal_source
+               ON goal_watcher_signals(goal_id, source_event_id)
+               WHERE source_event_id <> ''"""
         )
         try:
             self.conn.execute(
@@ -172,6 +205,29 @@ class GoalStore:
         except sqlite3.DatabaseError:
             self.fts_enabled = False
         self.conn.commit()
+
+    def _migrate_signal_schema(self) -> None:
+        """Upgrade early goal-signal prototypes without discarding local evidence."""
+        existing = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(goal_watcher_signals)")
+        }
+        additions = {
+            "source_event_id": "TEXT NOT NULL DEFAULT ''",
+            "event_type": "TEXT NOT NULL DEFAULT 'change'",
+            "old_value": "TEXT",
+            "new_value": "TEXT",
+            "severity": "TEXT NOT NULL DEFAULT 'info'",
+            "acknowledged_at": "TEXT",
+            "resolution": "TEXT",
+            "resolution_note": "TEXT NOT NULL DEFAULT ''",
+            "surfaced_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_surfaced_at": "TEXT",
+            "snoozed_until": "TEXT",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for name, definition in additions.items():
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE goal_watcher_signals ADD COLUMN {name} {definition}")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -317,7 +373,15 @@ class GoalStore:
             parent = current.get("parent_goal_id")
             current = self.get(int(parent)) if parent is not None else None
 
-    def update(self, goal_id: int, *, expected_revision: int | None = None, **fields: Any) -> dict[str, Any] | None:
+    def update(
+        self,
+        goal_id: int,
+        *,
+        expected_revision: int | None = None,
+        resolves_signal_id: int | None = None,
+        signal_resolution: str = "goal_updated",
+        **fields: Any,
+    ) -> dict[str, Any] | None:
         unknown = set(fields).difference(self._UPDATABLE)
         if unknown:
             raise ValueError(f"Unknown or immutable goal field(s): {', '.join(sorted(unknown))}")
@@ -325,6 +389,14 @@ class GoalStore:
         if existing is None:
             return None
         self._assert_revision(existing, expected_revision)
+        signal = None
+        if resolves_signal_id is not None:
+            signal = self.get_watcher_signal(int(resolves_signal_id))
+            if signal is None:
+                raise ValueError(f"Goal watcher signal #{resolves_signal_id} was not found")
+            if int(signal["goal_id"]) != int(goal_id):
+                raise ValueError(f"Signal #{resolves_signal_id} does not belong to goal #{goal_id}")
+            signal_resolution = self._validate_choice(signal_resolution, _SIGNAL_RESOLUTIONS, "signal_resolution")
         values = dict(existing)
         if "title" in fields:
             values["title"] = _clean(fields["title"], field="title", maximum=300, required=True)
@@ -368,17 +440,41 @@ class GoalStore:
             )
             self._replace_fts(existing, values["title"], values["description"])
             self._event(int(goal_id), "updated", progress_percent=values["progress_percent"], metadata={"fields": sorted(fields)})
+            if signal is not None and not signal["acknowledged"]:
+                self._acknowledge_signal_in_transaction(
+                    signal,
+                    resolution=signal_resolution,
+                    note=f"Resolved while updating goal #{goal_id}",
+                )
         return self.get(int(goal_id))
 
-    def _set_status(self, goal_id: int, status: str, expected_revision: int | None = None) -> dict[str, Any] | None:
-        goal = self.update(goal_id, expected_revision=expected_revision, status=status)
+    def _set_status(
+        self,
+        goal_id: int,
+        status: str,
+        expected_revision: int | None = None,
+        resolves_signal_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        goal = self.update(
+            goal_id,
+            expected_revision=expected_revision,
+            resolves_signal_id=resolves_signal_id,
+            signal_resolution="goal_completed" if status == "completed" else "goal_updated",
+            status=status,
+        )
         if goal:
             with self._transaction():
                 self._event(goal_id, status, progress_percent=goal["progress_percent"])
         return self.get(goal_id) if goal else None
 
-    def complete(self, goal_id: int, *, expected_revision: int | None = None) -> dict[str, Any] | None:
-        return self._set_status(goal_id, "completed", expected_revision)
+    def complete(
+        self,
+        goal_id: int,
+        *,
+        expected_revision: int | None = None,
+        resolves_signal_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        return self._set_status(goal_id, "completed", expected_revision, resolves_signal_id)
 
     def pause(self, goal_id: int, *, expected_revision: int | None = None) -> dict[str, Any] | None:
         return self._set_status(goal_id, "paused", expected_revision)
@@ -455,16 +551,326 @@ class GoalStore:
     def unlink(self, goal_id: int, *, link_type: str, ref_id: str) -> None:
         kind = self._validate_choice(link_type, _LINK_TYPES, "link_type")
         with self._transaction():
-            self.conn.execute("DELETE FROM goal_links WHERE goal_id=? AND link_type=? AND ref_id=?", (int(goal_id), kind, str(ref_id)))
-            self.conn.execute("UPDATE goals_meta SET updated_at=?, revision=revision+1 WHERE goal_id=?", (utc_now(), int(goal_id)))
-            self._event(int(goal_id), "unlinked", metadata={"link_type": kind, "ref_id": str(ref_id)})
+            cursor = self.conn.execute("DELETE FROM goal_links WHERE goal_id=? AND link_type=? AND ref_id=?", (int(goal_id), kind, str(ref_id)))
+            if cursor.rowcount:
+                self.conn.execute("UPDATE goals_meta SET updated_at=?, revision=revision+1 WHERE goal_id=?", (utc_now(), int(goal_id)))
+                self._event(int(goal_id), "unlinked", metadata={"link_type": kind, "ref_id": str(ref_id)})
 
     def linked_refs(self, goal_id: int) -> dict[str, list[str]]:
-        result = {"tasks": [], "actions": []}
+        result = {"tasks": [], "actions": [], "watchers": []}
         rows = self.conn.execute("SELECT link_type, ref_id FROM goal_links WHERE goal_id=? ORDER BY created_at", (int(goal_id),)).fetchall()
         for row in rows:
-            result["tasks" if row["link_type"] == "task" else "actions"].append(str(row["ref_id"]))
+            result[{"task": "tasks", "action": "actions", "watcher": "watchers"}[row["link_type"]]].append(str(row["ref_id"]))
         return result
+
+    def linked_goals(self, *, link_type: str, ref_id: str) -> list[dict[str, Any]]:
+        """Return every goal interested in one durable task/action/watcher reference."""
+        kind = self._validate_choice(link_type, _LINK_TYPES, "link_type")
+        rows = self.conn.execute(
+            """SELECT g.* FROM goal_links l JOIN goals_meta g ON g.goal_id=l.goal_id
+               WHERE l.link_type=? AND l.ref_id=?
+               ORDER BY CASE g.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                        g.updated_at DESC""",
+            (kind, _clean(ref_id, field="ref_id", maximum=180, required=True)),
+        ).fetchall()
+        return [self._row_to_goal(row) for row in rows]
+
+    def unlink_reference(self, *, link_type: str, ref_id: str) -> list[int]:
+        """Remove a deleted external reference from all goals and retain timeline evidence."""
+        goals = self.linked_goals(link_type=link_type, ref_id=ref_id)
+        for goal in goals:
+            self.unlink(int(goal["goal_id"]), link_type=link_type, ref_id=ref_id)
+        return [int(goal["goal_id"]) for goal in goals]
+
+    @staticmethod
+    def _row_to_signal(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        return {
+            "signal_id": int(row["signal_id"]),
+            "goal_id": int(row["goal_id"]),
+            "watcher_id": str(row["watcher_id"]),
+            "source_event_id": str(row["source_event_id"]),
+            "event_type": str(row["event_type"]),
+            "event_summary": str(row["event_summary"]),
+            "old_value": row["old_value"],
+            "new_value": row["new_value"],
+            "severity": str(row["severity"]),
+            "created_at": str(row["created_at"]),
+            "acknowledged": bool(row["acknowledged"]),
+            "acknowledged_at": row["acknowledged_at"],
+            "resolution": row["resolution"],
+            "resolution_note": str(row["resolution_note"] or ""),
+            "surfaced_count": int(row["surfaced_count"] or 0),
+            "last_surfaced_at": row["last_surfaced_at"],
+            "snoozed_until": row["snoozed_until"],
+            "metadata": metadata,
+        }
+
+    def get_watcher_signal(self, signal_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM goal_watcher_signals WHERE signal_id=?", (int(signal_id),)
+        ).fetchone()
+        return self._row_to_signal(row) if row else None
+
+    def record_watcher_signal(
+        self,
+        goal_id: int,
+        watcher_id: str,
+        event_summary: str,
+        *,
+        source_event_id: str | None = None,
+        event_type: str = "change",
+        old_value: Any | None = None,
+        new_value: Any | None = None,
+        severity: str = "info",
+        created_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist one idempotent watcher observation as goal evidence, never a goal mutation."""
+        goal = self.get(int(goal_id))
+        if goal is None:
+            raise ValueError(f"Goal #{goal_id} was not found")
+        watcher = _clean(watcher_id, field="watcher_id", maximum=180, required=True)
+        summary = _clean(event_summary, field="event_summary", maximum=4_000, required=True)
+        source = _clean(source_event_id or str(uuid4()), field="source_event_id", maximum=180, required=True)
+        kind = _clean(event_type or "change", field="event_type", maximum=80, required=True).casefold()
+        level = _clean(severity or "info", field="severity", maximum=32, required=True).casefold()
+        stamp = str(created_at or utc_now())
+        try:
+            parsed_stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            parsed_stamp = parsed_stamp if parsed_stamp.tzinfo else parsed_stamp.replace(tzinfo=timezone.utc)
+            stamp = parsed_stamp.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        except ValueError as exc:
+            raise ValueError("created_at must be an ISO timestamp") from exc
+        with self._transaction():
+            existing = self.conn.execute(
+                "SELECT * FROM goal_watcher_signals WHERE goal_id=? AND source_event_id=?",
+                (int(goal_id), source),
+            ).fetchone()
+            if existing is not None:
+                signal = self._row_to_signal(existing)
+                signal["created"] = False
+                return signal
+            cursor = self.conn.execute(
+                """INSERT INTO goal_watcher_signals
+                   (goal_id, watcher_id, source_event_id, event_type, event_summary,
+                    old_value, new_value, severity, created_at, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(goal_id), watcher, source, kind, summary,
+                    None if old_value is None else str(old_value)[:4_000],
+                    None if new_value is None else str(new_value)[:4_000],
+                    level, stamp,
+                    json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True, default=str),
+                ),
+            )
+            signal_id = int(cursor.lastrowid)
+            self._event(
+                int(goal_id), "watcher_signal", note=summary,
+                metadata={
+                    "signal_id": signal_id, "watcher_id": watcher,
+                    "source_event_id": source, "severity": level,
+                },
+            )
+        signal = self.get_watcher_signal(signal_id) or {}
+        signal["created"] = True
+        return signal
+
+    def list_watcher_signals(
+        self,
+        goal_id: int | None = None,
+        *,
+        include_acknowledged: bool = False,
+        include_snoozed: bool = True,
+        watcher_id: str | None = None,
+        source_event_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if goal_id is not None:
+            clauses.append("goal_id=?")
+            params.append(int(goal_id))
+        if not include_acknowledged:
+            clauses.append("acknowledged=0")
+        if not include_snoozed:
+            clauses.append("(snoozed_until IS NULL OR snoozed_until<=?)")
+            params.append(utc_now())
+        if watcher_id:
+            clauses.append("watcher_id=?")
+            params.append(str(watcher_id))
+        if source_event_id:
+            clauses.append("source_event_id=?")
+            params.append(str(source_event_id))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM goal_watcher_signals{where} ORDER BY created_at DESC, signal_id DESC LIMIT ?",
+            (*params, max(1, min(int(limit), 500))),
+        ).fetchall()
+        return [self._row_to_signal(row) for row in rows]
+
+    def pending_watcher_signals(
+        self,
+        goal_id: int | None = None,
+        *,
+        max_age_hours: int | None = None,
+        max_surfaced: int | None = None,
+        mark_surfaced: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return actionable signals; context callers can atomically count a surface."""
+        clauses = ["acknowledged=0", "(snoozed_until IS NULL OR snoozed_until<=?)"]
+        params: list[Any] = [utc_now()]
+        if goal_id is not None:
+            clauses.append("goal_id=?")
+            params.append(int(goal_id))
+        if max_age_hours is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max(0, int(max_age_hours)))
+            clauses.append("created_at>=?")
+            params.append(cutoff.isoformat(timespec="seconds").replace("+00:00", "Z"))
+        if max_surfaced is not None:
+            clauses.append("surfaced_count<?")
+            params.append(max(0, int(max_surfaced)))
+        rows = self.conn.execute(
+            f"""SELECT * FROM goal_watcher_signals WHERE {' AND '.join(clauses)}
+                ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                         created_at DESC, signal_id DESC LIMIT ?""",
+            (*params, max(1, min(int(limit), 500))),
+        ).fetchall()
+        signals = [self._row_to_signal(row) for row in rows]
+        if mark_surfaced and signals:
+            stamp = utc_now()
+            placeholders = ",".join("?" for _ in signals)
+            with self._transaction():
+                self.conn.execute(
+                    f"""UPDATE goal_watcher_signals
+                        SET surfaced_count=surfaced_count+1, last_surfaced_at=?
+                        WHERE signal_id IN ({placeholders})""",
+                    (stamp, *(signal["signal_id"] for signal in signals)),
+                )
+            for signal in signals:
+                signal["surfaced_count"] += 1
+                signal["last_surfaced_at"] = stamp
+        return signals
+
+    def contextualize_goals(
+        self,
+        goals: list[dict[str, Any]],
+        *,
+        max_age_hours: int = 48,
+        max_surfaced: int = 3,
+        per_goal: int = 3,
+        mark_surfaced: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Attach fresh pending signals to displayed goals and enforce anti-nag limits."""
+        if not goals:
+            return []
+        goal_ids = {int(goal["goal_id"]) for goal in goals}
+        signals: list[dict[str, Any]] = []
+        for goal_id in goal_ids:
+            signals.extend(self.pending_watcher_signals(
+                goal_id,
+                max_age_hours=max_age_hours,
+                max_surfaced=max_surfaced,
+                mark_surfaced=mark_surfaced,
+                limit=per_goal,
+            ))
+        grouped: dict[int, list[dict[str, Any]]] = {goal_id: [] for goal_id in goal_ids}
+        for signal in signals:
+            bucket = grouped.get(int(signal["goal_id"]))
+            if bucket is not None and len(bucket) < per_goal:
+                bucket.append(signal)
+        return [{**goal, "watcher_signals": grouped[int(goal["goal_id"])]} for goal in goals]
+
+    def mark_watcher_signals_surfaced(self, signal_ids: list[int]) -> None:
+        clean_ids = sorted({int(value) for value in signal_ids if int(value) > 0})
+        if not clean_ids:
+            return
+        placeholders = ",".join("?" for _ in clean_ids)
+        with self._transaction():
+            self.conn.execute(
+                f"""UPDATE goal_watcher_signals
+                    SET surfaced_count=surfaced_count+1, last_surfaced_at=?
+                    WHERE acknowledged=0 AND signal_id IN ({placeholders})""",
+                (utc_now(), *clean_ids),
+            )
+
+    def _acknowledge_signal_in_transaction(
+        self,
+        signal: dict[str, Any],
+        *,
+        resolution: str,
+        note: str = "",
+    ) -> None:
+        stamp = utc_now()
+        self.conn.execute(
+            """UPDATE goal_watcher_signals
+               SET acknowledged=1, acknowledged_at=?, resolution=?, resolution_note=?, snoozed_until=NULL
+               WHERE signal_id=?""",
+            (stamp, resolution, _clean(note, field="note", maximum=2_000), int(signal["signal_id"])),
+        )
+        self._event(
+            int(signal["goal_id"]), "watcher_signal_acknowledged", note=note,
+            metadata={
+                "signal_id": int(signal["signal_id"]), "resolution": resolution,
+                "source_event_id": signal["source_event_id"],
+            },
+        )
+
+    def acknowledge_watcher_signal(
+        self,
+        signal_id: int,
+        *,
+        resolution: str = "reviewed",
+        note: str = "",
+    ) -> dict[str, Any] | None:
+        signal = self.get_watcher_signal(int(signal_id))
+        if signal is None:
+            return None
+        normalized = self._validate_choice(resolution, _SIGNAL_RESOLUTIONS, "resolution")
+        if not signal["acknowledged"]:
+            with self._transaction():
+                self._acknowledge_signal_in_transaction(signal, resolution=normalized, note=note)
+        return self.get_watcher_signal(int(signal_id))
+
+    def snooze_watcher_signal(
+        self,
+        signal_id: int,
+        *,
+        hours: int = 24,
+        until: str | None = None,
+        note: str = "",
+    ) -> dict[str, Any] | None:
+        signal = self.get_watcher_signal(int(signal_id))
+        if signal is None:
+            return None
+        if signal["acknowledged"]:
+            raise ValueError("An acknowledged watcher signal cannot be snoozed")
+        if until:
+            try:
+                parsed = datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("until must be an ISO timestamp") from exc
+            parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        else:
+            bounded_hours = max(1, min(int(hours), 24 * 365))
+            parsed = datetime.now(timezone.utc) + timedelta(hours=bounded_hours)
+        if parsed <= datetime.now(timezone.utc):
+            raise ValueError("snoozed_until must be in the future")
+        stamp = parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self._transaction():
+            self.conn.execute(
+                "UPDATE goal_watcher_signals SET snoozed_until=? WHERE signal_id=?",
+                (stamp, int(signal_id)),
+            )
+            self._event(
+                int(signal["goal_id"]), "watcher_signal_snoozed", note=note,
+                metadata={"signal_id": int(signal_id), "snoozed_until": stamp},
+            )
+        return self.get_watcher_signal(int(signal_id))
 
     def list_events(self, goal_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -635,7 +1041,14 @@ class GoalStore:
 
     def list_all_for_export(self) -> list[dict[str, Any]]:
         return [
-            {**goal, "links": self.linked_refs(goal["goal_id"]), "events": list(reversed(self.list_events(goal["goal_id"], limit=200)))}
+            {
+                **goal,
+                "links": self.linked_refs(goal["goal_id"]),
+                "watcher_signals": list(reversed(self.list_watcher_signals(
+                    goal["goal_id"], include_acknowledged=True, limit=500,
+                ))),
+                "events": list(reversed(self.list_events(goal["goal_id"], limit=200))),
+            }
             for goal in self.list_all(limit=500)
         ]
 
@@ -682,6 +1095,35 @@ class GoalStore:
                 self.link(new_id, link_type="task", ref_id=str(task_id))
             for action_id in (item.get("links") or {}).get("actions", []):
                 self.link(new_id, link_type="action", ref_id=str(action_id))
+            for watcher_id in (item.get("links") or {}).get("watchers", []):
+                self.link(new_id, link_type="watcher", ref_id=str(watcher_id))
+            for signal in item.get("watcher_signals") or []:
+                if not isinstance(signal, dict):
+                    continue
+                restored = self.record_watcher_signal(
+                    new_id,
+                    str(signal.get("watcher_id") or "imported-watcher"),
+                    str(signal.get("event_summary") or "Imported watcher signal"),
+                    source_event_id=str(signal.get("source_event_id") or uuid4()),
+                    event_type=str(signal.get("event_type") or "change"),
+                    old_value=signal.get("old_value"),
+                    new_value=signal.get("new_value"),
+                    severity=str(signal.get("severity") or "info"),
+                    created_at=str(signal.get("created_at") or utc_now()),
+                    metadata=signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {},
+                )
+                with self._transaction():
+                    self.conn.execute(
+                        """UPDATE goal_watcher_signals SET acknowledged=?, acknowledged_at=?,
+                           resolution=?, resolution_note=?, surfaced_count=?, last_surfaced_at=?, snoozed_until=?
+                           WHERE signal_id=?""",
+                        (
+                            int(bool(signal.get("acknowledged"))), signal.get("acknowledged_at"),
+                            signal.get("resolution"), str(signal.get("resolution_note") or ""),
+                            max(0, int(signal.get("surfaced_count", 0) or 0)), signal.get("last_surfaced_at"),
+                            signal.get("snoozed_until"), int(restored["signal_id"]),
+                        ),
+                    )
             events = item.get("events")
             if isinstance(events, list) and events:
                 with self._transaction():
@@ -716,10 +1158,17 @@ class GoalStore:
 class GoalToolHandlers:
     """JSON adapters for the model-facing goal tool family."""
 
-    def __init__(self, store: GoalStore, task_store: Any | None = None, action_ledger: Any | None = None) -> None:
+    def __init__(
+        self,
+        store: GoalStore,
+        task_store: Any | None = None,
+        action_ledger: Any | None = None,
+        watcher_db_provider: Any | None = None,
+    ) -> None:
         self.store = store
         self.task_store = task_store
         self.action_ledger = action_ledger
+        self.watcher_db_provider = watcher_db_provider
 
     @staticmethod
     def _json(payload: dict[str, Any]) -> str:
@@ -734,6 +1183,32 @@ class GoalToolHandlers:
             return self._json({"ok": False, "error": "Goal not found."})
         return self._json({"ok": True, "goal": goal_public_view(goal)})
 
+    def _watcher_db(self) -> Any | None:
+        try:
+            return self.watcher_db_provider() if self.watcher_db_provider is not None else None
+        except Exception:
+            return None
+
+    def _acknowledge_source_event_if_resolved(self, signal: dict[str, Any]) -> bool:
+        remaining = self.store.list_watcher_signals(
+            include_acknowledged=False,
+            source_event_id=str(signal.get("source_event_id") or ""),
+            limit=2,
+        )
+        if remaining:
+            return False
+        db = self._watcher_db()
+        return bool(db and db.acknowledge_event(str(signal.get("source_event_id") or "")))
+
+    def _mutate_with_signal(self, operation: Any, signal_id: Any) -> str:
+        result = json.loads(self._mutate(operation))
+        if result.get("ok") and signal_id is not None:
+            signal = self.store.get_watcher_signal(int(signal_id))
+            if signal is not None:
+                result["resolved_signal"] = signal
+                result["source_watcher_event_acknowledged"] = self._acknowledge_source_event_if_resolved(signal)
+        return self._json(result)
+
     def create_goal(self, args: dict[str, Any]) -> str:
         return self._mutate(lambda: self.store.create(
             args.get("title", ""), description=args.get("description", ""), category=args.get("category", "general"),
@@ -743,7 +1218,14 @@ class GoalToolHandlers:
 
     def update_goal(self, args: dict[str, Any]) -> str:
         fields = {key: args[key] for key in GoalStore._UPDATABLE if key in args}
-        return self._mutate(lambda: self.store.update(int(args.get("goal_id", 0)), expected_revision=args.get("expected_revision"), **fields))
+        signal_id = args.get("resolves_signal_id")
+        return self._mutate_with_signal(
+            lambda: self.store.update(
+                int(args.get("goal_id", 0)), expected_revision=args.get("expected_revision"),
+                resolves_signal_id=signal_id, signal_resolution="goal_updated", **fields,
+            ),
+            signal_id,
+        )
 
     def list_goals(self, args: dict[str, Any]) -> str:
         statuses = args.get("statuses") or []
@@ -766,11 +1248,22 @@ class GoalToolHandlers:
             return self._json({"ok": False, "error": "Goal not found."})
         return self._json({
             "ok": True, "goal": goal_public_view(goal), "tree": self.store.tree(goal_id),
-            "links": self.store.linked_refs(goal_id), "timeline": self.store.list_events(goal_id, limit=int(args.get("timeline_limit", 20))),
+            "links": self.store.linked_refs(goal_id),
+            "watcher_signals": self.store.list_watcher_signals(
+                goal_id, include_acknowledged=bool(args.get("include_resolved_signals", False)), limit=100,
+            ),
+            "timeline": self.store.list_events(goal_id, limit=int(args.get("timeline_limit", 20))),
         })
 
     def complete_goal(self, args: dict[str, Any]) -> str:
-        return self._mutate(lambda: self.store.complete(int(args.get("goal_id", 0)), expected_revision=args.get("expected_revision")))
+        signal_id = args.get("resolves_signal_id")
+        return self._mutate_with_signal(
+            lambda: self.store.complete(
+                int(args.get("goal_id", 0)), expected_revision=args.get("expected_revision"),
+                resolves_signal_id=signal_id,
+            ),
+            signal_id,
+        )
 
     def pause_goal(self, args: dict[str, Any]) -> str:
         return self._mutate(lambda: self.store.pause(int(args.get("goal_id", 0)), expected_revision=args.get("expected_revision")))
@@ -807,6 +1300,69 @@ class GoalToolHandlers:
         except ValueError as exc:
             return self._json({"ok": False, "error": str(exc)})
         return self.get_goal_status({"goal_id": args.get("goal_id")})
+
+    def link_goal_watcher(self, args: dict[str, Any]) -> str:
+        watcher_id = str(args.get("watcher_id") or "")
+        db = self._watcher_db()
+        if db is None:
+            return self._json({"ok": False, "error": "Watcher storage is unavailable."})
+        if db.get_monitor(watcher_id) is None:
+            return self._json({"ok": False, "error": f"Watcher '{watcher_id}' was not found."})
+        try:
+            self.store.link(int(args.get("goal_id", 0)), link_type="watcher", ref_id=watcher_id)
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self.get_goal_status({"goal_id": args.get("goal_id")})
+
+    def unlink_goal_watcher(self, args: dict[str, Any]) -> str:
+        try:
+            self.store.unlink(
+                int(args.get("goal_id", 0)), link_type="watcher", ref_id=str(args.get("watcher_id") or ""),
+            )
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self.get_goal_status({"goal_id": args.get("goal_id")})
+
+    def get_goal_signals(self, args: dict[str, Any]) -> str:
+        try:
+            goal_id = int(args["goal_id"]) if args.get("goal_id") is not None else None
+            signals = self.store.list_watcher_signals(
+                goal_id,
+                include_acknowledged=bool(args.get("include_acknowledged", False)),
+                include_snoozed=bool(args.get("include_snoozed", True)),
+                limit=int(args.get("limit", 100)),
+            )
+        except (TypeError, ValueError) as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        return self._json({"ok": True, "count": len(signals), "signals": signals})
+
+    def acknowledge_goal_signal(self, args: dict[str, Any]) -> str:
+        try:
+            signal = self.store.acknowledge_watcher_signal(
+                int(args.get("signal_id", 0)), resolution=args.get("resolution", "reviewed"),
+                note=args.get("note", ""),
+            )
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        if signal is None:
+            return self._json({"ok": False, "error": "Goal watcher signal not found."})
+        return self._json({
+            "ok": True,
+            "signal": signal,
+            "source_watcher_event_acknowledged": self._acknowledge_source_event_if_resolved(signal),
+        })
+
+    def snooze_goal_signal(self, args: dict[str, Any]) -> str:
+        try:
+            signal = self.store.snooze_watcher_signal(
+                int(args.get("signal_id", 0)), hours=int(args.get("hours", 24)),
+                until=args.get("until"), note=args.get("note", ""),
+            )
+        except (TypeError, ValueError) as exc:
+            return self._json({"ok": False, "error": str(exc)})
+        if signal is None:
+            return self._json({"ok": False, "error": "Goal watcher signal not found."})
+        return self._json({"ok": True, "signal": signal})
 
     def sync_goal_progress(self, args: dict[str, Any]) -> str:
         return self._mutate(lambda: self.store.recalculate_progress(int(args.get("goal_id", 0))))

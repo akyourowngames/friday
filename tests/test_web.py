@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from ares.models import AppConfig
 from ares.tools.web import (
+    SEARCH_CACHE,
     fetch_url,
     format_results,
     summarize_results,
@@ -118,6 +119,38 @@ class TestWebSearch:
         assert payload["provider"] == "ddgs"
         assert "tavily failed" in payload["errors"]
         assert payload["results"][0]["title"] == "Fallback"
+
+    @patch("ares.tools.web.ddgs_search")
+    def test_web_search_filters_documents_and_reuses_recent_result(self, mock_ddgs, monkeypatch):
+        SEARCH_CACHE.clear()
+        monkeypatch.setattr("ares.tools.web.load_config", lambda: AppConfig())
+        mock_ddgs.return_value = ([
+            {"title": "WHO PDF", "url": "https://www.who.int/reports/health.pdf", "snippet": "Health report", "date": "2026-07-12"},
+            {"title": "WHO page", "url": "https://www.who.int/reports/health", "snippet": "Health report"},
+            {"title": "Other PDF", "url": "https://example.com/health.pdf", "snippet": "Health report"},
+        ], [])
+
+        first = web_search_payload(
+            "health report",
+            provider="ddgs",
+            domains=["who.int"],
+            file_type="pdf",
+            fetch_top=0,
+            cache_ttl_seconds=300,
+        )
+        second = web_search_payload(
+            "health report",
+            provider="ddgs",
+            domains=["who.int"],
+            file_type="pdf",
+            fetch_top=0,
+            cache_ttl_seconds=300,
+        )
+
+        assert [result["url"] for result in first["results"]] == ["https://www.who.int/reports/health.pdf"]
+        assert first["search_options"]["domains"] == ["who.int"]
+        assert second["cache"]["hit"] is True
+        mock_ddgs.assert_called_once()
 
     def test_format_results_includes_source_labels(self):
         output = format_results({

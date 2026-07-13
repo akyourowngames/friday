@@ -1220,7 +1220,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_column("Description", ratio=4)
             table.add_row("/help", "Show available commands")
             table.add_row("/memory [search|edit|delete|clean]", "Review, manage, and clean memories")
-            table.add_row("/goals [search|show|due]", "Track durable goals, progress, evidence, and hierarchy")
+            table.add_row("/goals [search|show|due|signals]", "Track goals, evidence, proactive watcher signals, and hierarchy")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
             table.add_row("/clear", "Clear terminal screen")
@@ -1311,6 +1311,23 @@ class AresCLI(MarketplaceCommandMixin):
                         )
                     self.console.print(table if goals else "[dim]No matching goals.[/dim]")
 
+                def print_signal_table(signals, title="Pending Goal Signals"):
+                    table = Table(title=title, border_style="bright_red", box=CLI_BOX)
+                    table.add_column("Signal", style="bright_red", justify="right", no_wrap=True)
+                    table.add_column("Goal", justify="right", no_wrap=True)
+                    table.add_column("Severity", no_wrap=True)
+                    table.add_column("Watcher", no_wrap=True)
+                    table.add_column("Detected change", ratio=4)
+                    table.add_column("Surfaces", justify="right")
+                    for signal in signals:
+                        table.add_row(
+                            str(signal.get("signal_id", "")), str(signal.get("goal_id", "")),
+                            str(signal.get("severity", "info")),
+                            str((signal.get("metadata") or {}).get("watcher_name") or signal.get("watcher_id", "")),
+                            str(signal.get("event_summary", "")), str(signal.get("surfaced_count", 0)),
+                        )
+                    self.console.print(table if signals else "[dim]No matching goal signals.[/dim]")
+
                 if not arg:
                     print_goal_table(goal_store.list_all(statuses=["active"], limit=50), "Active Goals")
                 elif arg == "due":
@@ -1321,6 +1338,13 @@ class AresCLI(MarketplaceCommandMixin):
                 elif arg.startswith("search "):
                     query = arg.split(maxsplit=1)[1]
                     print_goal_table(goal_store.search(query, limit=50), f"Goal Search: {query}")
+                elif arg == "signals" or arg.startswith("signals "):
+                    try:
+                        signal_goal_id = int(arg.split(maxsplit=1)[1]) if " " in arg else None
+                        signals = goal_store.list_watcher_signals(signal_goal_id, limit=100)
+                    except ValueError:
+                        signals = []
+                    print_signal_table(signals)
                 elif arg.startswith("show "):
                     try:
                         goal_id = int(arg.split(maxsplit=1)[1])
@@ -1332,14 +1356,17 @@ class AresCLI(MarketplaceCommandMixin):
                     else:
                         tree = goal_store.tree(goal_id)
                         links = goal_store.linked_refs(goal_id)
+                        signals = goal_store.list_watcher_signals(goal_id, limit=25)
                         timeline = goal_store.list_events(goal_id, limit=10)
                         self.console.print(Panel(
                             f"[bold]{goal['title']}[/bold]\n{goal['description'] or '[dim]No description[/dim]'}\n\n"
                             f"Status: {goal['status']} · Priority: {goal['priority']} · Progress: {goal['progress_percent']}% ({goal['progress_mode']})\n"
                             f"Target: {goal['target_date'] or 'none'} · Revision: {goal['revision']}\n"
-                            f"Children: {len(tree.get('children', []))} · Tasks: {len(links['tasks'])} · Actions: {len(links['actions'])}",
+                            f"Children: {len(tree.get('children', []))} · Tasks: {len(links['tasks'])} · Actions: {len(links['actions'])} · Watchers: {len(links['watchers'])} · Pending signals: {len(signals)}",
                             title=f"Goal #{goal_id}", border_style="bright_red",
                         ))
+                        if signals:
+                            print_signal_table(signals, f"Goal #{goal_id} · Pending Watcher Signals")
                         if timeline:
                             event_table = Table(title="Recent Goal Timeline", border_style="dim", box=CLI_BOX)
                             event_table.add_column("When", style="dim")
@@ -1351,7 +1378,7 @@ class AresCLI(MarketplaceCommandMixin):
                                 event_table.add_row(str(event.get("created_at", "")), str(event.get("event_type", "")), progress, str(event.get("note", "")))
                             self.console.print(event_table)
                 else:
-                    self.console.print("[red]Usage: /goals [search QUERY|show ID|due][/red]")
+                    self.console.print("[red]Usage: /goals [search QUERY|show ID|due|signals [GOAL_ID]][/red]")
 
         elif command == "/model":
             if not arg or arg == "list":
@@ -1648,6 +1675,7 @@ class AresCLI(MarketplaceCommandMixin):
                 database_path=resolve_watcher_database_path(self.config),
                 defaults=self.config.watcher.defaults,
                 db=watcher_tools.db if watcher_tools is not None else None,
+                goal_store=getattr(self.agent, "goal_store", None),
             )
             try:
                 result = controller.execute(arg if command == "/monitor" else "list")
@@ -1667,10 +1695,13 @@ class AresCLI(MarketplaceCommandMixin):
                     self.console.print(table if result["events"] else "[dim]No changes recorded.[/dim]")
                 elif action == "status":
                     item = result["monitor"]
+                    linked_goals = result.get("linked_goals") or []
+                    linked_text = ", ".join(f"#{goal['goal_id']} {goal['title']}" for goal in linked_goals) or "none"
                     self.console.print(Panel(
                         f"[bold]{item['name']}[/bold]\n{item['url'] or item['type']}\n\nStatus: {item['last_status'] or 'armed'} · Enabled: {item['enabled']}\n"
                         f"Checks: {item['total_checks']} · Changes: {item['total_changes']} · Errors: {item['error_count']}\n"
-                        f"Last check: {item['last_checked_at'] or 'never'} · Next: {item['next_check_at'] or 'next scheduler tick'}",
+                        f"Last check: {item['last_checked_at'] or 'never'} · Next: {item['next_check_at'] or 'next scheduler tick'}\n"
+                        f"Linked goals: {linked_text}",
                         title=f"Watcher {item['id'][:8]}", border_style="bright_red"))
                 elif action == "test":
                     monitor_data = result["monitor"]
@@ -1686,7 +1717,8 @@ class AresCLI(MarketplaceCommandMixin):
                     self.console.print("[cyan]Manual watcher check dispatched.[/cyan]")
                 else:
                     item = result["monitor"]
-                    self.console.print(f"[green]Watcher {action} complete:[/green] {item['name']} ({item['id'][:8]})")
+                    linked = f" · linked to goal #{result['linked_goal_id']}" if result.get("linked_goal_id") else ""
+                    self.console.print(f"[green]Watcher {action} complete:[/green] {item['name']} ({item['id'][:8]}){linked}")
             except (ValueError, KeyError) as exc:
                 self.console.print(f"[red]{exc}[/red]")
             finally:

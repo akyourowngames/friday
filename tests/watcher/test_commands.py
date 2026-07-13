@@ -1,5 +1,6 @@
 import pytest
 
+from ares.goals import GoalStore
 from ares.watcher.commands import WatcherCommands, parse_interval
 
 
@@ -29,3 +30,22 @@ def test_command_validation(tmp_path):
         with pytest.raises(ValueError): commands.execute("pause nope")
         with pytest.raises(ValueError): parse_interval("5s")
     finally: commands.close()
+
+
+def test_command_can_link_goal_and_reports_it_in_status(tmp_path):
+    goals = GoalStore(tmp_path / "ares.db")
+    goal = goals.create("Keep production healthy")
+    commands = WatcherCommands(tmp_path / "commands.db", goal_store=goals)
+    try:
+        added = commands.execute(
+            f'add "Production API" https://example.com --interval 5m --goal {goal["goal_id"]}'
+        )
+        assert added["linked_goal_id"] == goal["goal_id"]
+        identifier = added["monitor"]["id"][:8]
+        status = commands.execute(f"status {identifier}")
+        assert status["linked_goals"][0]["goal_id"] == goal["goal_id"]
+        removed = commands.execute(f"remove {identifier}")
+        assert removed["unlinked_goal_ids"] == [goal["goal_id"]]
+    finally:
+        commands.close()
+        goals.close()

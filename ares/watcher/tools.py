@@ -48,12 +48,14 @@ class WatcherToolHandlers:
         tool_monitors_enabled: bool = True,
         allow_mutating_tool_steps: bool = False,
         capabilities_provider: Callable[[], list[str]] | None = None,
+        goal_store: Any | None = None,
     ) -> None:
         self.database_path = Path(database_path).expanduser()
         self.service = service
         self.tool_monitors_enabled = bool(tool_monitors_enabled)
         self.allow_mutating_tool_steps = bool(allow_mutating_tool_steps)
         self.capabilities_provider = capabilities_provider or (lambda: [])
+        self.goal_store = goal_store
         self._owned_db: WatcherDatabase | None = None
 
     @property
@@ -123,6 +125,9 @@ class WatcherToolHandlers:
         validation_error = self._validation_error(monitor_type, str(url or ""), config)
         if validation_error:
             return f"Error: {validation_error}"
+        goal_id = int(args["goal_id"]) if args.get("goal_id") is not None else None
+        if goal_id is not None and (self.goal_store is None or self.goal_store.get(goal_id) is None):
+            return f"Error: Goal #{goal_id} was not found."
         monitor = Monitor(
             id=str(uuid4()),
             name=str(args.get("name") or ""),
@@ -135,7 +140,18 @@ class WatcherToolHandlers:
             enabled=bool(args.get("enabled", True)),
         )
         self.db.insert_monitor(monitor)
-        return _json({"created": True, "watcher": monitor.public_dict(), "next_step": "Use run_watcher_now to capture the baseline immediately."})
+        if goal_id is not None:
+            try:
+                self.goal_store.link(goal_id, link_type="watcher", ref_id=monitor.id)
+            except Exception as exc:
+                self.db.delete_monitor(monitor.id)
+                return f"Error: Watcher creation was rolled back because goal linking failed: {exc}"
+        return _json({
+            "created": True,
+            "watcher": monitor.public_dict(),
+            "linked_goal_id": goal_id,
+            "next_step": "Use run_watcher_now to capture the baseline immediately.",
+        })
 
     def list(self, args: dict[str, Any]) -> str:
         values = self.db.list_monitors(enabled_only=bool(args.get("enabled_only", False)))
@@ -152,6 +168,10 @@ class WatcherToolHandlers:
         snapshot = self.db.get_latest_snapshot(monitor.id)
         return _json({
             "watcher": monitor.public_dict(),
+            "linked_goals": [
+                {"goal_id": item["goal_id"], "title": item["title"], "status": item["status"]}
+                for item in (self.goal_store.linked_goals(link_type="watcher", ref_id=monitor.id) if self.goal_store is not None else [])
+            ],
             "latest_snapshot": snapshot.to_dict() if snapshot else None,
             "events": [item.to_dict() for item in self.db.list_events(monitor.id, limit=30)],
             "checks": [item.to_dict() for item in self.db.list_check_runs(monitor.id, limit=50)],
@@ -184,7 +204,12 @@ class WatcherToolHandlers:
         if not bool(args.get("confirm")):
             return "Confirmation required: deleting a watcher also deletes its snapshots, incidents, and run history."
         watcher_id = str(args.get("watcher_id") or "")
-        return _json({"deleted": self.db.delete_monitor(watcher_id), "watcher_id": watcher_id})
+        deleted = self.db.delete_monitor(watcher_id)
+        unlinked_goals = (
+            self.goal_store.unlink_reference(link_type="watcher", ref_id=watcher_id)
+            if deleted and self.goal_store is not None else []
+        )
+        return _json({"deleted": deleted, "watcher_id": watcher_id, "unlinked_goal_ids": unlinked_goals})
 
     def pause(self, args: dict[str, Any]) -> str:
         return self._set_enabled(args, False)

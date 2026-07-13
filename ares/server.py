@@ -1719,7 +1719,10 @@ class AresServer:
             if tool_name == "web_search":
                 return {
                     key: payload[key]
-                    for key in ("query", "max_results", "fetch_top")
+                    for key in (
+                        "query", "max_results", "fetch_top", "domains",
+                        "exclude_domains", "file_type", "search_mode", "recency_days",
+                    )
                     if key in payload
                 }
             if "path" in payload:

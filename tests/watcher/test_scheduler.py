@@ -2,7 +2,10 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from ares.actions import ActionLedger
+from ares.goals import GoalStore
 from ares.watcher.fetchers.base import BaseFetcher, FetchResult
+from ares.watcher.integration import GoalWatcherBridge
 from ares.watcher.models import Monitor, utc_now
 from ares.watcher.scheduler import WatcherScheduler
 
@@ -74,3 +77,70 @@ async def test_run_once_checks_all_due_monitors(watcher_db):
     results=await scheduler.run_once()
     assert len(results)==3 and watcher_db.overview()["total_checks"]==3
     await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_watcher_event_fans_out_to_all_linked_goals_without_mutation(tmp_path, watcher_db):
+    goals = GoalStore(tmp_path / "ares.db")
+    ledger = ActionLedger(tmp_path / "ares.db")
+    try:
+        first = goals.create("Buy a laptop under $1,000", priority="high")
+        second = goals.create("Refresh my work setup")
+        monitor = Monitor(
+            id="price-watch", name="Laptop price", type="custom", interval_seconds=20,
+            config={"threshold_field": "price", "change_detection": "threshold", "thresholds": {"price": {"alert_below": 900}}},
+        )
+        watcher_db.insert_monitor(monitor)
+        for goal in (first, second):
+            goals.link(goal["goal_id"], link_type="watcher", ref_id=monitor.id)
+        fetcher = SequenceFetcher([FetchResult(True, {"price": 1099}), FetchResult(True, {"price": 899})])
+        bridge = GoalWatcherBridge(goals, ledger)
+        scheduler = WatcherScheduler(
+            watcher_db, fetchers={"custom": fetcher}, goal_signal_handler=bridge.handle_event,
+        )
+        await scheduler.check_monitor(monitor, force=True)
+        event = await scheduler.check_monitor(watcher_db.get_monitor(monitor.id), force=True)
+
+        assert event is not None
+        assert "Linked goal signal" in (event.ai_summary or "")
+        assert len(goals.list_watcher_signals(watcher_id=monitor.id)) == 2
+        assert {item["source_event_id"] for item in goals.list_watcher_signals(watcher_id=monitor.id)} == {event.id}
+        assert goals.get(first["goal_id"])["status"] == "active"
+        assert goals.get(first["goal_id"])["progress_percent"] == 0
+        assert len([item for item in ledger.list_all() if item["action_type"] == "watcher_goal_signal"]) == 2
+
+        # Replay of the same watcher event is idempotent for signals and provenance.
+        replayed = bridge.handle_event(event, monitor)
+        assert all(item["created"] is False for item in replayed)
+        assert len(goals.list_watcher_signals(watcher_id=monitor.id)) == 2
+        assert len([item for item in ledger.list_all() if item["action_type"] == "watcher_goal_signal"]) == 2
+        await scheduler.close()
+    finally:
+        ledger.close()
+        goals.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_pause_incident_also_reaches_linked_goal(tmp_path, watcher_db):
+    goals = GoalStore(tmp_path / "ares.db")
+    try:
+        goal = goals.create("Keep production monitoring healthy")
+        monitor = Monitor(id="health-watch", name="Health", type="website", interval_seconds=20)
+        watcher_db.insert_monitor(monitor)
+        goals.link(goal["goal_id"], link_type="watcher", ref_id=monitor.id)
+        bridge = GoalWatcherBridge(goals)
+        scheduler = WatcherScheduler(
+            watcher_db,
+            fetchers={"website": SequenceFetcher([FetchResult(False, error="upstream down")])},
+            failure_limit=1,
+            goal_signal_handler=bridge.handle_event,
+        )
+        event = await scheduler.check_monitor(monitor, force=True)
+        signal = goals.list_watcher_signals(goal["goal_id"])[0]
+        assert event.event_type == "monitor_paused"
+        assert signal["event_type"] == "monitor_paused"
+        assert signal["source_event_id"] == event.id
+        assert goals.get(goal["goal_id"])["status"] == "active"
+        await scheduler.close()
+    finally:
+        goals.close()

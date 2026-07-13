@@ -23,7 +23,7 @@ Ares is a terminal-first AI assistant with a separate Next.js power workspace, a
 <table>
   <tr>
     <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
-    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 118 local tools for goals, watchers, files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
+    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 127 local tools for goals, watchers, files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
     <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
   </tr>
 </table>
@@ -102,12 +102,28 @@ Run the Instagram inbox watcher now and tell me what changed.
 
 The agent exposes `create_watcher`, `list_watchers`, `get_watcher`, `update_watcher`, `run_watcher_now`, fleet/event query tools, pause/resume, acknowledgement, capability discovery, and confirmed deletion. Use `get_watcher_capabilities` when Ares needs to inspect the currently connected MCP tools before building a workflow.
 
+### Goal-aware watcher signals
+
+Watchers can be linked to one or many durable goals. Pass `goal_id` to `create_watcher` for a one-step setup, or use `link_goal_watcher` later. Every detected change is fanned out idempotently using the watcher event UUID and stored in `goal_watcher_signals` with severity, old/new values, source provenance, snooze state, resolution, and surface count.
+
+A signal never changes goal progress or status. It appears in goal context for at most three turns during its first 48 hours, then remains available through `get_goal_signals` or `/goals signals` without nagging. The user can snooze or dismiss it, or explicitly confirm an `update_goal`/`complete_goal` call with `resolves_signal_id`; that mutation and signal acknowledgement share one SQLite transaction. Once every goal-specific copy is resolved, Ares reconciles the originating watcher incident too.
+
+See [`docs/goal-watcher-integration.md`](docs/goal-watcher-integration.md) for the runtime sequence, persistence contract, anti-nag rules, and operator examples.
+
+```text
+Create a goal to buy a laptop under $1,000, then watch this product page and link it.
+Show pending watcher signals for my laptop goal.
+Not now—snooze signal 12 for two days.
+Yes, the price is low enough; complete the goal and resolve signal 12.
+```
+
 For authenticated DMs, configure `/browser extension` or `/browser system`, sign in normally, and let the browser watcher navigate to or snapshot the inbox. Ares stores the captured signal—not your password—and never automates credential entry. The dashboard’s **Browser / DMs (Playwright)** source includes an Instagram inbox starter recipe; **Ares tool workflow** provides a visible JSON workflow editor for any read-only tool chain.
 
 Terminal controls use short IDs or exact names:
 
 ```text
 /monitor add "Production status" https://status.example.com --interval 5m --type website
+/monitor add "Laptop price" https://shop.example.com/laptop --interval 15m --goal 12
 /monitor list
 /monitor status ID
 /monitor pause ID
@@ -194,7 +210,7 @@ search_memory("Rohit Instagram")
 - **Session resilience:** malformed historical JSONL lines are skipped without discarding the rest of a session.
 - **Context continuity:** “continue,” “that session,” and person references can pull relevant archived turns into context.
 - **Structured people:** names, aliases, relationship notes, contact fields, and important dates are stored and retrieved as one local record.
-- **Evidence-backed goals:** multi-level outcomes, due dates, priorities, manual/derived progress, task/action links, and an append-only check-in timeline live in the shared database.
+- **Evidence-backed goals:** multi-level outcomes, due dates, priorities, manual/derived progress, task/action/watcher links, proactive signal review, and an append-only check-in timeline live in the shared database.
 - **Durable workflows:** task plans, leases, retries, verification steps, and a confirmation-aware runner survive process restarts.
 - **Action provenance:** file, communication, export, and workflow outcomes can be located later without storing arbitrary command bodies.
 
@@ -254,7 +270,8 @@ search_memory("Rohit Instagram")
 | Group | Representative tools |
 |---|---|
 | Memory & continuity | `store_memory`, `search_memory`, `remember_person`, `search_person`, `search_actions`, `export_data` |
-| Goals & evidence | `create_goal`, `list_goals`, `decompose_goal`, `link_goal_task`, `link_goal_action`, `record_goal_progress`, `sync_goal_progress` |
+| Goals & evidence | `create_goal`, `list_goals`, `decompose_goal`, `link_goal_task`, `link_goal_action`, `link_goal_watcher`, `get_goal_signals`, `snooze_goal_signal`, `record_goal_progress`, `sync_goal_progress` |
+| Proactive watchers | `create_watcher`, `run_watcher_now`, `list_watcher_events`, `acknowledge_watcher_event`, `get_watcher_overview` |
 | File operations | `read_file`, `search_files`, `write_file`, `edit_file`, `batch_edit`, `preview_diff`, `undo_last_edit`, `find_duplicates` |
 | Runtime | `run_code`, `run_command`, `terminal_exec` |
 | Research & media | `web_search`, `fetch_url`, `generate_image`, `resize_image`, `convert_image`, `crop_image` |
@@ -383,7 +400,7 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 |---|---|
 | `/help` | Show available controls. |
 | `/memory search QUERY` | Search durable facts and recall sources. |
-| `/goals [search|show|due]` | Inspect active goals, hierarchy, progress evidence, and deadlines. |
+| `/goals [search|show|due|signals]` | Inspect active goals, hierarchy, progress evidence, deadlines, and pending watcher signals. |
 | `/context` | Inspect active local context. |
 | `/model` | List or change the configured model. |
 | `/skills` | Discover, inspect, create, install, or manage skills. |
@@ -402,7 +419,7 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 ~/.ares/
 ├── config.json                 # Model, bridges, MCP, and surface configuration
 ├── data/
-│   ├── ares.db                 # Facts, embeddings, people, goals, conversations, actions, cron
+│   ├── ares.db                 # Facts, people, goals, goal-watcher signals, conversations, actions, cron
 │   ├── watchers.db             # Watchers, snapshots, incidents, checks, and notification attempts
 │   ├── telephony.key           # Local Fernet key for encrypted call-contact numbers
 │   ├── sessions/*.jsonl        # Append-only session archive with line provenance

@@ -274,6 +274,10 @@ class TelegramChannel:
         self._pending_marketplace_actions: dict[tuple[int, str], tuple[float, str, str, str | None]] = {}
         self._marketplace_results: dict[int, dict[str, list[str]]] = {}
         self._active_marketplace_requests: dict[int, str] = {}
+        executor = getattr(agent, "tool_executor", None)
+        attach = getattr(executor, "set_telegram_channel", None)
+        if callable(attach):
+            attach(self)
 
     @property
     def running(self) -> bool:
@@ -362,6 +366,10 @@ class TelegramChannel:
                 await result
         if self._owns_state_store:
             self.state_store.close()
+        executor = getattr(self.agent, "tool_executor", None)
+        detach = getattr(executor, "set_telegram_channel", None)
+        if callable(detach) and getattr(executor, "telegram_channel", None) is self:
+            detach(None)
 
     def _telegram_config(self) -> TelegramConfig:
         candidate = self._config_provider()
@@ -459,6 +467,7 @@ class TelegramChannel:
             database_path=resolve_watcher_database_path(self.config),
             defaults=self.config.watcher.defaults,
             db=watcher_tools.db if watcher_tools is not None else None,
+            goal_store=getattr(self.agent, "goal_store", None),
         )
         try:
             if command == "/alerts":
@@ -478,7 +487,8 @@ class TelegramChannel:
                 text = "Ares watchers\n" + ("\n".join(f"• {item['id'][:8]} · {item['name']} · {'paused' if not item['enabled'] else item['last_status'] or 'armed'} · {item['interval_seconds']}s" for item in values) if values else "No watchers configured.")
             elif action == "status":
                 item = result["monitor"]
-                text = f"Watcher · {item['name']}\nStatus: {item['last_status'] or 'armed'}\nEnabled: {item['enabled']}\nChecks: {item['total_checks']} · Changes: {item['total_changes']}\nErrors: {item['error_count']}\nLast: {item['last_checked_at'] or 'never'}"
+                linked = ", ".join(f"#{goal['goal_id']} {goal['title']}" for goal in result.get("linked_goals") or []) or "none"
+                text = f"Watcher · {item['name']}\nStatus: {item['last_status'] or 'armed'}\nEnabled: {item['enabled']}\nChecks: {item['total_checks']} · Changes: {item['total_changes']}\nErrors: {item['error_count']}\nLast: {item['last_checked_at'] or 'never'}\nLinked goals: {linked}"
             elif action == "events":
                 values = result["events"]
                 text = f"Events · {result['monitor']['name']}\n" + ("\n".join(f"• {item['severity'].upper()} · {item['change_summary'] or item['event_type']}" for item in values) if values else "No changes recorded.")
@@ -491,7 +501,8 @@ class TelegramChannel:
                     event = await service.scheduler.check_monitor(monitor, force=True) if monitor else None
                     text = f"Watcher check complete · {result['monitor']['name']}\n" + (f"Signal: {event.change_summary}" if event else "No change detected.")
             else:
-                text = f"Watcher {action} complete · {result['monitor']['name']} ({result['monitor']['id'][:8]})"
+                linked = f" · linked to goal #{result['linked_goal_id']}" if result.get("linked_goal_id") else ""
+                text = f"Watcher {action} complete · {result['monitor']['name']} ({result['monitor']['id'][:8]}){linked}"
             await self.api.send_message(chat_id, _telegram_trim(text), reply_to_message_id=reply_to)
         except (ValueError, KeyError) as exc:
             await self.api.send_message(chat_id, str(exc), reply_to_message_id=reply_to)
@@ -1159,6 +1170,74 @@ class TelegramChannel:
             await self.api.send_message(chat_id, message, reply_to_message_id=reply_to)
             return f"Telegram delivery failed: {resolved.name} could not be uploaded."
         return f"Telegram delivery verified: {resolved.name} was uploaded successfully to this Telegram chat."
+
+    async def deliver_file(
+        self,
+        *,
+        path: str | Path,
+        chat_id: int | None = None,
+        caption: str = "",
+    ) -> dict[str, Any]:
+        """Deliver a file only to a configured allowlisted chat.
+
+        This method is intentionally separate from the inbound /file command:
+        tools need a structured result and must never infer a recipient from a
+        transient incoming message.
+        """
+        cfg = self._telegram_config()
+        if not cfg.enabled or not resolve_bot_token(cfg):
+            return {"ok": False, "error": "Telegram delivery is disabled or not configured."}
+        allowed = {int(value) for value in cfg.allowed_chat_ids}
+        if not allowed:
+            return {"ok": False, "error": "Telegram delivery has no allowlisted chat IDs."}
+        if chat_id is None:
+            if len(allowed) != 1:
+                return {
+                    "ok": False,
+                    "error": "Specify chat_id because more than one Telegram chat is allowlisted.",
+                }
+            target_chat_id = next(iter(allowed))
+        else:
+            try:
+                target_chat_id = int(chat_id)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "Telegram chat_id must be a valid integer."}
+        if target_chat_id not in allowed:
+            return {"ok": False, "error": "Telegram chat_id is not allowlisted for delivery."}
+
+        try:
+            resolved = Path(path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            return {"ok": False, "error": "The requested local file was not found."}
+        if not resolved.is_file():
+            return {"ok": False, "error": "The requested path is not a regular file."}
+        try:
+            size = resolved.stat().st_size
+        except OSError:
+            return {"ok": False, "error": "The requested local file could not be inspected."}
+        if size > cfg.max_outbound_file_bytes:
+            return {
+                "ok": False,
+                "error": f"File exceeds the configured {cfg.max_outbound_file_bytes // (1024 * 1024)} MB Telegram upload limit.",
+            }
+        try:
+            await self.api.send_chat_action(target_chat_id, "upload_document")
+            response = await self.api.send_document(
+                target_chat_id,
+                resolved,
+                caption=(caption or f"Ares file: {resolved.name}"),
+            )
+        except Exception as exc:
+            logger.exception("Telegram tool file upload failed")
+            return {"ok": False, "error": f"Telegram file upload failed: {exc}"}
+        return {
+            "ok": True,
+            "chat_id": target_chat_id,
+            "path": str(resolved),
+            "name": resolved.name,
+            "bytes": size,
+            "telegram_message_id": response.get("message_id") if isinstance(response, dict) else None,
+        }
 
     async def _send_text_chunks(self, chat_id: int, text: str, reply_to: int | None) -> None:
         for index, chunk in enumerate(_split_message(text)):
