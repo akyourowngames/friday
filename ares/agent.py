@@ -141,9 +141,43 @@ class Agent:
             self.tools = [tool for tool in self.tools if tool.get("function", {}).get("name") not in cron_names]
         if self.mcp_manager is not None:
             self.tools.extend(getattr(self.mcp_manager, "tool_definitions", []))
+
+    def _live_mcp_context(self) -> str:
+        """Describe authoritative current MCP readiness for the next LLM turn."""
+        manager = getattr(self, "mcp_manager", None)
+        if manager is None:
+            return ""
+        try:
+            report = manager.readiness_report()
+        except Exception:
+            return ""
+        servers = report.get("servers") or {}
+        ready = [name for name, state in sorted(servers.items()) if state.get("ready")]
+        unavailable = [
+            name for name, state in sorted(servers.items()) if not state.get("ready")
+        ]
+        lines = [
+            "## Live MCP State (authoritative for this turn)",
+            f"Ready now: {', '.join(ready) if ready else 'none'}.",
+        ]
+        if unavailable:
+            lines.append(f"Not ready now: {', '.join(unavailable)}.")
+        lines.extend([
+            "This live state overrides older assistant messages and old tool failures in conversation history.",
+            "If the user explicitly requests a ready MCP, call that MCP now. Never claim it is unavailable "
+            "without either this live state marking it not ready or a failure returned by that MCP during this turn.",
+            "Do not silently switch to Playwright or another integration when the requested MCP is ready.",
+        ])
+        return "\n".join(lines)
+
     def build_messages(self, user_input: str, conversation_history: list[dict],
                        context: str = "") -> list[dict]:
         """Build the message list for the LLM."""
+        # MCPs can reconnect independently while a Telegram/web conversation
+        # remains open. Advertise the current registry at every turn instead of
+        # letting a stale assistant statement become the perceived truth.
+        if getattr(self, "mcp_manager", None) is not None:
+            self.refresh_tools()
         system_content = SYSTEM_PROMPT
         runtime = get_current_datetime_result()
         system_content += (
@@ -173,6 +207,9 @@ class Agent:
             "explicitly asks to continue it. If tool results are used, base the final answer on the current "
             "user request plus those tool results."
         )
+        live_mcp_context = self._live_mcp_context()
+        if live_mcp_context:
+            turn_guard += f"\n\n{live_mcp_context}"
 
         messages = [{"role": "system", "content": system_content}]
         messages.extend(conversation_history)
