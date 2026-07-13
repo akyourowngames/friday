@@ -136,6 +136,12 @@ DEFAULT_MCP_SERVERS: list[dict] = [
             "ANONYMIZED_TELEMETRY": "false",
             "WINDOWS_MCP_SCREENSHOT_SCALE": "0.5",
             "WINDOWS_MCP_DISABLE_FLASH": "true",
+            # `windows-mcp` receives UI Automation text directly from desktop
+            # applications.  Load Ares' narrowly-scoped compatibility hook in
+            # that subprocess so one malformed UTF-16 surrogate cannot crash
+            # its stdio JSON writer (observed with Telegram's UI tree).
+            "ARES_WINDOWS_MCP_COMPAT": "1",
+            "PYTHONPATH": str(Path(__file__).resolve().parent),
         },
         "timeout_seconds": 90.0,
     },
