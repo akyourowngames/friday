@@ -1,4 +1,5 @@
 import base64
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,16 @@ def test_next_workspace_export_and_runtime_descriptor_exist():
     assert page.headers["x-content-type-options"] == "nosniff"
 
 
+def test_workspace_agent_protocol_sends_normalized_selected_session_ids():
+    source = (Path(__file__).parents[1] / "ares-workspace" / "app" / "components" / "Workspace.tsx").read_text(encoding="utf-8")
+    assert "`conversation-${id}`" in source
+    assert 'type: "get_agent_runs", session_id:' in source
+    assert 'type: "cancel_agent_run", run_id: runId, session_id:' in source
+    assert 'type: "get_artifact", path: artifact.path, session_id:' in source
+    assert '"get_status", "get_workspace_settings"' in source
+    assert '"get_status", "get_agent_runs"' not in source
+
+
 def test_bundled_next_export_is_available_without_development_out(tmp_path, monkeypatch):
     from ares.workspace import app as app_module
     monkeypatch.setattr(app_module, "NEXT_WORKSPACE_OUT", tmp_path / "not-built")
@@ -36,9 +47,11 @@ def test_workspace_serves_allowed_pdfs_inline_for_local_preview(tmp_path):
     pdf = tmp_path / "brief.pdf"
     pdf_bytes = b"%PDF-1.6\nlocal preview\n"
     pdf.write_bytes(pdf_bytes)
-    app = create_workspace_app(artifact_roots=[tmp_path])
+    app = create_workspace_app(
+        artifact_roots=[tmp_path], artifact_resolver=lambda token: pdf if token == "owned" else None
+    )
     with TestClient(app) as client:
-        response = client.get("/api/artifact", params={"path": str(pdf)})
+        response = client.get("/api/artifact", params={"token": "owned"})
     assert response.status_code == 200
     assert response.content == pdf_bytes
     assert response.headers["content-type"].startswith("application/pdf")
@@ -51,9 +64,11 @@ def test_workspace_rejects_artifacts_outside_approved_roots(tmp_path):
     allowed.mkdir()
     outside = tmp_path / "outside.pdf"
     outside.write_bytes(b"%PDF-1.6\n")
-    app = create_workspace_app(artifact_roots=[allowed])
+    app = create_workspace_app(
+        artifact_roots=[allowed], artifact_resolver=lambda token: outside if token == "wrong" else None
+    )
     with TestClient(app) as client:
-        response = client.get("/api/artifact", params={"path": str(outside)})
+        response = client.get("/api/artifact", params={"token": "wrong"})
     assert response.status_code == 404
 
 

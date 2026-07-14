@@ -14,7 +14,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 132
+        assert len(tools) == 135
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -25,7 +25,10 @@ class TestToolDefinitions:
             "delegate_task",
             "delegate_tasks_parallel",
             "get_agent_run",
+            "list_agent_runs",
+            "get_latest_agent_run",
             "cancel_agent_run",
+            "resume_agent_run",
             "store_memory",
             "search_memory",
             "update_memory",

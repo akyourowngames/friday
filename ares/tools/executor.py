@@ -390,6 +390,26 @@ class ToolExecutor:
                 name_pattern=arguments.get("name_pattern", ""),
                 max_results=int(arguments.get("max_results", 20)),
             )
+        # Pure filesystem, document, image, shell, and REPL handlers may block
+        # on disk or subprocess I/O. Keep them off the shared event loop. DB-
+        # backed handlers intentionally remain on their owning thread because
+        # sqlite connections enforce thread affinity.
+        from ares.multi_agent_policy import (
+            FILESYSTEM_READ_TOOLS,
+            FILESYSTEM_WRITE_TOOLS,
+            REPL_TOOLS,
+            SHELL_TOOLS,
+        )
+
+        offload = (
+            set(FILESYSTEM_READ_TOOLS)
+            | set(FILESYSTEM_WRITE_TOOLS)
+            | set(REPL_TOOLS)
+            | set(SHELL_TOOLS)
+            | {"fetch_url"}
+        ) - {"export_data"}
+        if tool_name in offload:
+            return await asyncio.to_thread(self.execute, tool_name, arguments)
         return self.execute(tool_name, arguments)
 
     # ── Memory tools ──────────────────────────────────────────────

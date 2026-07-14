@@ -145,6 +145,36 @@ class ConversationStore:
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def get_messages_for_model(
+        self,
+        conversation_id: int,
+        limit: int = 20,
+        *,
+        max_content_chars: int = 50_000,
+    ) -> list[dict[str, str]]:
+        """Return bounded, model-safe direct history for exactly one chat.
+
+        This intentionally excludes stored system/tool roles, database metadata,
+        and legacy tool-call scaffolding.  Cross-conversation recall belongs in
+        the bounded recall/context layer and must never be presented as ordinary
+        preceding user/assistant messages in a newly created conversation.
+        """
+        bounded = max(0, min(int(limit), 200))
+        if bounded == 0:
+            return []
+        content_limit = max(1, min(int(max_content_chars), 200_000))
+        rows = self.conn.execute(
+            """SELECT role, content FROM conversation_messages
+               WHERE conversation_id = ? AND role IN ('user', 'assistant')
+               ORDER BY id DESC LIMIT ?""",
+            (int(conversation_id), bounded),
+        ).fetchall()
+        messages: list[dict[str, str]] = []
+        for row in reversed(rows):
+            content = str(row["content"] or "").replace("\x00", "")[:content_limit]
+            messages.append({"role": str(row["role"]), "content": content})
+        return messages
+
     def get_messages(self, conversation_id: int) -> list[dict]:
         """Return all messages for one conversation."""
         rows = self.conn.execute(

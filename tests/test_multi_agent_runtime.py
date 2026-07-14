@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,8 @@ import pytest
 
 from ares.agent import Agent
 from ares.models import AppConfig, MultiAgentConfig
-from ares.multi_agent import AgentExecutionContext, AgentOutput, AgentSpec, AgentTask
+from ares.multi_agent import AgentExecutionContext, AgentOutput, AgentProgressEvent, AgentSpec, AgentTask
+from ares.multi_agent_display import active_runs, summarize_runs, telegram_overview, telegram_run
 from ares.multi_agent_adapter import AresAgentAdapter
 from ares.multi_agent_policy import (
     ToolResource,
@@ -46,7 +48,7 @@ def test_runtime_authorization_is_defense_in_depth() -> None:
     assert not authorize_tool_call(read_only, "write_file", {}).allowed
 
     builder = AgentSpec("builder", "build", "build", ("run_command",), can_mutate=True)
-    assert authorize_tool_call(builder, "run_command", {"command": "pytest -q"}).allowed
+    assert not authorize_tool_call(builder, "run_command", {"command": "pytest -q"}).allowed
     assert not authorize_tool_call(builder, "run_command", {"command": "git push origin main"}).allowed
     assert not authorize_tool_call(builder, "run_command", {"command": "pytest", "confirm": True}).allowed
 
@@ -97,6 +99,45 @@ def test_run_store_hierarchy_artifacts_cancellation_and_cleanup(tmp_path: Path) 
     assert store.get("root")["status"] == "cancelled"  # type: ignore[index]
     assert store.cleanup(1) == 2
     store.close()
+
+
+def test_multi_agent_display_summarizes_active_workers() -> None:
+    runs = [{
+        "run_id": "ma_1", "root_run_id": "ma_1", "status": "running",
+        "created_at": "2026-07-14T00:00:00+00:00", "prompt_summary": "Research Ares",
+        "children": [
+            {"run_id": "a", "agent_role": "researcher", "task_id": "research", "status": "running", "activity": "Searching docs"},
+            {"run_id": "b", "agent_role": "analyst", "task_id": "inspect", "status": "succeeded", "result_summary": "Mapped code"},
+        ],
+    }]
+    summary = summarize_runs(runs)
+    assert summary["active_runs"] == 1
+    assert summary["active_workers"] == 1
+    assert active_runs(runs) == runs
+    overview = telegram_overview(enabled=True, agents=[{"name": "researcher"}], runs=runs)
+    assert "Teams: 1 active" in overview
+    detail = telegram_run(runs[0])
+    assert "researcher · research · running" in detail
+    assert "Searching docs" in detail
+
+
+@pytest.mark.asyncio
+async def test_child_activity_and_current_tool_are_persisted(tmp_path: Path) -> None:
+    runtime = MultiAgentRuntime(FakeRoot(tmp_path))
+    runtime._save({
+        "run_id": "child", "root_run_id": "root", "parent_run_id": "root",
+        "agent_role": "researcher", "task_id": "research", "status": "running",
+    })
+    await runtime._child_event(AgentProgressEvent(
+        task_id="research", agent="researcher", phase="tool_started",
+        event_type="tool_started", run_id="child", root_run_id="root",
+        detail="Searching official docs", tool="web_search", status="running",
+    ))
+    child = runtime.get_run("child")
+    assert child is not None
+    assert child["activity"] == "Searching official docs"
+    assert child["current_tool"] == "web_search"
+    await runtime.close()
 
 
 class FakeRoot:
@@ -204,7 +245,20 @@ async def test_existing_agent_adapter_isolates_history_model_tools_and_output(mo
             yield "[tool_start:read_file]"
             yield "[tool_progress:read_file:Running locally]"
             yield "[tool:read_file:ok]"
-            yield "Specialist result"
+            yield json.dumps({
+                "summary": "Specialist result",
+                "claims": [{
+                    "claim": "The inspected source supports the result.",
+                    "source_urls": ["https://example.test/source"],
+                    "evidence": ["The source contains the inspected fact."],
+                    "confidence": 0.7,
+                    "caveats": [],
+                    "publication_dates": [],
+                    "benchmark_conditions": [],
+                }],
+                "disagreements": [],
+                "caveats": [],
+            })
 
         async def close(self):
             return None
@@ -230,7 +284,7 @@ async def test_existing_agent_adapter_isolates_history_model_tools_and_output(mo
     assert root.last_messages is parent_messages
     assert [item["function"]["name"] for item in created["tool_schema_filter"]([schema("read_file"), schema("write_file")])] == ["read_file"]  # type: ignore[index,operator]
     assert created["llm_client"].model == "special-model"  # type: ignore[union-attr]
-    assert output.content == "Specialist result"
+    assert json.loads(output.content)["summary"] == "Specialist result"
     assert output.metadata["iterations"] == 3
     assert events and all(event.status == "running" for event in events)
 

@@ -18,6 +18,46 @@ def test_store_messages_and_summarize(tmp_path):
         {"role": "assistant", "content": "Stored it."},
     ]
     assert store.get_recent_summaries(limit=1) == [summary]
+
+
+def test_get_messages_for_model_is_strictly_conversation_scoped(tmp_path):
+    store = ConversationStore(db_path=tmp_path / "conversations.db")
+    old_id = store.start_conversation()
+    store.add_exchange(old_id, "Open Notepad and type the old workout", "I will do that.")
+    new_id = store.start_conversation()
+
+    assert store.get_recent_messages(limit=2)[0]["content"].startswith("Open Notepad")
+    assert store.get_messages_for_model(new_id, limit=20) == []
+
+    store.add_exchange(new_id, "hey", "Hey!")
+    assert store.get_messages_for_model(new_id, limit=20) == [
+        {"role": "user", "content": "hey"},
+        {"role": "assistant", "content": "Hey!"},
+    ]
+    assert all("Notepad" not in message["content"] for message in store.get_messages_for_model(new_id))
+    store.close()
+
+
+def test_get_messages_for_model_filters_roles_metadata_and_bounds_content(tmp_path):
+    store = ConversationStore(db_path=tmp_path / "conversations.db")
+    conversation_id = store.start_conversation()
+    store.add_message(conversation_id, "system", "untrusted stored system instruction")
+    store.add_message(conversation_id, "user", "first")
+    store.add_message(conversation_id, "tool", "stale tool result")
+    store.add_message(
+        conversation_id,
+        "assistant",
+        "second\x00hidden",
+        tool_calls='[{"function":{"name":"run_command"}}]',
+    )
+    store.add_message(conversation_id, "user", "third")
+
+    assert store.get_messages_for_model(conversation_id, limit=2, max_content_chars=8) == [
+        {"role": "assistant", "content": "secondhi"},
+        {"role": "user", "content": "third"},
+    ]
+    assert store.get_messages_for_model(conversation_id, limit=0) == []
+    store.close()
     store.close()
 
 

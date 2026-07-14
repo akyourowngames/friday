@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import mimetypes
 import re
+import secrets
+import time
 from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -163,6 +166,10 @@ class AresServer:
         self._ensure_multi_agent_subscription()
 
         self._connected_websockets: list = []
+        # Workspace supervision is scoped to each connection's selected
+        # conversation. Runtime session IDs are derived as ``conversation-N``.
+        self._connection_sessions: dict[Any, int | None] = {}
+        self._artifact_preview_tokens: dict[str, tuple[str, int, float]] = {}
         self._chat_tasks: set[asyncio.Task] = set()
         # A conversation must preserve its own order, but independent chats
         # should never wait for another chat's research or tool run. The Agent
@@ -228,10 +235,9 @@ class AresServer:
 
     async def _push_status_to_clients(self) -> None:
         """Push updated status to all connected websockets."""
-        status = self._status()
         for ws in list(self._connected_websockets):
             try:
-                await self._send(ws, status)
+                await self._send(ws, self._status(session_id=self._connection_sessions.get(ws)))
             except Exception:
                 pass
 
@@ -287,6 +293,7 @@ class AresServer:
             websocket_port=self.port,
             watcher_dashboard_url=f"http://{watcher.host}:{watcher.port}",
             artifact_roots=self._artifact_roots(),
+            artifact_resolver=self._resolve_artifact_preview_token,
         )
         workspace = self.config.workspace
         uvicorn_config = uvicorn.Config(
@@ -357,9 +364,12 @@ class AresServer:
     async def handle_client(self, websocket: ServerConnection) -> None:
         """Handle a connected desktop renderer."""
         self._connected_websockets.append(websocket)
+        self._connection_sessions[websocket] = None
         try:
-            await self._send(websocket, self._session_info())
-            await self._send(websocket, self._status())
+            await self._send(websocket, self._session_info(session_id=None))
+            await self._send(websocket, self._status(session_id=None))
+            # Never disclose global run details before this connection selects
+            # an explicit conversation.
             await self._send(websocket, self._agent_runs_state())
             async for raw in websocket:
                 try:
@@ -387,6 +397,7 @@ class AresServer:
         except ConnectionClosed:
             pass  # client disconnected (e.g. health-check probe or user closed app)
         finally:
+            self._connection_sessions.pop(websocket, None)
             if websocket in self._connected_websockets:
                 self._connected_websockets.remove(websocket)
 
@@ -434,9 +445,9 @@ class AresServer:
             elif msg_type == "get_memories":
                 await self._send(websocket, {"type": "memories", "memories": self._memories()})
             elif msg_type == "get_status":
-                await self._send(websocket, self._status())
+                await self._send(websocket, self._status(session_id=self._connection_sessions.get(websocket)))
             elif msg_type == "get_agent_runs":
-                await self._send(websocket, self._agent_runs_state(session_id=message.get("session_id")))
+                await self._handle_get_agent_runs(websocket, message)
             elif msg_type == "cancel_agent_run":
                 await self._handle_cancel_agent_run(websocket, message)
             elif msg_type == "get_personal_settings":
@@ -651,6 +662,7 @@ class AresServer:
                 session_id = self.conversation_store.start_conversation()
         else:
             session_id = self.conversation_store.start_conversation()
+        self._set_connection_session(websocket, session_id)
         event_context = {"session_id": session_id, "request_id": request_id}
         history = self._conversation_history(session_id)
         history = self._sanitize_history(history)
@@ -695,7 +707,9 @@ class AresServer:
         max_retries = 3
         for attempt in range(max_retries + 1):
             try:
-                async for chunk in self._run_agent_stream(agent_input, history, session_id):
+                async for chunk in self._run_agent_stream(
+                    agent_input, history, session_id, request_id=request_id
+                ):
                     tool_start = parse_tool_start_token(chunk)
                     if tool_start:
                         started_tools.append(tool_start)
@@ -814,7 +828,12 @@ class AresServer:
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
 
     async def _run_agent_stream(
-        self, agent_input: str, history: list[dict[str, Any]], session_id: int
+        self,
+        agent_input: str,
+        history: list[dict[str, Any]],
+        session_id: int,
+        *,
+        request_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Serialize only a single conversation while other chats run freely."""
         scope_factory = getattr(self.agent, "session_scope", None)
@@ -826,7 +845,14 @@ class AresServer:
         lock = self._session_execution_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             with scope:
-                async for chunk in self.agent.run_stream(agent_input, conversation_history=history):
+                kwargs: dict[str, Any] = {"conversation_history": history}
+                try:
+                    parameters = inspect.signature(self.agent.run_stream).parameters
+                except (TypeError, ValueError):
+                    parameters = {}
+                if "request_id" in parameters:
+                    kwargs["request_id"] = request_id
+                async for chunk in self.agent.run_stream(agent_input, **kwargs):
                     yield chunk
 
     async def _describe_attached_images(
@@ -1120,7 +1146,7 @@ class AresServer:
             "settings": self._workspace_settings()["settings"],
             "restart_required": [],
         })
-        await self._send(websocket, self._status())
+        await self._send(websocket, self._status(session_id=self._connection_sessions.get(websocket)))
         await self._send(websocket, self._mcp_state())
 
     def _mcp_state(self) -> dict[str, Any]:
@@ -1420,8 +1446,9 @@ class AresServer:
     async def _handle_new_session(self, websocket: Any) -> None:
         # A new composer is only a client selection change. Existing sessions
         # may still be streaming in the background and must remain writable.
-        self.conversation_id = None
-        await self._send(websocket, self._session_info())
+        self._set_connection_session(websocket, None)
+        await self._send(websocket, self._session_info(session_id=None))
+        await self._send(websocket, self._agent_runs_state())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
 
     async def _handle_rename_session(self, websocket: Any, message: dict[str, Any]) -> None:
@@ -1439,14 +1466,18 @@ class AresServer:
             await self._send_error(websocket, "session_id is required")
             return
         self.conversation_store.delete_conversation(session_id)
-        if self.conversation_id == session_id:
-            self.conversation_id = None
-            await self._send(websocket, self._session_info())
+        if self._connection_sessions.get(websocket) == session_id:
+            self._set_connection_session(websocket, None)
+            await self._send(websocket, self._session_info(session_id=None))
+            await self._send(websocket, self._agent_runs_state())
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
 
     async def _handle_load_session(self, websocket: Any, message: dict[str, Any]) -> None:
-        session_id = int(message.get("session_id") or self.conversation_id)
-        self.conversation_id = session_id
+        session_id = int(message.get("session_id") or self._connection_sessions.get(websocket) or 0)
+        if session_id <= 0:
+            await self._send_error(websocket, "session_id is required")
+            return
+        self._set_connection_session(websocket, session_id)
         await self._send(
             websocket,
             {
@@ -1455,7 +1486,8 @@ class AresServer:
                 "messages": self._conversation_history(session_id),
             },
         )
-        await self._send(websocket, self._session_info())
+        await self._send(websocket, self._session_info(session_id=session_id))
+        await self._send(websocket, self._agent_runs_state(session_id=session_id))
 
     async def _handle_prefetch_sessions(self, websocket: Any, message: dict[str, Any]) -> None:
         raw_ids = message.get("session_ids") or []
@@ -1486,6 +1518,10 @@ class AresServer:
         if not requested:
             await self._send_error(websocket, "Artifact path is required")
             return
+        session_id = self._connection_session(websocket, message.get("session_id"))
+        if session_id is None:
+            await self._send_error(websocket, "Artifact access requires the selected conversation")
+            return
         try:
             path = Path(requested).expanduser().resolve(strict=True)
         except (OSError, RuntimeError):
@@ -1494,6 +1530,9 @@ class AresServer:
         roots = self._artifact_roots()
         if not path.is_file() or not any(path.is_relative_to(root) for root in roots):
             await self._send_error(websocket, "Artifact is outside the Ares workspace")
+            return
+        if str(path) not in self._artifact_paths_for_session(session_id):
+            await self._send_error(websocket, "Artifact does not belong to the selected conversation")
             return
         if path.stat().st_size > 25 * 1024 * 1024:
             await self._send_error(websocket, "Artifact is larger than the 25 MB preview limit")
@@ -1517,8 +1556,59 @@ class AresServer:
             # endpoint. Chrome's PDF renderer is unreliable for iframe data:
             # URLs, while the endpoint preserves application/pdf and supports
             # its built-in toolbar, pages, and search.
-            payload["preview_url"] = f"/api/artifact?path={quote(str(path), safe='')}"
+            token = secrets.token_urlsafe(32)
+            now = time.monotonic()
+            self._artifact_preview_tokens = {
+                key: value
+                for key, value in self._artifact_preview_tokens.items()
+                if value[2] > now
+            }
+            self._artifact_preview_tokens[token] = (str(path), session_id, now + 120.0)
+            payload["preview_url"] = f"/api/artifact?token={quote(token, safe='')}"
         await self._send(websocket, payload)
+
+    def _resolve_artifact_preview_token(self, token: str) -> str | None:
+        """Resolve one unguessable preview capability without accepting paths."""
+        item = self._artifact_preview_tokens.get(str(token or ""))
+        if item is None:
+            return None
+        path, _session_id, expires_at = item
+        if expires_at <= time.monotonic():
+            self._artifact_preview_tokens.pop(str(token), None)
+            return None
+        return path
+
+    def _artifact_paths_for_session(self, session_id: int) -> set[str]:
+        """Return artifact paths already disclosed by one conversation/run."""
+        paths: set[str] = set()
+
+        def add(raw: Any) -> None:
+            if not raw:
+                return
+            try:
+                path = Path(str(raw)).expanduser().resolve(strict=True)
+            except (OSError, RuntimeError):
+                return
+            if path.is_file() and any(path.is_relative_to(root) for root in self._artifact_roots()):
+                paths.add(str(path))
+
+        for message in self._conversation_history(session_id):
+            for artifact in message.get("artifacts") or []:
+                if isinstance(artifact, dict):
+                    add(artifact.get("path"))
+
+        runtime = getattr(self.agent, "multi_agent_runtime", None)
+        runtime_session_id = self._runtime_session_id(session_id)
+        if runtime is not None and runtime_session_id is not None:
+            for run in runtime.list_runs(limit=200, session_id=runtime_session_id):
+                records = [run, *(run.get("children") or [])]
+                for record in records:
+                    if not isinstance(record, dict):
+                        continue
+                    for artifact in record.get("artifacts") or []:
+                        if isinstance(artifact, dict):
+                            add(artifact.get("path"))
+        return paths
 
     def _extract_artifacts(
         self, response: str, tool_calls: list[dict[str, Any]]
@@ -1579,7 +1669,7 @@ class AresServer:
         save_config(self.config)
         self.agent.set_model(model)
         await self._send(websocket, {"type": "model_updated", "model": model})
-        await self._send(websocket, self._status())
+        await self._send(websocket, self._status(session_id=self._connection_sessions.get(websocket)))
 
     async def _handle_complete_onboarding(
         self, websocket: Any, message: dict[str, Any]
@@ -1619,7 +1709,7 @@ class AresServer:
         await self._send(websocket, {"type": "onboarding_completed", "state": self._onboarding_state()})
         await self._send(websocket, {"type": "model_updated", "model": self.config.model})
         await self._send(websocket, self._personal_settings())
-        await self._send(websocket, self._status())
+        await self._send(websocket, self._status(session_id=self._connection_sessions.get(websocket)))
 
     async def _handle_save_personal_settings(
         self, websocket: Any, message: dict[str, Any]
@@ -1655,12 +1745,44 @@ class AresServer:
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "type": "session_info",
-            "session_id": self.conversation_id if session_id is None else session_id,
+            "session_id": session_id,
             "model": self.config.model,
         }
         if request_id:
             payload["request_id"] = request_id
         return payload
+
+    @staticmethod
+    def _runtime_session_id(session_id: Any | None) -> str | None:
+        """Normalize a workspace conversation ID to the runtime session key."""
+        if session_id in (None, ""):
+            return None
+        value = str(session_id).strip()
+        if value.startswith("conversation-"):
+            suffix = value.removeprefix("conversation-")
+            return value if suffix.isdigit() and int(suffix) > 0 else None
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            return None
+        return f"conversation-{numeric}" if numeric > 0 else None
+
+    @staticmethod
+    def _conversation_session_id(session_id: Any | None) -> int | None:
+        runtime_id = AresServer._runtime_session_id(session_id)
+        if runtime_id is None:
+            return None
+        return int(runtime_id.removeprefix("conversation-"))
+
+    def _set_connection_session(self, websocket: Any, session_id: int | None) -> None:
+        self._connection_sessions[websocket] = session_id
+
+    def _connection_session(self, websocket: Any, requested: Any | None = None) -> int | None:
+        current = self._connection_sessions.get(websocket)
+        if requested in (None, ""):
+            return current
+        selected = self._conversation_session_id(requested)
+        return selected if selected is not None and selected == current else None
 
     def _conversation_exists(self, conversation_id: int) -> bool:
         """Check if a conversation row exists in the database."""
@@ -1672,10 +1794,10 @@ class AresServer:
         ).fetchone()
         return row is not None
 
-    def _status(self) -> dict[str, Any]:
+    def _status(self, *, session_id: int | None = None) -> dict[str, Any]:
         context_usage = {"used": 0, "total": 128000, "percent": 0, "breakdown": {}}
-        if self.conversation_id:
-            history = self._conversation_history(self.conversation_id)
+        if session_id:
+            history = self._conversation_history(session_id)
             from ares.context_blend import (
                 TokenEstimator,
                 estimate_token_breakdown,
@@ -1714,7 +1836,7 @@ class AresServer:
             "type": "status",
             "model": self.config.model,
             "memory_count": self._memory_count(),
-            "session_id": self.conversation_id,
+            "session_id": session_id,
             "context_usage": context_usage,
             "watchers": watcher_status,
         }
@@ -1770,8 +1892,28 @@ class AresServer:
                 self._connected_websockets.remove(websocket)
 
     async def _handle_multi_agent_event(self, event: dict[str, Any]) -> None:
-        """Forward stable supervisor events without coupling it to WebSockets."""
-        await self._broadcast({"type": "agent_event", "event": event})
+        """Forward full supervisor details only to the selected conversation."""
+        conversation_id = self._conversation_session_id(event.get("session_id"))
+        if conversation_id is None:
+            return
+        public_event = dict(event)
+        public_event["runtime_session_id"] = str(event.get("session_id") or "")
+        public_event["session_id"] = conversation_id
+        stale: list[Any] = []
+        for websocket in list(self._connected_websockets):
+            if self._connection_sessions.get(websocket) != conversation_id:
+                continue
+            try:
+                await self._send(websocket, {
+                    "type": "agent_event", "session_id": conversation_id,
+                    "event": public_event,
+                })
+            except Exception:
+                stale.append(websocket)
+        for websocket in stale:
+            self._connection_sessions.pop(websocket, None)
+            with suppress(ValueError):
+                self._connected_websockets.remove(websocket)
 
     def _ensure_multi_agent_subscription(self) -> None:
         """Follow runtime creation/replacement during live configuration reloads."""
@@ -1788,15 +1930,49 @@ class AresServer:
     def _agent_runs_state(self, session_id: Any | None = None) -> dict[str, Any]:
         self._ensure_multi_agent_subscription()
         runtime = getattr(self.agent, "multi_agent_runtime", None)
+        conversation_id = self._conversation_session_id(session_id)
         if runtime is None:
-            return {"type": "agent_runs", "enabled": False, "runs": []}
-        selected = None if session_id in (None, "") else str(session_id)
+            return {
+                "type": "agent_runs", "enabled": False, "runs": [],
+                "session_id": conversation_id,
+            }
+        if conversation_id is None:
+            return {
+                "type": "agent_runs", "enabled": bool(self.config.multi_agent.enabled),
+                "runs": [], "agents": runtime.list_agents(), "session_id": None,
+            }
+        selected = self._runtime_session_id(conversation_id)
+        runs = runtime.list_runs(limit=30, session_id=selected)
         return {
             "type": "agent_runs",
             "enabled": bool(self.config.multi_agent.enabled),
-            "runs": runtime.list_runs(limit=30, session_id=selected),
+            "session_id": conversation_id,
+            "runtime_session_id": selected,
+            "runs": [self._public_agent_run(run, conversation_id) for run in runs],
             "agents": runtime.list_agents(),
         }
+
+    @staticmethod
+    def _public_agent_run(run: dict[str, Any], conversation_id: int) -> dict[str, Any]:
+        public = dict(run)
+        public["runtime_session_id"] = str(run.get("session_id") or "")
+        public["session_id"] = conversation_id
+        public["children"] = [
+            AresServer._public_agent_run(child, conversation_id)
+            for child in (run.get("children") or [])
+            if isinstance(child, dict)
+        ]
+        return public
+
+    async def _handle_get_agent_runs(self, websocket: Any, message: dict[str, Any]) -> None:
+        session_id = self._connection_session(websocket, message.get("session_id"))
+        if session_id is None:
+            if self._connection_sessions.get(websocket) is None and message.get("session_id") in (None, ""):
+                await self._send(websocket, self._agent_runs_state())
+            else:
+                await self._send_error(websocket, "Agent runs belong to another conversation.")
+            return
+        await self._send(websocket, self._agent_runs_state(session_id=session_id))
 
     async def _handle_cancel_agent_run(self, websocket: Any, message: dict[str, Any]) -> None:
         runtime = getattr(self.agent, "multi_agent_runtime", None)
@@ -1807,11 +1983,17 @@ class AresServer:
         if not run_id:
             await self._send_error(websocket, "run_id is required")
             return
-        cancelled = await runtime.cancel(run_id)
+        session_id = self._connection_session(websocket, message.get("session_id"))
+        if session_id is None:
+            await self._send_error(websocket, "That agent run belongs to another conversation.")
+            return
+        runtime_session_id = self._runtime_session_id(session_id)
+        cancelled = await runtime.cancel(run_id, session_id=runtime_session_id)
         await self._send(websocket, {
             "type": "agent_run_cancelled", "run_id": run_id, "cancelled": cancelled,
+            "session_id": session_id,
         })
-        await self._send(websocket, self._agent_runs_state())
+        await self._send(websocket, self._agent_runs_state(session_id=session_id))
 
     async def _watch_runtime_files(self) -> None:
         """Hot-reload local configuration and Ares instructions while running."""

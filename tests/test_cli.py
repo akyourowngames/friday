@@ -1,6 +1,8 @@
 """Tests for CLI startup helpers."""
 
+import asyncio
 import json
+import inspect
 import os
 import sqlite3
 from io import StringIO
@@ -25,9 +27,89 @@ class DummyAgent:
     def __init__(self):
         self.model = None
         self.last_messages = []
+        self.session_id = "cli-test"
 
     def set_model(self, model: str) -> None:
         self.model = model
+
+    def set_session_id(self, session_id: str) -> None:
+        self.session_id = session_id
+
+
+class FakeAgentRuntime:
+    def __init__(self):
+        self.config = SimpleNamespace(enabled=True)
+        self.listeners = []
+        self.cancelled = []
+        self.sessions = []
+        self.runs = [{
+            "run_id": "ma_cli", "root_run_id": "ma_cli", "session_id": "cli",
+            "status": "running", "created_at": "2026-07-14T00:00:00+00:00",
+            "prompt_summary": "Research and inspect the repository",
+            "activity": "Executing dependency wave",
+            "metadata": {"execution_waves": [["research"]]},
+            "children": [{
+                "run_id": "agent_cli", "root_run_id": "ma_cli", "agent_role": "researcher",
+                "task_id": "research", "status": "running", "activity": "Searching official docs",
+                "current_tool": "web_search", "dependencies": [],
+                "artifacts": [{"path": "report.md", "media_type": "text/markdown", "description": "Research report"}],
+            }],
+        }]
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+        return lambda: self.listeners.remove(listener) if listener in self.listeners else None
+
+    async def emit(self, event):
+        for listener in tuple(self.listeners):
+            result = listener(event)
+            if inspect.isawaitable(result):
+                await result
+
+    def list_agents(self):
+        return [{
+            "name": "researcher", "can_mutate": False, "max_iterations": 8,
+            "timeout_seconds": 120.0, "description": "Research official sources",
+        }]
+
+    def list_runs(self, limit=30, session_id=None):
+        self.sessions.append(("list", session_id))
+        return self.runs[:limit]
+
+    def get_run(self, run_id, session_id=None):
+        self.sessions.append(("get", session_id))
+        return self.runs[0] if run_id in {"ma_cli", "agent_cli"} else None
+
+    async def cancel(self, run_id, session_id=None):
+        self.cancelled.append((run_id, session_id))
+        return True
+
+    async def delegate_request(self, request, session_id=None):
+        self.sessions.append(("delegate", session_id, request))
+        return self.runs[0]
+
+    def doctor(self):
+        return {"enabled": True, "runtime_initialized": True, "persistence": "healthy"}
+
+    async def smoke_test(self, session_id=None):
+        self.sessions.append(("smoke", session_id))
+        return self.runs[0]
+
+
+class AgentEventStreamingAgent(DummyAgent):
+    def __init__(self):
+        super().__init__()
+        self.multi_agent_runtime = FakeAgentRuntime()
+
+    async def run_stream(self, *_args, **_kwargs):
+        base = {
+            "root_run_id": "ma_cli", "run_id": "agent_cli", "task_id": "research",
+            "agent": "researcher", "session_id": self.session_id, "status": "running",
+        }
+        await self.multi_agent_runtime.emit({**base, "event_type": "agent_started", "detail": "Researching"})
+        await self.multi_agent_runtime.emit({**base, "event_type": "tool_started", "tool": "web_search", "detail": "Using web search"})
+        await self.multi_agent_runtime.emit({**base, "event_type": "agent_completed", "status": "succeeded", "detail": "Research complete"})
+        yield "Team complete."
 
 
 class StreamingAgent(DummyAgent):
@@ -174,9 +256,21 @@ class DummyProjectContext:
 class DummyConversationStore:
     def __init__(self):
         self.exchanges = []
+        self.started = 1
+        self.ended = []
 
     def add_exchange(self, conversation_id, user_input, assistant_response):
         self.exchanges.append((conversation_id, user_input, assistant_response))
+
+    def start_conversation(self):
+        self.started += 1
+        return self.started
+
+    def end_conversation(self, conversation_id):
+        self.ended.append(conversation_id)
+
+    def get_messages_for_model(self, conversation_id, limit=20):
+        return []
 
 
 class DummySkill:
@@ -611,6 +705,81 @@ def test_tools_command_sets_output_mode():
     assert app.tool_output_mode == "hidden"
     assert app._handle_command("/tools summary")
     assert app.tool_output_mode == "summary"
+
+
+def test_agents_status_and_show_render_worker_dashboard():
+    app = make_cli()
+    app.agent.multi_agent_runtime = FakeAgentRuntime()
+
+    assert app._handle_command("/agents status")
+    assert app._handle_command("/agents show ma_cli")
+
+    output = app.console_file.getvalue()
+    assert "Ares Supervisor" in output
+    assert "1 active workers" in output
+    assert "researcher" in output
+    assert "Searching official docs" in output
+    assert "Execution Tree" in output
+    assert "Wave 1" in output
+    assert "report.md" in output
+
+
+@pytest.mark.asyncio
+async def test_agents_run_doctor_smoke_and_cancel_use_current_session():
+    app = make_cli()
+    runtime = FakeAgentRuntime()
+    app.agent.multi_agent_runtime = runtime
+
+    assert app._handle_command("/agents run compare frameworks")
+    assert app._handle_command("/agents doctor")
+    assert app._handle_command("/agents smoke-test")
+    assert app._handle_command("/agents cancel ma_cli")
+    await asyncio.sleep(0.05)
+
+    assert ("delegate", "cli-test", "compare frameworks") in runtime.sessions
+    assert ("smoke", "cli-test") in runtime.sessions
+    assert runtime.cancelled == [("ma_cli", "cli-test")]
+    output = app.console_file.getvalue()
+    assert "Multi-Agent Doctor" in output
+    assert "Native Delegation" in output or "ma_cli" in output
+
+
+def test_reset_starts_new_conversation_and_agent_session():
+    app = make_cli()
+    app.conversation_history = [{"role": "assistant", "content": "old"}]
+    app.agent.last_messages = [{"role": "assistant", "content": "stale"}]
+    old_conversation = app.conversation_id
+    old_session = app.agent.session_id
+
+    assert app._handle_command("/reset")
+
+    assert app.conversation_store.ended == [old_conversation]
+    assert app.conversation_id != old_conversation
+    assert app.conversation_history == []
+    assert app.agent.last_messages == []
+    assert app.agent.session_id != old_session
+
+
+def test_cli_model_history_never_uses_global_recent_messages():
+    app = make_cli()
+    app.conversation_store.get_recent_messages = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("global history must not be loaded")
+    )
+    assert app._conversation_history_for_model(app.conversation_id) == []
+
+
+@pytest.mark.asyncio
+async def test_cli_stream_prints_live_specialist_events():
+    app = make_cli()
+    app.agent = AgentEventStreamingAgent()
+
+    await app._process_input("research this")
+
+    output = app.console_file.getvalue()
+    assert "Agent | researcher" in output
+    assert "web search" in output
+    assert "Research complete" in output
+    assert "Team complete." in output
 
 
 @pytest.mark.asyncio

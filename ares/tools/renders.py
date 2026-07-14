@@ -661,6 +661,14 @@ RENDERERS: dict[str, Callable[[str], Any]] = {
     "update_task": lambda content: render_json_status(content, title="Workflow Task", border_style="bright_blue"),
     "cancel_task": lambda content: render_json_status(content, title="Workflow Task", border_style="bright_blue"),
     "run_task": lambda content: render_json_status(content, title="Workflow Run", border_style="bright_blue"),
+    "list_agents": lambda content: render_json_status(content, title="Native Specialist Roles", border_style="bright_magenta"),
+    "delegate_task": lambda content: render_json_status(content, title="Native Agent Run", border_style="bright_magenta"),
+    "delegate_tasks_parallel": lambda content: render_json_status(content, title="Native Agent Team", border_style="bright_magenta"),
+    "get_agent_run": lambda content: render_json_status(content, title="Agent Execution Manifest", border_style="bright_magenta"),
+    "list_agent_runs": lambda content: render_json_status(content, title="Agent Run Manifests", border_style="bright_magenta"),
+    "get_latest_agent_run": lambda content: render_json_status(content, title="Latest Agent Execution Manifest", border_style="bright_magenta"),
+    "cancel_agent_run": lambda content: render_json_status(content, title="Agent Run Cancellation", border_style="bright_magenta"),
+    "resume_agent_run": lambda content: render_json_status(content, title="Resumed Agent Team", border_style="bright_magenta"),
 }
 DEFAULT_RENDERER = render_generic_tool
 

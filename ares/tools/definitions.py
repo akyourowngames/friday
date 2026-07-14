@@ -72,8 +72,30 @@ def get_tool_definitions() -> list[dict]:
             ["run_id"],
         ),
         _tool(
+            "list_agent_runs",
+            "List real native multi-agent manifests for the current session. Agent counts, roles, waves, timing, and status must come from these records, never generated prose.",
+            {
+                "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                "status": {
+                    "type": "string",
+                    "enum": ["queued", "running", "succeeded", "failed", "timed_out", "blocked", "cancelled", "interrupted"],
+                },
+            },
+        ),
+        _tool(
+            "get_latest_agent_run",
+            "Get the latest real native multi-agent manifest for the current session, or an explicit zero-agent result when none exists.",
+            {},
+        ),
+        _tool(
             "cancel_agent_run",
             "Cancel an active native multi-agent root run and every unfinished child task.",
+            {"run_id": {"type": "string"}},
+            ["run_id"],
+        ),
+        _tool(
+            "resume_agent_run",
+            "Resume a durable, session-owned read-only agent run from its successful child checkpoints. Unfinished mutation-capable work is never replayed automatically.",
             {"run_id": {"type": "string"}},
             ["run_id"],
         ),

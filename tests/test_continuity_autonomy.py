@@ -20,6 +20,7 @@ from ares.sessions import SessionStore
 from ares.tasks import TaskConflictError, TaskStore, TaskToolHandlers
 from ares.tools import ToolExecutor
 from ares.tools.renders import get_renderer
+from ares.turn_policy import build_turn_execution_context
 
 
 def test_people_store_resolves_exact_aliases_and_returns_complete_records(tmp_path):
@@ -402,7 +403,8 @@ def test_agent_resolves_gmail_alias_before_mcp_without_leaking_email_to_ledger(t
                 "arguments": json.dumps({"to": "uma", "subject": "Hello", "body": "private email body"}),
             },
         }
-        results = asyncio.run(agent.process_tool_calls_async([call]))
+        with agent.turn_scope(build_turn_execution_context("Send Uma this email")):
+            results = asyncio.run(agent.process_tool_calls_async([call]))
         assert mcp.calls[0][1]["to"] == "uma@example.test"
         assert "uma@example.test" not in results[0]["content"]
         action = next(item for item in agent.action_ledger.list_all() if item["action_type"] == "email_sent")
@@ -424,7 +426,8 @@ def test_agent_resolves_gmail_alias_before_mcp_without_leaking_email_to_ledger(t
                 }),
             },
         }
-        asyncio.run(agent.process_tool_calls_async([calendar_call]))
+        with agent.turn_scope(build_turn_execution_context("Create this calendar event and invite Uma")):
+            asyncio.run(agent.process_tool_calls_async([calendar_call]))
         assert mcp.calls[1][1]["attendees"] == ["uma@example.test"]
         calendar_action = next(item for item in agent.action_ledger.list_all() if item["action_type"] == "calendar_event_created")
         assert "uma@example.test" not in json.dumps(calendar_action)
@@ -467,7 +470,8 @@ def test_agent_adds_playwright_stale_ref_recovery_without_blind_retry(tmp_path, 
                 "arguments": json.dumps({"ref": "e17"}),
             },
         }
-        result = asyncio.run(agent.process_tool_calls_async([call]))[0]["content"]
+        with agent.turn_scope(build_turn_execution_context("Click the referenced button in the browser")):
+            result = asyncio.run(agent.process_tool_calls_async([call]))[0]["content"]
         assert mcp.calls == 2
         assert "Do not retry the old ref" in result
         assert "Fresh browser snapshot" in result
@@ -497,7 +501,8 @@ def test_agent_runs_real_local_workflow_and_links_ledger_to_task(tmp_path, fake_
             "type": "function",
             "function": {"name": "run_task", "arguments": json.dumps({"task_id": task_id})},
         }
-        result = asyncio.run(agent.process_tool_calls_async([call]))
+        with agent.turn_scope(build_turn_execution_context("Run the saved task")):
+            result = asyncio.run(agent.process_tool_calls_async([call]))
         payload = json.loads(result[0]["content"])
         assert payload["ok"] is True and payload["task"]["status"] == "completed"
         assert target.read_text(encoding="utf-8") == "final"

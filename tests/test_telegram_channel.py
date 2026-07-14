@@ -6,7 +6,7 @@ import pytest
 
 import ares.channels.telegram as telegram_module
 from ares.channels.store import ChannelStore
-from ares.channels.telegram import TelegramChannel, _split_message, run_telegram_channel
+from ares.channels.telegram import TelegramChannel, _TelegramProgress, _split_message, run_telegram_channel
 from ares.channels.audio import EnglishAudioTranscriber, EnglishTranscript
 from ares.models import AppConfig, TelegramConfig
 
@@ -48,6 +48,40 @@ class FakeAgent:
         yield "[tool_start:web_search]"
         yield '[tool:web_search:{"query":"ares"}]'
         yield "Here is the answer."
+
+
+class FakeAgentRuntime:
+    def __init__(self):
+        self.config = SimpleNamespace(enabled=True)
+        self.cancelled = []
+        self.sessions = []
+        self.runs = [{
+            "run_id": "ma_telegram", "root_run_id": "ma_telegram", "session_id": "telegram-1", "status": "running",
+            "created_at": "2026-07-14T00:00:00+00:00", "prompt_summary": "Research Ares",
+            "children": [{
+                "run_id": "worker_1", "root_run_id": "ma_telegram", "agent_role": "researcher",
+                "task_id": "research", "status": "running", "activity": "Searching official docs",
+                "current_tool": "web_search", "dependencies": [],
+            }],
+        }]
+
+    def list_agents(self):
+        return [{
+            "name": "researcher", "can_mutate": False, "max_iterations": 8,
+            "timeout_seconds": 120, "description": "Research official sources",
+        }]
+
+    def list_runs(self, limit=30, session_id=None):
+        self.sessions.append(("list", session_id))
+        return self.runs[:limit]
+
+    def get_run(self, run_id, session_id=None):
+        self.sessions.append(("get", session_id))
+        return self.runs[0] if run_id in {"ma_telegram", "worker_1"} else None
+
+    async def cancel(self, run_id, session_id=None):
+        self.cancelled.append((run_id, session_id))
+        return True
 
 
 class FakeTelegramAPI:
@@ -187,6 +221,53 @@ async def test_help_exposes_marketplace_commands_to_an_authorized_chat(telegram_
     assert "/skills [list|search|info|install]" in response
     assert "/mcp [list|search|info|add|test|refresh]" in response
     assert "/confirm <code>" in response
+    assert "/agents [status|active|roles|runs|show|cancel]" in response
+    assert "/workers" in response
+
+
+@pytest.mark.asyncio
+async def test_telegram_agents_commands_show_and_cancel_workers(telegram_channel):
+    channel, _conversations, api, _state = telegram_channel
+    runtime = FakeAgentRuntime()
+    channel.agent.multi_agent_runtime = runtime
+
+    for update_id, text in enumerate(("/agents status", "/workers", "/agents show ma_telegram", "/agents cancel ma_telegram"), start=200):
+        await channel._handle_update({
+            "update_id": update_id,
+            "message": {"message_id": update_id, "chat": {"id": 123, "type": "private"}, "text": text},
+        })
+
+    responses = "\n".join(message[1] for message in api.messages)
+    assert "Ares specialist runtime" in responses
+    assert "All active specialist workers" in responses
+    assert "researcher · research · running" in responses
+    assert "Cancelled · ma_telegram" in responses
+    assert runtime.cancelled == [("ma_telegram", "telegram-1")]
+    assert runtime.sessions and all(item[1] == "telegram-1" for item in runtime.sessions)
+    assert not channel.agent.prompts
+
+
+@pytest.mark.asyncio
+async def test_telegram_progress_renders_compact_live_worker_team(telegram_channel):
+    channel, _conversations, api, _state = telegram_channel
+    progress = _TelegramProgress(channel, 123, 9)
+    await progress.start()
+    await progress.agent_event({
+        "event_type": "tool_started", "root_run_id": "ma_live", "run_id": "worker_live",
+        "agent": "researcher", "task_id": "docs", "status": "running",
+        "detail": "Searching official sources", "tool": "web_search",
+    })
+    await progress.agent_event({
+        "event_type": "agent_completed", "root_run_id": "ma_live", "run_id": "worker_live",
+        "agent": "researcher", "task_id": "docs", "status": "succeeded",
+        "detail": "Research complete",
+    })
+    await progress.finish("✅ Done")
+
+    edits = "\n".join(item[2] for item in api.edits)
+    assert "Ares team is working" in edits
+    assert "researcher · docs" in edits
+    assert "1/1 specialists completed" in api.edits[-1][2]
 
 
 @pytest.mark.asyncio
