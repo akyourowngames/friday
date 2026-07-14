@@ -55,6 +55,7 @@ def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
     if config.agent_max_iterations <= 40:
         config.agent_max_iterations = 80
     _configure_playwright_mcp(config)
+    _configure_windows_mcp(config)
     return config
 
 
@@ -78,6 +79,26 @@ def _configure_playwright_mcp(config: AppConfig) -> None:
             server["env"] = environment
         else:
             server.pop("env", None)
+
+
+def _configure_windows_mcp(config: AppConfig) -> None:
+    """Apply safe built-in Windows MCP compatibility upgrades in-memory.
+
+    Existing Ares installations persist their built-in MCP records, so changing
+    ``DEFAULT_MCP_SERVERS`` alone does not reach a user who already has a
+    Windows entry. Only recognize Ares' own ``uvx windows-mcp serve`` record;
+    custom Windows MCP servers remain completely untouched.
+    """
+    for server in config.mcp_servers:
+        if not isinstance(server, dict) or server.get("name") != "windows":
+            continue
+        args = list(server.get("args") or [])
+        if server.get("command") != "uvx" or args[:2] != ["windows-mcp", "serve"]:
+            continue
+        environment = dict(server.get("env") or {})
+        environment.setdefault("ARES_WINDOWS_MCP_COMPAT", "1")
+        environment.setdefault("PYTHONPATH", str(Path(__file__).resolve().parent))
+        server["env"] = environment
 
 
 def load_config() -> AppConfig:

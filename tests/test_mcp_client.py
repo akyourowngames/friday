@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import asyncio
 
 from ares.agent import Agent
+from ares.config import _ensure_mcp_defaults
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
 from ares.tools.mcp_client import (
     MCPAuthProvider,
@@ -34,6 +35,25 @@ def test_windows_mcp_is_restricted_to_desktop_interaction_tools():
     assert "PowerShell" not in allow_list
     assert "Registry" not in allow_list
     assert "FileSystem" not in allow_list
+
+
+def test_existing_builtin_windows_mcp_gets_snapshot_compatibility_env():
+    config = AppConfig()
+    windows = next(server for server in config.mcp_servers if server["name"] == "windows")
+    windows["env"] = {"WINDOWS_MCP_DISABLE_FLASH": "true"}
+
+    _ensure_mcp_defaults(config)
+
+    assert windows["env"]["ARES_WINDOWS_MCP_COMPAT"] == "1"
+    assert windows["env"]["PYTHONPATH"]
+
+
+def test_windows_mcp_compat_replaces_lone_surrogates_in_text_output():
+    from ares.windows_mcp_compat import _sanitize_result
+
+    result = _sanitize_result(["safe", "broken \ud83d", {"nested": "still \ud83d"}])
+
+    assert result == ["safe", "broken ?", {"nested": "still ?"}]
 
 
 def test_mcp_server_config_defaults():
@@ -136,6 +156,33 @@ def test_call_tool_routes_to_session_and_renders_text():
     result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {"limit": 2}))
 
     assert result == "event one\nevent two"
+
+
+def test_windows_snapshot_uses_short_timeout_and_recovers_once(monkeypatch):
+    class HungSession:
+        async def call_tool(self, tool_name, arguments):
+            await asyncio.sleep(3600)
+
+    manager = MCPClientManager(
+        [{"name": "windows", "command": "windows-mcp", "timeout_seconds": 90}]
+    )
+    manager.sessions["windows"] = HungSession()
+    recoveries: list[str] = []
+
+    async def fake_recover(reason):
+        recoveries.append(reason)
+
+    async def immediate_timeout(awaitable, timeout):
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(manager, "_recover_windows_server", fake_recover)
+    monkeypatch.setattr("ares.tools.mcp_client.asyncio.wait_for", immediate_timeout)
+
+    result = asyncio.run(manager.call_tool("mcp__windows__Snapshot", {}))
+
+    assert "timed out after 15s" in result
+    assert len(recoveries) == 1
 
 
 def test_readiness_report_uses_schema_cache():

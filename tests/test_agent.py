@@ -58,6 +58,38 @@ class TestAgent:
         assert "Current local date:" in system
         assert "Timezone:" in system
 
+    def test_build_messages_uses_live_mcp_state_over_stale_history(self, agent):
+        class FakeManager:
+            tool_definitions = [{
+                "type": "function",
+                "function": {
+                    "name": "mcp__windows__Snapshot",
+                    "description": "Inspect the desktop",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }]
+
+            @staticmethod
+            def readiness_report():
+                return {
+                    "servers": {
+                        "windows": {"ready": True},
+                        "calendar": {"ready": False},
+                    }
+                }
+
+        agent.mcp_manager = FakeManager()
+        messages = agent.build_messages(
+            "Use Windows MCP now",
+            [{"role": "assistant", "content": "Windows MCP was unavailable earlier."}],
+        )
+
+        guard = messages[-2]["content"]
+        assert "Live MCP State" in guard
+        assert "Ready now: windows" in guard
+        assert "overrides older assistant messages" in guard
+        assert any(tool["function"]["name"] == "mcp__windows__Snapshot" for tool in agent.tools)
+
     def test_build_messages_includes_user_input(self, agent):
         """Messages include the user's input."""
         messages = agent.build_messages("Hello", [])

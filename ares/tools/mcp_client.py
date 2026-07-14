@@ -669,19 +669,35 @@ class MCPClientManager:
             _, server_name, mcp_tool = tool_name.split("__", 2)
         except ValueError:
             return f"Error: Invalid MCP tool name '{tool_name}'. Expected mcp__<server>__<tool>."
-        session = self.sessions.get(server_name)
-        if session is None:
-            return f"Error: MCP server '{server_name}' is not connected."
-        timeout = self.servers.get(
+        config = self.servers.get(
             server_name, MCPServerConfig(name=server_name)
-        ).timeout_seconds
+        )
+        timeout = config.timeout_seconds
 
-        # Add retry logic for Playwright MCP calls to handle transient failures
-        max_retries = 2 if server_name == "playwright" else 0
+        # Desktop snapshots are expected to be fast. A crashed Windows MCP
+        # process used to leave callers waiting for its generic 90-second
+        # timeout, even after its stdio writer had already died. Keep an
+        # observation bounded, while allowing actions such as a native app
+        # launch to retain the configured server timeout.
+        if server_name == "windows" and mcp_tool.casefold() in {"snapshot", "screenshot"}:
+            timeout = min(timeout, 15.0)
+
+        # Retry only genuinely transient Playwright failures. Repeating a bad
+        # accessibility ref or invalid input costs seconds and cannot succeed
+        # without new page evidence, which the Agent handles separately.
+        # Snapshot is read-only, so a single retry after reconnecting a crashed
+        # Windows MCP is safe and lets the agent continue without manual restart.
+        can_retry_windows_snapshot = (
+            server_name == "windows" and mcp_tool.casefold() == "snapshot"
+        )
+        max_retries = 1 if server_name == "playwright" or can_retry_windows_snapshot else 0
         last_error = None
 
         for attempt in range(max_retries + 1):
             try:
+                session = self.sessions.get(server_name)
+                if session is None:
+                    return f"Error: MCP server '{server_name}' is not connected."
                 result = await asyncio.wait_for(
                     session.call_tool(mcp_tool, arguments=arguments), timeout=timeout
                 )
@@ -702,6 +718,11 @@ class MCPClientManager:
                     logger.warning("Retrying Playwright MCP call %s after timeout (attempt %d/%d)", mcp_tool, attempt + 1, max_retries + 1)
                     await asyncio.sleep(1.0)
                     continue
+                if can_retry_windows_snapshot and attempt < max_retries:
+                    await self._recover_windows_server(
+                        f"Snapshot timed out after {timeout:g}s"
+                    )
+                    continue
                 return f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s."
             except asyncio.CancelledError as exc:
                 _clear_current_task_cancellation()
@@ -710,13 +731,40 @@ class MCPClientManager:
                 )
                 return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. Check the MCP server logs or increase timeout_seconds."
             except Exception as exc:
-                if server_name == "playwright" and attempt < max_retries:
+                error_text = str(exc).casefold()
+                retryable = any(
+                    keyword in error_text
+                    for keyword in ("timeout", "navigation", "page load", "target closed", "connection reset")
+                )
+                if server_name == "playwright" and retryable and attempt < max_retries:
                     logger.warning("Retrying Playwright MCP call %s after error (attempt %d/%d): %s", mcp_tool, attempt + 1, max_retries + 1, exc)
                     await asyncio.sleep(1.0)
+                    continue
+                if can_retry_windows_snapshot and attempt < max_retries:
+                    await self._recover_windows_server(str(exc) or exc.__class__.__name__)
                     continue
                 return f"Error calling MCP tool '{mcp_tool}' on '{server_name}': {exc}"
 
         return f"Error: MCP tool '{mcp_tool}' on '{server_name}' failed after {max_retries + 1} attempts"
+
+    async def _recover_windows_server(self, reason: str) -> None:
+        """Replace a crashed Windows MCP process without touching other MCPs."""
+        name = "windows"
+        config = self.servers.get(name)
+        if config is None:
+            return
+        logger.warning("Restarting Windows MCP after Snapshot failure: %s", redact_mcp_text(reason))
+        self.server_errors[name] = "Restarting after a failed desktop snapshot."
+        await self.close_server(name)
+        try:
+            await asyncio.wait_for(
+                self._connect_server(name, config), timeout=min(config.timeout_seconds, 20.0)
+            )
+        except Exception as exc:
+            self.server_errors[name] = f"Restart failed: {redact_mcp_text(exc)}"
+            logger.warning("Windows MCP restart failed: %s", self.server_errors[name])
+        else:
+            self.server_errors.pop(name, None)
 
     def _render_result(self, result: Any) -> str:
         structured = getattr(result, "structured_content", None)

@@ -199,6 +199,52 @@ async def test_internal_tool_start_tokens_never_stream_as_chat(server):
 
 
 @pytest.mark.asyncio
+async def test_binary_artifacts_use_the_same_origin_workspace_preview_url(server, tmp_path):
+    pdf = tmp_path / "research" / "downloads" / "brief.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"%PDF-1.6\nlocal preview\n")
+    socket = FakeSocket()
+
+    await server.handle_message(socket, json.dumps({"type": "get_artifact", "path": str(pdf)}))
+
+    artifact = socket.messages[-1]
+    assert artifact["type"] == "artifact_content"
+    assert artifact["mime"] == "application/pdf"
+    assert artifact["preview_url"].startswith("/api/artifact?path=")
+    assert "data_url" not in artifact
+
+
+@pytest.mark.asyncio
+async def test_cancel_chat_stops_only_the_requested_background_task(server):
+    """A wedged tool may be stopped without waiting for the whole server."""
+    tool_started = asyncio.Event()
+
+    async def run_stream(_message, conversation_history=None):
+        yield "[tool_start:web_search]"
+        tool_started.set()
+        await asyncio.Event().wait()
+
+    server.agent.run_stream = run_stream
+    socket = FakeSocket()
+    request_id = "cancel-web-search"
+    task = asyncio.create_task(server.handle_message(socket, json.dumps({
+        "type": "chat", "request_id": request_id, "content": "search bitcoin",
+    })))
+    server._chat_tasks.add(task)
+    server._chat_tasks_by_request[request_id] = (task, socket)
+
+    await asyncio.wait_for(tool_started.wait(), timeout=0.2)
+    await server.handle_message(socket, json.dumps({
+        "type": "cancel_chat", "request_id": request_id, "session_id": 1,
+    }))
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert any(item["type"] == "response_cancelled" for item in socket.messages)
+    assert not any(item["type"] == "response_done" for item in socket.messages)
+
+
+@pytest.mark.asyncio
 async def test_skills_websocket_crud(server, tmp_path):
     server.agent.skill_manager = SkillManager([tmp_path / "skills"])
     socket = FakeSocket()
@@ -359,15 +405,15 @@ async def test_chat_streams_content_tools_and_done(server):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_chats_keep_streams_and_agent_scope_isolated(server):
+async def test_concurrent_chats_queue_agent_execution_and_keep_scopes_isolated(server):
     class ConcurrentAgent:
         def __init__(self):
             self.model = "test-model"
             self.tool_executor = type("ToolExecutor", (), {})()
             self.llm = FakeLLM()
             self.scope = ContextVar("test_chat_scope", default="none")
-            self.started = 0
-            self.both_started = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
 
         @contextmanager
         def session_scope(self, session_id):
@@ -378,15 +424,16 @@ async def test_concurrent_chats_keep_streams_and_agent_scope_isolated(server):
                 self.scope.reset(token)
 
         async def run_stream(self, message, conversation_history=None):
-            self.started += 1
-            if self.started == 2:
-                self.both_started.set()
-            await asyncio.wait_for(self.both_started.wait(), timeout=1)
-            session = self.scope.get()
-            yield f"{session}:{message}:one "
-            await asyncio.sleep(0)
-            assert self.scope.get() == session
-            yield "two"
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                session = self.scope.get()
+                yield f"{session}:{message}:one "
+                await asyncio.sleep(0)
+                assert self.scope.get() == session
+                yield "two"
+            finally:
+                self.active -= 1
 
         def close(self):
             pass
@@ -411,6 +458,7 @@ async def test_concurrent_chats_keep_streams_and_agent_scope_isolated(server):
         "r1": "conversation-1:first:one two",
         "r2": "conversation-2:second:one two",
     }
+    assert server.agent.max_active == 1
 
 
 @pytest.mark.asyncio

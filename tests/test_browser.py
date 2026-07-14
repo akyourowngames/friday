@@ -31,7 +31,7 @@ def test_get_mcp_args_for_all_explicit_modes():
         Path("~/.ares/data").expanduser() / "playwright-profile"
     )
     assert "--cdp-endpoint" in system and "http://127.0.0.1:9223" in system
-    assert extension == ["@playwright/mcp@latest", "--extension"]
+    assert extension == ["-y", "@playwright/mcp@latest", "--extension"]
 
 
 def test_auto_mode_prioritizes_extension_then_cdp_then_isolated(monkeypatch):
