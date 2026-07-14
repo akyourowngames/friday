@@ -291,6 +291,36 @@ class WatcherConfig(BaseModel):
     defaults: WatcherDefaultsConfig = Field(default_factory=WatcherDefaultsConfig)
 
 
+class MultiAgentRoleOverride(BaseModel):
+    """Optional local override for one native specialist role."""
+
+    enabled: bool = True
+    model: str | None = None
+    max_iterations: int | None = Field(default=None, ge=1, le=200)
+    timeout_seconds: float | None = Field(default=None, ge=1.0, le=3600.0)
+    allowed_tools: list[str] | None = None
+    can_mutate: bool | None = None
+    can_delegate: bool | None = None
+
+
+class MultiAgentConfig(BaseModel):
+    """Conservative limits for Ares' native supervisor runtime."""
+
+    enabled: bool = True
+    max_parallel_agents: int = Field(default=3, ge=1, le=16)
+    max_tasks_per_run: int = Field(default=8, ge=1, le=32)
+    default_timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
+    max_timeout_seconds: float = Field(default=600.0, ge=1.0, le=3600.0)
+    max_depth: int = Field(default=1, ge=0, le=4)
+    allow_recursive_delegation: bool = False
+    require_review_for_mutations: bool = True
+    persist_runs: bool = True
+    retention_days: int = Field(default=30, ge=1, le=3650)
+    stream_progress: bool = True
+    role_overrides: dict[str, MultiAgentRoleOverride] = Field(default_factory=dict)
+    model_overrides_by_role: dict[str, str] = Field(default_factory=dict)
+
+
 class SkillRegistry(BaseModel):
     """A configured, trusted source of community SKILL.md bundles.
 
@@ -416,6 +446,7 @@ class AppConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
+    multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     cron_enabled: bool = True
     cron_tick_seconds: int = 60
     cron_max_concurrent: int = 3
@@ -425,4 +456,6 @@ class AppConfig(BaseModel):
     browser_cdp_port: int = Field(default=9222, ge=1, le=65535)
     browser_chrome_path: str = ""
     browser_extension_token: str = ""
+    windows_snapshot_timeout_seconds: float = Field(default=12.0, ge=2.0, le=90.0)
+    windows_snapshot_cache_seconds: float = Field(default=1.5, ge=0.0, le=10.0)
     block_session_context: bool = False  # Block previous session summary from flowing into new sessions

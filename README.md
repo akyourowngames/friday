@@ -23,13 +23,14 @@ Ares is a terminal-first AI assistant with a separate Next.js power workspace, a
 <table>
   <tr>
     <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
-    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 127 local tools for goals, watchers, files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
+    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 132 local tools for goals, watchers, native specialists, files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
     <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
   </tr>
 </table>
 
 ### Latest upgrades
 
+- **Native multi-agent supervisor:** Ares can delegate bounded research, code analysis, implementation, review, and synthesis to isolated specialists; independent work runs concurrently, dependencies run in waves, and the root Ares agent still owns the final answer.
 - **Goal-aware monitoring:** link one watcher to multiple goals, review routed signals in both watcher consoles, and keep progress changes explicit instead of automatic.
 - **Research delivery:** search and rank web sources, fetch online pages/PDFs/reports, extract readable content, save sourced artifacts, and deliver supported files through Telegram.
 - **Power workspace:** isolated background chats, smooth token streaming, cached history with skeleton loading, structured tool traces, and built-in previews for Markdown, PDFs, images, and generated files.
@@ -77,6 +78,21 @@ npm run dev
 ```
 
 `npm run build` creates the static Next.js export and synchronizes it into `ares/workspace/static` for the Python runtime.
+
+### Native multi-agent mode
+
+Multi-agent mode is enabled conservatively by default. Ares delegates only when parallel research, separate code inspection, or an independent implementation review is worth the overhead. Each child gets an isolated history and session, a role-specific tool allowlist filtered before the model call, its own model/iteration/timeout budget, and no authority to invent user confirmation or recursively create a swarm.
+
+The chat workspace renders the live run tree with roles, dependencies, elapsed time, current tool, results, artifacts, failures, synthesis, and cancellation. Terminal users can inspect it with `/agents`, `/agents runs`, `/agents show RUN_ID`, and `/agents cancel RUN_ID`; `/agents on` and `/agents off` toggle delegation without disabling normal Ares chat.
+
+Example prompts:
+
+- “Research three approaches in parallel and compare them.”
+- “Inspect the backend and frontend separately, then create an implementation plan.”
+- “Have a builder implement this feature and a reviewer verify the changes.”
+- “Analyze this bug using a code analyst, documentation researcher, and verifier.”
+
+Configuration, safety details, role extension, and tool filtering are documented in [Native multi-agent mode](docs/multi-agent.md).
 
 > [!TIP]
 > Start in the terminal first. Use `/setup`, `/model`, `/context`, and `/help` to inspect the active configuration and available controls.
@@ -279,6 +295,7 @@ search_memory("Rohit Instagram")
 | Memory & continuity | `store_memory`, `search_memory`, `remember_person`, `search_person`, `search_actions`, `export_data` |
 | Goals & evidence | `create_goal`, `list_goals`, `decompose_goal`, `link_goal_task`, `link_goal_action`, `link_goal_watcher`, `get_goal_signals`, `snooze_goal_signal`, `record_goal_progress`, `sync_goal_progress` |
 | Proactive watchers | `create_watcher`, `run_watcher_now`, `list_watcher_events`, `acknowledge_watcher_event`, `get_watcher_overview` |
+| Native specialists | `list_agents`, `delegate_task`, `delegate_tasks_parallel`, `get_agent_run`, `cancel_agent_run` |
 | File operations | `read_file`, `search_files`, `write_file`, `edit_file`, `batch_edit`, `preview_diff`, `undo_last_edit`, `find_duplicates` |
 | Runtime | `run_code`, `run_command`, `terminal_exec` |
 | Research & media | `web_search`, `fetch_url`, `generate_image`, `resize_image`, `convert_image`, `crop_image` |
@@ -413,6 +430,7 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 | `/skills` | Discover, inspect, create, install, or manage skills. |
 | `/mcp status` | Inspect MCP readiness and safe diagnostics. |
 | `/browser status` | Inspect the effective Playwright browser connection mode. |
+| `/agents [status|runs|show|cancel|on|off]` | Inspect and control native specialist roles and runs. |
 | `/phone status` | Check KDE Connect/ADB health. |
 | `/export [PATH]` | Export local Ares data. |
 | `/import PATH [--config]` | Import a previous local export. |
@@ -427,6 +445,7 @@ Telegram uses long polling: no public IP, webhook, or port forwarding is require
 ├── config.json                 # Model, bridges, MCP, and surface configuration
 ├── data/
 │   ├── ares.db                 # Facts, people, goals, goal-watcher signals, conversations, actions, cron
+│   ├── multi_agent.db          # Root/child agent runs, timing, status, summaries, and artifact references
 │   ├── watchers.db             # Watchers, snapshots, incidents, checks, and notification attempts
 │   ├── telephony.key           # Local Fernet key for encrypted call-contact numbers
 │   ├── sessions/*.jsonl        # Append-only session archive with line provenance
@@ -471,6 +490,7 @@ npm run build
 ## 📚 Further reading
 
 - [MCP configuration and management](docs/mcp.md)
+- [Native multi-agent mode](docs/multi-agent.md)
 - [Marketplace guide](docs/marketplace.md)
 - [Watcher service design](docs/superpowers/specs/2026-07-12-watcher-service-design.md)
 - [Watcher core implementation plan](docs/superpowers/plans/2026-07-12-watcher-core-infrastructure.md)

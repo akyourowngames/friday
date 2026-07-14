@@ -1,10 +1,10 @@
 "use client";
 
-import { ArrowDown, ArrowUp, FileImage, FileText, Paperclip, Square, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Bot, FileImage, FileText, Network, Paperclip, Square, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Artifact, ChatMessage, PendingFile, TraceEvent } from "@/lib/types";
+import type { AgentRootRun, Artifact, ChatMessage, PendingFile, TraceEvent } from "@/lib/types";
 
 interface Props {
   messages: ChatMessage[];
@@ -21,6 +21,9 @@ interface Props {
   openArtifact: (artifact: Artifact) => void;
   model: string;
   traces: TraceEvent[];
+  agentRunsEnabled: boolean;
+  agentRuns: AgentRootRun[];
+  cancelAgentRun: (runId: string) => void;
 }
 
 export function MarkdownContent({ children, streaming = false }: { children: string; streaming?: boolean }) {
@@ -51,8 +54,49 @@ function ArtifactCards({ artifacts, open }: { artifacts?: Artifact[]; open: (art
   </button>)}</div>;
 }
 
+function runElapsed(run: AgentRootRun, now: number) {
+  const start = Date.parse(run.started_at || run.created_at || "");
+  if (!Number.isFinite(start)) return "";
+  const end = run.completed_at ? Date.parse(run.completed_at) : now || start;
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function MultiAgentRuns({ enabled, runs, cancel, openArtifact }: { enabled: boolean; runs: AgentRootRun[]; cancel: (runId: string) => void; openArtifact: (artifact: Artifact) => void }) {
+  const [now, setNow] = useState(0);
+  const active = runs.some(run => ["queued", "running"].includes(run.status));
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  if (!enabled || !runs.length) return null;
+  return <div className="agent-runs" aria-label="Multi-agent runs">
+    {runs.slice(0, 5).map(run => <details className={`agent-run is-${run.status}`} key={run.run_id} open={run.status === "running" || run.status === "queued"}>
+      <summary>
+        <span className="agent-run-icon"><Network /></span>
+        <span><strong>Specialist team</strong><small>{run.prompt_summary || run.activity || "Delegated Ares task"}</small></span>
+        <em>{runElapsed(run, now)}</em><i className={`agent-status is-${run.status}`}>{run.status.replace("_", " ")}</i>
+      </summary>
+      <div className="agent-run-body">
+        <div className="agent-run-meta"><span>{run.children?.length || 0} specialist{run.children?.length === 1 ? "" : "s"}</span><span>{run.activity || (run.status === "running" ? "Executing dependency wave" : "Run complete")}</span>{["queued", "running"].includes(run.status) && <button onClick={() => cancel(run.run_id)}><Square size={10} fill="currentColor" /> Cancel</button>}</div>
+        <div className="agent-children">{(run.children || []).map(child => <details className={`agent-child is-${child.status}`} key={child.run_id}>
+          <summary><span className="agent-avatar"><Bot /></span><span><strong>{child.agent_role}</strong><small>{child.task_id}{child.dependencies?.length ? ` · after ${child.dependencies.join(", ")}` : " · independent"}</small></span><i className={`agent-status is-${child.status}`}>{child.status.replace("_", " ")}</i></summary>
+          <div className="agent-child-result">
+            <p>{child.activity || child.result_summary || child.error_summary || child.prompt_summary || "Waiting for progress…"}</p>
+            {child.current_tool && <span className="agent-tool">Using {child.current_tool}</span>}
+            {child.result_content && <MarkdownContent>{child.result_content}</MarkdownContent>}
+            {child.artifacts?.length ? <div className="agent-artifacts">{child.artifacts.map(artifact => <button key={artifact.path} onClick={() => openArtifact({ id: artifact.path, path: artifact.path, name: artifact.path.split(/[\\/]/).pop() || "Artifact", mime: artifact.media_type, kind: artifact.media_type === "application/pdf" ? "pdf" : artifact.media_type?.startsWith("image/") ? "image" : artifact.media_type === "text/markdown" ? "markdown" : "file" })}><FileText />{artifact.path.split(/[\\/]/).pop()}</button>)}</div> : null}
+          </div>
+        </details>)}</div>
+        {run.status === "running" && run.activity?.toLowerCase().includes("synth") ? <div className="agent-synthesis"><i /> Root Ares is synthesizing the specialist evidence</div> : null}
+      </div>
+    </details>)}
+  </div>;
+}
+
 export function ChatView(props: Props) {
-  const { messages, historyLoading, streaming, busy, phase, input, setInput, attachments, removeAttachment, addFiles, sendMessage, openArtifact, model, traces } = props;
+  const { messages, historyLoading, streaming, busy, phase, input, setInput, attachments, removeAttachment, addFiles, sendMessage, openArtifact, model, traces, agentRunsEnabled, agentRuns, cancelAgentRun } = props;
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -96,6 +140,7 @@ export function ChatView(props: Props) {
             <ArtifactCards artifacts={message.artifacts} open={openArtifact} />
           </div>
         </article>)}
+        <MultiAgentRuns enabled={agentRunsEnabled} runs={agentRuns} cancel={cancelAgentRun} openArtifact={openArtifact} />
         {busy && !streaming && !historyLoading ? <article className="message assistant thinking-message"><div className="message-avatar">A</div><div><div className="message-head"><strong>Ares</strong><time>{phase === "thinking" ? "reasoning" : "working"}</time></div><div className="thinking-copy"><span>Thinking through this</span><i /><i /><i /></div></div></article> : null}
         {streaming ? <article className="message assistant"><div className="message-avatar">A</div><div><div className="message-head"><strong>Ares</strong><time>streaming</time></div><MarkdownContent streaming>{streaming}</MarkdownContent></div></article> : null}
       </div>

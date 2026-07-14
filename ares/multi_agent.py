@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from datetime import UTC, datetime
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -57,6 +58,7 @@ class AgentTask:
     context: Mapping[str, Any] = field(default_factory=dict)
     timeout_seconds: float | None = None
     required: bool = True
+    result_format: str = "text"
 
     def __post_init__(self) -> None:
         if not self.task_id.strip() or not self.agent.strip() or not self.prompt.strip():
@@ -101,6 +103,15 @@ class AgentResult:
     artifacts: tuple[AgentArtifact, ...] = ()
     error: str | None = None
     duration_seconds: float = 0.0
+    run_id: str = ""
+    parent_run_id: str = ""
+    root_run_id: str = ""
+    iterations: int = 0
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "artifacts", tuple(self.artifacts))
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     @property
     def ok(self) -> bool:
@@ -124,11 +135,42 @@ class AgentProgressEvent:
     agent: str
     phase: str
     detail: str = ""
+    event_type: str = "agent_progress"
+    root_run_id: str = ""
+    parent_run_id: str = ""
+    run_id: str = ""
+    session_id: str = ""
+    status: str = ""
+    tool: str = ""
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "event_type": self.event_type,
+            "root_run_id": self.root_run_id,
+            "parent_run_id": self.parent_run_id,
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "task_id": self.task_id,
+            "agent": self.agent,
+            "phase": self.phase,
+            "status": self.status or self.phase,
+            "detail": self.detail,
+            "tool": self.tool,
+            "timestamp": self.timestamp,
+            "metadata": dict(self.metadata),
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class AgentTeamResult:
     results: tuple[AgentResult, ...]
+    root_run_id: str = ""
+    execution_waves: tuple[tuple[str, ...], ...] = ()
 
     def by_id(self) -> Mapping[str, AgentResult]:
         return MappingProxyType({result.task_id: result for result in self.results})
@@ -136,6 +178,40 @@ class AgentTeamResult:
     @property
     def succeeded(self) -> bool:
         return all(result.ok for result in self.results)
+
+    @property
+    def status(self) -> str:
+        if self.succeeded:
+            return AgentRunStatus.SUCCEEDED.value
+        if any(result.status is AgentRunStatus.CANCELLED for result in self.results):
+            return AgentRunStatus.CANCELLED.value
+        return AgentRunStatus.FAILED.value
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "root_run_id": self.root_run_id,
+            "status": self.status,
+            "execution_waves": [list(wave) for wave in self.execution_waves],
+            "results": [
+                {
+                    "task_id": item.task_id,
+                    "agent": item.agent,
+                    "status": item.status.value,
+                    "content": item.content,
+                    "summary": item.summary,
+                    "error": item.error,
+                    "duration_seconds": item.duration_seconds,
+                    "run_id": item.run_id,
+                    "artifacts": [
+                        {"path": artifact.path, "media_type": artifact.media_type, "description": artifact.description}
+                        for artifact in item.artifacts
+                    ],
+                    "iterations": item.iterations,
+                    "metadata": dict(item.metadata),
+                }
+                for item in self.results
+            ],
+        }
 
 
 class AgentRegistry:
@@ -237,6 +313,7 @@ class MultiAgentOrchestrator:
         pending = set(task_map)
         results: dict[str, AgentResult] = {}
         semaphore = asyncio.Semaphore(self.max_parallel)
+        waves: list[tuple[str, ...]] = []
 
         while pending:
             for task_id in list(pending):
@@ -263,6 +340,7 @@ class MultiAgentOrchestrator:
             ready.sort(key=lambda task: order[task.task_id])
             if not ready:
                 raise RuntimeError("no runnable tasks remain")
+            waves.append(tuple(task.task_id for task in ready))
 
             slots: list[AgentResult | None] = [None] * len(ready)
 
@@ -302,7 +380,11 @@ class MultiAgentOrchestrator:
                     )
                 pending.clear()
 
-        return AgentTeamResult(tuple(results[task.task_id] for task in tasks))
+        return AgentTeamResult(
+            tuple(results[task.task_id] for task in tasks),
+            root_run_id=str((run_metadata or {}).get("root_run_id") or ""),
+            execution_waves=tuple(waves),
+        )
 
     async def _run_one(
         self,
@@ -329,27 +411,36 @@ class MultiAgentOrchestrator:
                     output.summary,
                     output.artifacts,
                     duration_seconds=time.perf_counter() - started,
+                    run_id=str(output.metadata.get("run_id") or ""),
+                    parent_run_id=str(output.metadata.get("parent_run_id") or ""),
+                    root_run_id=str(output.metadata.get("root_run_id") or ""),
+                    iterations=int(output.metadata.get("iterations") or 0),
+                    metadata=output.metadata,
                 )
                 await self._emit(callback, AgentProgressEvent(task.task_id, task.agent, "succeeded", output.summary))
                 return result
         except TimeoutError:
-            return AgentResult(
+            result = AgentResult(
                 task.task_id,
                 task.agent,
                 AgentRunStatus.TIMED_OUT,
                 error=f"agent exceeded {task.timeout_seconds or spec.timeout_seconds:.2f}s timeout",
                 duration_seconds=time.perf_counter() - started,
             )
+            await self._emit(callback, AgentProgressEvent(task.task_id, task.agent, "timed_out", result.error or ""))
+            return result
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            return AgentResult(
+            result = AgentResult(
                 task.task_id,
                 task.agent,
                 AgentRunStatus.FAILED,
                 error=f"{type(exc).__name__}: {exc}",
                 duration_seconds=time.perf_counter() - started,
             )
+            await self._emit(callback, AgentProgressEvent(task.task_id, task.agent, "failed", result.error or ""))
+            return result
 
     @staticmethod
     async def _emit(callback: ProgressCallback | None, event: AgentProgressEvent) -> None:
@@ -361,8 +452,8 @@ class MultiAgentOrchestrator:
 
 
 READ_ONLY_RESEARCH_TOOLS = (
-    "web_search", "fetch_url", "extract_document", "read_file", "search_files",
-    "list_directory", "search_memory", "search_actions", "list_skills", "load_skill",
+    "web_search", "fetch_url", "download_online_file", "extract_document", "read_file", "search_files",
+    "list_directory", "search_memory", "search_actions", "list_skills", "load_skill", "mcp__fetch__*",
 )
 READ_ONLY_CODE_TOOLS = (
     "read_file", "search_files", "list_directory", "get_file_info", "glob_pattern",
@@ -371,16 +462,16 @@ READ_ONLY_CODE_TOOLS = (
 CODE_MUTATION_TOOLS = READ_ONLY_CODE_TOOLS + (
     "write_file", "edit_file", "create_directory", "move_file", "batch_edit",
     "insert_line", "replace_lines", "delete_lines", "preview_diff", "backup_file",
-    "undo_last_edit", "append_to_file", "prepend_to_file", "run_python", "run_shell",
+    "undo_last_edit", "append_to_file", "prepend_to_file", "run_python", "run_command",
 )
 
 
 def default_agent_specs() -> tuple[AgentSpec, ...]:
     return (
-        AgentSpec("planner", "Creates a bounded dependency-aware plan.", "Plan minimal independent tasks."),
-        AgentSpec("researcher", "Collects source-backed evidence.", "Prefer primary sources.", READ_ONLY_RESEARCH_TOOLS, timeout_seconds=180),
-        AgentSpec("analyst", "Compares evidence and trade-offs.", "State assumptions and confidence.", READ_ONLY_CODE_TOOLS),
-        AgentSpec("builder", "Implements an approved scoped change.", "Inspect, edit minimally, and test.", CODE_MUTATION_TOOLS, timeout_seconds=300, can_mutate=True),
-        AgentSpec("reviewer", "Checks correctness, safety, and regressions.", "Review without mutating.", READ_ONLY_CODE_TOOLS),
-        AgentSpec("synthesizer", "Combines specialist outputs.", "Preserve caveats and failed-task status."),
+        AgentSpec("planner", "Decomposes complex work into bounded tasks and success criteria.", "Identify dependencies and success criteria. Do not mutate anything.", READ_ONLY_CODE_TOOLS),
+        AgentSpec("researcher", "Collects evidence from the web, documentation, and read-only MCP sources.", "Prefer primary sources and preserve source URLs.", READ_ONLY_RESEARCH_TOOLS, timeout_seconds=180),
+        AgentSpec("analyst", "Inspects repository structure, integration points, risks, and tests.", "Remain read-only. State assumptions and affected components.", READ_ONLY_CODE_TOOLS),
+        AgentSpec("builder", "Implements approved scoped work and runs relevant tests.", "Inspect first, edit narrowly, verify, and respect every confirmation boundary.", CODE_MUTATION_TOOLS, timeout_seconds=300, can_mutate=True),
+        AgentSpec("reviewer", "Checks generated changes for correctness, regressions, security, and architecture.", "Remain read-only and report evidence-backed findings.", READ_ONLY_CODE_TOOLS),
+        AgentSpec("synthesizer", "Combines specialist findings into a compact structured result.", "Resolve disagreements with evidence and preserve caveats."),
     )

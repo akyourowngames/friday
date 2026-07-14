@@ -89,7 +89,9 @@ async def test_independent_tasks_run_in_parallel() -> None:
     elapsed = time.perf_counter() - started
 
     assert peak == 3
-    assert elapsed < 0.18
+    # peak concurrency is the deterministic proof; keep only a generous wall
+    # clock guard because the complete Windows suite can briefly deschedule it.
+    assert elapsed < 0.5
     assert [item.content for item in result.results] == ["one", "two", "three"]
 
 

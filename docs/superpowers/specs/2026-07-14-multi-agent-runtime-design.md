@@ -1,8 +1,10 @@
 # Ares Native Multi-Agent Runtime
 
 **Date:** 2026-07-14  
-**Status:** Phase 1 implementation  
-**Branch:** `agent/multi-agent-runtime`
+**Status:** Implemented end to end on the default branch
+**Branch:** `ares`
+
+> Implementation note: the original phase-one scheduler described below has now been connected to the existing `Agent`, strict pre-LLM tool filtering and runtime authorization, SQLite run persistence, native delegation tools, resource-aware parallel tool calls, WebSocket/CLI controls, and the existing Next.js workspace. See [`docs/multi-agent.md`](../../multi-agent.md) for the current operator and developer contract.
 
 ## Decision
 
@@ -35,7 +37,7 @@ The existing `Agent` already:
 
 The missing primitive is an orchestration layer above that loop. Also, `process_tool_calls_async()` currently executes returned tool calls one-by-one, so real parallelism needs explicit resource-aware scheduling rather than only prompting the model to work in parallel.
 
-## Phase 1 included here
+## Initial scheduler foundation
 
 `ares/multi_agent.py` adds:
 
@@ -95,7 +97,7 @@ flowchart TD
     B -. artifact refs .-> FS
 ```
 
-## Phase 2: connect the existing `Agent` as the executor
+## Implemented: connect the existing `Agent` as the executor
 
 Add an adapter that creates an isolated specialist run while reusing Ares services:
 
@@ -121,17 +123,19 @@ Recommended defaults:
 ```json
 {
   "multi_agent": {
-    "enabled": false,
-    "max_parallel": 4,
+    "enabled": true,
+    "max_parallel_agents": 3,
     "max_tasks_per_run": 8,
-    "max_delegation_depth": 1,
+    "max_depth": 1,
+    "allow_recursive_delegation": false,
     "default_timeout_seconds": 120,
+    "max_timeout_seconds": 600,
     "require_review_for_mutations": true
   }
 }
 ```
 
-## Phase 3: parallelize safe tool calls
+## Implemented: parallelize safe tool calls
 
 Classify tool calls into resource groups before parallel execution:
 
@@ -143,7 +147,7 @@ Classify tool calls into resource groups before parallel execution:
 
 Preserve the model’s tool-result order even when execution finishes out of order. Do not blindly parallelize every tool call because two writes may conflict.
 
-## Phase 4: persistence and workspace UI
+## Implemented: persistence and workspace UI
 
 Persist a run tree in SQLite:
 

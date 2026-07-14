@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
@@ -205,7 +205,11 @@ class ToolExecutor:
         try:
             yield
         finally:
-            self._session_context.reset(token)
+            # Async-generator cancellation can finalize in a copied context.
+            # The scoped value is already unreachable there; never turn a
+            # disconnected client into an unhandled ContextVar exception.
+            with suppress(ValueError):
+                self._session_context.reset(token)
 
     def set_watcher_service(self, service: WatcherService | None) -> None:
         """Attach the watcher service owned by the current Ares runtime."""

@@ -14,13 +14,18 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 127
+        assert len(tools) == 132
 
     def test_tool_names(self):
         """Tool names match expected set."""
         tools = get_tool_definitions()
         names = {t["function"]["name"] for t in tools}
         assert names == {
+            "list_agents",
+            "delegate_task",
+            "delegate_tasks_parallel",
+            "get_agent_run",
+            "cancel_agent_run",
             "store_memory",
             "search_memory",
             "update_memory",

@@ -23,6 +23,61 @@ def get_tool_definitions() -> list[dict]:
     """Return all tool definitions in OpenAI function calling format."""
     return [
         _tool(
+            "list_agents",
+            "List native Ares specialist roles, capabilities, tool boundaries, mutation status, timeouts, and iteration budgets.",
+            {},
+        ),
+        _tool(
+            "delegate_task",
+            "Delegate one bounded specialist task. Use only when specialization provides meaningful value; the root Ares agent remains responsible for the final answer.",
+            {
+                "agent": {"type": "string", "description": "Specialist role returned by list_agents."},
+                "task": {"type": "string", "description": "Specific, independently verifiable assignment."},
+                "context": {"type": "string", "description": "Minimal task-specific context; do not duplicate the whole conversation."},
+                "timeout_seconds": {"type": "number", "description": "Optional bounded timeout."},
+                "required": {"type": "boolean", "default": True},
+                "result_format": {"type": "string", "default": "text", "description": "text, markdown, or json."},
+            },
+            ["agent", "task"],
+        ),
+        _tool(
+            "delegate_tasks_parallel",
+            "Run multiple native specialists in dependency-aware parallel waves. Independent tasks overlap; dependent tasks wait for prerequisite results.",
+            {
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {"type": "string"},
+                            "agent": {"type": "string"},
+                            "prompt": {"type": "string"},
+                            "depends_on": {"type": "array", "items": {"type": "string"}},
+                            "context": {"type": "object"},
+                            "timeout_seconds": {"type": "number"},
+                            "required": {"type": "boolean", "default": True},
+                            "result_format": {"type": "string", "default": "text"},
+                        },
+                        "required": ["task_id", "agent", "prompt"],
+                    },
+                },
+                "context": {"type": "string", "description": "Shared bounded context for every specialist."},
+            },
+            ["tasks"],
+        ),
+        _tool(
+            "get_agent_run",
+            "Inspect a current or completed native multi-agent root or child run.",
+            {"run_id": {"type": "string"}},
+            ["run_id"],
+        ),
+        _tool(
+            "cancel_agent_run",
+            "Cancel an active native multi-agent root run and every unfinished child task.",
+            {"run_id": {"type": "string"}},
+            ["run_id"],
+        ),
+        _tool(
             "store_memory",
             "Save a durable user preference, identity fact, recurring project, or explicit remember-this request. Do not store temporary moods, insults, tool outputs, guesses, current events, or facts about the world.",
             {

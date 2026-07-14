@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -43,6 +44,16 @@ class Agent:
         is_voice_session: bool = False,
         session_store: Any | None = None,
         session_id: str | None = None,
+        tool_executor: ToolExecutor | None = None,
+        llm_client: LLMClient | None = None,
+        browser_controller: BrowserTaskController | None = None,
+        playwright_tool_lock: asyncio.Lock | None = None,
+        skill_manager: SkillManager | None = None,
+        system_prompt_override: str | None = None,
+        tool_schema_filter: Callable[[list[dict]], list[dict]] | None = None,
+        tool_authorizer: Callable[[str, dict], Any] | None = None,
+        delegation_depth: int = 0,
+        multi_agent_runtime: Any | None = None,
     ):
         self.memory_store = memory_store
         self.conversation_store = conversation_store
@@ -51,7 +62,8 @@ class Agent:
         self._session_context: ContextVar[str | None | object] = ContextVar(
             f"ares_agent_session_{id(self)}", default=_SESSION_UNSET
         )
-        self.tool_executor = ToolExecutor(
+        self._owns_tool_executor = tool_executor is None
+        self.tool_executor = tool_executor or ToolExecutor(
             memory_store=memory_store,
             conversation_store=conversation_store,
             config=config,
@@ -60,14 +72,21 @@ class Agent:
         )
         self._session_store = session_store or self.tool_executor.session_store
         self.mcp_manager = mcp_manager
-        self.browser_controller = BrowserTaskController()
+        self.browser_controller = browser_controller or BrowserTaskController()
         # Browser pages are a single mutable surface. Other MCP servers, local
         # tools, and LLM turns can safely proceed in parallel across chats.
-        self._playwright_tool_lock = asyncio.Lock()
+        self._playwright_tool_lock = playwright_tool_lock or asyncio.Lock()
+        self._windows_snapshot_cache: dict[str, tuple[float, str, str]] = {}
+        self.system_prompt_override = system_prompt_override
+        self._tool_schema_filter = tool_schema_filter
+        self._tool_authorizer = tool_authorizer
+        self.delegation_depth = delegation_depth
+        self.multi_agent_runtime = multi_agent_runtime
         self.is_cron_session = is_cron_session
         self.is_voice_session = is_voice_session
         self.refresh_tools()
         self.last_messages: list[dict] = []
+        self.last_iteration_count = 0
 
         kwargs = {}
         if api_key or config:
@@ -76,13 +95,14 @@ class Agent:
             kwargs["base_url"] = base_url or (config.api_base_url if config else "")
         if model or config:
             kwargs["model"] = model or (config.model if config else "")
-        self.llm = LLMClient(**kwargs)
+        self.llm = llm_client or LLMClient(**kwargs)
         if config is not None:
             self.llm.config = config
-        self.tool_executor.config = self.llm.config
         self.config = self.llm.config
-        self.tool_executor.set_session_id(session_id)
-        if getattr(self.tool_executor, "telephony", None) is not None:
+        if self._owns_tool_executor:
+            self.tool_executor.config = self.llm.config
+            self.tool_executor.set_session_id(session_id)
+        if self._owns_tool_executor and getattr(self.tool_executor, "telephony", None) is not None:
             # Phone transcripts use the normal agent loop, so call-time tool
             # access and memory behavior remain identical to chat.
             self.tool_executor.telephony.voice_agent.agent = self
@@ -90,8 +110,8 @@ class Agent:
         self.action_ledger = self.tool_executor.action_ledger
         self.task_store = self.tool_executor.task_store
         self.goal_store = self.tool_executor.goal_store
-        self.workflow_runner: AutonomousWorkflowRunner | None = None
-        if self.task_store is not None and self.action_ledger is not None:
+        self.workflow_runner: AutonomousWorkflowRunner | None = getattr(self.tool_executor, "workflow_runner", None)
+        if self._owns_tool_executor and self.task_store is not None and self.action_ledger is not None:
             self.workflow_runner = AutonomousWorkflowRunner(
                 task_store=self.task_store,
                 action_ledger=self.action_ledger,
@@ -110,13 +130,23 @@ class Agent:
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
         skill_dirs = list(self.config.skill_dirs or [])
-        self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
-        self.tool_executor.skill_manager = self.skill_manager
+        self.skill_manager = skill_manager or SkillManager(skill_dirs=skill_dirs or None)
+        if self._owns_tool_executor:
+            self.tool_executor.skill_manager = self.skill_manager
+
+        # The root owns one lightweight supervisor. Child specialists share its
+        # stores and executor but never receive recursive delegation by default.
+        if self.multi_agent_runtime is None and delegation_depth == 0 and self.config.multi_agent.enabled:
+            from ares.multi_agent_runtime import MultiAgentRuntime
+
+            self.multi_agent_runtime = MultiAgentRuntime(self)
+            self.refresh_tools()
 
     def set_session_id(self, session_id: str | None) -> None:
         """Update local provenance scope when a long-lived surface switches chats."""
         self._default_session_id = session_id
-        self.tool_executor.set_session_id(session_id)
+        if self._owns_tool_executor:
+            self.tool_executor.set_session_id(session_id)
 
     @property
     def session_id(self) -> str | None:
@@ -131,7 +161,8 @@ class Agent:
             with self.tool_executor.session_scope(session_id):
                 yield
         finally:
-            self._session_context.reset(token)
+            with suppress(ValueError):
+                self._session_context.reset(token)
 
     def refresh_tools(self) -> None:
         """Refresh the advertised tool list, including connected MCP tools."""
@@ -141,6 +172,12 @@ class Agent:
             self.tools = [tool for tool in self.tools if tool.get("function", {}).get("name") not in cron_names]
         if self.mcp_manager is not None:
             self.tools.extend(getattr(self.mcp_manager, "tool_definitions", []))
+        if not getattr(getattr(getattr(self, "config", None), "multi_agent", None), "enabled", False) or getattr(self, "delegation_depth", 0) > 0:
+            delegation_names = {"list_agents", "delegate_task", "delegate_tasks_parallel", "get_agent_run", "cancel_agent_run"}
+            self.tools = [tool for tool in self.tools if tool.get("function", {}).get("name") not in delegation_names]
+        schema_filter = getattr(self, "_tool_schema_filter", None)
+        if schema_filter is not None:
+            self.tools = schema_filter(self.tools)
 
     def _live_mcp_context(self) -> str:
         """Describe authoritative current MCP readiness for the next LLM turn."""
@@ -178,7 +215,7 @@ class Agent:
         # letting a stale assistant statement become the perceived truth.
         if getattr(self, "mcp_manager", None) is not None:
             self.refresh_tools()
-        system_content = SYSTEM_PROMPT
+        system_content = getattr(self, "system_prompt_override", None) or SYSTEM_PROMPT
         runtime = get_current_datetime_result()
         system_content += (
             "\n\n## Runtime"
@@ -196,7 +233,8 @@ class Agent:
                     system_content += f"\n\n{skill_context}"
         if context:
             system_content += f"\n\n## Current Context\n{context}"
-        browser_guidance = self.browser_controller.begin_turn(self.session_id, user_input)
+        browser_controller = getattr(self, "browser_controller", None)
+        browser_guidance = browser_controller.begin_turn(self.session_id, user_input) if browser_controller is not None else ""
         if browser_guidance:
             system_content += f"\n\n{browser_guidance}"
 
@@ -448,6 +486,14 @@ class Agent:
         if configured_skill_dirs and current_skill_dirs[: len(configured_skill_dirs)] != configured_skill_dirs:
             self.skill_manager = SkillManager(skill_dirs=configured_skill_dirs)
             self.tool_executor.skill_manager = self.skill_manager
+        if self.delegation_depth == 0:
+            if self.multi_agent_runtime is None and config.multi_agent.enabled:
+                from ares.multi_agent_runtime import MultiAgentRuntime
+
+                self.multi_agent_runtime = MultiAgentRuntime(self)
+            elif self.multi_agent_runtime is not None:
+                self.multi_agent_runtime.apply_config()
+        self.refresh_tools()
 
     def reload_runtime_content(self) -> None:
         """Refresh local instructions that may change while ``ares --all`` runs.
@@ -547,10 +593,20 @@ class Agent:
     async def _execute_external_tool(self, tool_name: str, args: dict) -> str:
         """Execute one MCP call, serializing only the shared browser surface."""
         resolved_args = self._resolve_external_person_arguments(tool_name, args)
-        is_browser = self.browser_controller.is_playwright_tool(tool_name)
+        browser_controller = getattr(self, "browser_controller", None)
+        if browser_controller is None:
+            if self.mcp_manager is None:
+                return "Error: MCP manager is not configured."
+            return await self.mcp_manager.call_tool(tool_name, resolved_args)
+        from ares.multi_agent_policy import ToolResource, classify_tool
+
+        is_browser = (
+            browser_controller.is_playwright_tool(tool_name)
+            or classify_tool(tool_name) is ToolResource.BROWSER_SHARED
+        )
 
         async def execute() -> str:
-            preflight = self.browser_controller.before_call(
+            preflight = browser_controller.before_call(
                 self.session_id, tool_name, resolved_args
             )
             used_cached_snapshot = preflight.cached_result is not None
@@ -561,26 +617,65 @@ class Agent:
             elif self.mcp_manager is None:
                 result = "Error: MCP manager is not configured."
             else:
-                result = await self.mcp_manager.call_tool(tool_name, resolved_args)
+                lowered = tool_name.casefold()
+                is_windows_snapshot = lowered.startswith("mcp__windows__") and lowered.endswith("__snapshot")
+                cache_key = str(self.session_id or "root")
+                args_key = json.dumps(resolved_args, sort_keys=True, default=str)
+                cached = self._windows_snapshot_cache.get(cache_key)
+                cache_seconds = float(getattr(self.config, "windows_snapshot_cache_seconds", 1.5))
+                if is_windows_snapshot and cached and cached[2] == args_key and time.monotonic() - cached[0] <= cache_seconds:
+                    result = cached[1]
+                elif is_windows_snapshot:
+                    timeout = float(getattr(self.config, "windows_snapshot_timeout_seconds", 12.0))
+                    try:
+                        async with asyncio.timeout(timeout):
+                            result = await self.mcp_manager.call_tool(tool_name, resolved_args)
+                    except TimeoutError:
+                        screenshot_tool = next(
+                            (
+                                str(schema.get("function", {}).get("name") or "")
+                                for schema in getattr(self.mcp_manager, "tool_definitions", [])
+                                if str(schema.get("function", {}).get("name") or "").casefold().endswith("__screenshot")
+                                and str(schema.get("function", {}).get("name") or "").casefold().startswith("mcp__windows__")
+                            ),
+                            "",
+                        )
+                        if not screenshot_tool:
+                            result = f"Error: Windows UI-tree Snapshot exceeded {timeout:.0f}s. Use the fast Windows Screenshot tool or retry Snapshot with use_ui_tree=false."
+                        else:
+                            fast = await self.mcp_manager.call_tool(screenshot_tool, {"use_annotation": False})
+                            result = (
+                                f"Windows UI-tree Snapshot exceeded {timeout:.0f}s, so Ares automatically returned a fast screenshot-only capture. "
+                                "Use Snapshot again only if interactive element IDs are essential.\n\n"
+                                f"{fast}"
+                            )
+                    self._windows_snapshot_cache[cache_key] = (time.monotonic(), str(result), args_key)
+                    if len(self._windows_snapshot_cache) > 64:
+                        oldest = min(self._windows_snapshot_cache, key=lambda key: self._windows_snapshot_cache[key][0])
+                        self._windows_snapshot_cache.pop(oldest, None)
+                else:
+                    if lowered.startswith("mcp__windows__"):
+                        self._windows_snapshot_cache.pop(cache_key, None)
+                    result = await self.mcp_manager.call_tool(tool_name, resolved_args)
             if not used_cached_snapshot:
-                result = self.browser_controller.after_call(
+                result = browser_controller.after_call(
                     self.session_id, tool_name, resolved_args, result
                 )
             if (
                 self.mcp_manager is not None
-                and self.browser_controller.should_recover_stale_ref(
+                and browser_controller.should_recover_stale_ref(
                     self.session_id, tool_name, resolved_args, result
                 )
             ):
                 snapshot_tool = "mcp__playwright__browser_snapshot"
                 snapshot = await self.mcp_manager.call_tool(snapshot_tool, {})
-                snapshot = self.browser_controller.after_call(
+                snapshot = browser_controller.after_call(
                     self.session_id, snapshot_tool, {}, snapshot
                 )
                 executor = getattr(self, "tool_executor", None)
                 if executor is not None:
                     executor.record_external_action(snapshot_tool, {}, snapshot)
-                if self.browser_controller.result_succeeded(snapshot):
+                if browser_controller.result_succeeded(snapshot):
                     return (
                         f"{result}\n\nPlaywright recovery: captured one fresh snapshot automatically. "
                         "Do not retry the old ref. Choose a ref from the snapshot below and make at most one "
@@ -597,49 +692,95 @@ class Agent:
                 return await execute()
         return await execute()
 
+    def _authorize_tool(self, tool_name: str, args: dict) -> None:
+        authorizer = getattr(self, "_tool_authorizer", None)
+        if authorizer is None:
+            return
+        decision = authorizer(tool_name, args)
+        allowed = bool(getattr(decision, "allowed", decision))
+        if not allowed:
+            reason = str(getattr(decision, "reason", "tool call is not authorized"))
+            raise PermissionError(reason)
+
+    async def _execute_one_tool_async(
+        self,
+        index: int,
+        call: dict,
+        progress_callback: ToolProgressCallback | None,
+    ) -> tuple[int, bool, str]:
+        tool_name = call.get("function", {}).get("name", "unknown")
+        try:
+            args = self._tool_call_args(call)
+            self._authorize_tool(tool_name, args)
+            if progress_callback is not None:
+                await progress_callback(tool_name, "Preparing input")
+            if tool_name.startswith("mcp__"):
+                if progress_callback is not None:
+                    await progress_callback(tool_name, "Calling connected tool")
+                result = await self._execute_external_tool(tool_name, args)
+                executor = getattr(self, "tool_executor", None)
+                if executor is not None:
+                    executor.record_external_action(tool_name, args, result)
+                external = True
+            elif tool_name in {"list_agents", "delegate_task", "delegate_tasks_parallel", "get_agent_run", "cancel_agent_run"}:
+                if self.multi_agent_runtime is None:
+                    result = "Error: Native multi-agent mode is disabled."
+                else:
+                    if progress_callback is not None:
+                        await progress_callback(tool_name, "Running native specialists")
+                    result = await self.multi_agent_runtime.execute_tool(tool_name, args, session_id=self.session_id)
+                external = False
+            elif tool_name == "run_task":
+                if progress_callback is not None:
+                    await progress_callback(tool_name, "Running workflow steps")
+                if self.workflow_runner is None:
+                    result = "Error: Workflow runner is unavailable because local task storage is not configured."
+                else:
+                    result = await self.workflow_runner.run(
+                        str(args.get("task_id", "")),
+                        confirm=bool(args.get("confirm", False)),
+                        max_steps=int(args.get("max_steps", 25)),
+                    )
+                external = False
+            else:
+                if progress_callback is not None:
+                    await progress_callback(tool_name, "Running locally")
+                result = await self.tool_executor.execute_async(tool_name, args)
+                external = False
+            if progress_callback is not None:
+                await progress_callback(tool_name, "Finished")
+            return index, external, str(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if progress_callback is not None:
+                await progress_callback(tool_name, f"Failed: {exc}")
+            return index, tool_name.startswith("mcp__"), f"Error: {exc}"
+
     async def process_tool_calls_async(
         self,
         tool_calls: list[dict],
         progress_callback: ToolProgressCallback | None = None,
     ) -> list[dict]:
-        """Execute local and MCP tool calls and return results with metadata."""
+        """Execute safe independent calls concurrently and preserve result order."""
+        from ares.multi_agent_policy import call_resource, execution_waves
+
         mcp_results: dict[int, str] = {}
         local_results: dict[int, str] = {}
+        resources = []
         for i, call in enumerate(tool_calls):
-            tool_name = call.get("function", {}).get("name", "unknown")
             try:
-                args = self._tool_call_args(call)
-                if progress_callback is not None:
-                    await progress_callback(tool_name, "Preparing input")
-                if tool_name.startswith("mcp__"):
-                    if progress_callback is not None:
-                        await progress_callback(tool_name, "Calling connected tool")
-                    result = await self._execute_external_tool(tool_name, args)
-                    executor = getattr(self, "tool_executor", None)
-                    if executor is not None:
-                        executor.record_external_action(tool_name, args, result)
-                    mcp_results[i] = result
-                elif tool_name == "run_task":
-                    if progress_callback is not None:
-                        await progress_callback(tool_name, "Running workflow steps")
-                    if getattr(self, "workflow_runner", None) is None:
-                        local_results[i] = "Error: Workflow runner is unavailable because local task storage is not configured."
-                    else:
-                        local_results[i] = await self.workflow_runner.run(
-                            str(args.get("task_id", "")),
-                            confirm=bool(args.get("confirm", False)),
-                            max_steps=int(args.get("max_steps", 25)),
-                        )
-                else:
-                    if progress_callback is not None:
-                        await progress_callback(tool_name, "Running locally")
-                    local_results[i] = await self.tool_executor.execute_async(tool_name, args)
-            except BaseException as exc:
-                result = f"Error: {exc}"
-                if tool_name.startswith("mcp__"):
-                    mcp_results[i] = result
-                else:
-                    local_results[i] = result
+                arguments = self._tool_call_args(call)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                arguments = {}
+            resources.append(call_resource(i, call, arguments))
+        for wave in execution_waves(resources):
+            completed = await asyncio.gather(*(
+                self._execute_one_tool_async(i, tool_calls[i], progress_callback)
+                for i in wave
+            ))
+            for index, external, result in completed:
+                (mcp_results if external else local_results)[index] = result
         return self._process_tool_calls_core(
             tool_calls,
             mcp_results=mcp_results,
@@ -698,6 +839,7 @@ class Agent:
         # Agent loop: keep going while LLM wants to call tools
         max_iterations = self.config.agent_max_iterations
         for iteration in range(max_iterations):
+            self.last_iteration_count = iteration + 1
             response = await self.llm.chat(messages, tools=self.tools)
 
             # Check for tool calls
@@ -739,6 +881,7 @@ class Agent:
 
         max_iterations = self.config.agent_max_iterations
         for iteration in range(max_iterations):
+            self.last_iteration_count = iteration + 1
             tool_calls: dict[int, dict] = {}
             content_parts: list[str] = []
             has_tool_calls = False
@@ -812,27 +955,36 @@ class Agent:
                     self.process_tool_calls_async(formatted_calls, report_tool_progress)
                 )
                 active_tools: dict[str, float] = {}
+                reported_seconds: dict[str, int] = {}
                 try:
                     while not tool_task.done():
                         try:
                             tool_name, detail = await asyncio.wait_for(
-                                progress.get(), timeout=0.75
+                                progress.get(), timeout=0.25
                             )
                             if tool_name not in active_tools:
                                 active_tools[tool_name] = asyncio.get_running_loop().time()
                                 yield f"[tool_start:{tool_name}]"
                             yield f"[tool_progress:{tool_name}:{detail}]"
+                            if detail.casefold().startswith(("finished", "failed")):
+                                active_tools.pop(tool_name, None)
+                                reported_seconds.pop(tool_name, None)
                         except asyncio.TimeoutError:
                             now = asyncio.get_running_loop().time()
                             for tool_name, started_at in active_tools.items():
                                 elapsed = max(1, round(now - started_at))
-                                yield f"[tool_progress:{tool_name}:Still working · {elapsed}s]"
+                                if reported_seconds.get(tool_name) != elapsed:
+                                    reported_seconds[tool_name] = elapsed
+                                    yield f"[tool_progress:{tool_name}:Still working · {elapsed}s]"
                     while not progress.empty():
                         tool_name, detail = progress.get_nowait()
                         if tool_name not in active_tools:
                             active_tools[tool_name] = asyncio.get_running_loop().time()
                             yield f"[tool_start:{tool_name}]"
                         yield f"[tool_progress:{tool_name}:{detail}]"
+                        if detail.casefold().startswith(("finished", "failed")):
+                            active_tools.pop(tool_name, None)
+                            reported_seconds.pop(tool_name, None)
                     tool_results = await tool_task
                 finally:
                     if not tool_task.done():
@@ -859,5 +1011,8 @@ class Agent:
 
     async def close(self):
         """Clean up resources."""
-        self.tool_executor.close()
+        if self.multi_agent_runtime is not None and self.delegation_depth == 0:
+            await self.multi_agent_runtime.close()
+        if self._owns_tool_executor:
+            self.tool_executor.close()
         await self.llm.close()

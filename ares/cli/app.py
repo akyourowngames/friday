@@ -1237,6 +1237,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/call CONTACT|NUMBER [--confirm]", "Place a provider-backed telephone call")
             table.add_row("/telephony [status|contacts|recent|hangup|mute|unmute]", "Manage Twilio/LiveKit telephony")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
+            table.add_row("/agents [status|runs|show|cancel|on|off]", "Inspect and control native specialist runs")
             table.add_row("/mcp [search|add|list|test|refresh]", "Discover, configure, and manage MCP servers")
             table.add_row("/monitor [list|add|status|pause|resume|remove|events|test]", "Control proactive watchers")
             table.add_row("/skill-name", "Load a skill directly by slash command")
@@ -1379,6 +1380,57 @@ class AresCLI(MarketplaceCommandMixin):
                             self.console.print(event_table)
                 else:
                     self.console.print("[red]Usage: /goals [search QUERY|show ID|due|signals [GOAL_ID]][/red]")
+
+        elif command == "/agents":
+            runtime = getattr(self.agent, "multi_agent_runtime", None)
+            action, _, value = arg.partition(" ")
+            action = action.casefold() or "list"
+            if action in {"on", "off"}:
+                enabled = action == "on"
+                self.config.multi_agent.enabled = enabled
+                save_config(self.config)
+                if enabled and runtime is None:
+                    from ares.multi_agent_runtime import MultiAgentRuntime
+                    runtime = MultiAgentRuntime(self.agent)
+                    self.agent.multi_agent_runtime = runtime
+                self.agent.refresh_tools()
+                self.console.print(f"[green]Native multi-agent mode {'enabled' if enabled else 'disabled'}.[/green]")
+            elif runtime is None:
+                self.console.print("[yellow]Native multi-agent mode is unavailable. Use /agents on.[/yellow]")
+            elif action == "list":
+                table = Table(title="Ares Specialists", border_style="bright_cyan", box=CLI_BOX)
+                table.add_column("Role", style="cyan")
+                table.add_column("Mode")
+                table.add_column("Budget")
+                table.add_column("Purpose", ratio=4)
+                for item in runtime.list_agents():
+                    table.add_row(item["name"], "mutation" if item["can_mutate"] else "read-only", f"{item['max_iterations']} iter · {item['timeout_seconds']:.0f}s", item["description"])
+                self.console.print(table)
+            elif action in {"status", "runs"}:
+                runs = runtime.list_runs(limit=20)
+                table = Table(title="Native Agent Runs", border_style="bright_cyan", box=CLI_BOX)
+                table.add_column("Run", style="cyan", no_wrap=True)
+                table.add_column("Status", no_wrap=True)
+                table.add_column("Session", no_wrap=True)
+                table.add_column("Specialists", justify="right")
+                table.add_column("Task", ratio=4)
+                for run in runs:
+                    table.add_row(str(run.get("run_id", "")), str(run.get("status", "")), str(run.get("session_id") or "—"), str(len(run.get("children") or [])), str(run.get("prompt_summary") or ""))
+                self.console.print(table if runs else "[dim]No multi-agent runs yet.[/dim]")
+            elif action == "show" and value:
+                run = runtime.get_run(value.strip())
+                if run is None:
+                    self.console.print("[red]Agent run not found.[/red]")
+                else:
+                    self.console.print_json(data=run)
+            elif action == "cancel" and value:
+                target = value.strip()
+                async def cancel_run() -> None:
+                    cancelled = await runtime.cancel(target)
+                    self.console.print(f"[yellow]{'Cancelled' if cancelled else 'Not active'}: {target}[/yellow]")
+                asyncio.create_task(cancel_run(), name=f"ares-cli-cancel:{target}")
+            else:
+                self.console.print("[red]Usage: /agents [status|runs|show RUN_ID|cancel RUN_ID|on|off][/red]")
 
         elif command == "/model":
             if not arg or arg == "list":

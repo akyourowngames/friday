@@ -458,7 +458,9 @@ async def test_concurrent_chats_queue_agent_execution_and_keep_scopes_isolated(s
         "r1": "conversation-1:first:one two",
         "r2": "conversation-2:second:one two",
     }
-    assert server.agent.max_active == 1
+    # Independent sessions must overlap; only shared browser resources are
+    # serialized inside Agent rather than globally blocking every chat.
+    assert server.agent.max_active == 2
 
 
 @pytest.mark.asyncio

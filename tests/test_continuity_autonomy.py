@@ -440,8 +440,10 @@ def test_agent_adds_playwright_stale_ref_recovery_without_blind_retry(tmp_path, 
         def __init__(self):
             self.calls = 0
 
-        async def call_tool(self, _name: str, _args: dict) -> str:
+        async def call_tool(self, name: str, _args: dict) -> str:
             self.calls += 1
+            if name.endswith("browser_snapshot"):
+                return "Fresh browser snapshot with ref e22."
             return "Error: reference e17 is stale and does not exist."
 
     data_dir = tmp_path / "data"
@@ -449,6 +451,14 @@ def test_agent_adds_playwright_stale_ref_recovery_without_blind_retry(tmp_path, 
     mcp = FakeMCP()
     agent = Agent(memory, config=AppConfig(data_dir=str(data_dir)), mcp_manager=mcp)
     try:
+        # Seed a valid observation. The controller correctly refuses blind
+        # interactions when no fresh snapshot exists.
+        agent.browser_controller.after_call(
+            agent.session_id,
+            "mcp__playwright__browser_snapshot",
+            {},
+            "Initial browser snapshot with ref e17.",
+        )
         call = {
             "id": "playwright-1",
             "type": "function",
@@ -458,9 +468,9 @@ def test_agent_adds_playwright_stale_ref_recovery_without_blind_retry(tmp_path, 
             },
         }
         result = asyncio.run(agent.process_tool_calls_async([call]))[0]["content"]
-        assert mcp.calls == 1
-        assert "Do not retry that ref" in result
-        assert "fresh browser_snapshot" in result
+        assert mcp.calls == 2
+        assert "Do not retry the old ref" in result
+        assert "Fresh browser snapshot" in result
     finally:
         agent.tool_executor.close()
         memory.close()

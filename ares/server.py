@@ -158,6 +158,9 @@ class AresServer:
             conversation_store=self.conversation_store,
             mcp_manager=self.mcp_manager,
         )
+        self._multi_agent_unsubscribe = None
+        self._multi_agent_subscription_runtime = None
+        self._ensure_multi_agent_subscription()
 
         self._connected_websockets: list = []
         self._chat_tasks: set[asyncio.Task] = set()
@@ -357,6 +360,7 @@ class AresServer:
         try:
             await self._send(websocket, self._session_info())
             await self._send(websocket, self._status())
+            await self._send(websocket, self._agent_runs_state())
             async for raw in websocket:
                 try:
                     incoming = json.loads(raw)
@@ -431,6 +435,10 @@ class AresServer:
                 await self._send(websocket, {"type": "memories", "memories": self._memories()})
             elif msg_type == "get_status":
                 await self._send(websocket, self._status())
+            elif msg_type == "get_agent_runs":
+                await self._send(websocket, self._agent_runs_state(session_id=message.get("session_id")))
+            elif msg_type == "cancel_agent_run":
+                await self._handle_cancel_agent_run(websocket, message)
             elif msg_type == "get_personal_settings":
                 await self._send(websocket, self._personal_settings())
             elif msg_type == "get_telephony_settings":
@@ -1761,6 +1769,50 @@ class AresServer:
             with suppress(ValueError):
                 self._connected_websockets.remove(websocket)
 
+    async def _handle_multi_agent_event(self, event: dict[str, Any]) -> None:
+        """Forward stable supervisor events without coupling it to WebSockets."""
+        await self._broadcast({"type": "agent_event", "event": event})
+
+    def _ensure_multi_agent_subscription(self) -> None:
+        """Follow runtime creation/replacement during live configuration reloads."""
+        runtime = getattr(self.agent, "multi_agent_runtime", None)
+        if runtime is self._multi_agent_subscription_runtime:
+            return
+        if self._multi_agent_unsubscribe is not None:
+            self._multi_agent_unsubscribe()
+        self._multi_agent_unsubscribe = None
+        self._multi_agent_subscription_runtime = runtime
+        if runtime is not None:
+            self._multi_agent_unsubscribe = runtime.subscribe(self._handle_multi_agent_event)
+
+    def _agent_runs_state(self, session_id: Any | None = None) -> dict[str, Any]:
+        self._ensure_multi_agent_subscription()
+        runtime = getattr(self.agent, "multi_agent_runtime", None)
+        if runtime is None:
+            return {"type": "agent_runs", "enabled": False, "runs": []}
+        selected = None if session_id in (None, "") else str(session_id)
+        return {
+            "type": "agent_runs",
+            "enabled": bool(self.config.multi_agent.enabled),
+            "runs": runtime.list_runs(limit=30, session_id=selected),
+            "agents": runtime.list_agents(),
+        }
+
+    async def _handle_cancel_agent_run(self, websocket: Any, message: dict[str, Any]) -> None:
+        runtime = getattr(self.agent, "multi_agent_runtime", None)
+        if runtime is None:
+            await self._send_error(websocket, "Native multi-agent mode is disabled.")
+            return
+        run_id = str(message.get("run_id") or "").strip()
+        if not run_id:
+            await self._send_error(websocket, "run_id is required")
+            return
+        cancelled = await runtime.cancel(run_id)
+        await self._send(websocket, {
+            "type": "agent_run_cancelled", "run_id": run_id, "cancelled": cancelled,
+        })
+        await self._send(websocket, self._agent_runs_state())
+
     async def _watch_runtime_files(self) -> None:
         """Hot-reload local configuration and Ares instructions while running."""
         try:
@@ -1917,6 +1969,7 @@ class AresServer:
     def _apply_config_to_agent(self) -> None:
         if hasattr(self.agent, "apply_config"):
             self.agent.apply_config(self.config)
+            self._ensure_multi_agent_subscription()
         else:  # Lightweight fakes used in focused server tests.
             self.agent.set_model(self.config.model)
 
@@ -2139,13 +2192,21 @@ class AresServer:
             }))
 
     async def _send_error(self, websocket: Any, message: str, **context: Any) -> None:
-        await self._send(websocket, {"type": "error", "message": message, **context})
+        with suppress(ConnectionClosed):
+            await self._send(websocket, {"type": "error", "message": message, **context})
 
     async def _send(self, websocket: Any, payload: dict[str, Any]) -> None:
-        await websocket.send(json.dumps(payload, ensure_ascii=False))
+        try:
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+        except ConnectionClosed:
+            return
 
     async def close(self) -> None:
         """Shut down stores."""
+        if self._multi_agent_unsubscribe is not None:
+            self._multi_agent_unsubscribe()
+        self._multi_agent_unsubscribe = None
+        self._multi_agent_subscription_runtime = None
         if self._runtime_reload_task is not None and not self._runtime_reload_task.done():
             self._runtime_reload_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
