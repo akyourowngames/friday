@@ -319,6 +319,61 @@ class ProactiveConfig(BaseModel):
     telegram_enabled: bool = False
 
 
+class MultiAgentRoleOverride(BaseModel):
+    """Optional local override for one native specialist role."""
+
+    enabled: bool = True
+    model: str | None = None
+    max_iterations: int | None = Field(default=None, ge=1, le=200)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=1000000)
+    timeout_seconds: float | None = Field(default=None, ge=1.0, le=3600.0)
+    allowed_tools: list[str] | None = None
+    can_mutate: bool | None = None
+    can_delegate: bool | None = None
+    capabilities: list[str] | None = None
+    retry_limit: int | None = Field(default=None, ge=0, le=5)
+    retry_backoff_seconds: float | None = Field(default=None, ge=0.0, le=30.0)
+    fallback_models: list[str] | None = None
+
+
+class MultiAgentConfig(BaseModel):
+    """Conservative limits for Ares' native supervisor runtime."""
+
+    enabled: bool = True
+    max_parallel_agents: int = Field(default=3, ge=1, le=16)
+    max_tasks_per_run: int = Field(default=8, ge=1, le=32)
+    default_timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
+    max_timeout_seconds: float = Field(default=600.0, ge=1.0, le=3600.0)
+    max_total_duration_seconds: float = Field(default=900.0, ge=1.0, le=14400.0)
+    max_total_iterations: int = Field(default=80, ge=1, le=1000)
+    max_total_tokens: int = Field(default=120000, ge=256, le=4000000)
+    max_retries_per_task: int = Field(default=1, ge=0, le=5)
+    retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=30.0)
+    max_depth: int = Field(default=1, ge=0, le=4)
+    allow_recursive_delegation: bool = False
+    require_review_for_mutations: bool = True
+    review_role: str = "reviewer"
+    persist_runs: bool = True
+    retention_days: int = Field(default=30, ge=1, le=3650)
+    stream_progress: bool = True
+    role_overrides: dict[str, MultiAgentRoleOverride] = Field(default_factory=dict)
+    model_overrides_by_role: dict[str, str] = Field(default_factory=dict)
+    fallback_models_by_role: dict[str, list[str]] = Field(default_factory=dict)
+    partial_result_synthesis: bool = True
+    checkpoint_runs: bool = True
+    action_grant_ttl_seconds: float = Field(default=300.0, ge=1.0, le=3600.0)
+    provider_max_concurrency: int = Field(default=0, ge=0, le=64)
+    builder_worktree_isolation: bool = True
+    builder_worktree_root: str = "~/.ares/agent-worktrees"
+    # A review verdict is evidence, not authority to modify the caller's
+    # checkout. A separately-issued exact patch grant is also required when
+    # this opt-in is enabled.
+    auto_apply_builder_patches: bool = False
+    tool_operation_timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
+    tool_cancel_grace_seconds: float = Field(default=2.0, ge=0.1, le=60.0)
+    cancel_active_on_disable: bool = False
+
+
 class SkillRegistry(BaseModel):
     """A configured, trusted source of community SKILL.md bundles.
 
@@ -446,6 +501,7 @@ class AppConfig(BaseModel):
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
+    multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     cron_enabled: bool = True
     cron_tick_seconds: int = 60
     cron_max_concurrent: int = 3
@@ -455,4 +511,6 @@ class AppConfig(BaseModel):
     browser_cdp_port: int = Field(default=9222, ge=1, le=65535)
     browser_chrome_path: str = ""
     browser_extension_token: str = ""
+    windows_snapshot_timeout_seconds: float = Field(default=12.0, ge=2.0, le=90.0)
+    windows_snapshot_cache_seconds: float = Field(default=1.5, ge=0.0, le=10.0)
     block_session_context: bool = False  # Block previous session summary from flowing into new sessions

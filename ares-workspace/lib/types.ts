@@ -69,6 +69,21 @@ export interface ActivityEvent {
   state: "active" | "done" | "error"; at: Date;
 }
 
+export type AgentRunStatus = "queued" | "running" | "succeeded" | "failed" | "timed_out" | "blocked" | "cancelled";
+export interface AgentRunArtifact { path: string; media_type?: string; description?: string }
+export interface AgentChildRun {
+  run_id: string; root_run_id: string; parent_run_id?: string; session_id?: string; task_id?: string;
+  agent_role: string; prompt_summary?: string; status: AgentRunStatus; dependencies?: string[];
+  created_at?: string; started_at?: string; completed_at?: string; duration_seconds?: number;
+  error_summary?: string; result_summary?: string; result_content?: string; artifacts?: AgentRunArtifact[];
+  iterations?: number; cancelled?: boolean; current_tool?: string; activity?: string;
+}
+export interface AgentRootRun extends AgentChildRun { children?: AgentChildRun[]; metadata?: JsonRecord }
+export interface AgentProgressEvent extends JsonRecord {
+  event_type: string; root_run_id: string; run_id?: string; parent_run_id?: string; session_id?: string;
+  task_id?: string; agent?: string; status?: AgentRunStatus; phase?: string; detail?: string; tool?: string; timestamp?: string;
+}
+
 export interface WorkspaceSettings {
   identity?: Record<string, string>;
   personalization?: Record<string, string>;

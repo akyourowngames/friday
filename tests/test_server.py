@@ -49,6 +49,45 @@ class FakeAgent:
         pass
 
 
+class FakeMultiAgentRuntime:
+    def __init__(self, artifacts=None):
+        self.listeners = []
+        self.cancelled = []
+        self.runs = {
+            "conversation-1": [{
+                "run_id": "ma_one", "root_run_id": "ma_one", "session_id": "conversation-1",
+                "agent_role": "supervisor", "status": "running", "children": [{
+                    "run_id": "child_one", "root_run_id": "ma_one", "session_id": "conversation-1",
+                    "agent_role": "researcher", "task_id": "research", "status": "running",
+                    "artifacts": list(artifacts or []),
+                }],
+            }],
+            "conversation-2": [{
+                "run_id": "ma_two", "root_run_id": "ma_two", "session_id": "conversation-2",
+                "agent_role": "supervisor", "status": "running", "children": [],
+            }],
+        }
+
+    def subscribe(self, listener):
+        self.listeners.append(listener)
+        return lambda: self.listeners.remove(listener) if listener in self.listeners else None
+
+    def list_agents(self):
+        return [{"name": "researcher"}]
+
+    def list_runs(self, limit=30, session_id=None):
+        return self.runs.get(session_id, [])[:limit]
+
+    def get_run(self, run_id, session_id=None):
+        return next((run for run in self.runs.get(session_id, []) if run["run_id"] == run_id), None)
+
+    async def cancel(self, run_id, session_id=None):
+        if self.get_run(run_id, session_id=session_id) is None:
+            return False
+        self.cancelled.append((run_id, session_id))
+        return True
+
+
 class FakeMemoryStore:
     def get_recent(self, limit=100):
         return [{"id": 1, "content": "User's name is Krish", "kind": "fact"}]
@@ -204,14 +243,52 @@ async def test_binary_artifacts_use_the_same_origin_workspace_preview_url(server
     pdf.parent.mkdir(parents=True)
     pdf.write_bytes(b"%PDF-1.6\nlocal preview\n")
     socket = FakeSocket()
+    server._connection_sessions[socket] = 1
+    server.conversation_store.add_message(1, "assistant", f"Saved to {pdf}")
 
-    await server.handle_message(socket, json.dumps({"type": "get_artifact", "path": str(pdf)}))
+    await server.handle_message(socket, json.dumps({"type": "get_artifact", "path": str(pdf), "session_id": 1}))
 
     artifact = socket.messages[-1]
     assert artifact["type"] == "artifact_content"
     assert artifact["mime"] == "application/pdf"
-    assert artifact["preview_url"].startswith("/api/artifact?path=")
+    assert artifact["preview_url"].startswith("/api/artifact?token=")
     assert "data_url" not in artifact
+
+
+@pytest.mark.asyncio
+async def test_agent_events_runs_cancellation_and_artifacts_are_connection_scoped(server, tmp_path):
+    artifact = tmp_path / "private-agent-report.md"
+    artifact.write_text("private", encoding="utf-8")
+    runtime = FakeMultiAgentRuntime(artifacts=[{"path": str(artifact), "media_type": "text/markdown"}])
+    server.agent.multi_agent_runtime = runtime
+    first = FakeSocket()
+    second = FakeSocket()
+    server._connected_websockets[:] = [first, second]
+    server._connection_sessions[first] = 1
+    server._connection_sessions[second] = 2
+
+    await server._handle_multi_agent_event({
+        "event_type": "agent_started", "root_run_id": "ma_one", "run_id": "child_one",
+        "session_id": "conversation-1", "agent": "researcher", "status": "running",
+    })
+    assert [message["type"] for message in first.messages] == ["agent_event"]
+    assert second.messages == []
+    assert first.messages[0]["event"]["session_id"] == 1
+
+    await server._handle_get_agent_runs(first, {"session_id": 1})
+    await server._handle_get_agent_runs(second, {"session_id": 1})
+    assert first.messages[-1]["runs"][0]["run_id"] == "ma_one"
+    assert second.messages[-1]["type"] == "error"
+
+    await server._handle_cancel_agent_run(first, {"run_id": "ma_one", "session_id": 1})
+    await server._handle_cancel_agent_run(second, {"run_id": "ma_one", "session_id": 2})
+    assert runtime.cancelled == [("ma_one", "conversation-1")]
+    assert next(message for message in second.messages if message["type"] == "agent_run_cancelled")["cancelled"] is False
+
+    await server._handle_get_artifact(second, {"path": str(artifact), "session_id": 2})
+    await server._handle_get_artifact(first, {"path": str(artifact), "session_id": 1})
+    assert second.messages[-1]["type"] == "error"
+    assert first.messages[-1]["type"] == "artifact_content"
 
 
 @pytest.mark.asyncio
@@ -405,6 +482,28 @@ async def test_chat_streams_content_tools_and_done(server):
 
 
 @pytest.mark.asyncio
+async def test_chat_passes_workspace_request_id_when_agent_supports_it(server):
+    class RequestAwareAgent(FakeAgent):
+        def __init__(self):
+            super().__init__()
+            self.request_ids = []
+
+        async def run_stream(self, message, conversation_history=None, request_id=None):
+            self.request_ids.append(request_id)
+            yield "request scoped"
+
+    agent = RequestAwareAgent()
+    server.agent = agent
+    socket = FakeSocket()
+    await server.handle_message(socket, json.dumps({
+        "type": "chat", "request_id": "workspace-request-1", "content": "search bitcoin",
+    }))
+
+    assert agent.request_ids == ["workspace-request-1"]
+    assert [message["text"] for message in socket.messages if message["type"] == "content"] == ["request scoped"]
+
+
+@pytest.mark.asyncio
 async def test_concurrent_chats_queue_agent_execution_and_keep_scopes_isolated(server):
     class ConcurrentAgent:
         def __init__(self):
@@ -458,7 +557,9 @@ async def test_concurrent_chats_queue_agent_execution_and_keep_scopes_isolated(s
         "r1": "conversation-1:first:one two",
         "r2": "conversation-2:second:one two",
     }
-    assert server.agent.max_active == 1
+    # Independent sessions must overlap; only shared browser resources are
+    # serialized inside Agent rather than globally blocking every chat.
+    assert server.agent.max_active == 2
 
 
 @pytest.mark.asyncio

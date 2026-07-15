@@ -49,6 +49,7 @@ def create_workspace_app(
     watcher_dashboard_url: str = "http://127.0.0.1:8080",
     artifact_roots: list[str | Path] | None = None,
     voice_config_provider: Callable[[], Any] | None = None,
+    artifact_resolver: Callable[[str], str | Path | None] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Ares Workspace", version="1.0.0", docs_url=None, redoc_url=None)
     static_dir = resolve_workspace_static_dir()
@@ -141,10 +142,13 @@ def create_workspace_app(
         return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/artifact", include_in_schema=False)
-    async def artifact(path: str) -> FileResponse:
-        """Serve an approved local artifact with its real MIME type for preview."""
+    async def artifact(token: str) -> FileResponse:
+        """Serve an artifact only through an opaque, short-lived capability."""
+        authorized = artifact_resolver(token) if artifact_resolver is not None else None
+        if not authorized:
+            raise HTTPException(status_code=404, detail="Artifact preview token is invalid or expired")
         try:
-            resolved = Path(path).expanduser().resolve(strict=True)
+            resolved = Path(authorized).expanduser().resolve(strict=True)
         except (OSError, RuntimeError):
             raise HTTPException(status_code=404, detail="Artifact does not exist") from None
         if (

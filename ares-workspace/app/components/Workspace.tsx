@@ -6,7 +6,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAresSocket } from "@/lib/useAresSocket";
 import type {
-  Artifact, ArtifactPreview, AresMessage, ChatMessage, JsonRecord, McpServer, McpState, PendingFile, RuntimeStatus,
+  AgentProgressEvent, AgentRootRun, Artifact, ArtifactPreview, AresMessage, ChatMessage, JsonRecord, McpServer, McpState, PendingFile, RuntimeStatus,
   Session, Skill, TraceEvent, ViewId, WatcherMonitor, WatcherState, WorkspaceFile, WorkspaceSettings,
 } from "@/lib/types";
 import { ChatView, MarkdownContent } from "./ChatView";
@@ -36,6 +36,26 @@ const CHAT_CACHE_LIMIT = 20;
 const CHAT_CACHE_MESSAGE_LIMIT = 240;
 const newRuntime = (messages: ChatMessage[] = [], hydrated = false): ChatRuntime => ({ messages, streaming: "", busy: false, historyLoading: false, traces: [], phase: "idle", hydrated });
 const sessionKey = (id: number) => `session:${id}`;
+const runtimeSessionId = (id: number | null) => id ? `conversation-${id}` : "";
+function conversationSessionId(value: unknown) {
+  if (typeof value === "string" && value.startsWith("conversation-")) {
+    return number(value.slice("conversation-".length));
+  }
+  return number(value);
+}
+function normalizeAgentRun(raw: unknown): AgentRootRun {
+  const run = raw as AgentRootRun;
+  const session = conversationSessionId(run.session_id);
+  return {
+    ...run,
+    session_id: session ? String(session) : undefined,
+    children: array(run.children).map(child => {
+      const value = child as AgentRootRun;
+      const childSession = conversationSessionId(value.session_id) || session;
+      return { ...value, session_id: childSession ? String(childSession) : undefined };
+    }),
+  };
+}
 
 function normalizeHistory(raw: unknown): ChatMessage[] {
   return array(raw).map(item => {
@@ -110,6 +130,8 @@ export function Workspace() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview | null>(null);
   const [threadQuery, setThreadQuery] = useState("");
+  const [agentRuns, setAgentRuns] = useState<AgentRootRun[]>([]);
+  const [agentRunsEnabled, setAgentRunsEnabled] = useState(false);
   const sendRef = useRef<(payload: JsonRecord & { type: string }) => boolean>(() => false);
   const activeToolIds = useRef<Record<string, string>>({});
   const sessionIdRef = useRef<number | null>(null);
@@ -188,7 +210,7 @@ export function Workspace() {
 
   const handleMessage = useCallback((message: AresMessage) => {
     const requestId = text(message.request_id);
-    const eventSessionId = number(message.session_id);
+    const eventSessionId = conversationSessionId(message.session_id);
     const eventKey = eventSessionId ? sessionKey(eventSessionId) : requestChatRef.current.get(requestId) || activeChatKeyRef.current;
     switch (message.type) {
       case "socket_open": requestInitialState(); break;
@@ -197,6 +219,56 @@ export function Workspace() {
         break;
       }
       case "status": setStatus(message as unknown as RuntimeStatus); break;
+      case "agent_runs": {
+        if (eventSessionId && eventSessionId !== sessionIdRef.current) break;
+        setAgentRunsEnabled(Boolean(message.enabled));
+        setAgentRuns(array(message.runs).map(normalizeAgentRun));
+        break;
+      }
+      case "agent_event": {
+        const event = message.event as unknown as AgentProgressEvent;
+        if (!event?.root_run_id) break;
+        const agentSessionId = eventSessionId || conversationSessionId(event.session_id);
+        if (!agentSessionId || agentSessionId !== sessionIdRef.current) break;
+        setAgentRuns(current => {
+          const next = [...current];
+          let root = next.find(item => item.run_id === event.root_run_id);
+          if (!root) {
+            root = {
+              run_id: event.root_run_id, root_run_id: event.root_run_id,
+              session_id: String(agentSessionId), agent_role: "supervisor",
+              prompt_summary: text(event.root_task || event.detail), status: event.status || "running",
+              created_at: event.timestamp || new Date().toISOString(), children: [],
+            };
+            next.unshift(root);
+          }
+          root.status = event.status || root.status;
+          if (event.event_type === "synthesis_started") root.activity = "Synthesizing specialist results";
+          else if (event.detail) root.activity = event.detail;
+          if (event.run_id && event.run_id !== event.root_run_id) {
+            const children = [...(root.children || [])];
+            let child = children.find(item => item.run_id === event.run_id);
+            if (!child) {
+              child = {
+                run_id: event.run_id, root_run_id: event.root_run_id, parent_run_id: event.parent_run_id,
+                session_id: String(agentSessionId), task_id: event.task_id, agent_role: event.agent || "specialist",
+                status: event.status || "running", created_at: event.timestamp || new Date().toISOString(),
+                dependencies: [],
+              };
+              children.push(child);
+            }
+            child.status = event.status || child.status;
+            child.activity = event.detail || child.activity;
+            child.current_tool = event.tool || child.current_tool;
+            root.children = children;
+          }
+          return next.slice(0, 30);
+        });
+        if (["orchestration_completed", "orchestration_cancelled"].includes(event.event_type)) {
+          sendRef.current({ type: "get_agent_runs", session_id: agentSessionId, runtime_session_id: runtimeSessionId(agentSessionId) });
+        }
+        break;
+      }
       case "sessions": {
         const query = text(message.query);
         if (query !== threadQueryRef.current) break;
@@ -231,6 +303,7 @@ export function Workspace() {
             sessionIdRef.current = eventSessionId; setSessionId(eventSessionId);
           }
         }
+        sendRef.current({ type: "get_agent_runs", session_id: eventSessionId, runtime_session_id: runtimeSessionId(eventSessionId) });
         break;
       }
       case "session_history": {
@@ -363,7 +436,7 @@ export function Workspace() {
   const newChat = useCallback(() => {
     const key = uid("draft");
     updateChat(key, () => newRuntime([], true)); activeChatKeyRef.current = key; setActiveChatKey(key);
-    send({ type: "new_session" }); sessionIdRef.current = null; setSessionId(null); setThreadQuery(""); navigate("chat");
+    send({ type: "new_session" }); sessionIdRef.current = null; setSessionId(null); setAgentRuns([]); setThreadQuery(""); navigate("chat");
   }, [send, navigate, updateChat]);
   const loadSession = (id: number) => {
     const key = sessionKey(id);
@@ -373,6 +446,7 @@ export function Workspace() {
     const cached = sessionCacheRef.current.get(id);
     updateChat(key, current => current.hydrated || current.busy ? current : { ...current, messages: cached || [], historyLoading: !cached });
     send({ type: "load_session", session_id: id });
+    send({ type: "get_agent_runs", session_id: id, runtime_session_id: runtimeSessionId(id) });
     navigate("chat");
   };
   const sessionMenu = (session: Session) => {
@@ -505,7 +579,7 @@ export function Workspace() {
       </aside>
       <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />
       <main className="main-stage">
-        {view === "chat" && <><header className="topbar"><div className="topbar-left"><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><strong className="chat-title">{activeSession?.title || "New chat"}</strong></div><div className="topbar-actions"><span className="simple-status"><span className={`connection-dot ${connection === "online" ? "is-online" : "is-offline"}`} />{connection === "online" ? "Ready" : connection}</span><button className="avatar-btn" onClick={() => navigate("settings")} aria-label="Open settings">{userName.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "OP"}</button></div></header><ChatView messages={activeChat.messages} historyLoading={activeChat.historyLoading} streaming={activeChat.streaming} busy={activeChat.busy} phase={activeChat.phase} input={input} setInput={setInput} attachments={attachments} removeAttachment={id => setAttachments(current => current.filter(item => item.id !== id))} addFiles={addChatFiles} sendMessage={sendMessage} cancelMessage={cancelMessage} openArtifact={artifact => { setArtifactPreview({ ...artifact }); send({ type: "get_artifact", path: artifact.path }); }} model={status.model || "Ares model"} traces={activeChat.traces} /></>}
+        {view === "chat" && <><header className="topbar"><div className="topbar-left"><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><strong className="chat-title">{activeSession?.title || "New chat"}</strong></div><div className="topbar-actions"><span className="simple-status"><span className={`connection-dot ${connection === "online" ? "is-online" : "is-offline"}`} />{connection === "online" ? "Ready" : connection}</span><button className="avatar-btn" onClick={() => navigate("settings")} aria-label="Open settings">{userName.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "OP"}</button></div></header><ChatView messages={activeChat.messages} historyLoading={activeChat.historyLoading} streaming={activeChat.streaming} busy={activeChat.busy} phase={activeChat.phase} input={input} setInput={setInput} attachments={attachments} removeAttachment={id => setAttachments(current => current.filter(item => item.id !== id))} addFiles={addChatFiles} sendMessage={sendMessage} cancelMessage={cancelMessage} openArtifact={artifact => { setArtifactPreview({ ...artifact }); send({ type: "get_artifact", path: artifact.path, session_id: sessionIdRef.current, runtime_session_id: runtimeSessionId(sessionIdRef.current) }); }} model={status.model || "Ares model"} traces={activeChat.traces} agentRunsEnabled={agentRunsEnabled} agentRuns={agentRuns.filter(run => !sessionId || conversationSessionId(run.session_id) === sessionId)} cancelAgentRun={runId => send({ type: "cancel_agent_run", run_id: runId, session_id: sessionIdRef.current, runtime_session_id: runtimeSessionId(sessionIdRef.current) })} /></>}
         {view === "settings" && <SettingsHub settings={settingsData} savingSettings={savingSettings} saveSettings={next => { setSavingSettings(true); send({ type: "save_workspace_settings", settings: next as unknown as JsonRecord }); }} watchers={watchers} refreshWatchers={() => send({ type: "get_watcher_state" })} createWatcher={() => openWatcherEditor()} editWatcher={openWatcherEditor} watcherAction={(action, arguments_) => send({ type: "watcher_action", action, arguments: arguments_ })} files={files} uploadFiles={uploadLibrary} attachFile={attachLibrary} removeFile={file => { if (window.confirm(`Delete ${file.name} from the local library?`)) send({ type: "delete_workspace_file", file_id: file.id, confirm: true }); }} uploading={uploading} skills={skills} categories={categories} selectedSkill={selectedSkill} selectSkill={skill => { setSelectedSkill(skill); send({ type: "get_skill", name: skill.name }); }} createSkill={() => openSkillEditor(undefined, true)} draftSkill={openSkillDraft} editSkill={skill => openSkillEditor(skill)} removeSkill={skill => { if (window.confirm(`Delete user skill ${skill.name}?`)) send({ type: "delete_skill", name: skill.name }); }} mcp={mcp} probeMcp={() => send({ type: "probe_mcp_servers" })} addMcp={() => openMcpEditor()} editMcp={openMcpEditor} reconnectMcp={server => send({ type: "reconnect_mcp_server", name: server.name })} removeMcp={server => { if (window.confirm(`Remove MCP server ${server.name}? Its tools immediately disappear from Ares and watchers.`)) send({ type: "delete_mcp_server", name: server.name, confirm: true }); }} onSectionChange={section => { if (section === "watchers") send({ type: "get_watcher_state" }); if (section === "files") send({ type: "list_workspace_files" }); if (section === "skills") send({ type: "list_skills" }); if (section === "mcp") send({ type: "get_mcp_state" }); }} close={() => navigate("chat")} />}
       </main>
     </div>

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from ares.skills import SkillManager
 from ares.tools.definitions import get_tool_definitions
 from ares.tools.executor import ToolExecutor
@@ -159,6 +161,40 @@ def test_auto_loaded_skills_require_direct_intent_signals(tmp_path):
     assert "computer-use" not in browser_skills
     browser_use = next(skill for skill in manager.relevant_skills("open Instagram using MCP") if skill.name == "browser-use")
     assert manager.selection_reason(browser_use, "open Instagram using MCP") == "matches a browser action request"
+
+
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        "How many agents did you use for the parallel search?",
+        "Explain how web search works.",
+        "Compare these search results.",
+        "Did the researcher search the web?",
+        "What tools did the agents use?",
+    ],
+)
+def test_search_word_without_browser_action_never_loads_browser_skill(tmp_path, user_input):
+    manager = SkillManager([tmp_path])
+
+    selected = manager.relevant_skills(user_input)
+
+    assert "browser-use" not in {skill.name for skill in selected}
+
+
+def test_skill_router_requires_browser_action_and_target_and_routes_other_intents(tmp_path):
+    manager = SkillManager([tmp_path])
+
+    browser = manager.relevant_skills("Search this website by clicking the search box")
+    research = manager.relevant_skills("Compare these search results and evaluate the sources")
+    codebase = manager.relevant_skills("Explain this codebase")
+
+    assert browser[0].name == "browser-use"
+    assert manager.selection_reason(browser[0], "Search this website by clicking the search box") == "matches a browser action request"
+    assert "web-research" in {skill.name for skill in research}
+    assert "browser-use" not in {skill.name for skill in research}
+    assert "codebase-summary" in {skill.name for skill in codebase}
+    for casual in ("hey", "thanks", "okay"):
+        assert manager.relevant_skills(casual) == []
 
 
 def test_browser_request_does_not_autoload_generic_research_or_code_skills(tmp_path):

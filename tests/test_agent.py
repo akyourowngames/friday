@@ -9,6 +9,7 @@ from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.reflection import ReflectionService
 from ares.skills import SkillManager
+from ares.turn_policy import build_turn_execution_context
 
 
 @pytest.fixture
@@ -189,7 +190,8 @@ class TestAgent:
                 "arguments": json.dumps({"content": "User likes pizza", "category": "preference"}),
             },
         }
-        results = agent.process_tool_calls([tool_call])
+        with agent.turn_scope(build_turn_execution_context("Remember that I like pizza")):
+            results = agent.process_tool_calls([tool_call])
         assert len(results) == 1
         assert results[0]["tool_name"] == "store_memory"
         assert "pizza" in results[0]["content"]

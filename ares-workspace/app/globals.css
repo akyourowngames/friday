@@ -1022,3 +1022,34 @@ body { background-image: radial-gradient(circle at 76% -10%, rgba(120, 130, 155,
   .workspace-goal-route { min-width: 110px; }
   .data-table th:nth-child(4), .data-table td:nth-child(4), .data-table th:nth-child(6), .data-table td:nth-child(6) { display: none; }
 }
+
+/* Native multi-agent supervisor — compact and embedded in the active chat. */
+.agent-runs { display: grid; gap: 10px; margin: 12px 0 22px 50px; }
+.agent-run { overflow: hidden; border: 1px solid #292929; border-radius: 14px; background: linear-gradient(145deg,#0d0d0d,#080808); box-shadow: 0 16px 48px rgba(0,0,0,.22); }
+.agent-run > summary, .agent-child > summary { display: flex; align-items: center; gap: 11px; cursor: pointer; list-style: none; }
+.agent-run > summary::-webkit-details-marker, .agent-child > summary::-webkit-details-marker { display: none; }
+.agent-run > summary { min-height: 62px; padding: 11px 14px; }
+.agent-run > summary > span:nth-child(2), .agent-child > summary > span:nth-child(2) { min-width: 0; flex: 1; }
+.agent-run strong, .agent-child strong { display: block; color: #ecece9; font-size: 12px; text-transform: capitalize; }
+.agent-run small, .agent-child small { display: block; overflow: hidden; margin-top: 3px; color: #777772; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-run summary > em { color: #777772; font: 500 9px/1 var(--mono); }
+.agent-run-icon, .agent-avatar { display: grid; flex: 0 0 auto; place-items: center; border: 1px solid #303030; color: #d8d8d4; background: #141414; }
+.agent-run-icon { width: 34px; height: 34px; border-radius: 10px; }.agent-run-icon svg { width: 16px; }
+.agent-avatar { width: 28px; height: 28px; border-radius: 8px; }.agent-avatar svg { width: 13px; }
+.agent-status { flex: 0 0 auto; padding: 5px 7px; border: 1px solid #303030; border-radius: 999px; color: #92928d; background: #111; font: 600 8px/1 var(--mono); text-transform: uppercase; }
+.agent-status.is-running, .agent-status.is-queued { color: #f3f3ef; border-color: #555; animation: agent-pulse 1.4s ease-in-out infinite; }
+.agent-status.is-succeeded { color: #d4f8df; border-color: #295337; background: #0c1d11; }
+.agent-status.is-failed, .agent-status.is-timed_out { color: #ffb9b9; border-color: #5e2929; background: #211010; }
+.agent-status.is-blocked, .agent-status.is-cancelled { color: #d0cdc5; border-color: #47443e; }
+.agent-run-body { padding: 0 13px 13px; border-top: 1px solid #202020; }
+.agent-run-meta { display: flex; min-height: 40px; align-items: center; gap: 9px; color: #777772; font-size: 9px; }
+.agent-run-meta span:nth-child(2) { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
+.agent-run-meta button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid #383838; border-radius: 7px; color: #d7d7d3; background: #171717; font-size: 9px; }
+.agent-children { display: grid; gap: 6px; }
+.agent-child { border: 1px solid #242424; border-radius: 10px; background: #0b0b0b; }.agent-child > summary { min-height: 48px; padding: 8px 10px; }
+.agent-child-result { padding: 0 11px 11px 49px; color: #aaa9a4; font-size: 11px; }.agent-child-result > p { margin: 0 0 7px; }.agent-child-result .message-copy { color: #c9c8c3; font-size: 12px; }
+.agent-tool { display: inline-block; margin: 0 0 8px; padding: 4px 6px; border: 1px solid #2d2d2d; border-radius: 5px; color: #8b8b86; font: 500 8px/1 var(--mono); }
+.agent-artifacts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }.agent-artifacts button { display: inline-flex; max-width: 100%; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid #313131; border-radius: 7px; color: #d0cfca; background: #151515; font-size: 9px; }.agent-artifacts svg { width: 12px; }
+.agent-synthesis { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: #a8a7a1; font-size: 9px; }.agent-synthesis i { width: 7px; height: 7px; border: 1px solid #aaa; border-top-color: transparent; border-radius: 50%; animation: tool-spin .8s linear infinite; }
+@keyframes agent-pulse { 50% { opacity: .58; } }
+@media (max-width: 700px) { .agent-runs { margin-left: 0; }.agent-run > summary { gap: 7px; }.agent-run summary > em { display: none; } }
