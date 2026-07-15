@@ -50,6 +50,7 @@ def build_user_context(
     task_store: Any | None = None,
     goal_store: Any | None = None,
     commitment_store: Any | None = None,
+    follow_up_store: Any | None = None,
     conversation_history: list[dict] | None = None,
 ) -> str:
     """Retrieve and render all durable user context for one response.
@@ -71,10 +72,10 @@ def build_user_context(
     if getattr(config, "project_context_enabled", False):
         project_text = project_context.get_context(token_budget=project_budget)
 
-    # Long-term memories must remain available across an unbounded number of
-    # conversations. The session ID is provenance/local scratch scope only;
-    # normal response retrieval deliberately searches the durable corpus.
-    search_scope = "all"
+    # Session-scoped rows are local scratch state. Durable reflected memories
+    # have session_id=NULL, so MemoryStore's session scope still makes them
+    # globally retrievable without leaking old temporary rows into every chat.
+    search_scope = "session" if session_id else "all"
     memories = memory_store.search(
         user_input,
         limit=max_retrieval,
@@ -114,6 +115,7 @@ def build_user_context(
             limit=8,
         )
     pending_commitments = commitment_store.list_pending(limit=8) if commitment_store is not None else []
+    pending_follow_ups = follow_up_store.list_open(limit=8) if follow_up_store is not None else []
 
     current_conversation_id = _conversation_id_from_scope(session_id)
     recent_conversations: list[dict[str, Any]] = []
@@ -220,6 +222,7 @@ def build_user_context(
         previous_session_summary=previous_summary,
         pending_tasks=pending_tasks,
         pending_commitments=pending_commitments,
+        pending_follow_ups=pending_follow_ups,
         token_budget=token_budget,
     )
     if goal_store is not None and active_goals:

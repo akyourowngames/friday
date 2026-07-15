@@ -57,12 +57,39 @@ class TestAgent:
             assert agent.tool_executor.session_id == "conversation-42"
             agent.get_context("isolated fact")
 
-        # Conversation scope remains provenance for writes/tools, while normal
-        # response retrieval searches all durable long-term memories.
-        assert searches[-1][1]["scope"] == "all"
+        # Conversation scope keeps temporary rows local while session search
+        # still includes durable global memories (session_id=NULL).
+        assert searches[-1][1]["scope"] == "session"
         assert searches[-1][1]["session_id"] == "conversation-42"
         assert agent.session_id == "default-session"
         assert agent.tool_executor.session_id == "default-session"
+
+    def test_follow_up_is_visible_and_cancellable_from_later_conversation(self, agent):
+        follow_up = agent.follow_up_store.create(
+            "Check whether the staged rollout completed",
+            confidence=0.94,
+            source_conversation_id="conversation-1",
+            source_reflection_id="reflection-1",
+            eligible_at="2026-07-16T09:00:00+05:30",
+        )
+        agent.set_session_id("conversation-99")
+
+        context = agent.get_context("What follow-ups are still pending?")
+        listed = json.loads(agent.tool_executor.execute("list_follow_ups", {"limit": 10}))
+        cancelled = json.loads(agent.tool_executor.execute(
+            "resolve_follow_up",
+            {
+                "follow_up_id": follow_up["follow_up_id"],
+                "status": "cancelled",
+                "resolution": "The user cancelled this check-in.",
+            },
+        ))
+
+        assert "## Pending Follow-ups:" in context
+        assert "staged rollout completed" in context
+        assert listed["follow_ups"][0]["source_conversation_id"] == "conversation-1"
+        assert cancelled["follow_up"]["status"] == "cancelled"
+        assert agent.follow_up_store.list_open() == []
 
     def test_build_messages_includes_system_prompt(self, agent):
         """Messages include the system prompt."""

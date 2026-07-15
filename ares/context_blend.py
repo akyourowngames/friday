@@ -409,6 +409,26 @@ def format_commitments(commitments: list[dict] | None, token_budget: int = 400) 
     return truncate_to_tokens("\n".join(lines), token_budget)
 
 
+def format_follow_ups(follow_ups: list[dict] | None, token_budget: int = 400) -> str:
+    """Format open reflection follow-ups as bounded, user-manageable context."""
+    if not follow_ups:
+        return ""
+    lines = [
+        "## Pending Follow-ups:",
+        "These are durable check-ins. The user may snooze, dismiss, cancel, or resolve them using their ID.",
+    ]
+    for item in follow_ups:
+        description = _format_recall_text(item.get("description"), maximum=280)
+        if not description:
+            continue
+        status = str(item.get("status") or "pending")
+        eligible = str(item.get("eligible_at") or "unscheduled")
+        lines.append(
+            f"- {item.get('follow_up_id')} [{status}; eligible {eligible}] {description}"
+        )
+    return truncate_to_tokens("\n".join(lines), token_budget)
+
+
 def _format_recall_text(value: object, *, maximum: int = 420) -> str:
     """Normalize and bound local recall text without masking saved values."""
     text = " ".join(str(value or "").split())
@@ -468,6 +488,7 @@ def build_context_prompt(
     previous_session_summary: str | None = None,
     pending_tasks: list[dict] | None = None,
     pending_commitments: list[dict] | None = None,
+    pending_follow_ups: list[dict] | None = None,
     token_budget: int = 2000,
 ) -> str:
     """Build a priority-ordered context string within a shared token budget."""
@@ -511,6 +532,10 @@ def build_context_prompt(
     if pending_commitments and remaining > 100:
         commitment_section = format_commitments(pending_commitments, token_budget=remaining)
         remaining = _append_section(sections, commitment_section, remaining)
+
+    if pending_follow_ups and remaining > 100:
+        follow_up_section = format_follow_ups(pending_follow_ups, token_budget=remaining)
+        remaining = _append_section(sections, follow_up_section, remaining)
 
     if recent_conversations and remaining > 100:
         recent_text = format_recent_conversations(recent_conversations, token_budget=remaining)

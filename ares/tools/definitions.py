@@ -1009,6 +1009,37 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool("delete_goal", "Permanently delete a goal and its links/timeline. Requires explicit user approval and confirm=true; child goals are preserved and detached.", {"goal_id": {"type": "integer"}, "expected_revision": {"type": "integer"}, "confirm": {"type": "boolean", "default": False}}, ["goal_id"]),
         _tool(
+            "list_follow_ups",
+            "List bounded open follow-ups, including their IDs, status, schedule, confidence, and provenance.",
+            {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+        ),
+        _tool(
+            "snooze_follow_up",
+            "Snooze an open follow-up until a future time. A naive ISO timestamp is interpreted in the configured local timezone.",
+            {
+                "follow_up_id": {"type": "string"},
+                "hours": {"type": "integer", "minimum": 1, "maximum": 8760, "default": 24},
+                "until": {"type": "string", "description": "Optional timezone-aware ISO timestamp, or local naive ISO timestamp."},
+            },
+            ["follow_up_id"],
+        ),
+        _tool(
+            "dismiss_follow_up",
+            "Dismiss an open follow-up without marking its underlying outcome complete.",
+            {"follow_up_id": {"type": "string"}, "reason": {"type": "string"}},
+            ["follow_up_id"],
+        ),
+        _tool(
+            "resolve_follow_up",
+            "Resolve or cancel an open follow-up when the user confirms the outcome or cancellation.",
+            {
+                "follow_up_id": {"type": "string"},
+                "status": {"type": "string", "enum": ["resolved", "cancelled"], "default": "resolved"},
+                "resolution": {"type": "string"},
+            },
+            ["follow_up_id"],
+        ),
+        _tool(
             "phone_status",
             "PHONE TOOL — the ONLY way to check Android phone status. Do NOT use run_command with kdeconnect-cli or adb for this. Checks KDE Connect and ADB bridge health. No arguments.",
             {},

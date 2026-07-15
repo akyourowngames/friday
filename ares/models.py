@@ -303,6 +303,10 @@ class ReflectionConfig(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=10)
     follow_up_delay_hours: int = Field(default=24, ge=0, le=8_760)
     follow_up_cooldown_hours: int = Field(default=72, ge=1, le=8_760)
+    local_timezone: str = Field(
+        default="",
+        description="IANA timezone for interpreting reflection follow-up schedules; empty uses the system timezone.",
+    )
 
 
 class ProactiveConfig(BaseModel):

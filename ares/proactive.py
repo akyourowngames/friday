@@ -542,12 +542,15 @@ class ProactiveService:
                 priority = 5
                 reason = "unfinished commitment is still pending"
                 timing = ""
+                eligible = False
                 if due_at is not None and due_at < current:
+                    eligible = True
                     candidate_type = "commitment_overdue"
                     priority = 1
                     reason = "pending commitment is overdue"
                     timing = f" It was due {due_at.astimezone().strftime('%Y-%m-%d %H:%M')}."
                 elif due_at is not None and due_at <= current + timedelta(days=due_window):
+                    eligible = True
                     candidate_type = "commitment_due_soon"
                     priority = 3
                     reason = "pending commitment is due soon"
@@ -557,7 +560,10 @@ class ProactiveService:
                     if last_activity is not None:
                         inactive = (current - last_activity).days
                         if inactive >= commitment_inactive_days:
+                            eligible = True
                             reason = f"unfinished commitment has been inactive for {inactive} days"
+                if not eligible:
+                    continue
                 message = f"You still have this commitment pending: “{description}”.{timing}"
                 message += " Want me to help you close it out?"
                 candidates.append(ProactiveCandidate(
@@ -644,6 +650,12 @@ class ProactiveService:
             if not match:
                 raise ValueError("initiative model did not return a JSON object")
             payload = json.loads(match.group())
+        if not isinstance(payload, dict):
+            raise ValueError("initiative model did not return a JSON object")
+        # A no_action response may use JSON null because there is no message to
+        # deliver. Normalize it to the schema's empty-message default.
+        if payload.get("message") is None:
+            payload["message"] = ""
         return InitiativeDecision.model_validate(payload)
 
     async def _decide(
@@ -679,7 +691,12 @@ class ProactiveService:
                 )
             return decision
         except Exception as exc:
-            logger.warning("Proactive initiative decision failed: %s", exc)
+            # Proactive initiative is optional. Provider refusal/empty errors
+            # already degrade to no_action and should not pollute normal chat.
+            logger.debug(
+                "Proactive initiative decision skipped after %s: %r",
+                type(exc).__name__, exc,
+            )
             return InitiativeDecision(
                 decision="no_action",
                 confidence=0.0,

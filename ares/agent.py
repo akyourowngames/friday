@@ -158,7 +158,15 @@ class Agent:
         self.task_store = self.tool_executor.task_store
         self.goal_store = self.tool_executor.goal_store
         self.commitment_store = self.tool_executor.commitment_store
-        self.follow_up_store = FollowUpStore(connection=self.memory_store.conn)
+        follow_up_timezone = str(
+            getattr(getattr(self.config, "reflection", None), "local_timezone", "") or ""
+        ).strip() or None
+        executor_follow_ups = getattr(self.tool_executor, "follow_up_store", None)
+        self.follow_up_store = executor_follow_ups or FollowUpStore(
+            connection=self.memory_store.conn,
+            timezone_name=follow_up_timezone,
+        )
+        self.tool_executor.follow_up_store = self.follow_up_store
         self.workflow_runner: AutonomousWorkflowRunner | None = getattr(self.tool_executor, "workflow_runner", None)
         if self._owns_tool_executor and self.task_store is not None and self.action_ledger is not None:
             self.workflow_runner = AutonomousWorkflowRunner(
@@ -530,6 +538,7 @@ class Agent:
             task_store=self.task_store,
             goal_store=self.goal_store,
             commitment_store=self.commitment_store,
+            follow_up_store=self.follow_up_store,
             conversation_history=conversation_history,
         )
 

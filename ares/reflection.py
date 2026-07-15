@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -19,6 +20,24 @@ from ares.memory_policy import memory_rejection_reason
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _reflection_timezone(config: Any) -> tuple[str, ZoneInfo]:
+    configured = str(
+        getattr(config, "local_timezone", "")
+        or getattr(config, "timezone", "")
+    ).strip()
+    if not configured:
+        try:
+            from tzlocal import get_localzone_name
+
+            configured = get_localzone_name()
+        except Exception:
+            configured = str(datetime.now().astimezone().tzinfo or "UTC")
+    try:
+        return configured, ZoneInfo(configured)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"invalid reflection local timezone: {configured}") from exc
 
 
 class NewMemory(BaseModel):
@@ -251,6 +270,8 @@ class ConversationReflector:
         open_followups: list[dict[str, Any]],
         profile_text: str,
     ) -> ReflectionResult:
+        timezone_name, local_timezone = _reflection_timezone(self.config)
+        current_local_datetime = datetime.now(local_timezone).isoformat(timespec="seconds")
         state = {
             "existing_memories": [
                 {
@@ -300,7 +321,10 @@ class ConversationReflector:
             "clear durable outcome; include 2-5 milestones and one small specific next_action. A commitment is an "
             "explicit promise or obligation, not every request. A follow-up opportunity is a concrete future "
             "check-in that would help the user, not a generic suggestion. Resolve an open follow-up only when "
-            "the user explicitly completes, dismisses, or cancels it. If nothing durable changed, return empty arrays.\n\n"
+            "the user explicitly completes, dismisses, or cancels it. For every follow_up_opportunity, eligible_at "
+            "must be a timezone-aware ISO-8601 timestamp with an explicit UTC offset; interpret relative phrases "
+            f"using the current local datetime {current_local_datetime} in timezone {timezone_name}. "
+            "Never return a naive timestamp. If nothing durable changed, return empty arrays.\n\n"
             f"CURRENT STATE:\n{json.dumps(state, ensure_ascii=False)}\n\n"
             f"USER:\n{user_text[:8_000]}\n\nASSISTANT:\n{assistant_text[:8_000]}\n"
         )
@@ -406,6 +430,9 @@ class ReflectionApplier:
                     confidence=item.confidence,
                     importance=item.importance,
                     source="conversation_reflection",
+                    session_id=None,
+                    source_conversation_id=scope,
+                    source_reflection_id=reflection_id,
                 )
                 record("updated_memory", "updated", fact_id=item.fact_id)
             except Exception as exc:
@@ -593,7 +620,14 @@ class ReflectionService:
     ) -> None:
         self.config = config
         self.store = ReflectionStore(memory_store.conn)
-        self.follow_up_store = follow_up_store or FollowUpStore(connection=memory_store.conn)
+        timezone_name = str(
+            getattr(config, "local_timezone", "")
+            or getattr(config, "timezone", "")
+        ).strip() or None
+        self.follow_up_store = follow_up_store or FollowUpStore(
+            connection=memory_store.conn,
+            timezone_name=timezone_name,
+        )
         self._owns_llm = llm_client is None
         # ``config`` is normally ReflectionConfig, which contains extraction
         # policy but deliberately not model credentials.  Agent supplies its
