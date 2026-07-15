@@ -109,7 +109,7 @@ _LOCAL_MUTATION_RE = re.compile(
     r"\b(?:write|edit|modify|change|update|configure|create|delete|remove|rename|move|copy|append|"
     r"remember|forget|store|"
     r"install|uninstall|execute|run\s+(?:the\s+)?(?:command|script|code|tests?)|"
-    r"save|download|apply|patch|commit)\b",
+    r"save|download|apply|patch|commit|snooze|dismiss|resolve|cancel)\b",
     re.IGNORECASE,
 )
 _EXTERNAL_ACTION_RE = re.compile(
@@ -346,7 +346,7 @@ def _extract_targets(text: str) -> tuple[str, ...]:
         targets.append("recall")
     if re.search(r"\b(?:workflow|tasks?|durable\s+task|saved\s+task|task\s+id)\b", lowered):
         targets.append("workflow")
-    if re.search(r"\bgoals?\b", lowered):
+    if re.search(r"\bgoals?\b|\bfollow[-_\s]?ups?\b", lowered):
         targets.append("goals")
     if re.search(r"\b(?:watcher|monitor)\b", lowered):
         targets.append("watchers")

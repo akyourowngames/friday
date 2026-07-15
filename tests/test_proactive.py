@@ -20,7 +20,7 @@ class FakeInitiativeLLM:
         decision: str = "send",
         confidence: float = 0.95,
         reason: str = "This is a timely and useful follow-up.",
-        message: str = "A useful follow-up.",
+        message: str | None = "A useful follow-up.",
     ):
         self.payload = {
             "decision": decision,
@@ -151,6 +151,11 @@ def test_candidate_collection_covers_deadlines_blockers_commitments_and_reflecti
         blockers=["Waiting for security approval"],
     )
     commitment = commitments.create("Send the launch summary", confidence=0.96)
+    memory.conn.execute(
+        "UPDATE commitments_meta SET last_activity_at=? WHERE commitment_id=?",
+        ("2026-07-10T12:00:00Z", commitment["commitment_id"]),
+    )
+    memory.conn.commit()
     follow_up = followups.create(
         "Ask whether the migration is stable",
         confidence=0.94,
@@ -189,6 +194,51 @@ def test_candidate_collection_covers_deadlines_blockers_commitments_and_reflecti
         item.candidate_id == follow_up["follow_up_id"]
         for item in candidates
         if item.entity_type == "follow_up"
+    )
+    memory.close()
+
+
+def test_fresh_undated_commitment_waits_for_inactivity_threshold(
+    tmp_path, fake_embedding_provider,
+):
+    database = tmp_path / "commitment-inactivity.db"
+    memory = MemoryStore(database, embedding_provider=fake_embedding_provider)
+    goals = GoalStore(database, connection=memory.conn)
+    commitments = CommitmentStore(database, connection=memory.conn)
+    now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+    commitment = commitments.create("Send the fresh summary", confidence=0.96)
+    memory.conn.execute(
+        "UPDATE commitments_meta SET last_activity_at=? WHERE commitment_id=?",
+        (now.isoformat().replace("+00:00", "Z"), commitment["commitment_id"]),
+    )
+    memory.conn.commit()
+    service = ProactiveService(
+        goal_store=goals,
+        commitment_store=commitments,
+        config=ProactiveConfig(
+            inactive_commitment_days=3,
+            quiet_hours_start="00:00",
+            quiet_hours_end="00:00",
+        ),
+        deliver=lambda *_args: ["workspace"],
+        llm_client=FakeInitiativeLLM(),
+        now_provider=lambda: now,
+    )
+
+    fresh = service.collect_candidates(now=now)
+    memory.conn.execute(
+        "UPDATE commitments_meta SET last_activity_at=? WHERE commitment_id=?",
+        ((now - timedelta(days=3)).isoformat().replace("+00:00", "Z"), commitment["commitment_id"]),
+    )
+    memory.conn.commit()
+    inactive = service.collect_candidates(now=now)
+
+    assert all(item.entity_type != "commitment" for item in fresh)
+    assert any(
+        item.candidate_type == "commitment_pending"
+        and item.candidate_id == str(commitment["commitment_id"])
+        and "inactive for 3 days" in item.reason
+        for item in inactive
     )
     memory.close()
 
@@ -269,6 +319,11 @@ async def test_pending_commitment_uses_bounded_full_initiative_context(
     )
     conversations.end_conversation(previous)
     now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+    memory.conn.execute(
+        "UPDATE commitments_meta SET last_activity_at=? WHERE commitment_id=?",
+        ((now - timedelta(days=4)).isoformat().replace("+00:00", "Z"), commitment["commitment_id"]),
+    )
+    memory.conn.commit()
     llm = FakeInitiativeLLM(message="Would you like help preparing the launch brief?")
     delivered = []
 
@@ -328,7 +383,7 @@ async def test_llm_may_choose_no_action_and_decision_cooldown_avoids_rechecking(
         decision="no_action",
         confidence=0.91,
         reason="The recent conversation shows this can wait.",
-        message="",
+        message=None,
     )
     delivered = []
     service = ProactiveService(
@@ -492,6 +547,11 @@ async def test_daily_message_cap_blocks_second_candidate_and_keeps_an_audit_reco
     commitments.create("Send the release notes", confidence=0.96)
     commitments.create("Publish the launch brief", confidence=0.96)
     now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+    memory.conn.execute(
+        "UPDATE commitments_meta SET last_activity_at=?",
+        ((now - timedelta(days=4)).isoformat().replace("+00:00", "Z"),),
+    )
+    memory.conn.commit()
     llm = FakeInitiativeLLM(message="Would you like help with this commitment?")
     delivered = []
     service = ProactiveService(

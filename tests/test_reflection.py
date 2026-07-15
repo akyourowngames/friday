@@ -18,9 +18,11 @@ class FakeReflectionLLM:
     def __init__(self, payload):
         self.payload = payload
         self.calls = 0
+        self.prompts = []
 
-    async def chat(self, _messages, tools=None):
+    async def chat(self, messages, tools=None):
         self.calls += 1
+        self.prompts.append(messages)
         assert tools == []
         return {"content": json.dumps(self.payload)}
 
@@ -182,6 +184,16 @@ async def test_reflected_memory_remains_retrievable_across_unbounded_future_sess
             f"Conversation {index} temporary deployment note",
             session_id=f"conversation-{index}",
         )
+    temporary_id = memory.store(
+        "Temporary Helios launch key is Quartz",
+        source="conversation",
+        session_id="conversation-1",
+    )
+    memory.conn.execute(
+        "UPDATE facts_meta SET created_at='2020-01-01 00:00:00' WHERE fact_id=?",
+        (temporary_id,),
+    )
+    memory.conn.commit()
 
     context = build_user_context(
         "What is my deployment codename?",
@@ -201,10 +213,101 @@ async def test_reflected_memory_remains_retrievable_across_unbounded_future_sess
     )
 
     assert "deployment codename is Helios" in context
+    assert "Quartz" not in context
     fact = next(item for item in memory.list_all() if "Helios" in item["fact_text"])
     assert fact["session_id"] is None
     assert fact["source_conversation_id"] == "conversation-1"
     assert fact["source_reflection_id"] == reflection_id
+    memory.close()
+
+
+@pytest.mark.asyncio
+async def test_updated_reflected_memory_becomes_global_and_records_current_provenance(
+    tmp_path, fake_embedding_provider,
+):
+    database = tmp_path / "ares.db"
+    memory = MemoryStore(database, embedding_provider=fake_embedding_provider)
+    goals = GoalStore(database, connection=memory.conn)
+    commitments = CommitmentStore(database, connection=memory.conn)
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    fact_id = memory.store(
+        "User prefers weekly deployment summaries",
+        category="preference",
+        session_id="conversation-4",
+    )
+    llm = FakeReflectionLLM({
+        "updated_memories": [{
+            "fact_id": fact_id,
+            "fact_text": "User prefers daily deployment summaries",
+            "category": "preference",
+            "confidence": 0.96,
+            "evidence": "I prefer daily deployment summaries",
+        }],
+    })
+    service = ReflectionService(
+        memory_store=memory,
+        goal_store=goals,
+        commitment_store=commitments,
+        profile_manager=profile,
+        config=ReflectionConfig(timeout_seconds=5),
+        llm_client=llm,
+    )
+
+    reflection_id = service.enqueue_turn(
+        scope="conversation-22",
+        user_text="I prefer daily deployment summaries.",
+        assistant_text="Understood.",
+    )
+    await service.close()
+
+    updated = memory.get(fact_id)
+    assert updated["session_id"] is None
+    assert updated["source_conversation_id"] == "conversation-22"
+    assert updated["source_reflection_id"] == reflection_id
+    memory.close()
+
+
+@pytest.mark.asyncio
+async def test_relative_follow_up_time_uses_configured_non_utc_timezone(
+    tmp_path, fake_embedding_provider,
+):
+    database = tmp_path / "ares.db"
+    memory = MemoryStore(database, embedding_provider=fake_embedding_provider)
+    goals = GoalStore(database, connection=memory.conn)
+    commitments = CommitmentStore(database, connection=memory.conn)
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    llm = FakeReflectionLLM({
+        "follow_up_opportunities": [{
+            "description": "Check whether the rollout completed",
+            "confidence": 0.95,
+            "eligible_at": "2026-07-16T09:00:00",
+            "evidence": "Tomorrow at 9 AM, check whether the rollout completed",
+        }],
+    })
+    service = ReflectionService(
+        memory_store=memory,
+        goal_store=goals,
+        commitment_store=commitments,
+        profile_manager=profile,
+        config=ReflectionConfig(timeout_seconds=5, local_timezone="Asia/Kolkata"),
+        llm_client=llm,
+    )
+
+    service.enqueue_turn(
+        scope="conversation-31",
+        user_text="Tomorrow at 9 AM, check whether the rollout completed.",
+        assistant_text="I will follow up.",
+    )
+    await service.close()
+
+    prompt = llm.prompts[0][0]["content"]
+    follow_up = service.follow_up_store.list_open()[0]
+    assert "current local datetime" in prompt
+    assert "Asia/Kolkata" in prompt
+    assert "timezone-aware ISO-8601" in prompt
+    assert follow_up["eligible_at"] == "2026-07-16T03:30:00Z"
     memory.close()
 
 

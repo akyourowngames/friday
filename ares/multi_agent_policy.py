@@ -67,6 +67,7 @@ COMMUNICATION_TOOLS = frozenset({
 DATABASE_READ_TOOLS = frozenset({
     "search_memory", "search_actions", "search_person", "list_tasks", "get_task_status",
     "list_goals", "get_goal_status", "get_goal_signals", "list_watchers", "get_watcher",
+    "list_follow_ups",
     "list_watcher_events", "get_watcher_overview", "get_cron_job", "list_cron_jobs",
     "get_cron_logs", "telephony_get_call", "telephony_list_calls", "telephony_list_contacts",
 })

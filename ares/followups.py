@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ares.config import get_db_path
 from ares.sqlite_utils import connect_sqlite
@@ -42,7 +43,29 @@ def _clean(value: Any, *, field: str, maximum: int, required: bool = False) -> s
     return text
 
 
-def _iso_timestamp(value: Any, field: str) -> str | None:
+def _system_timezone_name() -> str:
+    try:
+        from tzlocal import get_localzone_name
+
+        return get_localzone_name()
+    except Exception:
+        return str(datetime.now().astimezone().tzinfo or "UTC")
+
+
+def _timezone_info(timezone_name: str | None) -> ZoneInfo:
+    name = str(timezone_name or _system_timezone_name()).strip() or "UTC"
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"invalid local timezone: {name}") from exc
+
+
+def _iso_timestamp(
+    value: Any,
+    field: str,
+    *,
+    timezone_name: str | None = None,
+) -> str | None:
     if value is None or not str(value).strip():
         return None
     try:
@@ -50,7 +73,7 @@ def _iso_timestamp(value: Any, field: str) -> str | None:
     except ValueError as exc:
         raise ValueError(f"{field} must be an ISO timestamp") from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=_timezone_info(timezone_name))
     return utc_now(parsed)
 
 
@@ -67,6 +90,7 @@ class FollowUpStore:
         db_path: str | Path | None = None,
         *,
         connection: sqlite3.Connection | None = None,
+        timezone_name: str | None = None,
     ) -> None:
         self.db_path = Path(db_path) if db_path is not None else get_db_path()
         self._owns_connection = connection is None
@@ -75,6 +99,8 @@ class FollowUpStore:
             self.conn = connect_sqlite(self.db_path)
         else:
             self.conn = connection
+        self.timezone_name = str(timezone_name or _system_timezone_name())
+        _timezone_info(self.timezone_name)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -140,7 +166,9 @@ class FollowUpStore:
         if existing is not None:
             return dict(existing)
         now = utc_now()
-        eligible = _iso_timestamp(eligible_at, "eligible_at") or now
+        eligible = _iso_timestamp(
+            eligible_at, "eligible_at", timezone_name=self.timezone_name,
+        ) or now
         follow_up_id = hashlib.sha256(
             f"{key}\0{source_reflection_id or now}".encode("utf-8")
         ).hexdigest()[:32]
@@ -175,7 +203,10 @@ class FollowUpStore:
         ).fetchone())
 
     def list_eligible(self, *, now: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        stamp = _iso_timestamp(now, "now") if now else utc_now()
+        stamp = (
+            _iso_timestamp(now, "now", timezone_name=self.timezone_name)
+            if now else utc_now()
+        )
         rows = self.conn.execute(
             """SELECT * FROM follow_up_opportunities
                WHERE status IN ('pending', 'snoozed') AND eligible_at<=?
@@ -211,7 +242,9 @@ class FollowUpStore:
                WHERE follow_up_id=? AND status IN ('pending', 'snoozed')""",
             (
                 "snoozed" if delivered else "pending",
-                _iso_timestamp(eligible_at, "eligible_at"),
+                _iso_timestamp(
+                    eligible_at, "eligible_at", timezone_name=self.timezone_name,
+                ),
                 now,
                 now,
                 1 if delivered else 0,
@@ -221,6 +254,29 @@ class FollowUpStore:
         )
         self.conn.commit()
         return self.get(follow_up_id)
+
+    def snooze(
+        self,
+        follow_up_id: str,
+        *,
+        eligible_at: str,
+    ) -> dict[str, Any] | None:
+        """Move an open follow-up to a future local/aware timestamp."""
+        now = utc_now()
+        cursor = self.conn.execute(
+            """UPDATE follow_up_opportunities
+               SET status='snoozed', eligible_at=?, updated_at=?
+               WHERE follow_up_id=? AND status IN ('pending', 'snoozed')""",
+            (
+                _iso_timestamp(
+                    eligible_at, "eligible_at", timezone_name=self.timezone_name,
+                ),
+                now,
+                str(follow_up_id),
+            ),
+        )
+        self.conn.commit()
+        return self.get(follow_up_id) if cursor.rowcount else None
 
     def resolve(
         self,

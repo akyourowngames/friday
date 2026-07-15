@@ -108,7 +108,7 @@ def categorize_tool_name(name: str) -> ToolCategory:
         return ToolCategory.PHONE
     if "watcher" in lowered or lowered.startswith(("create_monitor", "list_monitor", "update_monitor")):
         return ToolCategory.WATCHERS
-    if "goal" in lowered:
+    if "goal" in lowered or "follow_up" in lowered:
         return ToolCategory.GOALS
     if (
         lowered.startswith("mcp__playwright__")

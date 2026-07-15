@@ -22,6 +22,7 @@ _default_provider: EmbeddingProvider | None = None
 logger = logging.getLogger(__name__)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
+_UNSET = object()
 
 
 def _get_default_provider() -> EmbeddingProvider:
@@ -263,6 +264,9 @@ class MemoryStore:
         confidence: float | None = None,
         importance: float | None = None,
         source: str | None = None,
+        session_id: str | None | object = _UNSET,
+        source_conversation_id: str | None | object = _UNSET,
+        source_reflection_id: str | None | object = _UNSET,
     ) -> bool:
         """Update a memory and refresh search indexes when text changes."""
         existing = self.get(fact_id)
@@ -276,11 +280,21 @@ class MemoryStore:
             "confidence": confidence if confidence is not None else existing["confidence"],
             "importance": importance if importance is not None else existing.get("importance", 0.5),
             "source": source if source is not None else existing.get("source", "conversation"),
+            "session_id": existing.get("session_id") if session_id is _UNSET else session_id,
+            "source_conversation_id": (
+                existing.get("source_conversation_id")
+                if source_conversation_id is _UNSET else source_conversation_id
+            ),
+            "source_reflection_id": (
+                existing.get("source_reflection_id")
+                if source_reflection_id is _UNSET else source_reflection_id
+            ),
         }
         self.conn.execute(
             """UPDATE facts_meta
                SET fact_text = ?, category = ?, confidence = ?, importance = ?,
-                   source = ?, updated_at = datetime('now')
+                   source = ?, session_id = ?, source_conversation_id = ?,
+                   source_reflection_id = ?, updated_at = datetime('now')
                WHERE fact_id = ?""",
             (
                 updates["fact_text"],
@@ -288,6 +302,9 @@ class MemoryStore:
                 updates["confidence"],
                 updates["importance"],
                 updates["source"],
+                updates["session_id"],
+                updates["source_conversation_id"],
+                updates["source_reflection_id"],
                 fact_id,
             ),
         )

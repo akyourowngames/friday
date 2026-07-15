@@ -66,6 +66,7 @@ from ares.tools.image_edit import convert_image as _convert_image
 from ares.tools.image_edit import crop_image as _crop_image
 from ares.memory_policy import memory_rejection_reason
 from ares.commitments import CommitmentStore
+from ares.followups import FollowUpStore, future_utc
 from ares.cron.store import CronStore
 from ares.cron.tools import CronToolHandlers
 from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
@@ -102,6 +103,7 @@ class ToolExecutor:
         task_store: TaskStore | None = None,
         goal_store: GoalStore | None = None,
         commitment_store: CommitmentStore | None = None,
+        follow_up_store: FollowUpStore | None = None,
         session_store: SessionStore | None = None,
         telephony_manager: TelephonyManager | None = None,
     ):
@@ -143,6 +145,17 @@ class ToolExecutor:
         )
         self.commitment_store = commitment_store or (
             CommitmentStore(db_path=db_path, connection=shared_connection)
+            if db_path is not None else None
+        )
+        reflection_timezone = str(
+            getattr(getattr(config, "reflection", None), "local_timezone", "") or ""
+        ).strip() or None
+        self.follow_up_store = follow_up_store or (
+            FollowUpStore(
+                db_path=db_path,
+                connection=shared_connection,
+                timezone_name=reflection_timezone,
+            )
             if db_path is not None else None
         )
         self.goal_tools = GoalToolHandlers(self.goal_store, self.task_store, self.action_ledger) if self.goal_store is not None else None
@@ -346,6 +359,10 @@ class ToolExecutor:
             "sync_goal_progress": self._sync_goal_progress,
             "record_goal_progress": self._record_goal_progress,
             "delete_goal": self._delete_goal,
+            "list_follow_ups": self._list_follow_ups,
+            "snooze_follow_up": self._snooze_follow_up,
+            "dismiss_follow_up": self._dismiss_follow_up,
+            "resolve_follow_up": self._resolve_follow_up,
             "phone_status": self._phone_status,
             "phone_get_notifications": self._phone_get_notifications,
             "phone_search_contact": self._phone_search_contact,
@@ -790,6 +807,62 @@ class ToolExecutor:
     def _delete_goal(self, args: dict) -> str:
         return self._goal_call("delete_goal", args)
 
+    def _follow_up_tools_unavailable(self) -> str:
+        return self._json({
+            "ok": False,
+            "error": "Follow-up store is unavailable because Ares has no local data path.",
+        })
+
+    def _list_follow_ups(self, args: dict) -> str:
+        if self.follow_up_store is None:
+            return self._follow_up_tools_unavailable()
+        return self._json({
+            "ok": True,
+            "follow_ups": self.follow_up_store.list_open(limit=int(args.get("limit", 20))),
+        })
+
+    def _snooze_follow_up(self, args: dict) -> str:
+        if self.follow_up_store is None:
+            return self._follow_up_tools_unavailable()
+        eligible_at = args.get("until") or future_utc(int(args.get("hours", 24)))
+        follow_up = self.follow_up_store.snooze(
+            str(args.get("follow_up_id") or ""),
+            eligible_at=str(eligible_at),
+        )
+        return self._json({
+            "ok": follow_up is not None,
+            "follow_up": follow_up,
+            "error": None if follow_up is not None else "Open follow-up not found.",
+        })
+
+    def _dismiss_follow_up(self, args: dict) -> str:
+        if self.follow_up_store is None:
+            return self._follow_up_tools_unavailable()
+        follow_up = self.follow_up_store.resolve(
+            str(args.get("follow_up_id") or ""),
+            status="dismissed",
+            resolution=str(args.get("reason") or "Dismissed by the user."),
+        )
+        return self._json({
+            "ok": follow_up is not None,
+            "follow_up": follow_up,
+            "error": None if follow_up is not None else "Open follow-up not found.",
+        })
+
+    def _resolve_follow_up(self, args: dict) -> str:
+        if self.follow_up_store is None:
+            return self._follow_up_tools_unavailable()
+        follow_up = self.follow_up_store.resolve(
+            str(args.get("follow_up_id") or ""),
+            status=str(args.get("status") or "resolved"),
+            resolution=str(args.get("resolution") or "Resolved by the user."),
+        )
+        return self._json({
+            "ok": follow_up is not None,
+            "follow_up": follow_up,
+            "error": None if follow_up is not None else "Open follow-up not found.",
+        })
+
     # ── Consequential-action provenance ───────────────────────────
 
     @staticmethod
@@ -962,6 +1035,18 @@ class ToolExecutor:
             return ("goal_signal_snoozed", f"signal #{args.get('signal_id', '')}", "Snoozed a watcher signal linked to a goal.", ["goal", "watcher"])
         if lowered == "delete_goal":
             return ("goal_deleted", f"goal #{args.get('goal_id', '')}", "Deleted a goal.", ["goal"])
+        if lowered in {"snooze_follow_up", "dismiss_follow_up", "resolve_follow_up"}:
+            action_type = {
+                "snooze_follow_up": "follow_up_snoozed",
+                "dismiss_follow_up": "follow_up_dismissed",
+                "resolve_follow_up": "follow_up_resolved",
+            }[lowered]
+            return (
+                action_type,
+                f"follow-up {args.get('follow_up_id', '')}",
+                f"{action_type.replace('_', ' ').capitalize()}.",
+                ["follow-up"],
+            )
         return None
 
     def _record_consequential_action(
