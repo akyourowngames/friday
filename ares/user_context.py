@@ -71,7 +71,10 @@ def build_user_context(
     if getattr(config, "project_context_enabled", False):
         project_text = project_context.get_context(token_budget=project_budget)
 
-    search_scope = "session" if session_id else "all"
+    # Long-term memories must remain available across an unbounded number of
+    # conversations. The session ID is provenance/local scratch scope only;
+    # normal response retrieval deliberately searches the durable corpus.
+    search_scope = "all"
     memories = memory_store.search(
         user_input,
         limit=max_retrieval,

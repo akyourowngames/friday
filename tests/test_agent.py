@@ -57,7 +57,9 @@ class TestAgent:
             assert agent.tool_executor.session_id == "conversation-42"
             agent.get_context("isolated fact")
 
-        assert searches[-1][1]["scope"] == "session"
+        # Conversation scope remains provenance for writes/tools, while normal
+        # response retrieval searches all durable long-term memories.
+        assert searches[-1][1]["scope"] == "all"
         assert searches[-1][1]["session_id"] == "conversation-42"
         assert agent.session_id == "default-session"
         assert agent.tool_executor.session_id == "default-session"

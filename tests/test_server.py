@@ -454,6 +454,49 @@ async def test_server_listens_before_optional_mcp_startup_finishes(server, monke
 
 
 @pytest.mark.asyncio
+async def test_server_startup_starts_proactive_worker(server, monkeypatch):
+    entered_server = asyncio.Event()
+
+    class FakeWebSocketServer:
+        async def __aenter__(self):
+            entered_server.set()
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class ProactiveProbe:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.stopped = False
+
+        async def start(self):
+            self.started.set()
+
+        async def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr("ares.server.serve", lambda *_args, **_kwargs: FakeWebSocketServer())
+    server.config.watcher.enabled = False
+    server._workspace_enabled = False
+    server.telegram_channel = None
+    server.mcp_manager = None
+    probe = ProactiveProbe()
+    server.proactive_service = probe
+
+    task = asyncio.create_task(server.run_forever())
+    await asyncio.wait_for(entered_server.wait(), timeout=0.2)
+    await asyncio.wait_for(probe.started.wait(), timeout=0.2)
+
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await server.close()
+    assert probe.stopped is True
+
+
+@pytest.mark.asyncio
 async def test_chat_streams_content_tools_and_done(server):
     socket = FakeSocket()
 

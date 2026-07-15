@@ -244,6 +244,12 @@ class AresServer:
         self.proactive_service = (
             ProactiveService(
                 goal_store=goal_store,
+                commitment_store=getattr(self.agent, "commitment_store", None),
+                follow_up_store=getattr(self.agent, "follow_up_store", None),
+                memory_store=getattr(self.agent, "memory_store", None),
+                profile_manager=getattr(self.agent, "profile_manager", None),
+                conversation_store=self.conversation_store,
+                llm_client=getattr(self.agent, "llm", None),
                 config=self.config.proactive,
                 deliver=self._deliver_proactive_message,
             )
@@ -298,7 +304,7 @@ class AresServer:
             await asyncio.Future()
 
     async def _deliver_proactive_message(
-        self, message: str, goal: dict[str, Any],
+        self, message: str, candidate: dict[str, Any],
     ) -> list[str]:
         """Persist and fan out one already-approved initiative message."""
         channels: list[str] = []
@@ -307,12 +313,15 @@ class AresServer:
             session_id = self.conversation_store.start_conversation()
             self.conversation_store.rename_conversation(
                 session_id,
-                f"Ares follow-up · {str(goal.get('title') or 'goal')[:55]}",
+                f"Ares follow-up · {str(candidate.get('title') or candidate.get('description') or 'initiative')[:55]}",
             )
             self.conversation_store.add_message(session_id, "assistant", message)
             event = {
                 "type": "response_done",
-                "request_id": f"proactive-goal-{goal.get('goal_id')}",
+                "request_id": (
+                    f"proactive-{candidate.get('candidate_type', 'initiative')}-"
+                    f"{candidate.get('candidate_id', candidate.get('entity_id', 'unknown'))}"
+                ),
                 "session_id": session_id,
                 "content": message,
                 "tool_calls": [],
@@ -326,7 +335,7 @@ class AresServer:
         self._proactive_notifier.enabled = bool(
             self.config.enable_desktop_notifications and proactive.desktop_enabled
         )
-        if self._proactive_notifier.notify("Ares goal follow-up", message):
+        if self._proactive_notifier.notify("Ares follow-up", message):
             channels.append("desktop")
 
         if proactive.telegram_enabled and self.telegram_channel is not None:
@@ -2171,6 +2180,12 @@ class AresServer:
         self.proactive_service = (
             ProactiveService(
                 goal_store=goal_store,
+                commitment_store=getattr(self.agent, "commitment_store", None),
+                follow_up_store=getattr(self.agent, "follow_up_store", None),
+                memory_store=getattr(self.agent, "memory_store", None),
+                profile_manager=getattr(self.agent, "profile_manager", None),
+                conversation_store=self.conversation_store,
+                llm_client=getattr(self.agent, "llm", None),
                 config=self.config.proactive,
                 deliver=self._deliver_proactive_message,
             )

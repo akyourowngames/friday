@@ -301,6 +301,8 @@ class ReflectionConfig(BaseModel):
     completion_min_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     max_attempts: int = Field(default=3, ge=1, le=10)
+    follow_up_delay_hours: int = Field(default=24, ge=0, le=8_760)
+    follow_up_cooldown_hours: int = Field(default=72, ge=1, le=8_760)
 
 
 class ProactiveConfig(BaseModel):
@@ -309,8 +311,14 @@ class ProactiveConfig(BaseModel):
     enabled: bool = True
     poll_seconds: int = Field(default=900, ge=30, le=86_400)
     inactive_goal_days: int = Field(default=3, ge=1, le=365)
+    due_soon_days: int = Field(default=7, ge=0, le=365)
+    inactive_commitment_days: int = Field(default=3, ge=1, le=365)
     min_confidence: float = Field(default=0.80, ge=0.0, le=1.0)
     reminder_cooldown_hours: int = Field(default=72, ge=1, le=8_760)
+    decision_cooldown_hours: int = Field(default=24, ge=1, le=8_760)
+    failed_delivery_retry_hours: int = Field(default=1, ge=1, le=168)
+    initiative_context_token_budget: int = Field(default=1_800, ge=400, le=8_000)
+    decision_timeout_seconds: int = Field(default=30, ge=5, le=180)
     max_messages_per_day: int = Field(default=1, ge=0, le=20)
     quiet_hours_start: str = "22:00"
     quiet_hours_end: str = "08:00"

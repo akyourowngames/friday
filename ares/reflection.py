@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError
 
+from ares.followups import FollowUpStore, future_utc
 from ares.llm import LLMClient
 from ares.memory_policy import memory_rejection_reason
 
@@ -93,6 +94,16 @@ class FollowUpOpportunity(BaseModel):
     description: str
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     evidence: str = ""
+    eligible_at: str | None = None
+    cooldown_hours: int | None = Field(default=None, ge=1, le=8_760)
+
+
+class FollowUpResolution(BaseModel):
+    follow_up_id: str
+    status: Literal["resolved", "dismissed", "cancelled"] = "resolved"
+    resolution: str
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    evidence: str
 
 
 class ReflectionResult(BaseModel):
@@ -104,6 +115,7 @@ class ReflectionResult(BaseModel):
     profile_updates: list[ProfileUpdate] = Field(default_factory=list)
     commitments: list[CommitmentChange] = Field(default_factory=list)
     follow_up_opportunities: list[FollowUpOpportunity] = Field(default_factory=list)
+    follow_up_resolutions: list[FollowUpResolution] = Field(default_factory=list)
 
 
 class ReflectionStore:
@@ -236,6 +248,7 @@ class ConversationReflector:
         existing_memories: list[dict[str, Any]],
         active_goals: list[dict[str, Any]],
         pending_commitments: list[dict[str, Any]],
+        open_followups: list[dict[str, Any]],
         profile_text: str,
     ) -> ReflectionResult:
         state = {
@@ -265,19 +278,29 @@ class ConversationReflector:
                 }
                 for item in pending_commitments[:12]
             ],
+            "open_followups": [
+                {
+                    "follow_up_id": item.get("follow_up_id"),
+                    "description": item.get("description"),
+                    "status": item.get("status"),
+                }
+                for item in open_followups[:12]
+            ],
             "profile": profile_text[:4_000],
         }
         prompt = (
             "You are Ares' conservative conversation reflection process. Return ONLY one JSON object matching "
             "this schema: new_memories, updated_memories, new_goals, goal_progress, completed_goals, "
-            "profile_updates, commitments, follow_up_opportunities; every value is an array.\n\n"
+            "profile_updates, commitments, follow_up_opportunities, follow_up_resolutions; every value is an array.\n\n"
             "Only the USER text is evidence. Every proposed mutation must contain an exact short excerpt from "
             "the user text in its evidence field and a calibrated confidence from 0 to 1. Assistant text can "
             "help interpret the turn but is never evidence. Do not extract temporary requests, tool state, moods, "
             "guesses, or facts about the world. Update an existing record by ID instead of duplicating it. Mark a "
             "goal completed only when the user explicitly says that outcome is finished. Create a goal only for a "
             "clear durable outcome; include 2-5 milestones and one small specific next_action. A commitment is an "
-            "explicit promise or obligation, not every request. If nothing durable changed, return empty arrays.\n\n"
+            "explicit promise or obligation, not every request. A follow-up opportunity is a concrete future "
+            "check-in that would help the user, not a generic suggestion. Resolve an open follow-up only when "
+            "the user explicitly completes, dismisses, or cancels it. If nothing durable changed, return empty arrays.\n\n"
             f"CURRENT STATE:\n{json.dumps(state, ensure_ascii=False)}\n\n"
             f"USER:\n{user_text[:8_000]}\n\nASSISTANT:\n{assistant_text[:8_000]}\n"
         )
@@ -297,12 +320,14 @@ class ReflectionApplier:
         memory_store: Any,
         goal_store: Any,
         commitment_store: Any,
+        follow_up_store: FollowUpStore,
         profile_manager: Any,
         config: Any,
     ) -> None:
         self.memory_store = memory_store
         self.goal_store = goal_store
         self.commitment_store = commitment_store
+        self.follow_up_store = follow_up_store
         self.profile_manager = profile_manager
         self.config = config
 
@@ -353,7 +378,8 @@ class ReflectionApplier:
                     confidence=item.confidence,
                     importance=item.importance,
                     source="conversation_reflection",
-                    session_id=scope,
+                    source_conversation_id=scope,
+                    source_reflection_id=reflection_id,
                 )
                 record("new_memory", "created", fact_id=fact_id)
             except Exception as exc:
@@ -502,6 +528,52 @@ class ReflectionApplier:
                     record("commitment", "skipped", reason="missing_id_for_terminal_status")
             except Exception as exc:
                 record("commitment", "error", error=str(exc)[:500])
+
+        for item in result.follow_up_opportunities:
+            if not allowed("follow_up", item.confidence, item.evidence):
+                continue
+            try:
+                created = self.follow_up_store.create(
+                    item.description,
+                    confidence=item.confidence,
+                    source_conversation_id=scope,
+                    source_reflection_id=reflection_id,
+                    eligible_at=item.eligible_at or future_utc(
+                        int(getattr(self.config, "follow_up_delay_hours", 24))
+                    ),
+                    cooldown_hours=item.cooldown_hours or int(
+                        getattr(self.config, "follow_up_cooldown_hours", 72)
+                    ),
+                    evidence=item.evidence,
+                )
+                record("follow_up", "created", follow_up_id=created.get("follow_up_id"))
+            except Exception as exc:
+                record("follow_up", "error", error=str(exc)[:500])
+
+        for item in result.follow_up_resolutions:
+            if not allowed("follow_up_resolution", item.confidence, item.evidence):
+                continue
+            try:
+                resolved = self.follow_up_store.resolve(
+                    item.follow_up_id,
+                    status=item.status,
+                    resolution=item.resolution,
+                )
+                if resolved is None:
+                    record(
+                        "follow_up_resolution", "skipped",
+                        reason="not_found_or_closed", follow_up_id=item.follow_up_id,
+                    )
+                else:
+                    record(
+                        "follow_up_resolution", item.status,
+                        follow_up_id=item.follow_up_id,
+                    )
+            except Exception as exc:
+                record(
+                    "follow_up_resolution", "error",
+                    follow_up_id=item.follow_up_id, error=str(exc)[:500],
+                )
         return outcomes
 
 
@@ -517,9 +589,11 @@ class ReflectionService:
         profile_manager: Any,
         config: Any,
         llm_client: Any | None = None,
+        follow_up_store: FollowUpStore | None = None,
     ) -> None:
         self.config = config
         self.store = ReflectionStore(memory_store.conn)
+        self.follow_up_store = follow_up_store or FollowUpStore(connection=memory_store.conn)
         self._owns_llm = llm_client is None
         # ``config`` is normally ReflectionConfig, which contains extraction
         # policy but deliberately not model credentials.  Agent supplies its
@@ -537,6 +611,7 @@ class ReflectionService:
             memory_store=memory_store,
             goal_store=goal_store,
             commitment_store=commitment_store,
+            follow_up_store=self.follow_up_store,
             profile_manager=profile_manager,
             config=config,
         )
@@ -559,6 +634,7 @@ class ReflectionService:
                 existing_memories=self.memory_store.search(job["user_text"], limit=10),
                 active_goals=self.goal_store.list_all(statuses=["active", "paused"], limit=12),
                 pending_commitments=self.commitment_store.list_pending(limit=12),
+                open_followups=self.follow_up_store.list_open(limit=12),
                 profile_text=self.profile_manager.read(),
             )
             async with self._apply_lock:

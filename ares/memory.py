@@ -140,7 +140,18 @@ class MemoryStore:
         _ensure_column(self.conn, "facts_meta", "source", "TEXT DEFAULT 'conversation'")
         _ensure_column(self.conn, "facts_meta", "updated_at", "TEXT")
         _ensure_column(self.conn, "facts_meta", "session_id", "TEXT DEFAULT NULL")
-        _ensure_column(self.conn, "facts_meta", "session_id", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "source_conversation_id", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "source_reflection_id", "TEXT DEFAULT NULL")
+
+        # Reflected facts are durable user memories, not conversation-local
+        # scratch state. Migrate PR #28 rows once while retaining their source
+        # conversation independently for provenance and auditability.
+        self.conn.execute(
+            """UPDATE facts_meta
+               SET source_conversation_id = COALESCE(source_conversation_id, session_id),
+                   session_id = NULL
+               WHERE source = 'conversation_reflection' AND session_id IS NOT NULL"""
+        )
 
         # FTS5 for keyword search
         self.conn.execute("""
@@ -164,13 +175,20 @@ class MemoryStore:
         importance: float = 0.5,
         source: str = "conversation",
         session_id: str | None = None,
+        source_conversation_id: str | None = None,
+        source_reflection_id: str | None = None,
     ) -> int:
         """Store a new fact. Returns the fact_id."""
         # Insert metadata
         cursor = self.conn.execute(
-            """INSERT INTO facts_meta (fact_text, category, confidence, importance, source, session_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (fact_text, category, confidence, importance, source, session_id),
+            """INSERT INTO facts_meta
+               (fact_text, category, confidence, importance, source, session_id,
+                source_conversation_id, source_reflection_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                fact_text, category, confidence, importance, source, session_id,
+                source_conversation_id, source_reflection_id,
+            ),
         )
         fact_id = cursor.lastrowid
 
@@ -523,6 +541,9 @@ class MemoryStore:
                 confidence=float(memory.get("confidence", 1.0)),
                 importance=float(memory.get("importance", 0.5)),
                 source=memory.get("source", "import"),
+                session_id=memory.get("session_id"),
+                source_conversation_id=memory.get("source_conversation_id"),
+                source_reflection_id=memory.get("source_reflection_id"),
             )
             existing.add((text, category))
             imported += 1
