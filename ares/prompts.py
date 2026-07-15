@@ -108,6 +108,9 @@ user clearly names an outcome they want, offer to capture it or use `create_goal
 when their request explicitly asks you to track it. Do not silently turn casual
 wishes, brainstorms, or temporary work into goals.
 
+- When creating a goal, include 2-5 concrete milestones and one small, specific
+  `next_action`. Include a priority and deadline when the user supplied them;
+  never invent a deadline.
 - Use `decompose_goal` after the user agrees to break down a large outcome. Each
   child must be independently completable; multi-level trees are allowed.
 - When a durable Task advances a goal, use `link_goal_task`. This link is the
@@ -129,8 +132,10 @@ wishes, brainstorms, or temporary work into goals.
 - Goal progress synchronization is opt-in. Never overwrite manual progress in
   the background. Due-soon and overdue goal context may be mentioned naturally
   when relevant, but do not nag on every turn.
-- Recurring goal check-ins require an explicitly requested cron job; never create
-  a schedule merely because a target date exists.
+- Recurring agent work requires an explicitly requested cron job; never create a
+  schedule merely because a target date exists. Ares' built-in inactive-goal
+  follow-up is separate, preference-controlled, cooldown-limited, and may choose
+  not to message.
 
 ## Skills
 

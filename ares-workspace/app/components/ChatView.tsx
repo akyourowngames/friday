@@ -1,10 +1,11 @@
 "use client";
 
-import { ArrowDown, ArrowUp, FileImage, FileText, Paperclip, Square, X } from "lucide-react";
+import { ArrowDown, ArrowUp, FileImage, FileText, Mic, Paperclip, Square, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Artifact, ChatMessage, PendingFile, TraceEvent } from "@/lib/types";
+import { VoiceConversation, type VoiceConversationHandle } from "./VoiceConversation";
 
 interface Props {
   messages: ChatMessage[];
@@ -18,6 +19,7 @@ interface Props {
   removeAttachment: (id: string) => void;
   addFiles: (files: FileList | File[]) => void;
   sendMessage: (prompt?: string) => void;
+  cancelMessage: () => void;
   openArtifact: (artifact: Artifact) => void;
   model: string;
   traces: TraceEvent[];
@@ -52,11 +54,13 @@ function ArtifactCards({ artifacts, open }: { artifacts?: Artifact[]; open: (art
 }
 
 export function ChatView(props: Props) {
-  const { messages, historyLoading, streaming, busy, phase, input, setInput, attachments, removeAttachment, addFiles, sendMessage, openArtifact, model, traces } = props;
+  const { messages, historyLoading, streaming, busy, phase, input, setInput, attachments, removeAttachment, addFiles, sendMessage, cancelMessage, openArtifact, model, traces } = props;
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const voiceRoomRef = useRef<VoiceConversationHandle>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const hasMessages = messages.length > 0 || Boolean(streaming) || busy || historyLoading;
 
   const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
@@ -77,10 +81,18 @@ export function ChatView(props: Props) {
     inputRef.current.style.height = "auto";
     inputRef.current.style.height = `${Math.min(160, inputRef.current.scrollHeight)}px`;
   }, [input]);
+  const submitDraft = () => sendMessage();
+
+  const openVoiceRoom = () => {
+    setVoiceOpen(true);
+    // Starts in the microphone click so LiveKit can request microphone and
+    // speaker access while the browser still has a user gesture.
+    void voiceRoomRef.current?.start();
+  };
 
   const activeTrace = [...traces].reverse().find(trace => trace.state === "active");
 
-  return <section className="view is-active chat-view">
+  return <><section className="view is-active chat-view">
     <div className="chat-main" onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addFiles(event.dataTransfer.files); }}>
       <div className="messages" ref={scrollRef} aria-live="polite" onScroll={event => { const element = event.currentTarget; setAtBottom(element.scrollHeight - element.scrollTop - element.clientHeight < 80); }}>
         {historyLoading ? <div className="history-skeleton" aria-label="Loading conversation" role="status">
@@ -112,13 +124,16 @@ export function ChatView(props: Props) {
         {activeTrace && <div className="inline-trace"><span className="tool-spinner" /><strong>Using {activeTrace.label}</strong><span>{activeTrace.detail || "Working…"}</span></div>}
         <div className="attachment-strip">{attachments.map(file => <div className="attachment-chip" key={file.id}><span><FileText size={14} /></span><span><strong>{file.name}</strong><small>{sizeLabel(file.size)}</small></span><button onClick={() => removeAttachment(file.id)} aria-label={`Remove ${file.name}`}><X size={13} /></button></div>)}</div>
         <div className="composer">
-          <button className="composer-icon" onClick={() => fileRef.current?.click()} aria-label="Attach files"><Paperclip /></button>
-          <textarea ref={inputRef} rows={1} value={input} maxLength={50000} placeholder="Message Ares" aria-label="Message Ares" onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} />
-          <div className="composer-actions"><button className="mode-select" title={model}><span className="model-dot" /><span>{model || "Model"}</span></button><button className={`send-btn ${busy ? "is-stop" : ""}`} onClick={() => sendMessage()} disabled={busy} aria-label={busy ? "Ares is responding in this chat" : "Send message"}>{busy ? <Square size={13} fill="currentColor" /> : <ArrowUp />}</button></div>
+          <div className="composer-tools">
+            <button className="composer-icon" onClick={() => fileRef.current?.click()} aria-label="Attach files"><Paperclip /></button>
+            <button className="composer-icon voice-trigger" onClick={openVoiceRoom} aria-label="Start a LiveKit voice conversation" title="Talk to Ares"><Mic /></button>
+          </div>
+          <textarea ref={inputRef} rows={1} value={input} maxLength={50000} placeholder="Message Ares" aria-label="Message Ares" onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitDraft(); } }} />
+          <div className="composer-actions"><button className="mode-select" title={model}><span className="model-dot" /><span>{model || "Model"}</span></button><button className={`send-btn ${busy ? "is-stop" : ""}`} onClick={() => busy ? cancelMessage() : submitDraft()} aria-label={busy ? "Stop Ares response" : "Send message"}>{busy ? <Square size={13} fill="currentColor" /> : <ArrowUp />}</button></div>
         </div>
-        <div className="composer-meta"><span>{busy ? "This chat is running in the background if you switch." : "Ares can make mistakes. Check important information."}</span><span>{attachments.length ? `${attachments.length} file${attachments.length === 1 ? "" : "s"} ready` : "Files stay local"}</span></div>
+          <div className="composer-meta"><span aria-live="polite">{busy ? "This chat is running in the background if you switch." : "Use the microphone to talk to Ares live."}</span><span>{attachments.length ? `${attachments.length} file${attachments.length === 1 ? "" : "s"} ready` : "Files stay local"}</span></div>
         <input ref={fileRef} type="file" multiple hidden onChange={event => { if (event.target.files) addFiles(event.target.files); event.target.value = ""; }} />
       </div>
     </div>
-  </section>;
+  </section><VoiceConversation ref={voiceRoomRef} open={voiceOpen} onClose={() => setVoiceOpen(false)} /></>;
 }

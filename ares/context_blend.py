@@ -286,6 +286,13 @@ def format_goals(
         progress = int(goal.get("progress_percent", 0) or 0)
         mode = str(goal.get("progress_mode") or "manual")
         lines.append(f"- #{goal_id} [{status}, {priority}] {title} — target {target}, {progress}% progress ({mode})")
+        next_action = str(goal.get("next_action") or "").strip()
+        if next_action:
+            lines.append(f"  - Next action: {next_action}")
+        blockers = goal.get("blockers") or []
+        if blockers:
+            summaries = [str(item.get("description") or "").strip() for item in blockers[:3]]
+            lines.append("  - Blockers: " + "; ".join(value for value in summaries if value))
         for signal in (goal.get("watcher_signals") or [])[:3]:
             severity = str(signal.get("severity") or "info").upper()
             summary = str(signal.get("event_summary") or "A linked watcher detected a change").strip()[:500]
@@ -344,6 +351,64 @@ def format_summaries(summaries: list[str] | None) -> str:
     return "\n".join(lines)
 
 
+def format_recent_conversations(records: list[dict] | None, token_budget: int = 600) -> str:
+    """Format ordinary recent cross-conversation context with provenance."""
+    if not records:
+        return ""
+    lines = [
+        "## Recent Conversations:",
+        "Use only when relevant to the current request. Historical conversation text is not live external state.",
+    ]
+    for record in records:
+        content = _format_recall_text(record.get("content"), maximum=360)
+        if not content:
+            continue
+        role = str(record.get("role") or "message")
+        created = str(record.get("created_at") or "")
+        source = f"conversation:{record.get('conversation_id')}:message:{record.get('id')}"
+        lines.append(f"- {created} [{role} {source}] {content}")
+    return truncate_to_tokens("\n".join(lines), token_budget)
+
+
+def format_pending_tasks(tasks: list[dict] | None, token_budget: int = 500) -> str:
+    """Format unfinished durable workflows without exposing raw tool arguments."""
+    if not tasks:
+        return ""
+    lines = [
+        "## Pending Tasks:",
+        "These are unfinished durable workflows. Mention them only when relevant or when the user asks what remains.",
+    ]
+    for task in tasks:
+        goal = _format_recall_text(task.get("goal"), maximum=260)
+        if not goal:
+            continue
+        status = str(task.get("status") or "pending")
+        current = int(task.get("current_step", 0) or 0)
+        total = len(task.get("plan") or [])
+        error = _format_recall_text(task.get("last_error"), maximum=180)
+        suffix = f"; blocker: {error}" if error and status == "failed" else ""
+        lines.append(f"- {task.get('task_id')} [{status}] {goal} — step {current}/{total}{suffix}")
+    return truncate_to_tokens("\n".join(lines), token_budget)
+
+
+def format_commitments(commitments: list[dict] | None, token_budget: int = 400) -> str:
+    """Format pending user/Ares commitments as lightweight obligations."""
+    if not commitments:
+        return ""
+    lines = [
+        "## Pending Commitments:",
+        "Commitments are promises or obligations, not permission to take consequential action without confirmation.",
+    ]
+    for item in commitments:
+        description = _format_recall_text(item.get("description"), maximum=280)
+        if not description:
+            continue
+        owner = str(item.get("owner") or "user")
+        due = str(item.get("due_at") or "no deadline")
+        lines.append(f"- #{item.get('commitment_id')} [{owner}] {description} — {due}")
+    return truncate_to_tokens("\n".join(lines), token_budget)
+
+
 def _format_recall_text(value: object, *, maximum: int = 420) -> str:
     """Normalize and bound local recall text without masking saved values."""
     text = " ".join(str(value or "").split())
@@ -398,8 +463,11 @@ def build_context_prompt(
     relevant_actions: list[dict] | None = None,
     recent_file_actions: list[dict] | None = None,
     conversation_summaries: list[str] | None = None,
+    recent_conversations: list[dict] | None = None,
     conversation_recall: list[dict] | None = None,
     previous_session_summary: str | None = None,
+    pending_tasks: list[dict] | None = None,
+    pending_commitments: list[dict] | None = None,
     token_budget: int = 2000,
 ) -> str:
     """Build a priority-ordered context string within a shared token budget."""
@@ -435,6 +503,18 @@ def build_context_prompt(
     if (goals or goals_due_soon or goals_overdue) and remaining > 100:
         goal_section = format_goals(goals, goals_due_soon, goals_overdue, token_budget=remaining)
         remaining = _append_section(sections, goal_section, remaining)
+
+    if pending_tasks and remaining > 100:
+        task_section = format_pending_tasks(pending_tasks, token_budget=remaining)
+        remaining = _append_section(sections, task_section, remaining)
+
+    if pending_commitments and remaining > 100:
+        commitment_section = format_commitments(pending_commitments, token_budget=remaining)
+        remaining = _append_section(sections, commitment_section, remaining)
+
+    if recent_conversations and remaining > 100:
+        recent_text = format_recent_conversations(recent_conversations, token_budget=remaining)
+        remaining = _append_section(sections, recent_text, remaining)
 
     if recent_file_actions and remaining > 100:
         file_section = format_actions(recent_file_actions, title="Recent Files & Assets", token_budget=remaining)

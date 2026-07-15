@@ -1,4 +1,7 @@
 import base64
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -21,6 +24,49 @@ def test_next_workspace_export_and_runtime_descriptor_exist():
     assert runtime.json()["websocket_url"] == "ws://127.0.0.1:9876"
     assert health.json()["frontend"] == "nextjs"
     assert page.headers["x-content-type-options"] == "nosniff"
+
+
+def test_workspace_mints_a_short_lived_loopback_only_voice_session():
+    config = SimpleNamespace(telephony=SimpleNamespace(
+        livekit_url="wss://voice.example.livekit.cloud",
+        livekit_api_key="test-api-key",
+        livekit_api_secret="test-api-secret-must-be-at-least-32-characters-long!!",
+    ))
+    app = create_workspace_app(voice_config_provider=lambda: config)
+    with TestClient(app, client=("127.0.0.1", 40123)) as client:
+        response = client.get("/api/voice/session")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert payload["room"] == "ares-voice-room"
+    assert payload["identity"].startswith("workspace-")
+    assert payload["token"].count(".") == 2
+    assert "test-api-secret" not in json.dumps(payload)
+
+
+def test_workspace_rejects_voice_tokens_for_non_loopback_clients():
+    app = create_workspace_app(voice_config_provider=lambda: None)
+    with TestClient(app, client=("192.0.2.9", 40123)) as client:
+        response = client.get("/api/voice/session")
+
+    assert response.status_code == 403
+
+
+def test_workspace_voice_ui_uses_livekit_instead_of_browser_dictation():
+    root = Path("ares-workspace")
+    chat_view = (root / "app" / "components" / "ChatView.tsx").read_text(encoding="utf-8")
+    voice_view = (root / "app" / "components" / "VoiceConversation.tsx").read_text(encoding="utf-8")
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+
+    assert "Start a LiveKit voice conversation" in chat_view
+    assert "SpeechRecognition" not in chat_view
+    assert "/api/voice/session" in voice_view
+    assert "room.startAudio" in voice_view
+    assert "MAX_RECONNECT_ATTEMPTS = 5" in voice_view
+    assert "scheduleReconnect" in voice_view
+    assert "intentionalDisconnectRef" in voice_view
+    assert package["dependencies"]["livekit-client"].startswith("^2.")
 
 
 def test_bundled_next_export_is_available_without_development_out(tmp_path, monkeypatch):

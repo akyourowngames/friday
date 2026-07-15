@@ -24,7 +24,7 @@ _UNSET = object()
 _WHITESPACE = re.compile(r"\s+")
 _STATUSES = {"active", "paused", "completed", "abandoned"}
 _PRIORITIES = {"low", "normal", "high"}
-_SOURCES = {"manual", "ares-suggested", "import"}
+_SOURCES = {"manual", "ares-suggested", "reflection", "import"}
 _LINK_TYPES = {"task", "action", "watcher"}
 _SIGNAL_RESOLUTIONS = {"dismissed", "reviewed", "goal_updated", "goal_completed"}
 
@@ -82,7 +82,8 @@ def goal_public_view(goal: dict[str, Any]) -> dict[str, Any]:
         "goal_id", "title", "description", "status", "category", "priority",
         "progress_percent", "progress_mode", "target_date", "parent_goal_id",
         "created_at", "updated_at", "completed_at", "source", "confidence",
-        "revision", "is_overdue", "days_remaining",
+        "revision", "is_overdue", "days_remaining", "milestones", "next_action",
+        "blockers", "last_activity_at", "last_reminder_at", "source_conversation_id",
     )
     return {key: goal.get(key) for key in fields}
 
@@ -93,6 +94,7 @@ class GoalStore:
     _UPDATABLE = {
         "title", "description", "status", "category", "priority",
         "progress_percent", "target_date", "parent_goal_id", "source", "confidence",
+        "next_action",
     }
 
     def __init__(
@@ -132,6 +134,10 @@ class GoalStore:
                 completed_at TEXT,
                 source TEXT NOT NULL DEFAULT 'manual',
                 confidence REAL NOT NULL DEFAULT 1.0,
+                next_action TEXT NOT NULL DEFAULT '',
+                last_activity_at TEXT,
+                last_reminder_at TEXT,
+                source_conversation_id TEXT,
                 revision INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (parent_goal_id) REFERENCES goals_meta(goal_id) ON DELETE SET NULL
             );
@@ -151,6 +157,27 @@ class GoalStore:
                 progress_percent INTEGER,
                 created_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY (goal_id) REFERENCES goals_meta(goal_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS goal_milestones (
+                milestone_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                target_date TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (goal_id) REFERENCES goals_meta(goal_id) ON DELETE CASCADE,
+                UNIQUE(goal_id, position)
+            );
+            CREATE TABLE IF NOT EXISTS goal_blockers (
+                blocker_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
                 FOREIGN KEY (goal_id) REFERENCES goals_meta(goal_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS goal_watcher_signals (
@@ -177,13 +204,19 @@ class GoalStore:
             CREATE INDEX IF NOT EXISTS idx_goals_status ON goals_meta(status, target_date);
             CREATE INDEX IF NOT EXISTS idx_goals_parent ON goals_meta(parent_goal_id);
             CREATE INDEX IF NOT EXISTS idx_goal_events_goal ON goal_events(goal_id, event_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones(goal_id, position);
+            CREATE INDEX IF NOT EXISTS idx_goal_blockers_goal ON goal_blockers(goal_id, status);
             CREATE INDEX IF NOT EXISTS idx_goal_signals_unack
                 ON goal_watcher_signals(goal_id, acknowledged, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_goal_signals_watcher
                 ON goal_watcher_signals(watcher_id, created_at DESC);
             """
         )
+        self._migrate_goal_schema()
         self._migrate_signal_schema()
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_goals_activity ON goals_meta(status, last_activity_at)"
+        )
         self.conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_signal_source
                ON goal_watcher_signals(goal_id, source_event_id)
@@ -205,6 +238,46 @@ class GoalStore:
         except sqlite3.DatabaseError:
             self.fts_enabled = False
         self.conn.commit()
+
+    @staticmethod
+    def _default_milestones(title: str) -> list[dict[str, Any]]:
+        return [
+            {"title": f"Define success criteria for {title}"},
+            {"title": f"Complete the core work for {title}"},
+            {"title": f"Review and close {title}"},
+        ]
+
+    def _migrate_goal_schema(self) -> None:
+        """Add actionable fields and safely backfill existing local goals."""
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(goals_meta)")}
+        additions = {
+            "next_action": "TEXT NOT NULL DEFAULT ''",
+            "last_activity_at": "TEXT",
+            "last_reminder_at": "TEXT",
+            "source_conversation_id": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE goals_meta ADD COLUMN {name} {definition}")
+        self.conn.execute(
+            """UPDATE goals_meta SET last_activity_at=COALESCE(last_activity_at, updated_at, created_at),
+               next_action=CASE WHEN TRIM(COALESCE(next_action, ''))='' THEN
+                 'Define the next concrete step for ' || title ELSE next_action END"""
+        )
+        rows = self.conn.execute(
+            """SELECT goal_id, title FROM goals_meta WHERE NOT EXISTS (
+                   SELECT 1 FROM goal_milestones m WHERE m.goal_id=goals_meta.goal_id
+               )"""
+        ).fetchall()
+        now = utc_now()
+        for row in rows:
+            for position, item in enumerate(self._default_milestones(str(row["title"])), start=1):
+                self.conn.execute(
+                    """INSERT INTO goal_milestones
+                       (goal_id, title, position, status, target_date, created_at, completed_at)
+                       VALUES (?, ?, ?, 'pending', NULL, ?, NULL)""",
+                    (int(row["goal_id"]), item["title"], position, now),
+                )
 
     def _migrate_signal_schema(self) -> None:
         """Upgrade early goal-signal prototypes without discarding local evidence."""
@@ -281,16 +354,16 @@ class GoalStore:
             ),
         )
 
-    @staticmethod
-    def _row_to_goal(row: sqlite3.Row) -> dict[str, Any]:
+    def _row_to_goal(self, row: sqlite3.Row) -> dict[str, Any]:
         target = row["target_date"]
         remaining: int | None = None
         overdue = False
         if target:
             remaining = (date.fromisoformat(str(target)) - date.today()).days
             overdue = remaining < 0 and row["status"] == "active"
+        goal_id = int(row["goal_id"])
         return {
-            "goal_id": int(row["goal_id"]),
+            "goal_id": goal_id,
             "title": row["title"],
             "description": row["description"],
             "status": row["status"],
@@ -305,10 +378,69 @@ class GoalStore:
             "completed_at": row["completed_at"],
             "source": row["source"],
             "confidence": float(row["confidence"]),
+            "next_action": row["next_action"] or "",
+            "last_activity_at": row["last_activity_at"] or row["updated_at"],
+            "last_reminder_at": row["last_reminder_at"],
+            "source_conversation_id": row["source_conversation_id"],
             "revision": int(row["revision"]),
             "is_overdue": overdue,
             "days_remaining": remaining,
+            "milestones": self.list_milestones(goal_id),
+            "blockers": self.list_blockers(goal_id),
         }
+
+    def _normalize_milestones(
+        self, milestones: list[dict[str, Any] | str] | None, title: str,
+    ) -> list[dict[str, Any]]:
+        values = milestones or self._default_milestones(title)
+        if not isinstance(values, list) or not values:
+            values = self._default_milestones(title)
+        if len(values) > 20:
+            raise ValueError("A goal may have at most 20 milestones")
+        normalized: list[dict[str, Any]] = []
+        for item in values:
+            record = {"title": item} if isinstance(item, str) else item
+            if not isinstance(record, dict):
+                raise ValueError("Each milestone must be text or an object")
+            normalized.append({
+                "title": _clean(record.get("title"), field="milestone title", maximum=300, required=True),
+                "target_date": _target_date(record.get("target_date")),
+            })
+        return normalized
+
+    def _normalize_blockers(self, blockers: list[dict[str, Any] | str] | None) -> list[str]:
+        if blockers is None:
+            return []
+        if not isinstance(blockers, list) or len(blockers) > 20:
+            raise ValueError("blockers must be a list of at most 20 items")
+        result: list[str] = []
+        for item in blockers:
+            value = item.get("description") if isinstance(item, dict) else item
+            result.append(_clean(value, field="blocker", maximum=500, required=True))
+        return result
+
+    def _insert_goal_plan(
+        self,
+        goal_id: int,
+        milestones: list[dict[str, Any]],
+        blockers: list[str],
+        *,
+        created_at: str,
+    ) -> None:
+        for position, item in enumerate(milestones, start=1):
+            self.conn.execute(
+                """INSERT INTO goal_milestones
+                   (goal_id, title, position, status, target_date, created_at, completed_at)
+                   VALUES (?, ?, ?, 'pending', ?, ?, NULL)""",
+                (goal_id, item["title"], position, item.get("target_date"), created_at),
+            )
+        for description in blockers:
+            self.conn.execute(
+                """INSERT INTO goal_blockers
+                   (goal_id, description, status, created_at, resolved_at)
+                   VALUES (?, ?, 'active', ?, NULL)""",
+                (goal_id, description, created_at),
+            )
 
     def create(
         self,
@@ -321,12 +453,24 @@ class GoalStore:
         parent_goal_id: int | None = None,
         source: str = "manual",
         confidence: float = 1.0,
+        milestones: list[dict[str, Any] | str] | None = None,
+        next_action: str = "",
+        blockers: list[dict[str, Any] | str] | None = None,
+        source_conversation_id: str | None = None,
     ) -> dict[str, Any]:
         clean_title = _clean(title, field="title", maximum=300, required=True)
         clean_description = _clean(description, field="description", maximum=6_000)
         clean_category = _clean(category or "general", field="category", maximum=80, required=True).casefold()
         clean_priority = self._validate_choice(priority, _PRIORITIES, "priority")
         clean_source = self._validate_choice(source, _SOURCES, "source")
+        clean_milestones = self._normalize_milestones(milestones, clean_title)
+        clean_next_action = _clean(next_action, field="next_action", maximum=1_000)
+        if not clean_next_action:
+            clean_next_action = f"Define success criteria for {clean_title}"
+        clean_blockers = self._normalize_blockers(blockers)
+        clean_source_conversation = _clean(
+            source_conversation_id, field="source_conversation_id", maximum=180,
+        ) or None
         clean_target = _target_date(target_date)
         parent_id = int(parent_goal_id) if parent_goal_id is not None else None
         if parent_id is not None and self.get(parent_id) is None:
@@ -337,11 +481,17 @@ class GoalStore:
                 """INSERT INTO goals_meta
                    (title, description, status, category, priority, progress_percent,
                     progress_mode, target_date, parent_goal_id, created_at, updated_at,
-                    completed_at, source, confidence, revision)
-                   VALUES (?, ?, 'active', ?, ?, 0, 'manual', ?, ?, ?, ?, NULL, ?, ?, 1)""",
-                (clean_title, clean_description, clean_category, clean_priority, clean_target, parent_id, now, now, clean_source, _confidence(confidence)),
+                    completed_at, source, confidence, next_action, last_activity_at,
+                    last_reminder_at, source_conversation_id, revision)
+                   VALUES (?, ?, 'active', ?, ?, 0, 'manual', ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, 1)""",
+                (
+                    clean_title, clean_description, clean_category, clean_priority,
+                    clean_target, parent_id, now, now, clean_source, _confidence(confidence),
+                    clean_next_action, now, clean_source_conversation,
+                ),
             )
             goal_id = int(cursor.lastrowid)
+            self._insert_goal_plan(goal_id, clean_milestones, clean_blockers, created_at=now)
             self._insert_fts(goal_id, clean_title, clean_description)
             self._event(goal_id, "created", metadata={"source": clean_source})
         return self.get(goal_id) or {}
@@ -349,6 +499,21 @@ class GoalStore:
     def get(self, goal_id: int) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM goals_meta WHERE goal_id = ?", (int(goal_id),)).fetchone()
         return self._row_to_goal(row) if row else None
+
+    def list_milestones(self, goal_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM goal_milestones WHERE goal_id=? ORDER BY position, milestone_id",
+            (int(goal_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_blockers(self, goal_id: int, *, include_resolved: bool = False) -> list[dict[str, Any]]:
+        where = "" if include_resolved else " AND status='active'"
+        rows = self.conn.execute(
+            f"SELECT * FROM goal_blockers WHERE goal_id=?{where} ORDER BY blocker_id",
+            (int(goal_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def _assert_revision(self, existing: dict[str, Any], expected_revision: int | None) -> None:
         if expected_revision is not None and existing["revision"] != int(expected_revision):
@@ -421,6 +586,10 @@ class GoalStore:
             values["source"] = self._validate_choice(fields["source"], _SOURCES, "source")
         if "confidence" in fields:
             values["confidence"] = _confidence(fields["confidence"])
+        if "next_action" in fields:
+            values["next_action"] = _clean(
+                fields["next_action"], field="next_action", maximum=1_000, required=True,
+            )
         if values["status"] == "completed":
             values["progress_percent"] = 100
             values["completed_at"] = existing.get("completed_at") or utc_now()
@@ -431,11 +600,13 @@ class GoalStore:
             self.conn.execute(
                 """UPDATE goals_meta SET title=?, description=?, status=?, category=?, priority=?,
                    progress_percent=?, progress_mode=?, target_date=?, parent_goal_id=?, updated_at=?,
-                   completed_at=?, source=?, confidence=?, revision=revision+1 WHERE goal_id=?""",
+                   completed_at=?, source=?, confidence=?, next_action=?, last_activity_at=?,
+                   revision=revision+1 WHERE goal_id=?""",
                 (
                     values["title"], values["description"], values["status"], values["category"], values["priority"],
                     values["progress_percent"], values["progress_mode"], values["target_date"], values["parent_goal_id"],
-                    now, values["completed_at"], values["source"], values["confidence"], int(goal_id),
+                    now, values["completed_at"], values["source"], values["confidence"],
+                    values["next_action"], now, int(goal_id),
                 ),
             )
             self._replace_fts(existing, values["title"], values["description"])
@@ -508,12 +679,17 @@ class GoalStore:
         for item in subgoals:
             if not isinstance(item, dict):
                 raise ValueError("Each subgoal must be an object")
+            subgoal_title = _clean(item.get("title"), field="subgoal title", maximum=300, required=True)
             validated.append({
-                "title": _clean(item.get("title"), field="subgoal title", maximum=300, required=True),
+                "title": subgoal_title,
                 "description": _clean(item.get("description", ""), field="subgoal description", maximum=6_000),
                 "category": _clean(item.get("category", parent["category"]), field="category", maximum=80, required=True).casefold(),
                 "priority": self._validate_choice(item.get("priority", parent["priority"]), _PRIORITIES, "priority"),
                 "target_date": _target_date(item.get("target_date")),
+                "next_action": _clean(item.get("next_action"), field="next_action", maximum=1_000)
+                or f"Define success criteria for {subgoal_title}",
+                "milestones": self._normalize_milestones(item.get("milestones"), subgoal_title),
+                "blockers": self._normalize_blockers(item.get("blockers")),
             })
         created_ids: list[int] = []
         with self._transaction():
@@ -523,15 +699,27 @@ class GoalStore:
                     """INSERT INTO goals_meta
                        (title, description, status, category, priority, progress_percent,
                         progress_mode, target_date, parent_goal_id, created_at, updated_at,
-                        source, confidence, revision)
-                       VALUES (?, ?, 'active', ?, ?, 0, 'manual', ?, ?, ?, ?, 'manual', 1.0, 1)""",
-                    (item["title"], item["description"], item["category"], item["priority"], item["target_date"], int(goal_id), now, now),
+                        source, confidence, next_action, last_activity_at, last_reminder_at,
+                        source_conversation_id, revision)
+                       VALUES (?, ?, 'active', ?, ?, 0, 'manual', ?, ?, ?, ?, 'manual', 1.0,
+                               ?, ?, NULL, ?, 1)""",
+                    (
+                        item["title"], item["description"], item["category"], item["priority"],
+                        item["target_date"], int(goal_id), now, now, item["next_action"], now,
+                        parent.get("source_conversation_id"),
+                    ),
                 )
                 child_id = int(cursor.lastrowid)
                 created_ids.append(child_id)
+                self._insert_goal_plan(
+                    child_id, item["milestones"], item["blockers"], created_at=now,
+                )
                 self._insert_fts(child_id, item["title"], item["description"])
                 self._event(child_id, "created", metadata={"parent_goal_id": int(goal_id)})
-            self.conn.execute("UPDATE goals_meta SET updated_at=?, revision=revision+1 WHERE goal_id=?", (utc_now(), int(goal_id)))
+            self.conn.execute(
+                "UPDATE goals_meta SET updated_at=?, last_activity_at=?, revision=revision+1 WHERE goal_id=?",
+                (utc_now(), utc_now(), int(goal_id)),
+            )
             self._event(int(goal_id), "decomposed", metadata={"child_goal_ids": created_ids})
         return [goal for child_id in created_ids if (goal := self.get(child_id)) is not None]
 
@@ -545,7 +733,11 @@ class GoalStore:
                 "INSERT OR IGNORE INTO goal_links(goal_id, link_type, ref_id, created_at) VALUES (?, ?, ?, ?)",
                 (int(goal_id), kind, reference, utc_now()),
             )
-            self.conn.execute("UPDATE goals_meta SET updated_at=?, revision=revision+1 WHERE goal_id=?", (utc_now(), int(goal_id)))
+            now = utc_now()
+            self.conn.execute(
+                "UPDATE goals_meta SET updated_at=?, last_activity_at=?, revision=revision+1 WHERE goal_id=?",
+                (now, now, int(goal_id)),
+            )
             self._event(int(goal_id), "linked", metadata={"link_type": kind, "ref_id": reference})
 
     def unlink(self, goal_id: int, *, link_type: str, ref_id: str) -> None:
@@ -553,7 +745,11 @@ class GoalStore:
         with self._transaction():
             cursor = self.conn.execute("DELETE FROM goal_links WHERE goal_id=? AND link_type=? AND ref_id=?", (int(goal_id), kind, str(ref_id)))
             if cursor.rowcount:
-                self.conn.execute("UPDATE goals_meta SET updated_at=?, revision=revision+1 WHERE goal_id=?", (utc_now(), int(goal_id)))
+                now = utc_now()
+                self.conn.execute(
+                    "UPDATE goals_meta SET updated_at=?, last_activity_at=?, revision=revision+1 WHERE goal_id=?",
+                    (now, now, int(goal_id)),
+                )
                 self._event(int(goal_id), "unlinked", metadata={"link_type": kind, "ref_id": str(ref_id)})
 
     def linked_refs(self, goal_id: int) -> dict[str, list[str]]:
@@ -905,11 +1101,127 @@ class GoalStore:
         clean_note = _clean(note, field="note", maximum=2_000, required=True)
         percent = existing["progress_percent"] if progress_percent is None else _progress(progress_percent)
         with self._transaction():
+            now = utc_now()
             self.conn.execute(
-                "UPDATE goals_meta SET progress_percent=?, progress_mode='manual', updated_at=?, revision=revision+1 WHERE goal_id=?",
-                (percent, utc_now(), int(goal_id)),
+                """UPDATE goals_meta SET progress_percent=?, progress_mode='manual',
+                   updated_at=?, last_activity_at=?, revision=revision+1 WHERE goal_id=?""",
+                (percent, now, now, int(goal_id)),
             )
             self._event(int(goal_id), "progress", note=clean_note, progress_percent=percent)
+        return self.get(int(goal_id))
+
+    def set_milestone_status(
+        self,
+        goal_id: int,
+        milestone_id: int,
+        *,
+        status: str,
+        note: str = "",
+    ) -> dict[str, Any] | None:
+        normalized = self._validate_choice(status, {"pending", "completed", "skipped"}, "status")
+        existing = self.conn.execute(
+            "SELECT * FROM goal_milestones WHERE milestone_id=? AND goal_id=?",
+            (int(milestone_id), int(goal_id)),
+        ).fetchone()
+        if existing is None:
+            return None
+        now = utc_now()
+        with self._transaction():
+            self.conn.execute(
+                """UPDATE goal_milestones SET status=?, completed_at=?
+                   WHERE milestone_id=? AND goal_id=?""",
+                (
+                    normalized,
+                    now if normalized == "completed" else None,
+                    int(milestone_id),
+                    int(goal_id),
+                ),
+            )
+            self.conn.execute(
+                """UPDATE goals_meta SET updated_at=?, last_activity_at=?, revision=revision+1
+                   WHERE goal_id=?""",
+                (now, now, int(goal_id)),
+            )
+            self._event(
+                int(goal_id), "milestone_updated", note=note,
+                metadata={"milestone_id": int(milestone_id), "status": normalized},
+            )
+        return self.get(int(goal_id))
+
+    def add_blocker(self, goal_id: int, description: str) -> dict[str, Any] | None:
+        if self.get(int(goal_id)) is None:
+            return None
+        clean_description = _clean(description, field="blocker", maximum=500, required=True)
+        now = utc_now()
+        with self._transaction():
+            cursor = self.conn.execute(
+                """INSERT INTO goal_blockers
+                   (goal_id, description, status, created_at, resolved_at)
+                   VALUES (?, ?, 'active', ?, NULL)""",
+                (int(goal_id), clean_description, now),
+            )
+            self.conn.execute(
+                "UPDATE goals_meta SET updated_at=?, last_activity_at=?, revision=revision+1 WHERE goal_id=?",
+                (now, now, int(goal_id)),
+            )
+            self._event(
+                int(goal_id), "blocker_added", note=clean_description,
+                metadata={"blocker_id": int(cursor.lastrowid)},
+            )
+        return self.get(int(goal_id))
+
+    def resolve_blocker(self, goal_id: int, blocker_id: int) -> dict[str, Any] | None:
+        now = utc_now()
+        with self._transaction():
+            cursor = self.conn.execute(
+                """UPDATE goal_blockers SET status='resolved', resolved_at=?
+                   WHERE blocker_id=? AND goal_id=? AND status='active'""",
+                (now, int(blocker_id), int(goal_id)),
+            )
+            if not cursor.rowcount:
+                return None
+            self.conn.execute(
+                "UPDATE goals_meta SET updated_at=?, last_activity_at=?, revision=revision+1 WHERE goal_id=?",
+                (now, now, int(goal_id)),
+            )
+            self._event(
+                int(goal_id), "blocker_resolved", metadata={"blocker_id": int(blocker_id)},
+            )
+        return self.get(int(goal_id))
+
+    def inactive(self, *, before: str, limit: int = 50) -> list[dict[str, Any]]:
+        try:
+            parsed = datetime.fromisoformat(str(before).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("before must be an ISO timestamp") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        cutoff = parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        rows = self.conn.execute(
+            """SELECT * FROM goals_meta WHERE status='active' AND last_activity_at <= ?
+               ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                        last_activity_at, target_date LIMIT ?""",
+            (cutoff, max(1, min(int(limit), 200))),
+        ).fetchall()
+        return [self._row_to_goal(row) for row in rows]
+
+    def mark_reminded(self, goal_id: int, *, when: str | None = None) -> dict[str, Any] | None:
+        if self.get(int(goal_id)) is None:
+            return None
+        stamp = when or utc_now()
+        try:
+            parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("when must be an ISO timestamp") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        stamp = parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self._transaction():
+            self.conn.execute(
+                "UPDATE goals_meta SET last_reminder_at=?, updated_at=? WHERE goal_id=?",
+                (stamp, stamp, int(goal_id)),
+            )
+            self._event(int(goal_id), "reminded", metadata={"reminded_at": stamp})
         return self.get(int(goal_id))
 
     def list_all(
@@ -1029,9 +1341,11 @@ class GoalStore:
             return goal
         percent = round(completed * 100 / evidence)
         with self._transaction():
+            now = utc_now()
             self.conn.execute(
-                "UPDATE goals_meta SET progress_percent=?, progress_mode='derived', updated_at=?, revision=revision+1 WHERE goal_id=?",
-                (percent, utc_now(), int(goal_id)),
+                """UPDATE goals_meta SET progress_percent=?, progress_mode='derived',
+                   updated_at=?, last_activity_at=?, revision=revision+1 WHERE goal_id=?""",
+                (percent, now, now, int(goal_id)),
             )
             self._event(
                 int(goal_id), "progress_synced", progress_percent=percent,
@@ -1043,6 +1357,7 @@ class GoalStore:
         return [
             {
                 **goal,
+                "blockers": self.list_blockers(goal["goal_id"], include_resolved=True),
                 "links": self.linked_refs(goal["goal_id"]),
                 "watcher_signals": list(reversed(self.list_watcher_signals(
                     goal["goal_id"], include_acknowledged=True, limit=500,
@@ -1068,6 +1383,8 @@ class GoalStore:
                 item["title"], description=item.get("description", ""), category=item.get("category", "general"),
                 priority=item.get("priority", "normal"), target_date=item.get("target_date"), parent_goal_id=None,
                 source="import", confidence=item.get("confidence", 1.0),
+                milestones=item.get("milestones"), next_action=item.get("next_action", ""),
+                blockers=item.get("blockers"), source_conversation_id=item.get("source_conversation_id"),
             )
             new_id = int(created["goal_id"])
             if old_id:
@@ -1078,6 +1395,31 @@ class GoalStore:
         # Then restore hierarchy, state, links, and the exported evidence
         # timeline after all old ids have a deterministic new-id mapping.
         for item, new_id in imported_items:
+            restored_milestones = self.list_milestones(new_id)
+            for exported, restored in zip(item.get("milestones") or [], restored_milestones):
+                status = str(exported.get("status") or "pending") if isinstance(exported, dict) else "pending"
+                if status not in {"pending", "completed", "skipped"}:
+                    status = "pending"
+                with self._transaction():
+                    self.conn.execute(
+                        """UPDATE goal_milestones SET status=?, completed_at=?
+                           WHERE milestone_id=?""",
+                        (
+                            status,
+                            exported.get("completed_at") if status == "completed" else None,
+                            int(restored["milestone_id"]),
+                        ),
+                    )
+            restored_blockers = self.list_blockers(new_id, include_resolved=True)
+            for exported, restored in zip(item.get("blockers") or [], restored_blockers):
+                if not isinstance(exported, dict) or exported.get("status") != "resolved":
+                    continue
+                with self._transaction():
+                    self.conn.execute(
+                        """UPDATE goal_blockers SET status='resolved', resolved_at=?
+                           WHERE blocker_id=?""",
+                        (exported.get("resolved_at") or utc_now(), int(restored["blocker_id"])),
+                    )
             updates: dict[str, Any] = {
                 field: item[field]
                 for field in ("status", "progress_percent")
@@ -1091,6 +1433,12 @@ class GoalStore:
             if item.get("progress_mode") == "derived":
                 with self._transaction():
                     self.conn.execute("UPDATE goals_meta SET progress_mode='derived' WHERE goal_id=?", (new_id,))
+            with self._transaction():
+                self.conn.execute(
+                    """UPDATE goals_meta SET last_activity_at=COALESCE(?, last_activity_at),
+                       last_reminder_at=COALESCE(?, last_reminder_at) WHERE goal_id=?""",
+                    (item.get("last_activity_at"), item.get("last_reminder_at"), new_id),
+                )
             for task_id in (item.get("links") or {}).get("tasks", []):
                 self.link(new_id, link_type="task", ref_id=str(task_id))
             for action_id in (item.get("links") or {}).get("actions", []):
@@ -1214,6 +1562,8 @@ class GoalToolHandlers:
             args.get("title", ""), description=args.get("description", ""), category=args.get("category", "general"),
             priority=args.get("priority", "normal"), target_date=args.get("target_date"),
             parent_goal_id=args.get("parent_goal_id"), source=args.get("source", "manual"), confidence=args.get("confidence", 1.0),
+            milestones=args.get("milestones"), next_action=args.get("next_action", ""),
+            blockers=args.get("blockers"), source_conversation_id=args.get("source_conversation_id"),
         ))
 
     def update_goal(self, args: dict[str, Any]) -> str:

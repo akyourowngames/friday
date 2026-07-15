@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import ipaddress
 import mimetypes
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 
 BUNDLED_NEXT_DIR = Path(__file__).parent / "static"
 NEXT_WORKSPACE_OUT = Path(__file__).resolve().parents[2] / "ares-workspace" / "out"
+
+
+class SpeechPayload(BaseModel):
+    """Bounded text accepted by the local Edge speech endpoint."""
+
+    text: str = Field(min_length=1, max_length=8_000)
 
 
 def resolve_workspace_static_dir() -> Path:
@@ -22,12 +31,24 @@ def resolve_workspace_static_dir() -> Path:
     return BUNDLED_NEXT_DIR
 
 
+def _is_loopback_client(request: Request) -> bool:
+    """Only issue a browser voice token to a local workspace client."""
+    host = request.client.host if request.client else ""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def create_workspace_app(
     *,
     websocket_host: str = "127.0.0.1",
     websocket_port: int = 8765,
     watcher_dashboard_url: str = "http://127.0.0.1:8080",
     artifact_roots: list[str | Path] | None = None,
+    voice_config_provider: Callable[[], Any] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Ares Workspace", version="1.0.0", docs_url=None, redoc_url=None)
     static_dir = resolve_workspace_static_dir()
@@ -35,6 +56,10 @@ def create_workspace_app(
         Path(root).expanduser().resolve()
         for root in (artifact_roots or [Path.cwd(), Path.home() / ".ares"])
     ]
+    if voice_config_provider is None:
+        from ares.config import load_config
+
+        voice_config_provider = load_config
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -69,6 +94,51 @@ def create_workspace_app(
             "surface": "workspace",
             "frontend": "nextjs",
         }
+
+    @app.get("/api/voice/session", include_in_schema=False)
+    async def voice_session(request: Request) -> JSONResponse:
+        """Mint one short-lived LiveKit token for the local workspace voice panel.
+
+        The API secret remains entirely in Ares' local configuration. The JWT
+        is never written to a URL and cannot be requested over a network bind.
+        """
+        if not _is_loopback_client(request):
+            raise HTTPException(status_code=403, detail="Voice sessions are available only from the local Ares workspace.")
+        try:
+            from ares.telephony.livekit_room import DEFAULT_ROOM, create_room_session
+
+            payload = create_room_session(
+                DEFAULT_ROOM,
+                f"workspace-{uuid.uuid4().hex[:20]}",
+                ttl_seconds=600,
+                config=voice_config_provider(),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Ares voice is not configured or unavailable.") from exc
+        return JSONResponse(payload, headers={"Cache-Control": "no-store, max-age=0"})
+
+    @app.post("/api/speech", include_in_schema=False)
+    async def speech(payload: SpeechPayload) -> Response:
+        """Synthesize a voice-turn reply with the configured Edge voice.
+
+        This endpoint is deliberately local to the workspace. Browser
+        transcription never sends microphone audio here; only the completed
+        Ares response is provided as text after a user initiated voice turn.
+        """
+        spoken_text = " ".join(payload.text.split())
+        if not spoken_text:
+            raise HTTPException(status_code=422, detail="Speech text is empty")
+        try:
+            from ares.config import load_config
+            from ares.voice.tts import EdgeTTS
+
+            config = load_config()
+            audio = await EdgeTTS(config.voice.tts_voice).synthesize(spoken_text)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Edge TTS is unavailable") from exc
+        if not audio:
+            raise HTTPException(status_code=502, detail="Edge TTS returned no audio")
+        return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/artifact", include_in_schema=False)
     async def artifact(path: str) -> FileResponse:

@@ -64,19 +64,20 @@ function Modal({ state, close }: { state: ModalState; close: () => void }) {
 function ArtifactViewer({ artifact, close }: { artifact: ArtifactPreview | null; close: () => void }) {
   if (!artifact) return null;
   const isMarkdown = artifact.mime === "text/markdown" || /\.md$/i.test(artifact.name);
+  const previewSource = artifact.preview_url || artifact.data_url;
   return <div className="artifact-layer" role="dialog" aria-modal="true" aria-label={`Preview ${artifact.name}`}>
     <button className="artifact-backdrop" onClick={close} aria-label="Close artifact preview" />
     <section className="artifact-viewer">
       <header><div><small>ARES ARTIFACT</small><strong>{artifact.name}</strong></div><button onClick={close} aria-label="Close"><X /></button></header>
       <div className="artifact-canvas">
-        {!artifact.content && !artifact.data_url ? <div className="artifact-loading"><i /><span>Loading local preview…</span></div> : null}
-        {/* Data URLs come from the local Ares runtime and cannot use Next image optimization. */}
+        {!artifact.content && !previewSource ? <div className="artifact-loading"><i /><span>Loading local preview…</span></div> : null}
+        {/* Local binary URLs come from the Ares workspace and cannot use Next image optimization. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        {artifact.data_url && artifact.mime?.startsWith("image/") ? <img src={artifact.data_url} alt={artifact.name} /> : null}
-        {artifact.data_url && artifact.mime === "application/pdf" ? <iframe src={artifact.data_url} title={artifact.name} /> : null}
+        {previewSource && artifact.mime?.startsWith("image/") ? <img src={previewSource} alt={artifact.name} /> : null}
+        {previewSource && artifact.mime === "application/pdf" ? <><iframe src={previewSource} title={artifact.name} /><a className="artifact-open-link artifact-pdf-link" href={previewSource} target="_blank" rel="noreferrer">Open PDF in a new tab</a></> : null}
         {artifact.content && isMarkdown ? <div className="artifact-markdown"><MarkdownContent>{artifact.content}</MarkdownContent></div> : null}
         {artifact.content && !isMarkdown ? <pre><code>{artifact.content}</code></pre> : null}
-        {artifact.data_url && !artifact.mime?.startsWith("image/") && artifact.mime !== "application/pdf" ? <a className="artifact-open-link" href={artifact.data_url} download={artifact.name}>Save {artifact.name}</a> : null}
+        {previewSource && !artifact.mime?.startsWith("image/") && artifact.mime !== "application/pdf" ? <a className="artifact-open-link" href={previewSource} download={artifact.name}>Save {artifact.name}</a> : null}
       </div>
     </section>
   </div>;
@@ -272,6 +273,13 @@ export function Workspace() {
         if (requestId) requestChatRef.current.delete(requestId);
         break;
       }
+      case "response_cancelled": {
+        stopStream(eventKey);
+        updateChat(eventKey, current => ({ ...current, busy: false, streaming: "", phase: "idle", traces: current.traces.map(item => item.state === "active" ? { ...item, detail: "Stopped", state: "error" as const } : item) }));
+        if (requestId) requestChatRef.current.delete(requestId);
+        toast("Response stopped", "Ares stopped this chat. Other conversations keep running.", "warn", eventSessionId || undefined);
+        break;
+      }
       case "tool_start": {
         const tool = text(message.tool) || "Tool"; const traceId = uid("trace"); activeToolIds.current[`${eventKey}:${tool}`] = traceId;
         updateChat(eventKey, current => ({ ...current, traces: [...current.traces, { id: traceId, label: tool, detail: "Executing", state: "active", at: new Date() }] }));
@@ -282,12 +290,17 @@ export function Workspace() {
         updateChat(eventKey, current => ({ ...current, traces: current.traces.map(item => item.id === active ? { ...item, detail } : item) }));
         break;
       }
+      case "tool_progress": {
+        const tool = text(message.tool); const active = activeToolIds.current[`${eventKey}:${tool}`]; const detail = text(message.detail) || "Working…";
+        updateChat(eventKey, current => ({ ...current, traces: current.traces.map(item => item.id === active ? { ...item, detail, state: "active" as const } : item) }));
+        break;
+      }
       case "tool_result": {
         const tool = text(message.tool); const mapKey = `${eventKey}:${tool}`; const active = activeToolIds.current[mapKey]; delete activeToolIds.current[mapKey];
         updateChat(eventKey, current => ({ ...current, traces: current.traces.map(item => item.id === active ? { ...item, detail: "Completed", state: "done" } : item) }));
         break;
       }
-      case "artifact_content": setArtifactPreview({ id: text(message.path), path: text(message.path), name: text(message.name), mime: text(message.mime), content: text(message.content) || undefined, data_url: text(message.data_url) || undefined }); break;
+      case "artifact_content": setArtifactPreview({ id: text(message.path), path: text(message.path), name: text(message.name), mime: text(message.mime), content: text(message.content) || undefined, data_url: text(message.data_url) || undefined, preview_url: text(message.preview_url) || undefined }); break;
       case "workspace_files": setFiles(array(message.files).map(item => item as WorkspaceFile)); break;
       case "workspace_file_uploaded": setUploading(false); toast("File secured", `${text((message.file as JsonRecord | undefined)?.name) || "File"} is ready across conversations.`); break;
       case "workspace_files_error": setUploading(false); toast("Upload rejected", text(message.message), "error"); break;
@@ -305,6 +318,12 @@ export function Workspace() {
       case "mcp_server_saved": setModal(null); toast("MCP server saved", `${text(message.name)} is reconnecting.`); break;
       case "mcp_server_deleted": toast("MCP server removed", `${text(message.name)} no longer exposes tools.`); break;
       case "mcp_reconnected": toast("Reconnect complete", "MCP readiness and tool schemas were refreshed."); break;
+      case "runtime_reloaded": {
+        toast("Ares reloaded", text(message.reason) || "Local changes are live.");
+        requestInitialState();
+        break;
+      }
+      case "runtime_reload_error": toast("Auto-reload failed", text(message.message), "error"); break;
       case "watcher_state": setWatchers(message as unknown as WatcherState); break;
       case "watcher_action_result": setModal(null); toast("Watcher operation complete", `${text(message.action)} applied to the shared fleet.`); break;
       case "watcher_error": toast("Watcher operation failed", text(message.message), "error"); break;
@@ -386,6 +405,15 @@ export function Workspace() {
       return { ...current, messages: next, busy: true, historyLoading: false, streaming: "", phase: "thinking", traces: [] };
     });
     setInput(""); setAttachments([]); stopStream(key);
+  };
+
+  const cancelMessage = () => {
+    const key = activeChatKeyRef.current;
+    const requestId = [...requestChatRef.current.entries()].find(([, mappedKey]) => mappedKey === key)?.[0];
+    if (!requestId) { toast("Nothing to stop", "This chat has no active request.", "warn"); return; }
+    if (!send({ type: "cancel_chat", request_id: requestId, session_id: sessionIdRef.current })) {
+      toast("Stop not sent", "Reconnect Ares, then try again.", "error");
+    }
   };
 
   const uploadLibrary = async (incoming: FileList | File[]) => {
@@ -477,7 +505,7 @@ export function Workspace() {
       </aside>
       <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />
       <main className="main-stage">
-        {view === "chat" && <><header className="topbar"><div className="topbar-left"><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><strong className="chat-title">{activeSession?.title || "New chat"}</strong></div><div className="topbar-actions"><span className="simple-status"><span className={`connection-dot ${connection === "online" ? "is-online" : "is-offline"}`} />{connection === "online" ? "Ready" : connection}</span><button className="avatar-btn" onClick={() => navigate("settings")} aria-label="Open settings">{userName.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "OP"}</button></div></header><ChatView messages={activeChat.messages} historyLoading={activeChat.historyLoading} streaming={activeChat.streaming} busy={activeChat.busy} phase={activeChat.phase} input={input} setInput={setInput} attachments={attachments} removeAttachment={id => setAttachments(current => current.filter(item => item.id !== id))} addFiles={addChatFiles} sendMessage={sendMessage} openArtifact={artifact => { setArtifactPreview({ ...artifact }); send({ type: "get_artifact", path: artifact.path }); }} model={status.model || "Ares model"} traces={activeChat.traces} /></>}
+        {view === "chat" && <><header className="topbar"><div className="topbar-left"><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><strong className="chat-title">{activeSession?.title || "New chat"}</strong></div><div className="topbar-actions"><span className="simple-status"><span className={`connection-dot ${connection === "online" ? "is-online" : "is-offline"}`} />{connection === "online" ? "Ready" : connection}</span><button className="avatar-btn" onClick={() => navigate("settings")} aria-label="Open settings">{userName.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "OP"}</button></div></header><ChatView messages={activeChat.messages} historyLoading={activeChat.historyLoading} streaming={activeChat.streaming} busy={activeChat.busy} phase={activeChat.phase} input={input} setInput={setInput} attachments={attachments} removeAttachment={id => setAttachments(current => current.filter(item => item.id !== id))} addFiles={addChatFiles} sendMessage={sendMessage} cancelMessage={cancelMessage} openArtifact={artifact => { setArtifactPreview({ ...artifact }); send({ type: "get_artifact", path: artifact.path }); }} model={status.model || "Ares model"} traces={activeChat.traces} /></>}
         {view === "settings" && <SettingsHub settings={settingsData} savingSettings={savingSettings} saveSettings={next => { setSavingSettings(true); send({ type: "save_workspace_settings", settings: next as unknown as JsonRecord }); }} watchers={watchers} refreshWatchers={() => send({ type: "get_watcher_state" })} createWatcher={() => openWatcherEditor()} editWatcher={openWatcherEditor} watcherAction={(action, arguments_) => send({ type: "watcher_action", action, arguments: arguments_ })} files={files} uploadFiles={uploadLibrary} attachFile={attachLibrary} removeFile={file => { if (window.confirm(`Delete ${file.name} from the local library?`)) send({ type: "delete_workspace_file", file_id: file.id, confirm: true }); }} uploading={uploading} skills={skills} categories={categories} selectedSkill={selectedSkill} selectSkill={skill => { setSelectedSkill(skill); send({ type: "get_skill", name: skill.name }); }} createSkill={() => openSkillEditor(undefined, true)} draftSkill={openSkillDraft} editSkill={skill => openSkillEditor(skill)} removeSkill={skill => { if (window.confirm(`Delete user skill ${skill.name}?`)) send({ type: "delete_skill", name: skill.name }); }} mcp={mcp} probeMcp={() => send({ type: "probe_mcp_servers" })} addMcp={() => openMcpEditor()} editMcp={openMcpEditor} reconnectMcp={server => send({ type: "reconnect_mcp_server", name: server.name })} removeMcp={server => { if (window.confirm(`Remove MCP server ${server.name}? Its tools immediately disappear from Ares and watchers.`)) send({ type: "delete_mcp_server", name: server.name, confirm: true }); }} onSectionChange={section => { if (section === "watchers") send({ type: "get_watcher_state" }); if (section === "files") send({ type: "list_workspace_files" }); if (section === "skills") send({ type: "list_skills" }); if (section === "mcp") send({ type: "get_mcp_state" }); }} close={() => navigate("chat")} />}
       </main>
     </div>

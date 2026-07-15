@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import mimetypes
 import re
@@ -33,6 +34,8 @@ from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.onboarding import save_onboarding_data
 from ares.profile import ProfileManager
+from ares.proactive import ProactiveService
+from ares.reminders import DesktopNotifier
 from ares.soul import SoulManager
 from ares.tools.mcp_client import MCPClientManager, MCPServerConfig, redact_mcp_text
 from ares.workspace.settings import render_profile, render_soul, workspace_settings
@@ -222,6 +225,22 @@ class AresServer:
         )
         self._workspace_server = None
         self._workspace_task: asyncio.Task | None = None
+        self._proactive_notifier = DesktopNotifier(
+            enabled=bool(
+                self.config.enable_desktop_notifications
+                and self.config.proactive.desktop_enabled
+            )
+        )
+        goal_store = getattr(self.agent, "goal_store", None)
+        self.proactive_service = (
+            ProactiveService(
+                goal_store=goal_store,
+                config=self.config.proactive,
+                deliver=self._deliver_proactive_message,
+            )
+            if goal_store is not None
+            else None
+        )
 
     async def _push_status_to_clients(self) -> None:
         """Push updated status to all connected websockets."""
@@ -251,6 +270,8 @@ class AresServer:
                 self._launch_workspace()
             if self.telegram_channel is not None:
                 await self.telegram_channel.start()
+            if self.proactive_service is not None:
+                await self.proactive_service.start()
             if self.config.watcher.enabled:
                 from ares.watcher.integration import create_agent_watcher_service
                 self.watcher_service = create_agent_watcher_service(self.config, self.agent)
@@ -267,6 +288,44 @@ class AresServer:
                     self._watch_runtime_files(), name="ares-runtime-hot-reload"
                 )
             await asyncio.Future()
+
+    async def _deliver_proactive_message(
+        self, message: str, goal: dict[str, Any],
+    ) -> list[str]:
+        """Persist and fan out one already-approved initiative message."""
+        channels: list[str] = []
+        proactive = self.config.proactive
+        if proactive.workspace_enabled:
+            session_id = self.conversation_store.start_conversation()
+            self.conversation_store.rename_conversation(
+                session_id,
+                f"Ares follow-up · {str(goal.get('title') or 'goal')[:55]}",
+            )
+            self.conversation_store.add_message(session_id, "assistant", message)
+            event = {
+                "type": "response_done",
+                "request_id": f"proactive-goal-{goal.get('goal_id')}",
+                "session_id": session_id,
+                "content": message,
+                "tool_calls": [],
+                "artifacts": [],
+                "proactive": True,
+            }
+            await self._broadcast(event)
+            await self._broadcast({"type": "sessions", "sessions": self._sessions()})
+            channels.append("workspace")
+
+        self._proactive_notifier.enabled = bool(
+            self.config.enable_desktop_notifications and proactive.desktop_enabled
+        )
+        if self._proactive_notifier.notify("Ares goal follow-up", message):
+            channels.append("desktop")
+
+        if proactive.telegram_enabled and self.telegram_channel is not None:
+            with suppress(Exception):
+                delivered = await self.telegram_channel.deliver_proactive(message)
+                channels.extend(delivered)
+        return channels
 
     def _launch_workspace(self) -> None:
         """Launch the separate power-user workspace in the unified runtime."""
@@ -376,6 +435,10 @@ class AresServer:
                         self._chat_tasks.discard(finished)
                         if key and self._chat_tasks_by_request.get(key, (None, None))[0] is finished:
                             self._chat_tasks_by_request.pop(key, None)
+                        # Retrieve expected disconnect/cancellation failures so
+                        # they never become unhandled task tracebacks in CLI.
+                        with suppress(asyncio.CancelledError, ConnectionClosed, Exception):
+                            finished.exception()
 
                     task.add_done_callback(remove_finished_chat)
                 else:
@@ -383,6 +446,16 @@ class AresServer:
         except ConnectionClosed:
             pass  # client disconnected (e.g. health-check probe or user closed app)
         finally:
+            # Stop requests owned by a closed renderer. Awaiting them here
+            # keeps async-generator ContextVar teardown in the task that set it.
+            owned_tasks = [
+                task for task, owner in self._chat_tasks_by_request.values()
+                if owner is websocket and not task.done()
+            ]
+            for task in owned_tasks:
+                task.cancel()
+            if owned_tasks:
+                await asyncio.gather(*owned_tasks, return_exceptions=True)
             if websocket in self._connected_websockets:
                 self._connected_websockets.remove(websocket)
 
@@ -495,6 +568,10 @@ class AresServer:
                 await self._handle_telephony(websocket, message)
             else:
                 await self._send_error(websocket, f"Unknown message type: {msg_type}")
+        except asyncio.CancelledError:
+            raise
+        except ConnectionClosed:
+            return
         except Exception as exc:  # pragma: no cover - guardrail for desktop runtime
             await self._send_error(websocket, str(exc))
 
@@ -687,7 +764,9 @@ class AresServer:
         max_retries = 3
         for attempt in range(max_retries + 1):
             try:
-                async for chunk in self._run_agent_stream(agent_input, history, session_id):
+                async for chunk in self._run_agent_stream(
+                    agent_input, history, session_id, reflection_input=visible_content,
+                ):
                     tool_start = parse_tool_start_token(chunk)
                     if tool_start:
                         started_tools.append(tool_start)
@@ -806,7 +885,12 @@ class AresServer:
         await self._send(websocket, {"type": "sessions", "sessions": self._sessions()})
 
     async def _run_agent_stream(
-        self, agent_input: str, history: list[dict[str, Any]], session_id: int
+        self,
+        agent_input: str,
+        history: list[dict[str, Any]],
+        session_id: int,
+        *,
+        reflection_input: str | None = None,
     ) -> AsyncIterator[str]:
         """Serialize only a single conversation while other chats run freely."""
         scope_factory = getattr(self.agent, "session_scope", None)
@@ -818,7 +902,20 @@ class AresServer:
         lock = self._session_execution_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             with scope:
-                async for chunk in self.agent.run_stream(agent_input, conversation_history=history):
+                run_stream = self.agent.run_stream
+                stream_kwargs: dict[str, Any] = {"conversation_history": history}
+                try:
+                    parameters = inspect.signature(run_stream).parameters.values()
+                    accepts_reflection = any(
+                        parameter.name == "reflection_input"
+                        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters
+                    )
+                except (TypeError, ValueError):
+                    accepts_reflection = False
+                if accepts_reflection:
+                    stream_kwargs["reflection_input"] = reflection_input
+                async for chunk in run_stream(agent_input, **stream_kwargs):
                     yield chunk
 
     async def _describe_attached_images(
@@ -1826,8 +1923,31 @@ class AresServer:
             await self._reload_telegram_channel()
         if previous.watcher != latest.watcher:
             await self._reload_watcher_runtime()
+        if previous.proactive != latest.proactive:
+            await self._reload_proactive_runtime()
         if previous.workspace != latest.workspace:
             await self._reload_workspace_runtime()
+
+    async def _reload_proactive_runtime(self) -> None:
+        if self.proactive_service is not None:
+            with suppress(Exception):
+                await self.proactive_service.stop()
+        self._proactive_notifier.enabled = bool(
+            self.config.enable_desktop_notifications
+            and self.config.proactive.desktop_enabled
+        )
+        goal_store = getattr(self.agent, "goal_store", None)
+        self.proactive_service = (
+            ProactiveService(
+                goal_store=goal_store,
+                config=self.config.proactive,
+                deliver=self._deliver_proactive_message,
+            )
+            if goal_store is not None
+            else None
+        )
+        if self.proactive_service is not None:
+            await self.proactive_service.start()
 
     async def _reload_telegram_channel(self) -> None:
         if self.telegram_channel is not None:
@@ -2141,11 +2261,21 @@ class AresServer:
     async def _send_error(self, websocket: Any, message: str, **context: Any) -> None:
         await self._send(websocket, {"type": "error", "message": message, **context})
 
-    async def _send(self, websocket: Any, payload: dict[str, Any]) -> None:
-        await websocket.send(json.dumps(payload, ensure_ascii=False))
+    async def _send(self, websocket: Any, payload: dict[str, Any]) -> bool:
+        """Send an event without turning a routine client disconnect into noise."""
+        try:
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+            return True
+        except (ConnectionClosed, RuntimeError):
+            with suppress(ValueError):
+                self._connected_websockets.remove(websocket)
+            return False
 
     async def close(self) -> None:
         """Shut down stores."""
+        if self.proactive_service is not None:
+            with suppress(Exception):
+                await self.proactive_service.stop()
         if self._runtime_reload_task is not None and not self._runtime_reload_task.done():
             self._runtime_reload_task.cancel()
             with suppress(asyncio.CancelledError, Exception):

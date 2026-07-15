@@ -358,6 +358,9 @@ See [MCP configuration and diagnostics](docs/mcp.md) for `stdio`, SSE, and Strea
 | Voice | Streaming speech, interruption/barge-in, local Whisper or Sarvam/Edge options | `python -m ares --voice` |
 | Twilio webhook | Signed Voice and status callbacks (behind public HTTPS) | `python -m ares --telephony-webhook` |
 | Twilio media | Bidirectional Media Streams, local Whisper, Ares tools/memory, Edge TTS (behind public WSS) | `python -m ares --telephony-media-gateway` |
+| LiveKit worker | Ares voice worker that accepts LiveKit agent jobs | `ares-livekit dev` |
+| LiveKit room | Local browser room that mints a short-lived token and connects after a user click | `ares-livekit-room --room ares-voice-room` |
+| Workspace voice | Embedded LiveKit voice conversation from the composer microphone | `python -m ares --all` + `ares-livekit dev` |
 | Telegram | Allowlisted remote chat inside the unified runtime | `python -m ares --all` |
 
 ### Provider-backed phone calls
@@ -372,7 +375,45 @@ python -m ares --telephony-webhook --telephony-webhook-port 8080
 python -m ares --telephony-media-gateway --telephony-media-port 8767
 ```
 
-The media gateway converts Twilio's 8 kHz mu-law stream to local Whisper input, runs the normal Ares agent (including memory and tools), and returns Edge TTS audio to the call. It does not select an OpenAI realtime model. LiveKit project credentials are accepted and verified by locally signing a room token; audio routing to a separate LiveKit room remains an optional deployment integration rather than an implicit external dependency.
+The media gateway converts Twilio's 8 kHz mu-law stream to local Whisper input, runs the normal Ares agent (including memory and tools), and returns Edge TTS audio to the call. It does not select an OpenAI realtime model. LiveKit rooms use the same local credentials, a separate voice worker, and a loopback-only browser launcher.
+
+### LiveKit voice rooms
+
+LiveKit rooms are created automatically when the first participant joins. Ares now separates the worker and browser-room concerns so joining is fast and does not require pasting a JWT.
+
+When the unified runtime is open, the microphone in the Power Workspace starts the same conversation directly in Ares. It mints a fresh, short-lived token through a loopback-only workspace endpoint; no token or API credential is placed in a browser URL. Keep `ares-livekit dev` running, click the microphone, and allow microphone access when prompted.
+
+```powershell
+# Terminal 1: start the Ares LiveKit worker.
+ares-livekit dev
+
+# Terminal 2: start the loopback-only room launcher.
+# It opens the browser and issues a 10-minute token locally after Connect is clicked.
+ares-livekit-room --room ares-voice-room --identity krish
+```
+
+The launcher binds only to `127.0.0.1`/localhost, never puts the JWT in the URL, and sends `Cache-Control: no-store`. It reads `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` from the environment or the local `telephony` config. Use `--no-open` when you want to open the local URL yourself.
+
+For a separate client, integration, or debugging workflow, generate only a short-lived token:
+
+```powershell
+ares-livekit-token --room ares-voice-room --identity krish
+ares-livekit-token --room ares-voice-room --identity krish --json
+```
+
+The room launcher is also available through `python -m ares --livekit-join --livekit-room ares-voice-room --livekit-identity krish`. Run the worker and launcher in separate terminals.
+
+#### Sarvam voice for LiveKit
+
+Set `SARVAM_API_KEY` in your local environment and keep `voice.tts_backend` as `auto` (or set it to `sarvam`). The LiveKit worker then uses Sarvam Bulbul v3 instead of Edge TTS; without the key, it safely falls back to Edge.
+
+```powershell
+$env:SARVAM_API_KEY = "your-sarvam-key"
+# Optional Ares voice settings: speaker=shubh, model=bulbul:v3, language=en-IN, pace=0.9
+ares-livekit dev
+```
+
+Bulbul v3 is suited to Indian English, Indic languages, and code-mixed speech. Configure the speaker, language, and pace under `voice.sarvam_speaker`, `voice.sarvam_language_code`, and `voice.sarvam_pace` in `~/.ares/config.json`.
 
 Ares stores call sessions, transcripts, summaries, and encrypted telephony contacts locally in `~/.ares/data/ares.db`; the encryption key lives separately at `~/.ares/data/telephony.key`.
 

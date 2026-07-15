@@ -53,6 +53,9 @@ dev = [
 
 [project.scripts]
 ares = "ares.__main__:main"
+ares-livekit = "ares.telephony.livekit_worker:main"
+ares-livekit-room = "ares.telephony.livekit_room:main"
+ares-livekit-token = "ares.telephony.livekit_token:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

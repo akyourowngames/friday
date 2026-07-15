@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
@@ -65,6 +65,7 @@ from ares.tools.image_edit import resize_image as _resize_image
 from ares.tools.image_edit import convert_image as _convert_image
 from ares.tools.image_edit import crop_image as _crop_image
 from ares.memory_policy import memory_rejection_reason
+from ares.commitments import CommitmentStore
 from ares.cron.store import CronStore
 from ares.cron.tools import CronToolHandlers
 from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
@@ -99,6 +100,7 @@ class ToolExecutor:
         action_ledger: ActionLedger | None = None,
         task_store: TaskStore | None = None,
         goal_store: GoalStore | None = None,
+        commitment_store: CommitmentStore | None = None,
         session_store: SessionStore | None = None,
         telephony_manager: TelephonyManager | None = None,
     ):
@@ -136,6 +138,10 @@ class ToolExecutor:
         self._owns_goal_store = goal_store is None and db_path is not None
         self.goal_store = goal_store or (
             GoalStore(db_path=db_path, connection=shared_connection, task_store=self.task_store)
+            if db_path is not None else None
+        )
+        self.commitment_store = commitment_store or (
+            CommitmentStore(db_path=db_path, connection=shared_connection)
             if db_path is not None else None
         )
         self.goal_tools = GoalToolHandlers(self.goal_store, self.task_store, self.action_ledger) if self.goal_store is not None else None
@@ -205,7 +211,8 @@ class ToolExecutor:
         try:
             yield
         finally:
-            self._session_context.reset(token)
+            with suppress(ValueError):
+                self._session_context.reset(token)
 
     def set_watcher_service(self, service: WatcherService | None) -> None:
         """Attach the watcher service owned by the current Ares runtime."""
@@ -1179,6 +1186,7 @@ class ToolExecutor:
             people_store=self.people_store,
             action_ledger=self.action_ledger,
             goal_store=self.goal_store,
+            commitment_store=self.commitment_store,
             config=self.config,
             path=args.get("path"),
             profile=args.get("profile", "full"),

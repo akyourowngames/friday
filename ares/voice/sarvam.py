@@ -30,8 +30,26 @@ class SarvamTranscript:
 
 
 def sarvam_api_key() -> str:
-    """Return the Sarvam API key from the environment."""
-    return os.environ.get("SARVAM_API_KEY", "")
+    """Return the Sarvam API key from the process or persistent Windows user env.
+
+    ``setx`` updates the Windows user environment for *new* shells only. A
+    LiveKit worker can outlive the terminal that configured it, so on Windows
+    we also read the persisted user value when the current process does not
+    have an explicit ``SARVAM_API_KEY`` value. The key remains local and is
+    never written to source code, logs, or Ares exports.
+    """
+    if "SARVAM_API_KEY" in os.environ:
+        return os.environ["SARVAM_API_KEY"].strip()
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, "SARVAM_API_KEY")
+        return str(value or "").strip()
+    except OSError:
+        return ""
 
 
 class SarvamTranscriber:

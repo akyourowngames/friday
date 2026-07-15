@@ -139,7 +139,7 @@ def test_goals_export_and_import_with_links(tmp_path, fake_embedding_provider):
     source.create("Verify import hierarchy", parent_goal_id=goal["goal_id"])
     output = export_data(memory_store=memory, goal_store=source, path=tmp_path / "goals.json", profile="goals")
     payload = json.loads(output.read_text(encoding="utf-8"))
-    assert payload["version"] == 4
+    assert payload["version"] == 5
     exported_root = next(item for item in payload["goals"] if item["title"] == "Build durable goals")
     assert exported_root["links"]["actions"] == ["9"]
     assert exported_root["links"]["watchers"] == ["release-watch"]

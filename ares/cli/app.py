@@ -34,6 +34,7 @@ from ares.tools.exporter import export_data, import_data
 from ares.memory import MemoryStore
 from ares.memory_cleaner import MemoryCleaner
 from ares.profile import ProfileManager, PROFILE_TEMPLATE
+from ares.proactive import ProactiveService
 from ares.onboarding import OnboardingWizard
 from ares.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
@@ -232,6 +233,11 @@ class AresCLI(MarketplaceCommandMixin):
             limit=self.config.max_context_messages
         )
         self.notifier = DesktopNotifier(enabled=self.config.enable_desktop_notifications)
+        self.proactive_service = ProactiveService(
+            goal_store=self.agent.goal_store,
+            config=self.config.proactive,
+            deliver=self._deliver_proactive_message,
+        ) if getattr(self.agent, "goal_store", None) is not None else None
         cron_root = Path(self.config.data_dir).expanduser().parent
         self.cron_store = CronStore(cron_root)
         self.toast_manager = CronToastManager(self.console)
@@ -269,6 +275,24 @@ class AresCLI(MarketplaceCommandMixin):
         self._mcp_config_signature = self._get_mcp_config_signature(self.config)
         self._mcp_reconfigure_pending = False
 
+    async def _deliver_proactive_message(self, message: str, goal: dict) -> list[str]:
+        """Make CLI initiative visible without interrupting the active prompt."""
+        channels: list[str] = []
+        if self.config.proactive.workspace_enabled:
+            conversation_id = self.conversation_store.start_conversation()
+            self.conversation_store.rename_conversation(
+                conversation_id,
+                f"Ares follow-up · {str(goal.get('title') or 'goal')[:55]}",
+            )
+            self.conversation_store.add_message(conversation_id, "assistant", message)
+            channels.append("workspace")
+        self.notifier.enabled = bool(
+            self.config.enable_desktop_notifications and self.config.proactive.desktop_enabled
+        )
+        if self.notifier.notify("Ares goal follow-up", message):
+            channels.append("desktop")
+        return channels
+
     @staticmethod
     def _get_mcp_config_signature(config) -> str:
         """Return the portion of shared settings that requires reconnecting MCP."""
@@ -303,6 +327,10 @@ class AresCLI(MarketplaceCommandMixin):
         self._mcp_config_signature = self._get_mcp_config_signature(latest)
         self._mcp_reconfigure_pending = previous_mcp_signature != self._mcp_config_signature
         self.browser_manager = BrowserManager(self.config)
+        if self.proactive_service is not None:
+            self.proactive_service.config = latest.proactive
+            if latest.proactive.enabled and not self.proactive_service.running:
+                asyncio.create_task(self.proactive_service.start())
 
     async def _refresh_mcp_manager_if_needed(self) -> None:
         """Reconnect integrations after another Ares surface changed them."""
@@ -779,6 +807,14 @@ class AresCLI(MarketplaceCommandMixin):
         """Parse [tool_start:name] tokens."""
         inner = token.removeprefix("[tool_start:").removesuffix("]")
         return inner if re.match(r"^[A-Za-z][A-Za-z0-9_]*$", inner) else "unknown"
+
+    def _parse_tool_progress_token(self, token: str) -> tuple[str, str]:
+        """Parse internal progress events without letting them become prose."""
+        inner = token.removeprefix("[tool_progress:").removesuffix("]")
+        tool_name, separator, detail = inner.partition(":")
+        if not separator or not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", tool_name):
+            return "unknown", "Working"
+        return tool_name, self._clip_tool_detail(detail or "Working", 72)
 
     def _clip_tool_detail(self, text: str, limit: int = 90) -> str:
         """Keep tool summaries short enough to stay out of the user's way."""
@@ -1482,6 +1518,7 @@ class AresCLI(MarketplaceCommandMixin):
                 people_store=getattr(self.agent, "people_store", None),
                 action_ledger=getattr(self.agent, "action_ledger", None),
                 goal_store=getattr(self.agent, "goal_store", None),
+                commitment_store=getattr(self.agent, "commitment_store", None),
                 config=self.config,
                 path=arg or None,
             )
@@ -1500,6 +1537,7 @@ class AresCLI(MarketplaceCommandMixin):
                     people_store=getattr(self.agent, "people_store", None),
                     action_ledger=getattr(self.agent, "action_ledger", None),
                     goal_store=getattr(self.agent, "goal_store", None),
+                    commitment_store=getattr(self.agent, "commitment_store", None),
                     import_config=import_config,
                 )
                 if import_config:
@@ -1800,6 +1838,12 @@ class AresCLI(MarketplaceCommandMixin):
                         tool_steps.setdefault(tool_name, []).append(next_tool_step)
                         self._print_tool_start(tool_name, live_status, step=next_tool_step)
                         next_tool_step += 1
+                    elif token.startswith("[tool_progress:"):
+                        tool_name, detail = self._parse_tool_progress_token(token)
+                        # Keep one-second operational updates in the transient
+                        # activity area; never append them to the answer.
+                        if live_status is not None:
+                            live_status.update(self._working_text(f"{self._activity_label(tool_name)}{self._activity_separator()}{detail}"))
                     elif token.startswith("[tool:"):
                         tool_name, tool_content = self._parse_tool_token(token)
                         event = self._summarize_tool_result(tool_name, tool_content)
@@ -1871,6 +1915,8 @@ class AresCLI(MarketplaceCommandMixin):
             self.agent.refresh_tools()
         if self.cron_scheduler is not None:
             await self.cron_scheduler.start()
+        if self.proactive_service is not None:
+            await self.proactive_service.start()
         self._show_banner()
 
         try:
@@ -1935,6 +1981,11 @@ class AresCLI(MarketplaceCommandMixin):
                     await self.cron_scheduler.stop()
                 except Exception as exc:
                     self.console.print(f"[dim yellow]Shutdown warning (cron): {exc}[/dim yellow]")
+            if self.proactive_service is not None:
+                try:
+                    await self.proactive_service.stop()
+                except Exception as exc:
+                    self.console.print(f"[dim yellow]Shutdown warning (proactive): {exc}[/dim yellow]")
             if self.mcp_manager is not None:
                 try:
                     await self.mcp_manager.close()
