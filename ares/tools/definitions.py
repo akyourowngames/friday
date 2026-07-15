@@ -72,8 +72,30 @@ def get_tool_definitions() -> list[dict]:
             ["run_id"],
         ),
         _tool(
+            "list_agent_runs",
+            "List real native multi-agent manifests for the current session. Agent counts, roles, waves, timing, and status must come from these records, never generated prose.",
+            {
+                "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                "status": {
+                    "type": "string",
+                    "enum": ["queued", "running", "succeeded", "failed", "timed_out", "blocked", "cancelled", "interrupted"],
+                },
+            },
+        ),
+        _tool(
+            "get_latest_agent_run",
+            "Get the latest real native multi-agent manifest for the current session, or an explicit zero-agent result when none exists.",
+            {},
+        ),
+        _tool(
             "cancel_agent_run",
             "Cancel an active native multi-agent root run and every unfinished child task.",
+            {"run_id": {"type": "string"}},
+            ["run_id"],
+        ),
+        _tool(
+            "resume_agent_run",
+            "Resume a durable, session-owned read-only agent run from its successful child checkpoints. Unfinished mutation-capable work is never replayed automatically.",
             {"run_id": {"type": "string"}},
             ["run_id"],
         ),
@@ -746,6 +768,16 @@ def get_tool_definitions() -> list[dict]:
                 "include_fingerprint": {"type": "boolean", "default": False, "description": "Include a dependency fingerprint in the result."},
             },
             required=["command"],
+        ),
+        _tool(
+            "run_project_check",
+            "Run one named project verification check pre-configured by the repository owner. This accepts only the check name; it cannot execute arbitrary shell text, use pipes, redirects, nested interpreters, or network commands.",
+            {
+                "check": {"type": "string", "description": "Configured [tool.ares.agent_checks] name."},
+                "cwd": {"type": "string", "description": "Assigned builder workspace."},
+                "timeout_seconds": {"type": "integer", "description": "Maximum seconds (1-300, default 180)."},
+            },
+            required=["check"],
         ),
         _tool(
             "generate_image",

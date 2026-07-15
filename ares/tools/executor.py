@@ -71,6 +71,7 @@ from ares.tools.datetime_tool import get_current_datetime_result as _get_current
 from ares.tools import adb_bridge as _adb_bridge
 from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
 from ares.tools.shell_execution import resolve_project_command
+from ares.tools.project_checks import run_project_check
 from ares.telephony import TelephonyManager, TelephonyStore
 from ares.telephony.models import CallStatus
 from ares.watcher.database import resolve_watcher_database_path
@@ -289,6 +290,7 @@ class ToolExecutor:
             "file_tree": self._file_tree,
             "run_code": self._run_code,
             "run_command": self._run_command,
+            "run_project_check": self._run_project_check,
             "generate_image": self._generate_image,
             "image_info": self._image_info,
             "resize_image": self._resize_image,
@@ -390,6 +392,26 @@ class ToolExecutor:
                 name_pattern=arguments.get("name_pattern", ""),
                 max_results=int(arguments.get("max_results", 20)),
             )
+        # Pure filesystem, document, image, shell, and REPL handlers may block
+        # on disk or subprocess I/O. Keep them off the shared event loop. DB-
+        # backed handlers intentionally remain on their owning thread because
+        # sqlite connections enforce thread affinity.
+        from ares.multi_agent_policy import (
+            FILESYSTEM_READ_TOOLS,
+            FILESYSTEM_WRITE_TOOLS,
+            REPL_TOOLS,
+            SHELL_TOOLS,
+        )
+
+        offload = (
+            set(FILESYSTEM_READ_TOOLS)
+            | set(FILESYSTEM_WRITE_TOOLS)
+            | set(REPL_TOOLS)
+            | set(SHELL_TOOLS)
+            | {"fetch_url"}
+        ) - {"export_data"}
+        if tool_name in offload:
+            return await asyncio.to_thread(self.execute, tool_name, arguments)
         return self.execute(tool_name, arguments)
 
     # ── Memory tools ──────────────────────────────────────────────
@@ -1694,6 +1716,15 @@ class ToolExecutor:
         if bool(args.get("include_fingerprint", False)) or bool(args.get("reset", False)):
             result += f"\nSession: shell generation={self.repl.shell_generation}; dependency_fingerprint={self.repl.dependency_fingerprint(cwd)}"
         return result
+
+    def _run_project_check(self, args: dict) -> str:
+        """Run only a pre-approved project verification check, never shell text."""
+        return run_project_check(
+            str(args.get("check") or ""),
+            cwd=str(args.get("cwd") or "."),
+            trusted_checks=args.get("_trusted_agent_checks"),
+            timeout_seconds=int(args.get("timeout_seconds") or 180),
+        )
 
     # ── Image tools ────────────────────────────────────────────────
 

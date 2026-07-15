@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from ares.turn_policy import is_browser_action_request
+
 SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 WORD_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,}")
 STOP_WORDS = {
@@ -25,9 +27,13 @@ AUTOMATION_ACTION_TOKENS = {
     "click", "close", "inspect", "launch", "navigate", "open", "save", "type",
     "write",
 }
-BROWSER_AUTOMATION_TOKENS = {
+BROWSER_ACTION_TOKENS = {
+    "click", "fill", "inspect", "login", "navigate", "open", "operate", "press",
+    "scroll", "select", "submit", "type", "upload", "visit",
+}
+BROWSER_TARGET_TOKENS = {
     "browser", "dashboard", "form", "github", "google", "instagram", "linkedin",
-    "login", "page", "portal", "search", "site", "twitter", "url", "web", "webpage",
+    "page", "portal", "site", "twitter", "url", "web", "webpage",
     "website", "youtube",
 }
 BROWSER_WINDOW_EXCEPTIONS = (
@@ -202,10 +208,8 @@ class SkillManager:
         # request to load generic research or code-review playbooks.  Keeping
         # this route exclusive prevents unrelated skill instructions from
         # competing with browser evidence and stale-reference recovery.
-        browser_request = (
-            query_tokens & BROWSER_AUTOMATION_TOKENS
-            and not any(phrase in query_l for phrase in BROWSER_WINDOW_EXCEPTIONS)
-        )
+        browser_named = "browser-use" in query_l or "browser use" in query_l
+        browser_request = browser_named or is_browser_action_request(user_input)
 
         scored: list[tuple[int, Skill]] = []
         for skill in self.list_all():
@@ -282,8 +286,10 @@ class SkillManager:
                 return f'matches “{phrase}”'
 
         name_hits, description_hits, example_hits = self._match_tokens(skill, query_tokens)
-        if skill.name == "browser-use" and query_tokens & BROWSER_AUTOMATION_TOKENS:
+        if skill.name == "browser-use" and is_browser_action_request(user_input):
             return "matches a browser action request"
+        if skill.name == "web-research" and self._is_web_research_request(query_l, query_tokens):
+            return "matches a web research request"
         if skill.category.lower() == "automation" and query_tokens & AUTOMATION_ACTION_TOKENS:
             targets = query_tokens - AUTOMATION_ACTION_TOKENS - AUTOLOAD_BROAD_TOKENS
             if targets:
@@ -332,9 +338,10 @@ class SkillManager:
         # tasks. Prevent the generic Windows skill from winning an otherwise
         # ambiguous "open Google/Instagram" request; an explicit request for
         # the visible browser window remains a native desktop workflow.
+        browser_request = is_browser_action_request(query_l)
         if (
             name == "computer-use"
-            and query_tokens & BROWSER_AUTOMATION_TOKENS
+            and browser_request
             and not any(phrase in query_l for phrase in BROWSER_WINDOW_EXCEPTIONS)
         ):
             return 0
@@ -342,11 +349,14 @@ class SkillManager:
             name == "browser-use"
             and name not in query_l
             and name.replace("-", " ") not in query_l
-            and not query_tokens & BROWSER_AUTOMATION_TOKENS
+            and not browser_request
         ):
             return 0
 
-        if not self._passes_autoload_gate(skill, query_l, query_tokens, name_tokens, description_tokens, example_tokens):
+        web_research_request = name == "web-research" and self._is_web_research_request(query_l, query_tokens)
+        if not web_research_request and not self._passes_autoload_gate(
+            skill, query_l, query_tokens, name_tokens, description_tokens, example_tokens
+        ):
             return 0
 
         score = 0
@@ -358,6 +368,8 @@ class SkillManager:
         score += 4 * len(description_tokens)
         score += 2 * len(example_tokens)
         score += len(query_tokens & self._tokens(category))
+        if web_research_request:
+            score += 8
         # Long skill bodies often contain generic words such as "files" and
         # "status".  They may refine a direct match, but never create one.
         if score:
@@ -393,6 +405,22 @@ class SkillManager:
         if category == "research":
             return bool(query_tokens & RECENCY_TOKENS and query_tokens & self._tokens(skill.description))
         return False
+
+    @staticmethod
+    def _is_web_research_request(query_l: str, query_tokens: set[str]) -> bool:
+        """Require both a research/evaluation action and an evidence target."""
+        actions = {
+            "research", "investigate", "compare", "evaluate", "verify", "fact-check",
+            "factcheck", "cite", "summarize",
+        }
+        targets = {
+            "web", "search", "results", "sources", "evidence", "current", "latest",
+            "news", "recommendations",
+        }
+        return bool(
+            query_tokens & actions
+            and (query_tokens & targets or "search results" in query_l or "web research" in query_l)
+        )
 
     def _match_tokens(self, skill: Skill, query_tokens: set[str]) -> tuple[set[str], set[str], set[str]]:
         """Return request-term overlap for the short, intentional skill fields."""

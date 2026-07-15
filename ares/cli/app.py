@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import nullcontext, suppress
 from difflib import SequenceMatcher
+import inspect
 import json
 import re
 import shutil
@@ -41,6 +42,7 @@ from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.config import _ensure_mcp_defaults, load_config, save_config
 from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
+from ares.multi_agent_display import ACTIVE_STATUSES, elapsed_label, one_line, summarize_runs
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager, redact_mcp_text
 from ares.tools.adb_bridge import phone_status as get_phone_status
@@ -228,8 +230,11 @@ class AresCLI(MarketplaceCommandMixin):
             session_id=self.session_manager.get_id(),
         )
         self._session_finalized = False
-        self.conversation_history: list[dict] = self.conversation_store.get_recent_messages(
-            limit=self.config.max_context_messages
+        # A brand-new CLI conversation never inherits globally recent messages.
+        # Explicitly resumed conversations may use the conversation-scoped API,
+        # but old turns are context only and cannot become direct chat history.
+        self.conversation_history: list[dict] = self._conversation_history_for_model(
+            self.conversation_id
         )
         self.notifier = DesktopNotifier(enabled=self.config.enable_desktop_notifications)
         cron_root = Path(self.config.data_dir).expanduser().parent
@@ -242,6 +247,17 @@ class AresCLI(MarketplaceCommandMixin):
             on_complete=self.toast_manager,
         ) if self.config.cron_enabled else None
         self.session = self._create_prompt_session()
+
+    def _conversation_history_for_model(self, conversation_id: int) -> list[dict]:
+        """Load only direct messages belonging to one explicit conversation."""
+        loader = getattr(self.conversation_store, "get_messages_for_model", None)
+        if not callable(loader):
+            return []
+        try:
+            rows = loader(conversation_id, limit=self.config.max_context_messages)
+        except TypeError:
+            rows = loader(conversation_id)
+        return list(rows or [])
 
     def _create_prompt_session(self) -> PromptSession | None:
         """Create an interactive prompt session when attached to a TTY."""
@@ -1208,6 +1224,240 @@ class AresCLI(MarketplaceCommandMixin):
         else:
             self.console.print(f"[yellow]No $EDITOR set. Edit manually: {file_path}[/yellow]")
 
+    @staticmethod
+    def _agent_status_text(status: object) -> Text:
+        value = str(status or "unknown")
+        style = {
+            "running": "bold bright_cyan", "queued": "cyan", "succeeded": "green",
+            "failed": "bold red", "timed_out": "yellow", "blocked": "yellow",
+            "cancelled": "dim",
+        }.get(value, "dim")
+        return Text(value.replace("_", " "), style=style)
+
+    def _agent_runs_table(self, runs: list[dict], title: str = "Native Agent Runs") -> Table:
+        table = Table(title=title, border_style="bright_cyan", box=self._ui_box())
+        table.add_column("Run", style="cyan", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Time", justify="right", no_wrap=True)
+        table.add_column("Workers", justify="right", no_wrap=True)
+        table.add_column("Active", justify="right", no_wrap=True)
+        table.add_column("Task", ratio=4)
+        for run in runs:
+            children = run.get("children") or []
+            active = sum(str(item.get("status") or "") in ACTIVE_STATUSES for item in children)
+            table.add_row(
+                str(run.get("run_id") or ""), self._agent_status_text(run.get("status")),
+                elapsed_label(run), str(len(children)), str(active),
+                Text(one_line(run.get("prompt_summary") or run.get("activity"), 120)),
+            )
+        return table
+
+    def _agent_workers_table(self, runs: list[dict], title: str = "Specialist Workers") -> Table:
+        table = Table(title=title, border_style="bright_magenta", box=self._ui_box())
+        table.add_column("Team", style="cyan", no_wrap=True)
+        table.add_column("Worker", style="bright_magenta", no_wrap=True)
+        table.add_column("Run ID", style="dim", no_wrap=True)
+        table.add_column("Task", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Current activity", ratio=4)
+        for run in runs:
+            metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+            waves = run.get("execution_waves") or metadata.get("execution_waves") or []
+            wave_by_task = {
+                str(task_id): wave_index
+                for wave_index, wave in enumerate(waves, 1)
+                for task_id in (wave if isinstance(wave, (list, tuple)) else [])
+            }
+            for child in run.get("children") or []:
+                activity = (
+                    child.get("activity") or child.get("current_tool") or
+                    child.get("result_summary") or child.get("error_summary") or "Waiting"
+                )
+                task_id = str(child.get("task_id") or "task")
+                wave = wave_by_task.get(task_id)
+                table.add_row(
+                    str(run.get("run_id") or "")[:19], str(child.get("agent_role") or "specialist"),
+                    str(child.get("run_id") or "")[:19],
+                    f"W{wave} · {task_id}" if wave else task_id,
+                    self._agent_status_text(child.get("status")),
+                    Text(one_line(activity, 140)),
+                )
+        return table
+
+    def _print_agent_overview(self, runtime, *, active_only: bool = False) -> None:
+        runs = runtime.list_runs(limit=100, session_id=self._agent_session_id())
+        selected = [run for run in runs if str(run.get("status") or "") in ACTIVE_STATUSES] if active_only else runs
+        summary = summarize_runs(runs)
+        self.console.print(Panel(
+            Text.assemble(
+                ("Enabled", "bold green"),
+                f"{self._activity_separator()}{summary['active_runs']} active teams",
+                f"{self._activity_separator()}{summary['active_workers']} active workers",
+                f"{self._activity_separator()}{len(runtime.list_agents())} configured roles",
+            ),
+            title="[bold]Ares Supervisor[/bold]", border_style="bright_cyan", box=self._ui_box(),
+        ))
+        if selected:
+            self.console.print(self._agent_runs_table(selected, "Active Agent Teams" if active_only else "Recent Agent Teams"))
+            workers = [run for run in selected if run.get("children")]
+            if workers:
+                self.console.print(self._agent_workers_table(workers, "All Active Workers" if active_only else "Specialist Workers"))
+        else:
+            self.console.print("[dim]No specialist teams are currently running.[/dim]" if active_only else "[dim]No multi-agent runs yet.[/dim]")
+
+    def _print_agent_run(self, run: dict) -> None:
+        children = list(run.get("children") or [])
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        manifest = run.get("manifest") if isinstance(run.get("manifest"), dict) else {}
+        waves = (
+            run.get("execution_waves") or manifest.get("execution_waves") or
+            metadata.get("execution_waves") or []
+        )
+        manifest_children = {
+            str(item.get("run_id") or item.get("task_id") or ""): item
+            for item in (manifest.get("child_runs") or [])
+            if isinstance(item, dict)
+        }
+        failures = [
+            child for child in children
+            if str(child.get("status") or "") in {"failed", "timed_out", "blocked", "cancelled"}
+        ]
+        self.console.print(Panel(
+            Text.assemble(
+                (one_line(run.get("prompt_summary") or "Delegated task", 500), "bold white"),
+                "\n\n", ("Status: ", "dim"), self._agent_status_text(run.get("status")),
+                (f"  {self._activity_separator().strip()}  Elapsed: {elapsed_label(run)}", "dim"),
+                (f"\nSession: {run.get('session_id') or '—'}", "dim"),
+                (f"\nRequest: {run.get('request_id') or manifest.get('request_id') or '—'}", "dim"),
+                (f"\nAgents: {len(children)}  ·  Waves: {len(waves)}  ·  Issues: {len(failures)}", "dim"),
+                (f"\nActivity: {one_line(run.get('activity') or '—', 300)}", "dim"),
+            ),
+            title=f"[bold bright_cyan]{run.get('run_id', 'Agent run')}[/bold bright_cyan]",
+            border_style="bright_cyan", box=self._ui_box(),
+        ))
+        if waves:
+            for index, wave in enumerate(waves, 1):
+                self.console.print(self._activity_line(
+                    "working" if str(run.get("status")) in ACTIVE_STATUSES else "done",
+                    f"Wave {index}", ", ".join(str(item) for item in wave),
+                ))
+        if children:
+            self.console.print(self._agent_workers_table([run], "Execution Tree"))
+        for child in children:
+            content = child.get("result_summary") or child.get("error_summary")
+            manifest_child = manifest_children.get(str(child.get("run_id") or "")) or manifest_children.get(str(child.get("task_id") or "")) or {}
+            tools = child.get("tools") or manifest_child.get("tools") or (
+                child.get("metadata", {}).get("tools") if isinstance(child.get("metadata"), dict) else []
+            )
+            if tools:
+                self.console.print(self._activity_line(
+                    "done", f"{child.get('agent_role') or 'specialist'} tools",
+                    ", ".join(str(tool) for tool in tools),
+                ))
+            if content:
+                self.console.print(self._activity_line(
+                    "failed" if str(child.get("status")) in {"failed", "timed_out", "blocked"} else "done",
+                    str(child.get("agent_role") or "specialist"), one_line(content, 180),
+                ))
+        artifacts = [
+            (child, artifact)
+            for child in children
+            for artifact in (child.get("artifacts") or [])
+            if isinstance(artifact, dict)
+        ]
+        if artifacts:
+            table = Table(title="Agent Artifacts", border_style="bright_blue", box=self._ui_box())
+            table.add_column("Role", style="cyan", no_wrap=True)
+            table.add_column("Path", ratio=4)
+            table.add_column("Type", no_wrap=True)
+            table.add_column("Description", ratio=2)
+            for child, artifact in artifacts:
+                table.add_row(
+                    str(child.get("agent_role") or "specialist"),
+                    str(artifact.get("path") or ""),
+                    str(artifact.get("media_type") or "file"),
+                    one_line(artifact.get("description"), 100),
+                )
+            self.console.print(table)
+
+    def _agent_session_id(self) -> str:
+        return str(getattr(self.agent, "session_id", None) or self.session_manager.get_id())
+
+    @staticmethod
+    def _agent_payload(value: object) -> dict:
+        if isinstance(value, dict):
+            return value
+        serializer = getattr(value, "as_dict", None)
+        if callable(serializer):
+            payload = serializer()
+            return payload if isinstance(payload, dict) else {"result": payload}
+        try:
+            return dict(vars(value))
+        except (TypeError, AttributeError):
+            return {"result": str(value)}
+
+    def _print_agent_payload(self, title: str, value: object) -> None:
+        payload = self._agent_payload(value)
+        if payload.get("run_id") or payload.get("root_run_id"):
+            self._print_agent_run(payload)
+            return
+        self.console.print(Panel(
+            Text(json.dumps(payload, ensure_ascii=False, indent=2, default=str)),
+            title=title, border_style="bright_cyan", box=self._ui_box(),
+        ))
+
+    async def _run_agent_operation(self, runtime, action: str, value: str = "") -> None:
+        session_id = self._agent_session_id()
+        try:
+            if action == "run":
+                result = runtime.delegate_request(value, session_id=session_id)
+                title = "Native Delegation"
+            elif action == "doctor":
+                result = runtime.doctor()
+                title = "Multi-Agent Doctor"
+            else:
+                result = runtime.smoke_test(session_id=session_id)
+                title = "Multi-Agent Smoke Test"
+            if inspect.isawaitable(result):
+                result = await result
+            payload = self._agent_payload(result)
+            run_id = str(payload.get("run_id") or payload.get("root_run_id") or "")
+            if run_id:
+                persisted = runtime.get_run(run_id, session_id=session_id)
+                if inspect.isawaitable(persisted):
+                    persisted = await persisted
+                if persisted:
+                    result = persisted
+            self._print_agent_payload(title, result)
+        except Exception as exc:
+            self.console.print(f"[red]{action.replace('_', ' ').title()} failed: {exc}[/red]")
+
+    def _print_agent_event(self, event: dict, seen: set[tuple[str, str, str]]) -> None:
+        event_type = str(event.get("event_type") or "")
+        task_id = str(event.get("task_id") or "")
+        tool = str(event.get("tool") or "")
+        key = (event_type, task_id, tool)
+        if key in seen and event_type not in {"agent_progress"}:
+            return
+        seen.add(key)
+        role = str(event.get("agent") or "team")
+        detail = one_line(event.get("detail"), 110)
+        if event_type == "orchestration_started":
+            run_id = str(event.get("root_run_id") or event.get("run_id") or "")
+            self.console.print(self._activity_line("start", f"Specialist team {run_id}", detail or "delegation started"))
+        elif event_type == "agent_started":
+            self.console.print(self._activity_line("start", f"Agent | {role}", detail or task_id))
+        elif event_type == "tool_started":
+            self.console.print(self._activity_line("working", f"{role} | {tool.replace('_', ' ')}", detail))
+        elif event_type in {"agent_completed", "agent_failed", "agent_timed_out", "agent_blocked", "agent_cancelled"}:
+            failed = event_type in {"agent_failed", "agent_timed_out", "agent_blocked"}
+            self.console.print(self._activity_line("failed" if failed else "done", f"Agent | {role}", detail or event_type.removeprefix("agent_").replace("_", " ")))
+        elif event_type == "synthesis_started":
+            self.console.print(self._activity_line("working", "Root synthesis", detail))
+        elif event_type in {"orchestration_completed", "orchestration_cancelled"}:
+            failed = str(event.get("status") or "") not in {"succeeded", "running"}
+            self.console.print(self._activity_line("failed" if failed else "done", "Specialist team", str(event.get("status") or "complete")))
+
     def _handle_command(self, cmd: str) -> bool:
         """Handle slash commands. Returns False if should exit."""
         parts = cmd.strip().split(maxsplit=1)
@@ -1237,7 +1487,9 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/call CONTACT|NUMBER [--confirm]", "Place a provider-backed telephone call")
             table.add_row("/telephony [status|contacts|recent|hangup|mute|unmute]", "Manage Twilio/LiveKit telephony")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
-            table.add_row("/agents [status|runs|show|cancel|on|off]", "Inspect and control native specialist runs")
+            table.add_row("/agents run REQUEST", "Force a real native specialist delegation")
+            table.add_row("/agents [doctor|smoke-test]", "Verify runtime, persistence, roles, limits, and harmless parallel execution")
+            table.add_row("/agents [status|active|roles|runs|show|cancel|resume|on|off]", "Inspect and control this session's specialist teams")
             table.add_row("/mcp [search|add|list|test|refresh]", "Discover, configure, and manage MCP servers")
             table.add_row("/monitor [list|add|status|pause|resume|remove|events|test]", "Control proactive watchers")
             table.add_row("/skill-name", "Load a skill directly by slash command")
@@ -1397,7 +1649,21 @@ class AresCLI(MarketplaceCommandMixin):
                 self.console.print(f"[green]Native multi-agent mode {'enabled' if enabled else 'disabled'}.[/green]")
             elif runtime is None:
                 self.console.print("[yellow]Native multi-agent mode is unavailable. Use /agents on.[/yellow]")
-            elif action == "list":
+            elif action == "run":
+                if not value.strip():
+                    self.console.print("[red]Usage: /agents run REQUEST[/red]")
+                else:
+                    asyncio.create_task(
+                        self._run_agent_operation(runtime, "run", value.strip()),
+                        name="ares-cli-agents-run",
+                    )
+            elif action in {"doctor", "smoke-test", "smoke_test"}:
+                normalized = "doctor" if action == "doctor" else "smoke-test"
+                asyncio.create_task(
+                    self._run_agent_operation(runtime, normalized),
+                    name=f"ares-cli-agents-{normalized}",
+                )
+            elif action in {"list", "roles"}:
                 table = Table(title="Ares Specialists", border_style="bright_cyan", box=CLI_BOX)
                 table.add_column("Role", style="cyan")
                 table.add_column("Mode")
@@ -1406,31 +1672,47 @@ class AresCLI(MarketplaceCommandMixin):
                 for item in runtime.list_agents():
                     table.add_row(item["name"], "mutation" if item["can_mutate"] else "read-only", f"{item['max_iterations']} iter · {item['timeout_seconds']:.0f}s", item["description"])
                 self.console.print(table)
-            elif action in {"status", "runs"}:
-                runs = runtime.list_runs(limit=20)
-                table = Table(title="Native Agent Runs", border_style="bright_cyan", box=CLI_BOX)
-                table.add_column("Run", style="cyan", no_wrap=True)
-                table.add_column("Status", no_wrap=True)
-                table.add_column("Session", no_wrap=True)
-                table.add_column("Specialists", justify="right")
-                table.add_column("Task", ratio=4)
-                for run in runs:
-                    table.add_row(str(run.get("run_id", "")), str(run.get("status", "")), str(run.get("session_id") or "—"), str(len(run.get("children") or [])), str(run.get("prompt_summary") or ""))
-                self.console.print(table if runs else "[dim]No multi-agent runs yet.[/dim]")
+            elif action == "status":
+                self._print_agent_overview(runtime)
+            elif action == "active":
+                self._print_agent_overview(runtime, active_only=True)
+            elif action == "runs":
+                try:
+                    limit = max(1, min(int(value or 20), 100))
+                except ValueError:
+                    limit = 20
+                runs = runtime.list_runs(limit=limit, session_id=self._agent_session_id())
+                self.console.print(self._agent_runs_table(runs) if runs else "[dim]No multi-agent runs yet.[/dim]")
             elif action == "show" and value:
-                run = runtime.get_run(value.strip())
+                run = runtime.get_run(value.strip(), session_id=self._agent_session_id())
                 if run is None:
                     self.console.print("[red]Agent run not found.[/red]")
                 else:
-                    self.console.print_json(data=run)
+                    self._print_agent_run(run)
             elif action == "cancel" and value:
                 target = value.strip()
                 async def cancel_run() -> None:
-                    cancelled = await runtime.cancel(target)
+                    cancelled = await runtime.cancel(target, session_id=self._agent_session_id())
                     self.console.print(f"[yellow]{'Cancelled' if cancelled else 'Not active'}: {target}[/yellow]")
                 asyncio.create_task(cancel_run(), name=f"ares-cli-cancel:{target}")
+            elif action == "resume" and value:
+                target = value.strip()
+                async def resume_run() -> None:
+                    try:
+                        team = await runtime.resume(
+                            target, session_id=self._agent_session_id()
+                        )
+                    except Exception as exc:
+                        self.console.print(
+                            f"[red]Could not resume {target}: {type(exc).__name__}: {exc}[/red]"
+                        )
+                    else:
+                        self.console.print(
+                            f"[green]Resumed {target} as {team.root_run_id}.[/green]"
+                        )
+                asyncio.create_task(resume_run(), name=f"ares-cli-resume:{target}")
             else:
-                self.console.print("[red]Usage: /agents [status|runs|show RUN_ID|cancel RUN_ID|on|off][/red]")
+                self.console.print("[red]Usage: /agents [run REQUEST|doctor|smoke-test|status|active|roles|runs [LIMIT]|show RUN_ID|cancel RUN_ID|resume RUN_ID|on|off][/red]")
 
         elif command == "/model":
             if not arg or arg == "list":
@@ -1565,8 +1847,18 @@ class AresCLI(MarketplaceCommandMixin):
                 )
 
         elif command == "/reset":
-            self.conversation_history = []
-            self.console.print("[dim]Conversation reset. Memory preserved.[/dim]")
+            with suppress(Exception):
+                self.conversation_store.end_conversation(self.conversation_id)
+            self.conversation_id = self.conversation_store.start_conversation()
+            self.conversation_history = self._conversation_history_for_model(self.conversation_id)
+            self.session_manager = SessionManager()
+            set_session_id = getattr(self.agent, "set_session_id", None)
+            if callable(set_session_id):
+                set_session_id(self.session_manager.get_id())
+            if hasattr(self.agent, "last_messages"):
+                self.agent.last_messages = []
+            self._session_finalized = False
+            self.console.print(f"[dim]Started a new conversation #{self.conversation_id}. Memory preserved.[/dim]")
 
         elif command == "/soul":
             if not arg or arg == "show":
@@ -1841,42 +2133,56 @@ class AresCLI(MarketplaceCommandMixin):
             self._print_static_activity_header(thinking_label)
         selected_skills = self._active_skills(user_input) if activity_visible else []
         full_response = ""
-        with status_context as live_status:
-            if selected_skills:
-                self._print_skill_card(selected_skills)
-            try:
-                async for token in self.agent.run_stream(user_input, self.conversation_history):
-                    if token.startswith("[tool_start:"):
-                        tool_name = self._parse_tool_start_token(token)
-                        tool_started_at.setdefault(tool_name, []).append(time.monotonic())
-                        tool_steps.setdefault(tool_name, []).append(next_tool_step)
-                        self._print_tool_start(tool_name, live_status, step=next_tool_step)
-                        next_tool_step += 1
-                    elif token.startswith("[tool:"):
-                        tool_name, tool_content = self._parse_tool_token(token)
-                        event = self._summarize_tool_result(tool_name, tool_content)
-                        steps = tool_steps.get(tool_name) or []
-                        if steps:
-                            event["step"] = steps.pop(0)
-                        starts = tool_started_at.get(tool_name) or []
-                        if starts:
-                            elapsed = max(0.0, time.monotonic() - starts.pop(0))
-                            event["detail"] = f"{event['detail']}{self._activity_separator()}{elapsed:.1f}s"
-                        self._print_tool_done(event)
-                        if live_status is not None:
-                            live_status.update(self._working_text(thinking_label))
-                        if mode == "details" and not self._collapse_noisy_tool_output(tool_name, tool_content):
-                            try:
-                                renderer = get_renderer(tool_name)
-                                tool_renderables.append(renderer(tool_content))
-                            except Exception:
-                                tool_renderables.append(render_generic_tool(tool_content))
-                    else:
-                        full_response += token
-            except Exception as e:
-                if activity_visible:
-                    self.console.print(self._activity_line("failed", "Request", str(e)))
-                full_response = f"Error: {e}"
+        agent_unsubscribe = None
+        runtime = getattr(self.agent, "multi_agent_runtime", None)
+        agent_event_seen: set[tuple[str, str, str]] = set()
+        if activity_visible and runtime is not None:
+            expected_session = str(getattr(self.agent, "session_id", None) or "")
+            def handle_agent_event(event: dict) -> None:
+                event_session = str(event.get("session_id") or "")
+                if not expected_session or not event_session or event_session == expected_session:
+                    self._print_agent_event(event, agent_event_seen)
+            agent_unsubscribe = runtime.subscribe(handle_agent_event)
+        try:
+            with status_context as live_status:
+                if selected_skills:
+                    self._print_skill_card(selected_skills)
+                try:
+                    async for token in self.agent.run_stream(user_input, self.conversation_history):
+                        if token.startswith("[tool_start:"):
+                            tool_name = self._parse_tool_start_token(token)
+                            tool_started_at.setdefault(tool_name, []).append(time.monotonic())
+                            tool_steps.setdefault(tool_name, []).append(next_tool_step)
+                            self._print_tool_start(tool_name, live_status, step=next_tool_step)
+                            next_tool_step += 1
+                        elif token.startswith("[tool:"):
+                            tool_name, tool_content = self._parse_tool_token(token)
+                            event = self._summarize_tool_result(tool_name, tool_content)
+                            steps = tool_steps.get(tool_name) or []
+                            if steps:
+                                event["step"] = steps.pop(0)
+                            starts = tool_started_at.get(tool_name) or []
+                            if starts:
+                                elapsed = max(0.0, time.monotonic() - starts.pop(0))
+                                event["detail"] = f"{event['detail']}{self._activity_separator()}{elapsed:.1f}s"
+                            self._print_tool_done(event)
+                            if live_status is not None:
+                                live_status.update(self._working_text(thinking_label))
+                            if mode == "details" and not self._collapse_noisy_tool_output(tool_name, tool_content):
+                                try:
+                                    renderer = get_renderer(tool_name)
+                                    tool_renderables.append(renderer(tool_content))
+                                except Exception:
+                                    tool_renderables.append(render_generic_tool(tool_content))
+                        else:
+                            full_response += token
+                except Exception as e:
+                    if activity_visible:
+                        self.console.print(self._activity_line("failed", "Request", str(e)))
+                    full_response = f"Error: {e}"
+        finally:
+            if agent_unsubscribe is not None:
+                agent_unsubscribe()
 
         if mode == "details":
             for renderable in tool_renderables:

@@ -34,6 +34,7 @@ from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.mcp_registry import MCPRegistryClient
 from ares.models import AppConfig, TelegramConfig
+from ares.multi_agent_display import ACTIVE_STATUSES, active_runs, telegram_overview, telegram_run
 from ares.skill_registry import (
     RegistryError as SkillRegistryError,
     SafeSkillInstaller,
@@ -59,6 +60,17 @@ FILE_REQUEST_RE = re.compile(
     r"\b(?:send|upload|share|attach)\b[\s\S]{0,120}\b(?:file|document|report|output|result|it|this)\b"
     r"|\b(?:telegram|sendfile)\b",
     re.IGNORECASE,
+)
+TELEGRAM_COMMANDS = (
+    ("help", "Show Ares commands"),
+    ("new", "Start a fresh Ares session"),
+    ("status", "Show runtime and active team status"),
+    ("agents", "Inspect specialist teams and workers"),
+    ("workers", "Show every active specialist worker"),
+    ("monitors", "List proactive watchers"),
+    ("alerts", "Show watcher incidents"),
+    ("skills", "Manage Ares skills"),
+    ("mcp", "Manage connected MCP servers"),
 )
 
 
@@ -129,6 +141,12 @@ class TelegramBotAPI:
 
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         await self._request("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    async def set_commands(self, commands: tuple[tuple[str, str], ...]) -> bool:
+        return bool(await self._request(
+            "setMyCommands",
+            {"commands": [{"command": command, "description": description} for command, description in commands]},
+        ))
 
     async def send_document(
         self,
@@ -306,6 +324,10 @@ class TelegramChannel:
             print("Ares Telegram: connecting...")
             await self.api.delete_webhook()
             me = await self.api.get_me()
+            set_commands = getattr(self.api, "set_commands", None)
+            if callable(set_commands):
+                with suppress(Exception):
+                    await set_commands(TELEGRAM_COMMANDS)
             logger.info("Telegram channel connected as @%s", me.get("username", "ares-bot"))
             print(f"Ares Telegram: connected as @{me.get('username', 'ares-bot')}; waiting for messages.")
         except asyncio.CancelledError:
@@ -426,6 +448,8 @@ class TelegramChannel:
                     "/monitors — list proactive watchers\n"
                     "/monitor [add|status|pause|resume|remove|events|test] — control watchers\n"
                     "/alerts — recent watcher incidents\n"
+                    "/agents [status|active|roles|runs|show|cancel|resume] — inspect specialist teams\n"
+                    "/workers — show all workers running now\n"
                     "/confirm <code> — approve the last reviewed install\n/cancel — discard it\n"
                     "/help — show this help\n\n"
                     "Examples: /skills search research  •  /mcp search github",
@@ -437,10 +461,22 @@ class TelegramChannel:
                 await self.api.send_message(chat_id, "Started a new Ares session for this chat.", reply_to_message_id=reply_to)
                 return
             if command == "/status":
+                runtime = getattr(self.agent, "multi_agent_runtime", None)
+                team_status = "Specialists: unavailable"
+                if runtime is not None:
+                    runtime_session_id = self._telegram_runtime_session(chat_id)
+                    recent = runtime.list_runs(limit=100, session_id=runtime_session_id)
+                    active = active_runs(recent)
+                    active_workers = sum(
+                        str(child.get("status") or "") in ACTIVE_STATUSES
+                        for run in active for child in (run.get("children") or [])
+                    )
+                    team_status = f"Specialists: {len(active)} active teams · {active_workers} active workers"
                 await self.api.send_message(
                     chat_id,
                     f"Ares Telegram channel is online. Model: {self.agent.config.model}. "
-                    "This chat is allowlisted and its conversation is saved locally on the PC.",
+                    "This chat is allowlisted and its conversation is saved locally on the PC.\n"
+                    f"{team_status}",
                     reply_to_message_id=reply_to,
                 )
                 return
@@ -450,6 +486,9 @@ class TelegramChannel:
             if command in {"/monitor", "/monitors", "/alerts"}:
                 await self._handle_watcher_command(chat_id, command, argument, reply_to)
                 return
+            if command in {"/agents", "/agent", "/workers"}:
+                await self._handle_agents_command(chat_id, command, argument, reply_to)
+                return
             if command in {"/skills", "/mcp", "/confirm", "/cancel"}:
                 await self._handle_marketplace_command(chat_id, command, argument, reply_to)
                 return
@@ -458,6 +497,83 @@ class TelegramChannel:
                 return
 
             await self._handle_chat_message(chat_id, message, update, text, reply_to)
+
+    async def _handle_agents_command(
+        self, chat_id: int, command: str, argument: str, reply_to: int | None
+    ) -> None:
+        """Expose the native supervisor without routing operational commands through the LLM."""
+        runtime = getattr(self.agent, "multi_agent_runtime", None)
+        if runtime is None:
+            await self.api.send_message(
+                chat_id, "Native specialist mode is unavailable. Enable multi_agent and run Ares with --all.",
+                reply_to_message_id=reply_to,
+            )
+            return
+        runtime_session_id = self._telegram_runtime_session(chat_id)
+        pieces = argument.split(maxsplit=1)
+        action = ("active" if command == "/workers" else (pieces[0].casefold() if pieces and pieces[0] else "status"))
+        value = pieces[1].strip() if len(pieces) > 1 else ""
+        if action in {"status", "overview"}:
+            text = telegram_overview(
+                enabled=bool(runtime.config.enabled), agents=runtime.list_agents(),
+                runs=runtime.list_runs(limit=100, session_id=runtime_session_id),
+            )
+        elif action in {"active", "workers"}:
+            runs = active_runs(runtime.list_runs(limit=100, session_id=runtime_session_id))
+            text = "All active specialist workers"
+            if runs:
+                text += "\n\n" + "\n\n".join(telegram_run(run, include_results=False) for run in runs[:8])
+            else:
+                text += "\n\nNo specialist teams are currently running."
+        elif action in {"roles", "list"}:
+            lines = ["Ares specialist roles"]
+            for item in runtime.list_agents():
+                mode = "mutation-capable" if item.get("can_mutate") else "read-only"
+                lines.append(
+                    f"• {item.get('name')} · {mode} · {item.get('max_iterations')} iterations · "
+                    f"{float(item.get('timeout_seconds') or 0):.0f}s\n  {_one_line(item.get('description'), 150)}"
+                )
+            text = "\n".join(lines)
+        elif action == "runs":
+            try:
+                limit = max(1, min(int(value or 10), 30))
+            except ValueError:
+                limit = 10
+            runs = runtime.list_runs(limit=limit, session_id=runtime_session_id)
+            lines = [f"Recent specialist teams · {len(runs)}"]
+            for run in runs:
+                workers = run.get("children") or []
+                lines.append(
+                    f"• {run.get('run_id')} · {run.get('status')} · {len(workers)} workers\n"
+                    f"  {_one_line(run.get('prompt_summary') or run.get('activity'), 130)}"
+                )
+            text = "\n".join(lines) if runs else "No specialist runs yet."
+        elif action == "show" and value:
+            run = runtime.get_run(value, session_id=runtime_session_id)
+            text = telegram_run(run) if run else "Agent run not found. Use /agents runs to copy a run ID."
+        elif action == "cancel" and value:
+            cancelled = await runtime.cancel(value, session_id=runtime_session_id)
+            text = f"{'Cancelled' if cancelled else 'Not active'} · {value}"
+        elif action == "resume" and value:
+            try:
+                team = await runtime.resume(value, session_id=runtime_session_id)
+            except Exception as exc:
+                text = f"Could not resume {value}: {type(exc).__name__}: {exc}"
+            else:
+                text = f"Resumed {value} as {team.root_run_id}."
+        else:
+            text = (
+                "Agent commands\n"
+                "/agents status — supervisor overview\n"
+                "/agents active — all running workers\n"
+                "/agents roles — configured specialists\n"
+                "/agents runs [limit] — recent teams\n"
+                "/agents show RUN_ID — execution tree and results\n"
+                "/agents cancel RUN_ID — stop an active team\n"
+                "/agents resume RUN_ID — resume safe read-only checkpoint work\n"
+                "/workers — shortcut for active workers"
+            )
+        await self._send_text_chunks(chat_id, _telegram_trim(text), reply_to)
 
     async def _handle_watcher_command(self, chat_id: int, command: str, argument: str, reply_to: int | None) -> None:
         """Run the same watcher controls exposed by the local terminal."""
@@ -647,28 +763,40 @@ class TelegramChannel:
         response_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         scope_factory = getattr(self.agent, "session_scope", None)
-        scope = scope_factory(f"telegram-{session_id}") if callable(scope_factory) else nullcontext()
-        with scope:
-            async for chunk in self.agent.run_stream(prompt, conversation_history=history):
-                start = TOOL_START_TOKEN_RE.match(chunk)
-                if start:
-                    await status.event(self._tool_label(start.group(1), "Using"))
-                    continue
-                progress = TOOL_PROGRESS_TOKEN_RE.match(chunk)
-                if progress:
-                    await status.event(self._tool_label(progress.group(1), progress.group(2)))
-                    continue
-                result = TOOL_TOKEN_RE.match(chunk)
-                if result:
-                    tool_name, raw = result.groups()
-                    with suppress(json.JSONDecodeError):
-                        raw_payload: Any = json.loads(raw)
-                        tool_calls.append({"tool": tool_name, "content": raw_payload})
-                    if not tool_calls or tool_calls[-1].get("tool") != tool_name:
-                        tool_calls.append({"tool": tool_name, "content": raw})
-                    await status.event(self._tool_label(tool_name, "Finished"))
-                    continue
-                response_parts.append(chunk)
+        runtime_session_id = f"telegram-{session_id}"
+        scope = scope_factory(runtime_session_id) if callable(scope_factory) else nullcontext()
+        runtime = getattr(self.agent, "multi_agent_runtime", None)
+        unsubscribe = None
+        if runtime is not None:
+            async def handle_agent_event(event: dict[str, Any]) -> None:
+                if str(event.get("session_id") or "") == runtime_session_id:
+                    await status.agent_event(event)
+            unsubscribe = runtime.subscribe(handle_agent_event)
+        try:
+            with scope:
+                async for chunk in self.agent.run_stream(prompt, conversation_history=history):
+                    start = TOOL_START_TOKEN_RE.match(chunk)
+                    if start:
+                        await status.event(self._tool_label(start.group(1), "Using"))
+                        continue
+                    progress = TOOL_PROGRESS_TOKEN_RE.match(chunk)
+                    if progress:
+                        await status.event(self._tool_label(progress.group(1), progress.group(2)))
+                        continue
+                    result = TOOL_TOKEN_RE.match(chunk)
+                    if result:
+                        tool_name, raw = result.groups()
+                        with suppress(json.JSONDecodeError):
+                            raw_payload: Any = json.loads(raw)
+                            tool_calls.append({"tool": tool_name, "content": raw_payload})
+                        if not tool_calls or tool_calls[-1].get("tool") != tool_name:
+                            tool_calls.append({"tool": tool_name, "content": raw})
+                        await status.event(self._tool_label(tool_name, "Finished"))
+                        continue
+                    response_parts.append(chunk)
+        finally:
+            if unsubscribe is not None:
+                unsubscribe()
         return "".join(response_parts).strip(), tool_calls
 
     @staticmethod
@@ -685,6 +813,9 @@ class TelegramChannel:
             conversation_id = self.conversation_store.start_conversation()
             self.state_store.set_conversation_id(CHANNEL_NAME, chat_id, conversation_id)
         return conversation_id
+
+    def _telegram_runtime_session(self, chat_id: int) -> str:
+        return f"telegram-{self._conversation_id(chat_id)}"
 
     async def _start_new_session(self, chat_id: int) -> None:
         old_id = self.state_store.get_conversation_id(CHANNEL_NAME, chat_id)
@@ -1263,6 +1394,13 @@ class _TelegramProgress:
         self.reply_to = reply_to
         self.message_id: int | None = None
         self.events: list[str] = ["Thinking"]
+        self.workers: dict[str, dict[str, str]] = {}
+        self.root_run_id = ""
+        self.root_task = ""
+        self.root_status = ""
+        self.started_at = time.monotonic()
+        self._last_edit_at = 0.0
+        self._refresh_task: asyncio.Task | None = None
         self._typing_task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -1277,18 +1415,110 @@ class _TelegramProgress:
     async def event(self, value: str) -> None:
         if value not in self.events:
             self.events.append(value)
+        await self._refresh()
+
+    async def agent_event(self, event: dict[str, Any]) -> None:
+        """Merge one stable supervisor event into the compact Telegram team view."""
+        event_type = str(event.get("event_type") or "")
+        root_run_id = str(event.get("root_run_id") or "")
+        run_id = str(event.get("run_id") or "")
+        if root_run_id:
+            self.root_run_id = root_run_id
+        if event.get("root_task"):
+            self.root_task = _one_line(event["root_task"], 160)
+        if event_type.startswith("orchestration_") or event_type == "synthesis_started":
+            self.root_status = str(event.get("status") or event_type.removeprefix("orchestration_"))
+        if run_id and run_id != root_run_id:
+            worker = self.workers.setdefault(run_id, {
+                "agent": str(event.get("agent") or "specialist"),
+                "task_id": str(event.get("task_id") or "task"),
+                "status": "queued",
+                "detail": "Queued",
+                "tool": "",
+            })
+            worker["agent"] = str(event.get("agent") or worker["agent"])
+            worker["task_id"] = str(event.get("task_id") or worker["task_id"])
+            worker["status"] = str(event.get("status") or worker["status"])
+            if event.get("detail"):
+                worker["detail"] = _one_line(event["detail"], 115)
+            if event.get("tool"):
+                worker["tool"] = str(event["tool"])
+            if event_type in {"tool_completed", "agent_completed", "agent_failed", "agent_timed_out", "agent_blocked", "agent_cancelled"}:
+                worker["tool"] = ""
+        await self._refresh()
+
+    def _render(self) -> str:
+        if not self.workers:
+            lines = "\n".join(f"• {event}" for event in self.events[-5:])
+            return f"⌛ Ares is working…\n{lines}"
+        statuses = [worker["status"] for worker in self.workers.values()]
+        running = sum(status in ACTIVE_STATUSES for status in statuses)
+        succeeded = statuses.count("succeeded")
+        failed = sum(status in {"failed", "timed_out", "blocked"} for status in statuses)
+        elapsed = max(0, round(time.monotonic() - self.started_at))
+        lines = [
+            f"⌛ Ares team is working · {elapsed}s",
+            f"Workers: {running} active · {succeeded} done · {failed} issues",
+        ]
+        if self.root_task:
+            lines.append(f"Task: {self.root_task}")
+        lines.append("")
+        for worker in list(self.workers.values())[:8]:
+            status = worker["status"]
+            mark = {
+                "queued": "○", "running": "●", "succeeded": "✓", "failed": "✗",
+                "timed_out": "⌛", "blocked": "⊘", "cancelled": "–",
+            }.get(status, "·")
+            activity = worker["detail"]
+            if worker["tool"]:
+                activity = f"{worker['tool'].replace('_', ' ')} · {activity}"
+            lines.append(f"{mark} {worker['agent']} · {worker['task_id']}\n  {_one_line(activity, 130)}")
+        if len(self.workers) > 8:
+            lines.append(f"… and {len(self.workers) - 8} more workers")
+        return _telegram_trim("\n".join(lines))
+
+    async def _refresh(self, *, force: bool = False) -> None:
         if not self.message_id:
             return
-        lines = "\n".join(f"• {event}" for event in self.events[-5:])
+        interval = 0.8
+        now = time.monotonic()
+        remaining = interval - (now - self._last_edit_at)
+        if not force and remaining > 0:
+            if self._refresh_task is None or self._refresh_task.done():
+                self._refresh_task = asyncio.create_task(
+                    self._delayed_refresh(remaining), name=f"ares-telegram-progress:{self.chat_id}"
+                )
+            return
+        self._last_edit_at = now
         with suppress(Exception):
-            await self.channel.api.edit_message(self.chat_id, self.message_id, f"⌛ Ares is working…\n{lines}")
+            await self.channel.api.edit_message(self.chat_id, self.message_id, self._render())
+
+    async def _delayed_refresh(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(max(0.05, delay))
+            await self._refresh(force=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
 
     async def finish(self, text: str) -> None:
+        if self._refresh_task is not None and not self._refresh_task.done():
+            self._refresh_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._refresh_task
         if self._typing_task is not None:
             self._typing_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await self._typing_task
         if self.message_id:
+            if self.workers and text.startswith("✅"):
+                statuses = [worker["status"] for worker in self.workers.values()]
+                succeeded = statuses.count("succeeded")
+                issues = sum(status in {"failed", "timed_out", "blocked"} for status in statuses)
+                text = f"{text} · {succeeded}/{len(statuses)} specialists completed"
+                if issues:
+                    text += f" · {issues} issues"
             with suppress(Exception):
                 await self.channel.api.edit_message(self.chat_id, self.message_id, text)
 

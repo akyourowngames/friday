@@ -141,6 +141,7 @@ async def test_dependencies_execute_in_waves_and_receive_results() -> None:
                 "synthesizer",
                 "Combine",
                 depends_on=("research", "analysis"),
+                allowed_context=("task_dependencies",),
             ),
         ]
     )
