@@ -770,6 +770,16 @@ def get_tool_definitions() -> list[dict]:
             required=["command"],
         ),
         _tool(
+            "run_project_check",
+            "Run one named project verification check pre-configured by the repository owner. This accepts only the check name; it cannot execute arbitrary shell text, use pipes, redirects, nested interpreters, or network commands.",
+            {
+                "check": {"type": "string", "description": "Configured [tool.ares.agent_checks] name."},
+                "cwd": {"type": "string", "description": "Assigned builder workspace."},
+                "timeout_seconds": {"type": "integer", "description": "Maximum seconds (1-300, default 180)."},
+            },
+            required=["check"],
+        ),
+        _tool(
             "generate_image",
             "Generate an image from a text prompt using Pollinations.ai (free, no API key). Returns saved file path and records an asset manifest row with dimensions, format, checksum, and generation history.",
             {

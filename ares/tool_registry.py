@@ -29,6 +29,7 @@ class ToolCategory(str, Enum):
     PHONE = "phone"
     TELEPHONY = "telephony"
     MCP = "mcp"
+    UNKNOWN_CONSEQUENTIAL = "unknown_consequential"
 
 
 DELEGATION_TOOL_NAMES = frozenset({
@@ -117,7 +118,10 @@ def categorize_tool_name(name: str) -> ToolCategory:
         return ToolCategory.BROWSER
     if lowered.startswith("mcp__"):
         return ToolCategory.MCP
-    return ToolCategory.CORE_CONVERSATION
+    # A new local/plugin tool is consequential until it has an explicit
+    # registry category. Visibility selection is not an authorization
+    # boundary, but this prevents accidental fail-open advertising as well.
+    return ToolCategory.UNKNOWN_CONSEQUENTIAL
 
 
 def is_harmless_read_tool(name: str) -> bool:

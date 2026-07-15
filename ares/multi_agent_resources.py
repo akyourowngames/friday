@@ -44,6 +44,7 @@ class ResourceCoordinator:
             "browser": asyncio.Lock(),
             "shell": asyncio.Lock(),
             "repl": asyncio.Lock(),
+            "project_check": asyncio.Lock(),
             "database": asyncio.Lock(),
             "communication": asyncio.Lock(),
             "external": asyncio.Lock(),
@@ -58,6 +59,9 @@ class ResourceCoordinator:
         self._provider = (
             asyncio.Semaphore(self._provider_limit) if self._provider_limit else None
         )
+        self._quarantine_condition = asyncio.Condition()
+        self._quarantined: dict[int, dict[str, str]] = {}
+        self._next_quarantine = 0
 
     def state(self) -> dict[str, Any]:
         reads = sum(not write for write, _paths in self._fs_leases.values())
@@ -68,7 +72,45 @@ class ResourceCoordinator:
             "filesystem_waiters": len(self._fs_waiters),
             "provider_limit": self._provider_limit,
             "locked": {name: lock.locked() for name, lock in self._locks.items()},
+            "quarantined_operations": list(self._quarantined.values()),
         }
+
+    async def _wait_for_quarantine(self) -> None:
+        # A detached tool may still hold a process, socket, or external side
+        # effect. Conservatively quarantine new shared work until it exits.
+        async with self._quarantine_condition:
+            await self._quarantine_condition.wait_for(lambda: not self._quarantined)
+
+    async def quarantine_call(
+        self,
+        tool_name: str,
+        operation: asyncio.Task[Any],
+        *,
+        owner_run_id: str = "",
+        reason: str = "unresponsive",
+    ) -> dict[str, str]:
+        """Detach an unresponsive operation while retaining a logical lease."""
+        async with self._quarantine_condition:
+            self._next_quarantine += 1
+            token = self._next_quarantine
+            payload = {
+                "tool": str(tool_name), "owner_run_id": str(owner_run_id),
+                "reason": str(reason), "state": "quarantined",
+            }
+            self._quarantined[token] = payload
+
+        async def release_when_done() -> None:
+            try:
+                await operation
+            except BaseException:
+                pass
+            finally:
+                async with self._quarantine_condition:
+                    self._quarantined.pop(token, None)
+                    self._quarantine_condition.notify_all()
+
+        asyncio.create_task(release_when_done(), name=f"ares-quarantine:{tool_name}:{token}")
+        return dict(payload)
 
     @staticmethod
     def _filesystem_conflict(
@@ -133,6 +175,7 @@ class ResourceCoordinator:
 
     @asynccontextmanager
     async def acquire(self, resource: ToolCallResource) -> AsyncIterator[None]:
+        await self._wait_for_quarantine()
         async with AsyncExitStack() as stack:
             if resource.resource is ToolResource.FILESYSTEM_READ:
                 await stack.enter_async_context(
@@ -164,6 +207,11 @@ class ResourceCoordinator:
                 await stack.enter_async_context(self._locks["database"])
                 await stack.enter_async_context(self._locks["communication"])
                 await stack.enter_async_context(self._locks["external"])
+                await stack.enter_async_context(
+                    self._filesystem_lease(write=True, paths=())
+                )
+            elif resource.resource is ToolResource.PROJECT_CHECK:
+                await stack.enter_async_context(self._locks["project_check"])
                 await stack.enter_async_context(
                     self._filesystem_lease(write=True, paths=())
                 )

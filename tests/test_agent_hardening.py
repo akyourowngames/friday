@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +20,7 @@ from ares.multi_agent import (
     ContextMode,
 )
 from ares.turn_policy import build_turn_execution_context
+from ares.multi_agent_resources import BuilderWorktreeManager
 
 
 class _Registry:
@@ -168,6 +172,91 @@ async def test_greeting_exposes_no_tools_and_stale_action_cannot_execute(
     assert advertised == [[], []]
     assert "Hey!" in tokens
     assert any("current conversation turn does not authorize" in token for token in tokens)
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_real_child_agent_does_not_reenter_delegation_and_edits_isolated_worktree(
+    tmp_path, fake_embedding_provider
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for command in (
+        ("git", "init", str(repository)),
+        ("git", "-C", str(repository), "config", "user.email", "tests@example.test"),
+        ("git", "-C", str(repository), "config", "user.name", "Ares Tests"),
+    ):
+        assert subprocess.run(command, capture_output=True, text=True).returncode == 0
+    (repository / "seed.txt").write_text("seed\n", encoding="utf-8")
+    assert subprocess.run(("git", "-C", str(repository), "add", "seed.txt"), capture_output=True, text=True).returncode == 0
+    assert subprocess.run(("git", "-C", str(repository), "commit", "-m", "seed"), capture_output=True, text=True).returncode == 0
+    manager = BuilderWorktreeManager(tmp_path / "worktrees")
+    workspace = manager.prepare(repository, root_run_id="ma_child", child_run_id="child")
+    assert workspace.isolated
+
+    agent = _agent(tmp_path, fake_embedding_provider, enabled=True)
+    agent.delegation_depth = 1
+    agent._tool_schema_filter = lambda schemas: [
+        schema for schema in schemas if schema["function"]["name"] == "write_file"
+    ]
+    agent._tool_authorizer = lambda _name, _args: SimpleNamespace(allowed=True)
+    agent.refresh_tools()
+    target = str(Path(workspace.root) / "implemented.txt")
+    calls = 0
+
+    async def stream(_messages, tools=None):
+        nonlocal calls
+        calls += 1
+        assert any(item["function"]["name"] == "write_file" for item in tools or [])
+        if calls == 1:
+            yield {"type": "tool_call", "index": 0, "id": "edit", "name": "write_file"}
+            yield {"type": "tool_call_delta", "index": 0, "arguments": json.dumps({"path": target, "content": "implemented\n"})}
+        else:
+            yield {"type": "content", "text": "Builder completed the isolated implementation."}
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = stream
+    try:
+        response = "".join([token async for token in agent.run_stream(
+            "Have a builder implement a file and a reviewer verify it using multi-agent mode.", []
+        )])
+        assert "runtime is unavailable" not in response.casefold()
+        assert Path(workspace.root, "implemented.txt").read_text(encoding="utf-8") == "implemented\n"
+        assert not (repository / "implemented.txt").exists()
+    finally:
+        await agent.close()
+        subprocess.run(("git", "-C", str(repository), "worktree", "remove", "--force", workspace.root), capture_output=True, text=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_an_unresponsive_tool_releases_agent_task_and_quarantines_resource(
+    tmp_path, fake_embedding_provider
+):
+    agent = _agent(tmp_path, fake_embedding_provider, enabled=False)
+    agent.delegation_depth = 1
+    agent.root_run_id = "ma_cancel"
+    agent.config.multi_agent.tool_cancel_grace_seconds = 0.1
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stubborn_dispatch(_name, _args, _progress):
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await release.wait()
+            return False, "late"
+
+    agent._dispatch_one_tool_async = stubborn_dispatch  # type: ignore[method-assign]
+    call = {"function": {"name": "web_search", "arguments": json.dumps({"query": "x"})}}
+    pending = asyncio.create_task(agent._execute_one_tool_async(0, call, None))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, timeout=1)
+    assert agent.resource_coordinator.state()["quarantined_operations"]
+    release.set()
+    await asyncio.sleep(0)
     await agent.close()
 
 

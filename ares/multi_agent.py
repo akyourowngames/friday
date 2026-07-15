@@ -777,7 +777,7 @@ READ_ONLY_CODE_TOOLS = (
 CODE_MUTATION_TOOLS = READ_ONLY_CODE_TOOLS + (
     "write_file", "edit_file", "create_directory", "move_file", "batch_edit",
     "insert_line", "replace_lines", "delete_lines", "preview_diff", "backup_file",
-    "undo_last_edit", "append_to_file", "prepend_to_file", "run_python", "run_command",
+    "undo_last_edit", "append_to_file", "prepend_to_file", "run_project_check",
 )
 
 
@@ -787,8 +787,8 @@ def default_agent_specs() -> tuple[AgentSpec, ...]:
         AgentSpec("researcher", "Collects evidence from the web, documentation, and read-only MCP sources.", "Prefer primary sources and preserve source URLs.", READ_ONLY_RESEARCH_TOOLS, timeout_seconds=180),
         AgentSpec("analyst", "Inspects repository structure, integration points, risks, and tests.", "Remain read-only. State assumptions and affected components.", READ_ONLY_CODE_TOOLS),
         AgentSpec(
-            "builder", "Implements approved scoped work and runs relevant tests.",
-            "Inspect first, edit narrowly, verify, and respect every confirmation boundary.",
+            "builder", "Implements approved scoped work and can run configured project checks.",
+            "Inspect first, edit narrowly, use only configured project checks for verification, and respect every confirmation boundary.",
             CODE_MUTATION_TOOLS, timeout_seconds=300, can_mutate=True,
             capabilities=(
                 AgentCapability.FILESYSTEM_READ, AgentCapability.FILESYSTEM_WRITE,

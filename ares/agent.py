@@ -131,6 +131,8 @@ class Agent:
         self.refresh_tools()
         self.last_messages: list[dict] = []
         self.last_iteration_count = 0
+        self.tool_execution_records: list[dict[str, Any]] = []
+        self.unresponsive_tool_records: list[dict[str, str]] = []
 
         kwargs = {}
         if api_key or config:
@@ -1032,17 +1034,43 @@ class Agent:
             args = self._tool_call_args(call)
             self._authorize_tool(tool_name, args)
             coordinator = getattr(self, "resource_coordinator", None)
+            multi_agent = getattr(getattr(self, "config", None), "multi_agent", None)
+            timeout_seconds = max(1.0, float(getattr(multi_agent, "tool_operation_timeout_seconds", 120.0)))
+            cleanup_grace = max(0.1, float(getattr(multi_agent, "tool_cancel_grace_seconds", 2.0)))
+
+            async def await_operation(dispatch: asyncio.Task[tuple[bool, str]]) -> tuple[bool, str]:
+                done, _pending = await asyncio.wait({dispatch}, timeout=timeout_seconds)
+                if not done:
+                    dispatch.cancel()
+                    done, _pending = await asyncio.wait({dispatch}, timeout=cleanup_grace)
+                    if not done:
+                        if coordinator is not None:
+                            record = await coordinator.quarantine_call(
+                                tool_name, dispatch,
+                                owner_run_id=self.root_run_id or self.child_run_id,
+                                reason="timeout",
+                            )
+                            self.unresponsive_tool_records.append(record)
+                        return tool_name.startswith("mcp__"), (
+                            f"Error: {tool_name} timed out after {timeout_seconds:g}s; "
+                            "the resource is quarantined until its operation exits."
+                        )
+                if dispatch.cancelled():
+                    return tool_name.startswith("mcp__"), f"Error: {tool_name} was cancelled after timeout."
+                return dispatch.result()
+
             if coordinator is None:
                 dispatch = asyncio.create_task(
                     self._dispatch_one_tool_async(tool_name, args, progress_callback)
                 )
                 try:
-                    external, result = await asyncio.shield(dispatch)
+                    external, result = await await_operation(dispatch)
                 except asyncio.CancelledError:
-                    # Do not release the logical resource boundary while a
-                    # thread/subprocess or remote call is still running.
-                    with suppress(Exception):
-                        await dispatch
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+                    dispatch.cancel()
+                    await asyncio.wait({dispatch}, timeout=cleanup_grace)
                     raise
             else:
                 async with coordinator.acquire_call(tool_name, args):
@@ -1050,11 +1078,22 @@ class Agent:
                         self._dispatch_one_tool_async(tool_name, args, progress_callback)
                     )
                     try:
-                        external, result = await asyncio.shield(dispatch)
+                        external, result = await await_operation(dispatch)
                     except asyncio.CancelledError:
-                        with suppress(Exception):
-                            await dispatch
+                        current = asyncio.current_task()
+                        if current is not None:
+                            current.uncancel()
+                        dispatch.cancel()
+                        done, _pending = await asyncio.wait({dispatch}, timeout=cleanup_grace)
+                        if not done:
+                            record = await coordinator.quarantine_call(
+                                tool_name, dispatch,
+                                owner_run_id=self.root_run_id or self.child_run_id,
+                                reason="cancelled_with_unresponsive_tool",
+                            )
+                            self.unresponsive_tool_records.append(record)
                         raise
+            self.tool_execution_records.append({"tool": tool_name, "result": str(result)[:50_000]})
             return index, external, str(result)
         except asyncio.CancelledError:
             raise
@@ -1146,6 +1185,15 @@ class Agent:
 
     def _delegation_decision(self, context: TurnExecutionContext) -> DelegationDecision:
         """Route this request before the general model sees any tool schemas."""
+        if getattr(self, "delegation_depth", 0) > 0:
+            # A specialist prompt can legitimately mention agents, reviewers,
+            # or multi-agent work. It is assignment data, never an instruction
+            # to re-enter root-only delegation or meta routing.
+            return DelegationDecision(
+                mode=DelegationMode.NONE,
+                should_delegate=False,
+                reason="Child specialists cannot perform root delegation routing.",
+            )
         runtime = getattr(self, "multi_agent_runtime", None)
         config = getattr(getattr(self, "config", None), "multi_agent", None)
         roles: tuple[str, ...] = ()

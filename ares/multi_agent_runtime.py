@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import re
@@ -36,6 +37,7 @@ from ares.multi_agent_policy import ActionGrant, ActionGrantRegistry
 from ares.multi_agent_resources import BuilderWorkspace, BuilderWorktreeManager, ResourceCoordinator
 from ares.multi_agent_store import MultiAgentRunStore
 from ares.delegation_router import DelegationRoleUnavailableError, DelegationTaskLimitError
+from ares.tools.project_checks import snapshot_agent_checks
 
 
 EventListener = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -300,6 +302,33 @@ class MultiAgentRuntime:
             arguments=arguments,
             request_id=request_id,
             ttl_seconds=self.config.action_grant_ttl_seconds,
+            explicit_user_confirmation=explicit_user_confirmation,
+        )
+
+    def create_builder_patch_apply_grant(
+        self,
+        *,
+        root_run_id: str,
+        child_run_id: str,
+        patch_hash: str,
+        repository: str | Path,
+        request_id: str,
+        explicit_user_confirmation: bool,
+    ) -> ActionGrant:
+        """Issue a single-use grant for one reviewed patch identity.
+
+        Callers must obtain explicit confirmation for the shown hash. A model
+        review marker cannot mint this grant or alter its repository binding.
+        """
+        return self.create_action_grant(
+            root_run_id=root_run_id,
+            child_run_id=child_run_id,
+            tool="apply_builder_patch",
+            arguments={
+                "patch_hash": str(patch_hash),
+                "repository": str(Path(repository).expanduser().resolve()),
+            },
+            request_id=request_id,
             explicit_user_confirmation=explicit_user_confirmation,
         )
 
@@ -631,6 +660,9 @@ class MultiAgentRuntime:
         builder_workspaces: Mapping[str, Mapping[str, Any]],
         manager: BuilderWorktreeManager,
         review_role: str,
+        auto_apply: bool = False,
+        root_run_id: str = "",
+        request_id: str = "",
     ) -> dict[str, dict[str, Any]]:
         """Apply reviewer-approved isolated changes one at a time.
 
@@ -669,6 +701,10 @@ class MultiAgentRuntime:
                     "detail": str(builder_result.metadata.get("patch_capture") or "builder produced no patch"),
                 }
                 continue
+            try:
+                patch_hash = hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
+            except OSError:
+                patch_hash = ""
             review_results = [
                 result_by_id[candidate.task_id]
                 for candidate in tasks
@@ -680,6 +716,7 @@ class MultiAgentRuntime:
                 applications[task.task_id] = {
                     "status": "held_for_review",
                     "patch_path": patch_path,
+                    "patch_hash": patch_hash,
                     "detail": "no configured reviewer result approved this isolated patch",
                 }
                 continue
@@ -693,13 +730,44 @@ class MultiAgentRuntime:
                 applications[task.task_id] = {
                     "status": "held_for_review",
                     "patch_path": patch_path,
+                    "patch_hash": patch_hash,
                     "detail": "reviewer did not explicitly approve the isolated patch",
+                }
+                continue
+            if not auto_apply:
+                applications[task.task_id] = {
+                    "status": "held_for_root_approval",
+                    "patch_path": patch_path,
+                    "patch_hash": patch_hash,
+                    "detail": "review approved the patch, but reviewer text cannot modify the live repository",
+                }
+                continue
+            child_run_id = str(payload.get("child_run_id") or "")
+            grant_id = str(task.context.get("patch_apply_grant_id") or "")
+            grant = self.action_grants.consume(
+                grant_id,
+                root_run_id=root_run_id,
+                child_run_id=child_run_id,
+                tool="apply_builder_patch",
+                arguments={
+                    "patch_hash": patch_hash,
+                    "repository": str(Path.cwd().resolve()),
+                },
+                request_id=request_id,
+            ) if grant_id and child_run_id and patch_hash else None
+            if grant is None or not grant.allowed:
+                applications[task.task_id] = {
+                    "status": "held_for_root_approval",
+                    "patch_path": patch_path,
+                    "patch_hash": patch_hash,
+                    "detail": "automatic application requires an exact root-issued patch approval grant",
                 }
                 continue
             applied, detail = manager.apply_patch(Path.cwd(), patch_path)
             applications[task.task_id] = {
                 "status": "applied" if applied else "held_for_manual_application",
                 "patch_path": patch_path,
+                "patch_hash": patch_hash,
                 "detail": detail,
             }
         return applications
@@ -752,6 +820,7 @@ class MultiAgentRuntime:
         }
 
         builder_workspaces: dict[str, dict[str, Any]] = {}
+        project_checks = snapshot_agent_checks(Path.cwd())
         mutation_tasks = [
             task for task in tasks
             if any(self.registry.get(task.agent).permits_capability(capability) for capability in (
@@ -775,7 +844,9 @@ class MultiAgentRuntime:
                         "builder worktree isolation is disabled; mutation builders are serialized",
                     )
                 )
-                builder_workspaces[task.task_id] = workspace.as_dict()
+                workspace_data = workspace.as_dict()
+                workspace_data["child_run_id"] = child_ids[task.task_id]
+                builder_workspaces[task.task_id] = workspace_data
 
         if builder_workspaces:
             tasks = tuple(
@@ -819,6 +890,7 @@ class MultiAgentRuntime:
             "max_total_tokens": run_config.max_total_tokens,
             "max_total_duration_seconds": run_config.max_total_duration_seconds,
             "builder_workspaces": builder_workspaces,
+            "project_checks": project_checks,
             "launch_plan": {
                 "version": 1,
                 "tasks": [self._task_as_dict(task) for task in tasks],
@@ -971,6 +1043,7 @@ class MultiAgentRuntime:
                         "parent_session_id": parent_session_id,
                         "request_id": request_id,
                         "builder_workspaces": builder_workspaces,
+                        "project_checks": project_checks,
                         "depth": depth,
                         "resumed_from": str(resumed_from or ""),
                     },
@@ -1057,6 +1130,9 @@ class MultiAgentRuntime:
                 builder_workspaces=builder_workspaces,
                 manager=run_worktree_manager,
                 review_role=run_config.review_role,
+                auto_apply=run_config.auto_apply_builder_patches,
+                root_run_id=root_run_id,
+                request_id=request_id,
             )
             self._update(root_run_id, activity="Synthesizing specialist results")
             await self._emit(
@@ -1220,7 +1296,7 @@ class MultiAgentRuntime:
 
     def _mark_cancelled(self, root_run_id: str) -> None:
         for record in self._volatile.values():
-            if record.get("root_run_id") == root_run_id and record.get("status") in {"queued", "running"}:
+            if record.get("root_run_id") == root_run_id and record.get("status") in {"queued", "running", "cancelling"}:
                 record.update(status="cancelled", cancelled=True, completed_at=_now())
         if self.store is not None:
             self.store.mark_cancelled(root_run_id)
@@ -1283,11 +1359,27 @@ class MultiAgentRuntime:
         task = self._active.get(root_run_id)
         if task is None or task.done():
             return False
+        self._update(root_run_id, status="cancelling", activity="Cancelling specialist team")
+        await self._emit(
+            "orchestration_cancelling", root_run_id=root_run_id, run_id=root_run_id,
+            session_id=str((run or {}).get("session_id") or ""), status="cancelling",
+            detail="Cancellation requested; waiting only for a bounded cleanup grace period.",
+        )
         task.cancel()
         try:
-            await task
+            grace = max(0.1, float(self.config.tool_cancel_grace_seconds))
+            await asyncio.wait_for(asyncio.shield(task), timeout=grace)
         except asyncio.CancelledError:
             pass
+        except TimeoutError:
+            quarantined = self.resource_coordinator.state().get("quarantined_operations", [])
+            metadata = dict(self._volatile.get(root_run_id, {}).get("metadata") or {})
+            metadata["unresponsive_tools"] = quarantined
+            self._update(
+                root_run_id,
+                error_summary="cancelled_with_unresponsive_tool",
+                metadata=metadata,
+            )
         self._mark_cancelled(root_run_id)
         self.action_grants.revoke_root(root_run_id)
         return True

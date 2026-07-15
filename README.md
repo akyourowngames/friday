@@ -23,7 +23,7 @@ Ares is a terminal-first AI assistant with a separate Next.js power workspace, a
 <table>
   <tr>
     <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
-    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 135 local tools for goals, watchers, native specialists, files, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
+    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 136 local tools for goals, watchers, native specialists, files, configured project checks, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
     <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
   </tr>
 </table>

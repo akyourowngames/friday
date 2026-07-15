@@ -337,6 +337,12 @@ class MultiAgentConfig(BaseModel):
     provider_max_concurrency: int = Field(default=0, ge=0, le=64)
     builder_worktree_isolation: bool = True
     builder_worktree_root: str = "~/.ares/agent-worktrees"
+    # A review verdict is evidence, not authority to modify the caller's
+    # checkout. A separately-issued exact patch grant is also required when
+    # this opt-in is enabled.
+    auto_apply_builder_patches: bool = False
+    tool_operation_timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
+    tool_cancel_grace_seconds: float = Field(default=2.0, ge=0.1, le=60.0)
     cancel_active_on_disable: bool = False
 
 

@@ -96,7 +96,9 @@ One root-owned `ResourceCoordinator` is shared across the root and every child. 
 
 When a run contains multiple mutation-capable builders and `builder_worktree_isolation` is enabled, Ares attempts one detached Git worktree per builder. It uses a worktree only when Git is available, the repository is valid and clean, and the target is safe. Otherwise the builder receives the live repository and all mutation-capable children use one live-tree mutation slot, so conflicting builders serialize. The chosen workspace and fallback reason are recorded in run metadata.
 
-Isolated worktree output is never silently merged by a child. The adapter captures a binary Git patch artifact, the dependent reviewer must end with `APPROVE_PATCH`, and only then does the root apply that patch sequentially to a still-clean live repository. A missing/rejected review, dirty target tree, or apply conflict retains the patch artifact for manual application instead of modifying the repository.
+Isolated worktree output is never silently merged by a child or reviewer. The adapter captures a binary Git patch artifact and a dependent reviewer may end with `APPROVE_PATCH`, but that marker only records a review verdict. By default the patch remains `held_for_root_approval`. Applying it requires the `auto_apply_builder_patches` opt-in plus an exact, single-use root-issued grant bound to the patch hash, repository, run, and child. A missing/rejected review, missing approval grant, dirty target tree, or apply conflict retains the artifact for manual application instead of modifying the repository.
+
+Builders do not receive general shells or REPLs. Repository owners may configure named checks in `[tool.ares.agent_checks]` (for example `python -m pytest -q`, `python -m compileall -q ares tests`, `npm run lint`). `run_project_check` accepts only one of those pre-worktree snapshot names, runs it in the isolated worktree without a shell, and rejects pipes, redirects, nested interpreters, installers, publish commands, and direct network tools. Exit code and bounded output are recorded in the child manifest.
 
 ## Source-backed research
 

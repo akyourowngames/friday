@@ -480,7 +480,9 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
         return ToolEffect.EXTERNAL_ACTION
     if lowered.startswith(_LOCAL_MUTATION_VERBS):
         return ToolEffect.LOCAL_MUTATION
-    return ToolEffect.READ_ONLY
+    # Future local/plugin tools must be registered before they can cross the
+    # current-turn authorization boundary. Unknown is never read-only.
+    return ToolEffect.EXTERNAL_ACTION
 
 
 def _intent_allows(effect: ToolEffect, intent: TurnIntent) -> bool:

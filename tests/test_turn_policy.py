@@ -12,6 +12,7 @@ from ares.turn_policy import (
     arguments_hash,
     authorize_turn_tool,
     build_turn_execution_context,
+    classify_tool_effect,
     classify_turn_intent,
     issue_action_grant,
 )
@@ -45,6 +46,12 @@ def test_conversation_turn_hard_denies_stale_action_calls() -> None:
         decision = authorize_turn_tool(context, tool, arguments)
         assert not decision.allowed, (tool, decision)
         assert "conversation" in decision.reason
+
+
+def test_unknown_local_tool_is_consequential_and_denied_until_registered() -> None:
+    context = build_turn_execution_context("Read the README", request_id="req-unknown")
+    assert classify_tool_effect("future_plugin_tool").value == "external_action"
+    assert not authorize_turn_tool(context, "future_plugin_tool", {}).allowed
 
 
 def test_read_only_and_agent_meta_turns_have_narrow_authority() -> None:

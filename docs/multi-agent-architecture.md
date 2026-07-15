@@ -157,7 +157,7 @@ For multiple mutation tasks, `BuilderWorktreeManager.prepare()` attempts detache
 
 Every mutation-capable adapter enters `mutation_slot()` around its child loop. Isolated worktrees may run concurrently; every non-isolated/live-tree builder shares one lock and therefore serializes. Tool arguments are resolved under the assigned workspace and escape is denied.
 
-Worktrees are execution isolation, not merge authorization. No child may silently merge into the live tree. The adapter captures isolated changes as a patch artifact; a dependent reviewer must emit an explicit `APPROVE_PATCH` marker before the root applies the patch sequentially, and only while the live repository is still clean. Rejected/conflicting patches remain artifacts for manual review.
+Worktrees are execution isolation, not merge authorization. No child or reviewer may silently merge into the live tree. The adapter captures isolated changes as a patch artifact; a reviewer `APPROVE_PATCH` marker is evidence only. Patches remain held by default and can be applied only with the `auto_apply_builder_patches` opt-in and an exact, root-issued single-use grant tied to the patch hash, repository, root run, and child run. Rejected, unapproved, or conflicting patches remain artifacts for manual review.
 
 ## Research evidence contract
 

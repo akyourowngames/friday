@@ -28,6 +28,7 @@ class ToolResource(str, Enum):
     BROWSER_INTERACTION = "browser_interaction"
     SHELL_SHARED = "shell_shared"
     REPL_SHARED = "repl_shared"
+    PROJECT_CHECK = "project_check"
     COMMUNICATION = "communication"
     DATABASE_READ = "database_read"
     DATABASE_WRITE = "database_write"
@@ -57,6 +58,7 @@ FILESYSTEM_WRITE_TOOLS = frozenset({
 })
 SHELL_TOOLS = frozenset({"run_command", "terminal_exec"})
 REPL_TOOLS = frozenset({"run_python", "run_code"})
+PROJECT_CHECK_TOOLS = frozenset({"run_project_check"})
 COMMUNICATION_TOOLS = frozenset({
     "send_email", "telegram_send_file", "telegram_send_message", "phone_send_sms", "phone_call_number",
     "telephony_call", "telephony_answer", "telephony_hangup", "telephony_mute",
@@ -296,6 +298,8 @@ def classify_tool(name: str) -> ToolResource:
         return ToolResource.SHELL_SHARED
     if name in REPL_TOOLS:
         return ToolResource.REPL_SHARED
+    if name in PROJECT_CHECK_TOOLS:
+        return ToolResource.PROJECT_CHECK
     if name in COMMUNICATION_TOOLS or any(hint in lowered for hint in ("gmail_send", "telegram_send", "send_sms")):
         return ToolResource.COMMUNICATION
     if name in DATABASE_READ_TOOLS:
@@ -335,6 +339,7 @@ def required_capability(name: str) -> AgentCapability | None:
         ToolResource.FILESYSTEM_WRITE: AgentCapability.FILESYSTEM_WRITE,
         ToolResource.SHELL_SHARED: AgentCapability.SHELL_EXECUTION,
         ToolResource.REPL_SHARED: AgentCapability.CODE_EXECUTION,
+        ToolResource.PROJECT_CHECK: AgentCapability.SHELL_EXECUTION,
         ToolResource.BROWSER_READ: AgentCapability.BROWSER_READ,
         ToolResource.BROWSER_INTERACTION: AgentCapability.BROWSER_INTERACTION,
         ToolResource.COMMUNICATION: AgentCapability.COMMUNICATION,
@@ -439,14 +444,15 @@ def authorize_tool_call(
         ToolResource.FILESYSTEM_WRITE,
         ToolResource.SHELL_SHARED,
         ToolResource.REPL_SHARED,
+        ToolResource.PROJECT_CHECK,
     }:
         root = Path(workspace_root).expanduser().resolve(strict=False)
         raw_paths = [arguments.get(key) for key in PATH_ARGUMENTS if arguments.get(key)]
-        if resource in {ToolResource.SHELL_SHARED, ToolResource.REPL_SHARED}:
+        if resource in {ToolResource.SHELL_SHARED, ToolResource.REPL_SHARED, ToolResource.PROJECT_CHECK}:
             raw_paths = [arguments.get("cwd")]
             if not raw_paths[0]:
                 return ToolAccessDecision(
-                    False, "mutation-capable child shell/code calls require an explicit workspace cwd"
+                    False, "child execution/check calls require an explicit workspace cwd"
                 )
         if resource in {ToolResource.FILESYSTEM_READ, ToolResource.FILESYSTEM_WRITE} and not raw_paths:
             return ToolAccessDecision(False, "child filesystem access requires an explicit workspace path")

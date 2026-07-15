@@ -185,8 +185,12 @@ Assignment:
                         value = args.get(key)
                         if value and not Path(str(value)).expanduser().is_absolute():
                             args[key] = str((root / str(value)).resolve(strict=False))
-                elif resource in {ToolResource.SHELL_SHARED, ToolResource.REPL_SHARED}:
+                elif resource in {ToolResource.SHELL_SHARED, ToolResource.REPL_SHARED, ToolResource.PROJECT_CHECK}:
                     args.setdefault("cwd", str(root))
+                if resource is ToolResource.PROJECT_CHECK:
+                    # This snapshot was captured before the builder entered
+                    # its worktree; the builder cannot rewrite its own allowlist.
+                    args["_trusted_agent_checks"] = dict(metadata.get("project_checks") or {})
             return authorize_tool_call(
                 spec,
                 name,
@@ -374,6 +378,8 @@ Assignment:
                 "iterations": child.last_iteration_count,
                 "estimated_tokens": estimated_tokens,
                 "tools": tool_names,
+                "tool_results": list(getattr(child, "tool_execution_records", [])),
+                "unresponsive_tools": list(getattr(child, "unresponsive_tool_records", [])),
                 "context_mode": context.context_mode.value,
                 "allowed_context": list(context.allowed_context),
                 "builder_workspace": workspace.as_dict() if workspace is not None else None,

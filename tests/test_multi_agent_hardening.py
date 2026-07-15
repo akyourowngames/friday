@@ -12,6 +12,7 @@ from ares.models import AppConfig, MultiAgentConfig
 from ares.multi_agent import (
     AgentCapability,
     AgentExecutionContext,
+    AgentResult,
     AgentOutput,
     AgentRunStatus,
     AgentSpec,
@@ -371,6 +372,30 @@ def test_isolated_builder_worktree_captures_and_applies_reviewable_patch(tmp_pat
             text=True,
             check=False,
         )
+
+
+def test_reviewer_approval_holds_isolated_patch_without_exact_root_grant(tmp_path: Path) -> None:
+    patch = tmp_path / "builder.patch"
+    patch.write_text("diff --git a/a b/a\n", encoding="utf-8")
+    runtime = MultiAgentRuntime(_Root(tmp_path, persist_runs=False))
+    tasks = (
+        AgentTask("build", "builder", "Implement"),
+        AgentTask("review_build", "reviewer", "Review", depends_on=("build",)),
+    )
+    results = (
+        AgentResult("build", "builder", AgentRunStatus.SUCCEEDED, content="done", metadata={"patch_path": str(patch)}),
+        AgentResult("review_build", "reviewer", AgentRunStatus.SUCCEEDED, content="APPROVE_PATCH"),
+    )
+    applications = runtime._apply_approved_builder_patches(
+        tasks=tasks,
+        results=results,
+        builder_workspaces={"build": {"root": str(tmp_path), "isolated": True, "child_run_id": "child"}},
+        manager=BuilderWorktreeManager(tmp_path / "worktrees"),
+        review_role="reviewer",
+        auto_apply=True,
+    )
+    assert applications["build"]["status"] == "held_for_root_approval"
+    assert applications["build"]["patch_hash"]
 
 
 def test_run_store_scopes_children_to_parent_session_and_supports_latest(tmp_path: Path) -> None:
