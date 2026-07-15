@@ -14,6 +14,7 @@ from ares.context import ProjectContext
 from ares.user_context import build_user_context
 from ares.autonomy import AutonomousWorkflowRunner
 from ares.browser_control import BrowserTaskController
+from ares.followups import FollowUpStore
 from ares.memory import MemoryStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
@@ -157,6 +158,7 @@ class Agent:
         self.task_store = self.tool_executor.task_store
         self.goal_store = self.tool_executor.goal_store
         self.commitment_store = self.tool_executor.commitment_store
+        self.follow_up_store = FollowUpStore(connection=self.memory_store.conn)
         self.workflow_runner: AutonomousWorkflowRunner | None = getattr(self.tool_executor, "workflow_runner", None)
         if self._owns_tool_executor and self.task_store is not None and self.action_ledger is not None:
             self.workflow_runner = AutonomousWorkflowRunner(
@@ -187,6 +189,7 @@ class Agent:
                 memory_store=self.memory_store,
                 goal_store=self.goal_store,
                 commitment_store=self.commitment_store,
+                follow_up_store=self.follow_up_store,
                 profile_manager=self.profile_manager,
                 config=getattr(self.config, "reflection", self.config),
                 llm_client=self.llm,

@@ -240,6 +240,12 @@ class AresCLI(MarketplaceCommandMixin):
         self.notifier = DesktopNotifier(enabled=self.config.enable_desktop_notifications)
         self.proactive_service = ProactiveService(
             goal_store=self.agent.goal_store,
+            commitment_store=getattr(self.agent, "commitment_store", None),
+            follow_up_store=getattr(self.agent, "follow_up_store", None),
+            memory_store=self.memory_store,
+            profile_manager=getattr(self.agent, "profile_manager", None),
+            conversation_store=self.conversation_store,
+            llm_client=getattr(self.agent, "llm", None),
             config=self.config.proactive,
             deliver=self._deliver_proactive_message,
         ) if getattr(self.agent, "goal_store", None) is not None else None
@@ -291,21 +297,21 @@ class AresCLI(MarketplaceCommandMixin):
         self._mcp_config_signature = self._get_mcp_config_signature(self.config)
         self._mcp_reconfigure_pending = False
 
-    async def _deliver_proactive_message(self, message: str, goal: dict) -> list[str]:
+    async def _deliver_proactive_message(self, message: str, candidate: dict) -> list[str]:
         """Make CLI initiative visible without interrupting the active prompt."""
         channels: list[str] = []
         if self.config.proactive.workspace_enabled:
             conversation_id = self.conversation_store.start_conversation()
             self.conversation_store.rename_conversation(
                 conversation_id,
-                f"Ares follow-up · {str(goal.get('title') or 'goal')[:55]}",
+                f"Ares follow-up · {str(candidate.get('title') or candidate.get('description') or 'initiative')[:55]}",
             )
             self.conversation_store.add_message(conversation_id, "assistant", message)
             channels.append("workspace")
         self.notifier.enabled = bool(
             self.config.enable_desktop_notifications and self.config.proactive.desktop_enabled
         )
-        if self.notifier.notify("Ares goal follow-up", message):
+        if self.notifier.notify("Ares follow-up", message):
             channels.append("desktop")
         return channels
 

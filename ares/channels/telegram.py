@@ -1655,17 +1655,17 @@ async def run_telegram_channel() -> None:
         )
     )
 
-    async def deliver_proactive(message: str, goal: dict[str, Any]) -> list[str]:
+    async def deliver_proactive(message: str, candidate: dict[str, Any]) -> list[str]:
         channels: list[str] = []
         if config.proactive.workspace_enabled:
             conversation_id = conversation_store.start_conversation()
             conversation_store.rename_conversation(
                 conversation_id,
-                f"Ares follow-up · {str(goal.get('title') or 'goal')[:55]}",
+                f"Ares follow-up · {str(candidate.get('title') or candidate.get('description') or 'initiative')[:55]}",
             )
             conversation_store.add_message(conversation_id, "assistant", message)
             channels.append("workspace")
-        if proactive_notifier.notify("Ares goal follow-up", message):
+        if proactive_notifier.notify("Ares follow-up", message):
             channels.append("desktop")
         if config.proactive.telegram_enabled:
             channels.extend(await channel.deliver_proactive(message))
@@ -1674,6 +1674,12 @@ async def run_telegram_channel() -> None:
     proactive_service = (
         ProactiveService(
             goal_store=agent.goal_store,
+            commitment_store=getattr(agent, "commitment_store", None),
+            follow_up_store=getattr(agent, "follow_up_store", None),
+            memory_store=memory_store,
+            profile_manager=getattr(agent, "profile_manager", None),
+            conversation_store=conversation_store,
+            llm_client=getattr(agent, "llm", None),
             config=config.proactive,
             deliver=deliver_proactive,
         )

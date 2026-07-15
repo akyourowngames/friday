@@ -88,6 +88,26 @@ class TestMemoryStore:
         assert count == 1
         assert len(store.list_all()) == 2
 
+    def test_pr28_reflected_rows_migrate_to_global_with_provenance(
+        self, tmp_path, fake_embedding_provider,
+    ):
+        database = tmp_path / "legacy-reflection.db"
+        original = MemoryStore(database, embedding_provider=fake_embedding_provider)
+        fact_id = original.store(
+            "User prefers focused regression tests",
+            source="conversation_reflection",
+            session_id="conversation-12",
+        )
+        original.close()
+
+        migrated = MemoryStore(database, embedding_provider=fake_embedding_provider)
+        fact = migrated.get(fact_id)
+
+        assert fact["session_id"] is None
+        assert fact["source_conversation_id"] == "conversation-12"
+        assert fact["source_reflection_id"] is None
+        migrated.close()
+
     def test_suggest_merge_detects_duplicate_and_conflict(self, store):
         duplicate_id = store.store("User likes tea", category="preference")
         store.store("User prefers coffee", category="preference")
