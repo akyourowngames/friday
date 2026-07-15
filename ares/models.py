@@ -153,6 +153,8 @@ class VoiceConfig(BaseModel):
 
     enabled: bool = False
     stt_backend: str = "auto"
+    # Prefer Sarvam when configured; otherwise use the reliable Edge fallback.
+    # Workspace dictation is browser-native and does not use this backend.
     tts_backend: str = "auto"
     tts_voice: str = "en-US-JennyNeural"
     stt_model: str = "small"
@@ -289,6 +291,32 @@ class WatcherConfig(BaseModel):
         "webhook": {"enabled": False, "url": ""},
     })
     defaults: WatcherDefaultsConfig = Field(default_factory=WatcherDefaultsConfig)
+
+
+class ReflectionConfig(BaseModel):
+    """Background conversation-to-state extraction controls."""
+
+    enabled: bool = True
+    min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    completion_min_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    timeout_seconds: int = Field(default=45, ge=5, le=180)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+
+
+class ProactiveConfig(BaseModel):
+    """Initiative worker preferences and anti-spam boundaries."""
+
+    enabled: bool = True
+    poll_seconds: int = Field(default=900, ge=30, le=86_400)
+    inactive_goal_days: int = Field(default=3, ge=1, le=365)
+    min_confidence: float = Field(default=0.80, ge=0.0, le=1.0)
+    reminder_cooldown_hours: int = Field(default=72, ge=1, le=8_760)
+    max_messages_per_day: int = Field(default=1, ge=0, le=20)
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "08:00"
+    workspace_enabled: bool = True
+    desktop_enabled: bool = True
+    telegram_enabled: bool = False
 
 
 class MultiAgentRoleOverride(BaseModel):
@@ -471,6 +499,8 @@ class AppConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
+    reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
+    proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     cron_enabled: bool = True
     cron_tick_seconds: int = 60

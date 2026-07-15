@@ -107,7 +107,10 @@ class CronRunner:
             agent = Agent(memory_store, conversation_store, config=config, is_cron_session=True)
             chunks: list[str] = []
             async for chunk in agent.run_stream(prompt, []):
-                chunks.append(str(chunk))
+                # Keep internal tool lifecycle telemetry out of persisted cron
+                # answers and their downstream delivery channels.
+                if not str(chunk).startswith("[tool"):
+                    chunks.append(str(chunk))
             output = "".join(chunks)
         except asyncio.CancelledError:
             cancelled = True

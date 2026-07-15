@@ -65,11 +65,13 @@ class TestFormatters:
         assert "[redacted email]" not in result
 
     def test_format_goals_includes_progress_mode_and_due_state(self):
-        goal = {"goal_id": 3, "title": "Ship Ares", "status": "active", "priority": "high", "progress_percent": 30, "progress_mode": "derived", "target_date": "2026-07-20", "days_remaining": 4}
+        goal = {"goal_id": 3, "title": "Ship Ares", "status": "active", "priority": "high", "progress_percent": 30, "progress_mode": "derived", "target_date": "2026-07-20", "days_remaining": 4, "next_action": "Run release checks", "blockers": [{"description": "Waiting for review"}]}
         result = format_goals([goal], [goal], [])
         assert "Ship Ares" in result
         assert "30% progress (derived)" in result
         assert "Due soon" in result
+        assert "Run release checks" in result
+        assert "Waiting for review" in result
 
 
 class TestBuildContextPrompt:

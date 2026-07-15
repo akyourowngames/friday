@@ -145,6 +145,38 @@ class ConversationStore:
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def get_recent_context_messages(
+        self,
+        *,
+        limit: int = 15,
+        exclude_conversation_id: int | None = None,
+        ended_only: bool = False,
+    ) -> list[dict]:
+        """Return bounded recent messages with provenance for context injection.
+
+        Immediate messages from the active conversation are already supplied as
+        normal chat history.  Callers can therefore exclude that conversation,
+        preventing the retrieval layer from echoing the current turn back into
+        the prompt.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if exclude_conversation_id is not None:
+            clauses.append("m.conversation_id != ?")
+            params.append(int(exclude_conversation_id))
+        if ended_only:
+            clauses.append("c.ended_at IS NOT NULL")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.conn.execute(
+            f"""SELECT m.id, m.conversation_id, m.role, m.content, m.created_at
+                FROM conversation_messages AS m
+                JOIN conversations AS c ON c.id=m.conversation_id
+                {where}
+                ORDER BY m.created_at DESC, m.id DESC LIMIT ?""",
+            [*params, max(1, min(int(limit), 100))],
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
     def get_messages_for_model(
         self,
         conversation_id: int,

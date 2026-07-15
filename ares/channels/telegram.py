@@ -10,6 +10,7 @@ until its exact chat ID is in the local allowlist.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import mimetypes
@@ -34,6 +35,8 @@ from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.mcp_registry import MCPRegistryClient
 from ares.models import AppConfig, TelegramConfig
+from ares.proactive import ProactiveService
+from ares.reminders import DesktopNotifier
 from ares.multi_agent_display import ACTIVE_STATUSES, active_runs, telegram_overview, telegram_run
 from ares.skill_registry import (
     RegistryError as SkillRegistryError,
@@ -402,6 +405,18 @@ class TelegramChannel:
         cfg = self._telegram_config()
         return bool(cfg.enabled and resolve_bot_token(cfg))
 
+    async def deliver_proactive(self, message: str) -> list[str]:
+        """Send one initiative message to the primary allowlisted private chat."""
+        cfg = self._telegram_config()
+        if not self._is_enabled() or not cfg.allowed_chat_ids:
+            return []
+        chat_id = int(cfg.allowed_chat_ids[0])
+        await self.api.send_message(chat_id, _telegram_trim(message))
+        self.conversation_store.add_message(
+            self._conversation_id(chat_id), "assistant", message,
+        )
+        return ["telegram"]
+
     def _is_authorized(self, chat: dict[str, Any]) -> bool:
         cfg = self._telegram_config()
         try:
@@ -448,7 +463,8 @@ class TelegramChannel:
                     "/monitors — list proactive watchers\n"
                     "/monitor [add|status|pause|resume|remove|events|test] — control watchers\n"
                     "/alerts — recent watcher incidents\n"
-                    "/agents [status|active|roles|runs|show|cancel|resume] — inspect specialist teams\n"
+                    "/agents [status|active|roles|runs|show|cancel] — inspect specialist teams\n"
+                    "/agents resume RUN_ID — resume a safe checkpoint\n"
                     "/workers — show all workers running now\n"
                     "/confirm <code> — approve the last reviewed install\n/cancel — discard it\n"
                     "/help — show this help\n\n"
@@ -732,7 +748,9 @@ class TelegramChannel:
 
         self.conversation_store.add_message(session_id, "user", visible_content)
         try:
-            response, tool_calls = await self._run_agent(prompt, history, status, session_id)
+            response, tool_calls = await self._run_agent(
+                prompt, history, status, session_id, reflection_input=visible_content,
+            )
         except Exception as exc:
             logger.exception("Telegram agent turn failed")
             await status.finish("⚠️ Ares could not finish that request.")
@@ -759,6 +777,8 @@ class TelegramChannel:
         history: list[dict[str, str]],
         status: "_TelegramProgress",
         session_id: int,
+        *,
+        reflection_input: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         response_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
@@ -774,7 +794,20 @@ class TelegramChannel:
             unsubscribe = runtime.subscribe(handle_agent_event)
         try:
             with scope:
-                async for chunk in self.agent.run_stream(prompt, conversation_history=history):
+                run_stream = self.agent.run_stream
+                stream_kwargs: dict[str, Any] = {"conversation_history": history}
+                try:
+                    parameters = inspect.signature(run_stream).parameters.values()
+                    accepts_reflection = any(
+                        parameter.name == "reflection_input"
+                        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters
+                    )
+                except (TypeError, ValueError):
+                    accepts_reflection = False
+                if accepts_reflection:
+                    stream_kwargs["reflection_input"] = reflection_input
+                async for chunk in run_stream(prompt, **stream_kwargs):
                     start = TOOL_START_TOKEN_RE.match(chunk)
                     if start:
                         await status.event(self._tool_label(start.group(1), "Using"))
@@ -1616,6 +1649,37 @@ async def run_telegram_channel() -> None:
     )
     mcp_start_task: asyncio.Task | None = None
     watcher_service = None
+    proactive_notifier = DesktopNotifier(
+        enabled=bool(
+            config.enable_desktop_notifications and config.proactive.desktop_enabled
+        )
+    )
+
+    async def deliver_proactive(message: str, goal: dict[str, Any]) -> list[str]:
+        channels: list[str] = []
+        if config.proactive.workspace_enabled:
+            conversation_id = conversation_store.start_conversation()
+            conversation_store.rename_conversation(
+                conversation_id,
+                f"Ares follow-up · {str(goal.get('title') or 'goal')[:55]}",
+            )
+            conversation_store.add_message(conversation_id, "assistant", message)
+            channels.append("workspace")
+        if proactive_notifier.notify("Ares goal follow-up", message):
+            channels.append("desktop")
+        if config.proactive.telegram_enabled:
+            channels.extend(await channel.deliver_proactive(message))
+        return channels
+
+    proactive_service = (
+        ProactiveService(
+            goal_store=agent.goal_store,
+            config=config.proactive,
+            deliver=deliver_proactive,
+        )
+        if getattr(agent, "goal_store", None) is not None
+        else None
+    )
     try:
         if config.watcher.enabled:
             from ares.watcher.integration import create_agent_watcher_service
@@ -1633,8 +1697,13 @@ async def run_telegram_channel() -> None:
             # A first-run MCP may download a package. Telegram must remain
             # reachable while that optional work completes.
             mcp_start_task = asyncio.create_task(start_mcp(), name="ares-telegram-mcp")
+        if proactive_service is not None:
+            await proactive_service.start()
         await channel.run_forever()
     finally:
+        if proactive_service is not None:
+            with suppress(Exception):
+                await proactive_service.stop()
         if watcher_service is not None:
             with suppress(Exception):
                 await watcher_service.stop()

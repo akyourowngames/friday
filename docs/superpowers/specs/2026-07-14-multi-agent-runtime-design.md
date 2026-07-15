@@ -1,6 +1,6 @@
 # Ares Native Multi-Agent Runtime
 
-**Date:** 2026-07-14  
+**Date:** 2026-07-14
 **Status:** Implemented end to end on the default branch
 **Branch:** `ares`
 

@@ -14,6 +14,7 @@ data/
 *.sqlite3
 *.log
 .playwright-mcp/
+.codex-remote-attachments/
 electron-app/node_modules/
 electron-app/dist/
 electron-app/release/

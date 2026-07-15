@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Iterator
 
 from ares.context import ProjectContext
-from ares.context_blend import build_context_prompt, get_model_budgets
-from ares.actions import extract_since_reference, has_reference_language
+from ares.user_context import build_user_context
 from ares.autonomy import AutonomousWorkflowRunner
 from ares.browser_control import BrowserTaskController
 from ares.memory import MemoryStore
@@ -31,6 +30,7 @@ from ares.multi_agent import AgentTask, AgentTeamResult, ContextMode
 from ares.multi_agent_policy import ActionGrantRegistry
 from ares.multi_agent_resources import ResourceCoordinator
 from ares.profile import ProfileManager
+from ares.reflection import ReflectionService
 from ares.prompts import SYSTEM_PROMPT
 from ares.soul import SoulManager
 from ares.skills import SkillManager
@@ -156,6 +156,7 @@ class Agent:
         self.action_ledger = self.tool_executor.action_ledger
         self.task_store = self.tool_executor.task_store
         self.goal_store = self.tool_executor.goal_store
+        self.commitment_store = self.tool_executor.commitment_store
         self.workflow_runner: AutonomousWorkflowRunner | None = getattr(self.tool_executor, "workflow_runner", None)
         if self._owns_tool_executor and self.task_store is not None and self.action_ledger is not None:
             self.workflow_runner = AutonomousWorkflowRunner(
@@ -175,6 +176,21 @@ class Agent:
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        self.reflection_service: ReflectionService | None = None
+        if (
+            not self.is_cron_session
+            and self.goal_store is not None
+            and self.commitment_store is not None
+            and bool(getattr(getattr(self.config, "reflection", None), "enabled", True))
+        ):
+            self.reflection_service = ReflectionService(
+                memory_store=self.memory_store,
+                goal_store=self.goal_store,
+                commitment_store=self.commitment_store,
+                profile_manager=self.profile_manager,
+                config=getattr(self.config, "reflection", self.config),
+                llm_client=self.llm,
+            )
         skill_dirs = list(self.config.skill_dirs or [])
         self.skill_manager = skill_manager or SkillManager(skill_dirs=skill_dirs or None)
         if self._owns_tool_executor:
@@ -207,6 +223,9 @@ class Agent:
             with self.tool_executor.session_scope(session_id):
                 yield
         finally:
+            # Async-generator cleanup can run after a cancelled client task in
+            # a different ContextVar context. That context cannot retain this
+            # task-local value, so skip the invalid cross-context reset.
             with suppress(ValueError):
                 self._session_context.reset(token)
 
@@ -458,7 +477,11 @@ class Agent:
         if context:
             system_content += f"\n\n## Current Context\n{context}"
         browser_controller = getattr(self, "browser_controller", None)
-        browser_guidance = browser_controller.begin_turn(self.session_id, user_input) if browser_controller is not None else ""
+        browser_guidance = (
+            browser_controller.begin_turn(self.session_id, user_input)
+            if browser_controller is not None
+            else ""
+        )
         if browser_guidance:
             system_content += f"\n\n{browser_guidance}"
 
@@ -479,208 +502,33 @@ class Agent:
         messages.append({"role": "user", "content": user_input})
         return messages
 
-    def get_context(self, user_input: str) -> str:
-        """Build full context: soul + profile + project + memories.
-
-        Budgets scale automatically with the model's context window.
-        """
+    def get_context(
+        self,
+        user_input: str,
+        conversation_history: list[dict] | None = None,
+    ) -> str:
+        """Build every durable user-context layer through one retrieval path."""
         if getattr(self, "context_mode", ContextMode.FULL) is ContextMode.BOUNDED_SPECIALIST:
-            # The adapter already places the bounded assignment, explicitly
-            # passed shared context, task context, and dependency results in the
-            # child system prompt.  Personal/global context must be opt-in and
-            # no category is inferred merely from words in the child prompt.
-            # Selected project paths/content are carried in task.context by the
-            # root. Never replace that narrow allowlist with a generic project
-            # scan, which could disclose unrelated files.
+            # Specialist agents receive only the assignment and context the
+            # root explicitly delegated; never add global personal context.
             return ""
-
-        budgets = get_model_budgets(self.config.model)
-        token_budget = budgets["context_token_budget"]
-        max_retrieval = budgets["max_memory_retrieval"]
-
-        # Scale sub-budgets proportionally
-        soul_budget = max(200, token_budget // 10)
-        profile_budget = max(400, token_budget // 5)
-        project_budget = max(400, token_budget // 5)
-
-        soul_ctx = self.soul_manager.get_context(token_budget=soul_budget)
-        profile_ctx = self.profile_manager.get_context(token_budget=profile_budget)
-        project_ctx = ""
-        if self.config.project_context_enabled:
-            project_ctx = self.project_context.get_context(token_budget=project_budget)
-
-        # Session-scoped memory search
-        session_id = self.session_id
-        search_scope = "session" if session_id else "all"
-        memories = self.memory_store.search(
-            user_input, limit=max_retrieval,
-            scope=search_scope, session_id=session_id,
-            recent_sessions=getattr(self.config, "memory_session_scope", 3),
+        return build_user_context(
+            user_input,
+            config=self.config,
+            soul_manager=self.soul_manager,
+            profile_manager=self.profile_manager,
+            project_context=self.project_context,
+            memory_store=self.memory_store,
+            conversation_store=self.conversation_store,
+            session_store=self._session_store,
+            session_id=self.session_id,
+            people_store=self.people_store,
+            action_ledger=self.action_ledger,
+            task_store=self.task_store,
+            goal_store=self.goal_store,
+            commitment_store=self.commitment_store,
+            conversation_history=conversation_history,
         )
-
-        # Local people records are included as saved so an explicit request can
-        # retrieve complete contact and relationship information.
-        people: list[dict] = []
-        if self.people_store:
-            # A named saved person wins over generic recency so an explicit
-            # reference resolves to the intended saved record first.
-            named_people = self.people_store.mentioned_in(user_input, limit=4)
-            recent_people = self.people_store.recent_for_context(limit=max(3, min(max_retrieval, 8)))
-            seen_people: set[int] = set()
-            for person in [*named_people, *recent_people]:
-                person_id = int(person.get("person_id", 0) or 0)
-                if person_id and person_id not in seen_people:
-                    seen_people.add(person_id)
-                    people.append(person)
-
-        recent_actions = self.action_ledger.recent(limit=5) if self.action_ledger else []
-        active_goals = self.goal_store.list_all(statuses=["active"], limit=8) if self.goal_store else []
-        if self.goal_store and active_goals:
-            active_goals = self.goal_store.contextualize_goals(
-                active_goals, max_age_hours=48, max_surfaced=3, per_goal=3, mark_surfaced=False,
-            )
-        goals_due_soon = self.goal_store.due_soon(within_days=7) if self.goal_store else []
-        goals_overdue = self.goal_store.overdue() if self.goal_store else []
-        relevant_actions: list[dict] = []
-        conversation_recall: list[dict] = []
-        since = None
-        explicit_recall = has_reference_language(user_input)
-        if explicit_recall:
-            try:
-                since = extract_since_reference(user_input)
-            except ValueError:
-                since = None
-
-        if self.action_ledger and explicit_recall:
-            try:
-                relevant_actions = self.action_ledger.search(user_input, since=since, limit=max(3, min(max_retrieval, 8)))
-                fallback_actions = self.action_ledger.search(since=since, limit=max(3, min(max_retrieval, 8)))
-                known_action_ids = {action.get("action_id") for action in relevant_actions}
-                relevant_actions.extend(
-                    action for action in fallback_actions
-                    if action.get("action_id") not in known_action_ids
-                )
-                relevant_actions = relevant_actions[: max(3, min(max_retrieval, 8))]
-            except ValueError:
-                relevant_actions = []
-
-        if self.conversation_store is not None and explicit_recall and not session_id:
-            try:
-                # Search exact wording first, then fall back to a bounded
-                # recent/time-filtered window so "continue" never becomes a
-                # false negative merely because it has no lexical match.
-                conversation_recall = self.conversation_store.search_recall(
-                    user_input, since=since, limit=max(3, min(max_retrieval, 8))
-                )
-                fallback_recall = self.conversation_store.search_recall(
-                    since=since, limit=max(3, min(max_retrieval, 8))
-                )
-                known_message_ids = {record.get("id") for record in conversation_recall}
-                conversation_recall.extend(
-                    record for record in fallback_recall
-                    if record.get("id") not in known_message_ids
-                )
-                conversation_recall = conversation_recall[: max(3, min(max_retrieval, 8))]
-            except ValueError:
-                conversation_recall = []
-
-        if self._session_store is not None and explicit_recall:
-            try:
-                recall_limit = max(3, min(max_retrieval, 8))
-                scan_limit = min(100, recall_limit * 3) if session_id else recall_limit
-                session_recall = self._session_store.search_recall(
-                    user_input, since=since, limit=scan_limit
-                )
-                # A reference such as "continue" commonly has no lexical
-                # overlap with the historical answer.  Include a bounded
-                # fallback window so the JSONL archive cannot be skipped.
-                fallback_session_recall = self._session_store.search_recall(
-                    since=since, limit=scan_limit
-                )
-                if session_id:
-                    # The current turn is already present in live history and
-                    # can otherwise outrank the older session the user named.
-                    # Explicit continuation recall should search the archive,
-                    # not echo the active session back into its own context.
-                    session_recall = [
-                        record for record in session_recall
-                        if record.get("session_id") != session_id
-                    ]
-                    fallback_session_recall = [
-                        record for record in fallback_session_recall
-                        if record.get("session_id") != session_id
-                    ]
-                session_recall = session_recall[:recall_limit]
-                fallback_session_recall = fallback_session_recall[:recall_limit]
-                known_session_sources = {record.get("source_id") for record in session_recall}
-                session_recall.extend(
-                    record for record in fallback_session_recall
-                    if record.get("source_id") not in known_session_sources
-                )
-                # Add stable identifiers to the SQLite records too, then
-                # deduplicate mixed persistence sources by provenance.
-                for record in conversation_recall:
-                    record.setdefault(
-                        "source_id",
-                        f"conversation:{record.get('conversation_id')}:message:{record.get('id')}",
-                    )
-                known_sources = {record.get("source_id") for record in conversation_recall}
-                conversation_recall.extend(
-                    record for record in session_recall
-                    if record.get("source_id") not in known_sources
-                )
-                conversation_recall = conversation_recall[:recall_limit]
-            except ValueError:
-                # An invalid relative-time phrase must not break normal
-                # conversation context; the explicit tool reports it instead.
-                pass
-
-        file_action_types = {
-            "file_created", "file_edited", "file_deleted", "file_moved", "file_copied",
-            "directory_created", "files_batch_changed", "image_generated", "image_edited",
-            "export_created",
-        }
-        recent_file_actions = [
-            action for action in [*relevant_actions, *recent_actions]
-            if action.get("action_type") in file_action_types
-        ][:3]
-
-        summaries = []
-        if self.conversation_store is not None and not session_id:
-            summaries = self.conversation_store.get_recent_summaries(limit=5)
-
-        # Read previous session summary from JSONL
-        prev_summary = None
-        if session_id and self._session_store:
-            block_context = getattr(self.config, "block_session_context", False)
-            prev_summary = self._session_store.get_previous_summary(session_id, block=block_context)
-
-        prepared_context = build_context_prompt(
-            soul_context=soul_ctx,
-            profile_context=profile_ctx,
-            project_context=project_ctx,
-            memories=memories,
-            people=people,
-            goals=active_goals,
-            goals_due_soon=goals_due_soon,
-            goals_overdue=goals_overdue,
-            recent_actions=recent_actions,
-            relevant_actions=relevant_actions,
-            recent_file_actions=recent_file_actions,
-            conversation_summaries=summaries,
-            conversation_recall=conversation_recall,
-            previous_session_summary=prev_summary,
-            token_budget=token_budget,
-        )
-        if self.goal_store and active_goals:
-            surfaced_ids = [
-                int(signal["signal_id"])
-                for goal in active_goals
-                for signal in goal.get("watcher_signals") or []
-                if f"signal #{signal.get('signal_id')} " in prepared_context
-            ]
-            self.goal_store.mark_watcher_signals_surfaced(surfaced_ids)
-        return prepared_context
 
     def set_model(self, model: str) -> None:
         """Switch the underlying chat model."""
@@ -714,11 +562,19 @@ class Agent:
         if self.profile_manager.profile_path != profile_path:
             self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=config.profile_path)
             self.profile_manager.ensure_exists()
+            if self.reflection_service is not None:
+                self.reflection_service.profile_manager = self.profile_manager
+                self.reflection_service.applier.profile_manager = self.profile_manager
         if self.soul_manager.soul_path != soul_path:
             self.soul_manager = SoulManager(data_dir=data_dir, soul_path=config.soul_path)
             self.soul_manager.ensure_exists()
         self.project_context.enabled = config.project_context_enabled
         self.project_context.max_files = max(0, int(config.project_context_max_files))
+        if self.reflection_service is not None:
+            reflection_config = getattr(config, "reflection", config)
+            self.reflection_service.config = reflection_config
+            self.reflection_service.reflector.config = reflection_config
+            self.reflection_service.applier.config = reflection_config
 
         skill_dirs = list(config.skill_dirs or [])
         configured_skill_dirs = [Path(path).expanduser() for path in skill_dirs]
@@ -1507,10 +1363,18 @@ class Agent:
         user_input: str,
         conversation_history: list[dict],
         *,
+        reflection_input: str | None = None,
         request_id: str | None = None,
         confirmation_grants: Iterable[TurnActionGrant] = (),
     ) -> AsyncIterator[str]:
         """Run one request under immutable current-turn authority."""
+        if self.reflection_service is not None:
+            # Tests and embedders sometimes replace ``agent.llm`` after
+            # construction. Reflection is a separate call, but it should use
+            # the agent's current client rather than a stale network client.
+            self.reflection_service.llm = self.llm
+            self.reflection_service.reflector.llm = self.llm
+            await self.reflection_service.before_turn(self.session_id)
         routing_input, reference_error = self._resolve_referential_delegation(
             user_input, conversation_history
         )
@@ -1545,6 +1409,7 @@ class Agent:
                 delegation_decision=decision,
                 agent_evidence=evidence,
                 tools_override=tools_override,
+                reflection_input=reflection_input,
             ):
                 yield chunk
 
@@ -1557,10 +1422,11 @@ class Agent:
         delegation_decision: DelegationDecision,
         agent_evidence: str = "",
         tools_override: list[dict] | None = None,
+        reflection_input: str | None = None,
     ) -> AsyncIterator[str]:
         """Run the non-streaming model loop inside an established turn scope."""
         # Build context
-        context = self.get_context(user_input)
+        context = self.get_context(user_input, conversation_history)
         messages = self.build_messages(user_input, conversation_history, context)
         if agent_evidence:
             messages.insert(-1, {
@@ -1609,6 +1475,12 @@ class Agent:
             )
             messages.append({"role": "assistant", "content": content})
             self.last_messages = messages
+            if self.reflection_service is not None:
+                self.reflection_service.enqueue_turn(
+                    scope=self.session_id,
+                    user_text=reflection_input if reflection_input is not None else user_input,
+                    assistant_text=content,
+                )
             if content:
                 yield content
             return
@@ -1623,10 +1495,15 @@ class Agent:
         user_input: str,
         conversation_history: list[dict],
         *,
+        reflection_input: str | None = None,
         request_id: str | None = None,
         confirmation_grants: Iterable[TurnActionGrant] = (),
     ) -> AsyncIterator[str]:
         """Run streaming-first under immutable current-turn authority."""
+        if self.reflection_service is not None:
+            self.reflection_service.llm = self.llm
+            self.reflection_service.reflector.llm = self.llm
+            await self.reflection_service.before_turn(self.session_id)
         routing_input, reference_error = self._resolve_referential_delegation(
             user_input, conversation_history
         )
@@ -1661,6 +1538,7 @@ class Agent:
                 delegation_decision=decision,
                 agent_evidence=evidence,
                 tools_override=tools_override,
+                reflection_input=reflection_input,
             ):
                 yield chunk
 
@@ -1673,9 +1551,10 @@ class Agent:
         delegation_decision: DelegationDecision,
         agent_evidence: str = "",
         tools_override: list[dict] | None = None,
+        reflection_input: str | None = None,
     ) -> AsyncIterator[str]:
         """Run the streaming model loop inside an established turn scope."""
-        context = self.get_context(user_input)
+        context = self.get_context(user_input, conversation_history)
         messages = self.build_messages(user_input, conversation_history, context)
         if agent_evidence:
             messages.insert(-1, {
@@ -1815,6 +1694,14 @@ class Agent:
             )
             messages.append({"role": "assistant", "content": final_content})
             self.last_messages = messages
+            if self.reflection_service is not None:
+                # Queue before yielding so a disconnected streaming consumer
+                # cannot lose the reflection job after receiving the answer.
+                self.reflection_service.enqueue_turn(
+                    scope=self.session_id,
+                    user_text=reflection_input if reflection_input is not None else user_input,
+                    assistant_text=final_content,
+                )
             if final_content:
                 yield final_content
             return
@@ -1827,6 +1714,8 @@ class Agent:
 
     async def close(self):
         """Clean up resources."""
+        if self.reflection_service is not None:
+            await self.reflection_service.close()
         if self.multi_agent_runtime is not None and self.delegation_depth == 0:
             await self.multi_agent_runtime.close()
         if self._owns_tool_executor:

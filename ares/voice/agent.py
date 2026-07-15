@@ -186,7 +186,7 @@ class ContinuousVoiceAgent:
 
         self.stt_backend = self._resolve_backend(self.voice_config.stt_backend, local="whisper")
         self.tts_backend = self._resolve_backend(self.voice_config.tts_backend, local="edge")
-        self._tts_backend_explicit = (self.voice_config.tts_backend or "auto").lower().strip() != "auto"
+        self._tts_backend_explicit = (self.voice_config.tts_backend or "edge").lower().strip() != "auto"
         self.transcriber = self._create_transcriber()
         self.tts = self._create_tts()
         self.tts_sample_rate = self.voice_config.tts_sample_rate
@@ -200,6 +200,10 @@ class ContinuousVoiceAgent:
     def _resolve_backend(self, backend: str, *, local: str) -> str:
         backend = (backend or "auto").lower().strip()
         if backend == "auto":
+            # Older configs stored ``auto``. TTS should not select Sarvam
+            # implicitly; Edge is the stable default for spoken replies.
+            if local == "edge":
+                return "edge"
             return "sarvam" if sarvam_api_key() else local
         return backend
 
@@ -451,7 +455,8 @@ class ContinuousVoiceAgent:
         first_token = True
 
         async for token in agent.run_stream(text, history):
-            if token.startswith("[tool:"):
+            # Tool lifecycle tokens are renderer telemetry, never spoken prose.
+            if token.startswith("[tool"):
                 continue
             if first_token:
                 self.console.print("[bold green]Ares:[/bold green] ", end="")

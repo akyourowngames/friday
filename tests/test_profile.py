@@ -79,6 +79,24 @@ class TestProfileManager:
         assert "# About Me" in PROFILE_TEMPLATE
         assert "## Preferences" in PROFILE_TEMPLATE
 
+    def test_apply_updates_preserves_custom_sections(self, tmp_path):
+        manager = ProfileManager(data_dir=tmp_path)
+        manager.write(
+            "# About Me\n\n## Preferences\n- Theme: Light\n\n"
+            "## Custom Research\nKeep this prose exactly.\n"
+        )
+
+        applied = manager.apply_updates([
+            {"section": "Preferences", "key": "Theme", "value": "Dark"},
+            {"section": "Notes", "key": "Timezone", "value": "Asia/Calcutta"},
+        ])
+
+        content = manager.read()
+        assert len(applied) == 2
+        assert "- Theme: Dark" in content
+        assert "- Timezone: Asia/Calcutta" in content
+        assert "Keep this prose exactly." in content
+
     def test_is_populated_returns_false_for_empty_template(self, tmp_path):
         manager = ProfileManager(data_dir=tmp_path)
         manager.ensure_exists()

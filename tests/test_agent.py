@@ -7,6 +7,7 @@ import pytest
 from ares.agent import Agent
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.reflection import ReflectionService
 from ares.skills import SkillManager
 from ares.turn_policy import build_turn_execution_context
 
@@ -22,6 +23,25 @@ def agent(tmp_path, fake_embedding_provider):
 
 
 class TestAgent:
+    def test_reflection_nested_config_does_not_become_an_llm_config(self, agent, monkeypatch):
+        created_with = []
+
+        class StubLLM:
+            def __init__(self, config=None):
+                created_with.append(config)
+
+        monkeypatch.setattr("ares.reflection.LLMClient", StubLLM)
+        service = ReflectionService(
+            memory_store=agent.memory_store,
+            goal_store=agent.goal_store,
+            commitment_store=agent.commitment_store,
+            profile_manager=agent.profile_manager,
+            config=agent.config.reflection,
+        )
+
+        assert created_with == [None]
+        assert service.llm.__class__ is StubLLM
+
     def test_session_scope_isolates_memory_and_tool_provenance(self, agent, monkeypatch):
         searches = []
 
