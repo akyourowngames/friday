@@ -46,6 +46,56 @@ def test_explicit_separate_researchers_builds_bounded_dependency_plan() -> None:
     assert len(decision.plan) <= 8
 
 
+def test_plural_researcher_launch_with_real_topic_routes_before_meta_policy() -> None:
+    context = build_turn_execution_context(
+        "ok launch researchers to research how much corruption is there in world",
+        request_id="req-corruption",
+    )
+    decision = DelegationRouter().route(context, availability())
+
+    assert decision.mode is DelegationMode.EXPLICIT
+    assert decision.should_delegate
+    assert context.intent.value == "delegation"
+    assert len(decision.plan) == 2
+    assert {task.agent for task in decision.plan} == {"researcher"}
+    assert all("corruption" in task.prompt.casefold() for task in decision.plan)
+
+
+def test_with_multiple_agents_defaults_to_two_real_specialists() -> None:
+    context = build_turn_execution_context(
+        "Research on corruption in the world with multiple agents",
+        request_id="req-telegram-corruption",
+    )
+    decision = DelegationRouter().route(context, availability())
+
+    assert decision.mode is DelegationMode.EXPLICIT
+    assert decision.should_delegate
+    assert context.intent.value == "delegation"
+    assert len(decision.plan) == 2
+    assert all(task.agent == "researcher" for task in decision.plan)
+    assert all("corruption" in task.prompt.casefold() for task in decision.plan)
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "launch agents multi agent no fluff",
+        "oh okiee can you laucnh agents multi agent no fluff",
+        "use multi-agent mode",
+    ),
+)
+def test_vague_agent_launch_asks_for_assignment_without_starting_run(message: str) -> None:
+    decision = DelegationRouter().route(
+        build_turn_execution_context(message, request_id="req-vague"), availability()
+    )
+
+    assert decision.mode is DelegationMode.EXPLICIT
+    assert not decision.should_delegate
+    assert not decision.plan
+    assert decision.failure_reason is DelegationFailureReason.MISSING_TASK
+    assert "what you want" in decision.honest_failure_message.casefold()
+
+
 def test_agent_meta_question_routes_to_manifest_introspection_not_new_agents() -> None:
     context = build_turn_execution_context(
         "How many agents did you use for the parallel search, and how did you launch them?",

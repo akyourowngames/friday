@@ -1278,6 +1278,7 @@ class Agent:
         count = r"(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten)"
         claim = re.compile(
             rf"(?:\b{count}\s+(?:native\s+)?(?:agents?|researchers?|specialists?)\b|"
+            rf"\b{count}\s+(?:ordinary\s+)?tool\s+calls?\b|"
             r"\b(?:agent|researcher|builder|reviewer|specialist)s?\b.*"
             r"\b(?:ran|launched|spawned|used|wave|parallel|manifest|run\s+id)\b)",
             re.IGNORECASE,
@@ -1306,6 +1307,15 @@ class Agent:
             waves = record.get("execution_waves") or []
             details = f" Tools: {', '.join(tools)}." if tools else ""
             wave_text = f" Execution waves: {json.dumps(waves, ensure_ascii=False)}." if waves else ""
+            inspection_tools = {
+                "list_agents", "get_agent_run", "list_agent_runs", "get_latest_agent_run"
+            }
+            if tools and set(tools).issubset(inspection_tools):
+                return (
+                    "No new native agents were launched for this follow-up. "
+                    f"The root inspected the existing run with {count} session-scoped tool "
+                    f"call{'s' if count != 1 else ''}.{details}{wave_text}"
+                )
             return (
                 f"0 native agents ran for request {record.get('request_id') or 'unknown'}. "
                 f"The root executed {count} ordinary tool call{'s' if count != 1 else ''}; ordinary parallel tool calls are not agents."
@@ -1348,6 +1358,39 @@ class Agent:
             "They were launched by the root-owned native MultiAgentRuntime; ordinary parallel tool calls were not counted as agents."
         )
 
+    def _render_execution_summary(self, record: dict[str, Any] | None) -> str:
+        """Render runtime truth without leaking the internal audit manifest into chat."""
+        if not record:
+            return "Agent status: no agent run was recorded for that request."
+        kind = str(record.get("kind") or "")
+        if kind == "ordinary":
+            tools = [str(item) for item in record.get("tools") or []]
+            inspection_tools = {
+                "list_agents", "get_agent_run", "list_agent_runs", "get_latest_agent_run"
+            }
+            if tools and set(tools).issubset(inspection_tools):
+                return "Agent status: I inspected the existing run; I did not launch a new team for this follow-up."
+            return "Agent status: this request used regular tools, not specialist agents."
+        if kind == "delegation_failure":
+            reason = str(record.get("reason") or "the run could not be started")
+            return f"Agent status: no specialist completed the request — {reason}"
+
+        payload = self._native_record_payload(record)
+        manifest = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else payload
+        children = manifest.get("child_runs") or payload.get("children") or payload.get("results") or []
+        count = int(manifest.get("agent_count") or len(children))
+        status = str(manifest.get("status") or payload.get("status") or "unknown").replace("_", " ")
+        roles = [
+            str(item.get("role") or item.get("agent_role") or item.get("agent") or "specialist")
+            for item in children if isinstance(item, dict)
+        ]
+        role_text = ", ".join(roles)
+        role_suffix = f" ({role_text})" if role_text else ""
+        return (
+            f"Agent status: {count} specialist{'s' if count != 1 else ''}{role_suffix}; "
+            f"run {status}."
+        )
+
     def _guard_final_answer(
         self,
         context: TurnExecutionContext,
@@ -1360,13 +1403,13 @@ class Agent:
             payload = self._native_record_payload(record)
             evidence_text = json.dumps(payload, ensure_ascii=False, default=str)
             urls = tuple(dict.fromkeys(re.findall(r"https?://[^\s\"'<>\]]+", evidence_text)))
-            footer = self._render_execution_record(record)
+            footer = self._render_execution_summary(record)
             missing = [url.rstrip(".,;)") for url in urls if url.rstrip(".,;)") not in cleaned]
             if missing:
                 footer += "\n\nVerified sources:\n" + "\n".join(f"- {url}" for url in missing[:50])
             return "\n\n".join(part for part in (cleaned, footer) if part).strip()
         if removed:
-            truth = self._render_execution_record(record) if record else "0 native agents ran for this request."
+            truth = self._render_execution_summary(record)
             return "\n\n".join(part for part in (cleaned, truth) if part).strip()
         return cleaned or str(content or "")
 

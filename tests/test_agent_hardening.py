@@ -282,8 +282,10 @@ async def test_explicit_separate_researchers_run_real_native_plan_before_synthes
     answer = "".join([token async for token in agent.run_stream(request, [])])
 
     assert answer.startswith("Recommendation based on the verified run.")
-    assert "Verified native run ma_test: 4 agents" in answer
-    assert '[["researcher_1", "researcher_2", "researcher_3"], ["synthesis"]]' in answer
+    assert "Agent status: 4 specialists" in answer
+    assert "run succeeded" in answer
+    assert "Execution waves" not in answer
+    assert "ma_test" not in answer
     assert "https://example.com/researcher_1" in answer
     assert len(runtime.delegations) == 1
     tasks, kwargs = runtime.delegations[0]
@@ -296,6 +298,95 @@ async def test_explicit_separate_researchers_run_real_native_plan_before_synthes
     assert '"root_run_id": "ma_test"' in evidence
     assert '"agent_count": 4' in evidence
     assert "https://example.com/researcher_1" in evidence
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_style_with_multiple_agents_uses_native_runtime(
+    tmp_path, fake_embedding_provider
+):
+    runtime = _Runtime()
+    agent = _agent(tmp_path, fake_embedding_provider, runtime=runtime)
+
+    async def stream(_messages, tools=None):
+        assert tools == []
+        yield {"type": "content", "text": "Research summary from the specialist evidence."}
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = stream
+    answer = "".join([
+        token async for token in agent.run_stream(
+            "Research on corruption in the world with multiple agents", []
+        )
+    ])
+
+    assert len(runtime.delegations) == 1
+    tasks, _kwargs = runtime.delegations[0]
+    assert len(tasks) == 2
+    assert all(task.agent == "researcher" for task in tasks)
+    assert "Agent status: 2 specialists" in answer
+    assert "request_id" not in answer
+    assert "Execution waves" not in answer
+    await agent.close()
+
+
+def test_execution_guard_removes_unverified_tool_count_claims() -> None:
+    cleaned, removed = Agent._strip_unverified_agent_claims(
+        "Research timed out.\nZero tool calls made.\nPlease try again."
+    )
+
+    assert removed
+    assert "tool calls" not in cleaned.casefold()
+    assert cleaned == "Research timed out.\nPlease try again."
+
+
+@pytest.mark.asyncio
+async def test_launch_researchers_with_how_much_topic_delegates_before_model_tools(
+    tmp_path, fake_embedding_provider
+):
+    runtime = _Runtime()
+    agent = _agent(tmp_path, fake_embedding_provider, runtime=runtime)
+
+    async def stream(_messages, tools=None):
+        assert tools == []
+        yield {"type": "content", "text": "Research summary from verified child evidence."}
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = stream
+    answer = "".join([
+        token async for token in agent.run_stream(
+            "ok launch researchers to research how much corruption is there in world", []
+        )
+    ])
+
+    assert "meta-questions may only inspect" not in answer
+    assert len(runtime.delegations) == 1
+    tasks, _kwargs = runtime.delegations[0]
+    assert len(tasks) == 2
+    assert all(task.agent == "researcher" for task in tasks)
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_vague_launch_agents_is_clarified_without_model_or_runtime_call(
+    tmp_path, fake_embedding_provider
+):
+    runtime = _Runtime()
+    agent = _agent(tmp_path, fake_embedding_provider, runtime=runtime)
+
+    async def forbidden_stream(*_args, **_kwargs):
+        raise AssertionError("vague delegation must not reach the general model")
+        yield  # pragma: no cover
+
+    agent.llm.chat_stream = forbidden_stream
+    answer = "".join([
+        token async for token in agent.run_stream(
+            "oh okiee can you laucnh agents multi agent no fluff", []
+        )
+    ])
+
+    assert "what you want the agents to do" in answer.casefold()
+    assert runtime.delegations == []
     await agent.close()
 
 

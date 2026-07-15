@@ -407,9 +407,11 @@ class MCPClientManager:
             except Exception as exc:
                 self.server_errors[name] = str(exc) or exc.__class__.__name__
                 await self.close_server(name)
-                logger.warning(
-                    "Failed to connect MCP server '%s' — check config and network",
+                logger.info(
+                    "Optional MCP server '%s' is unavailable (%s); Ares will continue without it. "
+                    "Run /mcp status for details.",
                     name,
+                    exc.__class__.__name__,
                 )
             finally:
                 _uncancel_task()
