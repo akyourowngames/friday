@@ -84,6 +84,15 @@ from ares.cron.tools import CronToolHandlers
 from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
 from ares.tools import adb_bridge as _adb_bridge
 from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
+from ares.tools.phone_upgrades import (
+    call_preflight,
+    normalize_call_status,
+    prepare_notifications,
+    preview_sms,
+    rank_contact_candidates,
+    sms_delivery_status,
+    validate_post_call_note,
+)
 from ares.tools.shell_execution import resolve_project_command
 from ares.tools.project_checks import run_project_check
 from ares.tools.results import error_result, structured_result, wants_structured
@@ -2531,12 +2540,98 @@ class ToolExecutor:
     def _phone_get_notifications(self, args: dict) -> str:
         if not self.config or not self.config.phone.enabled:
             return self._phone_disabled()
-        return _kdeconnect_bridge.get_recent_notifications(limit=int(args.get("limit", 20)))
+        advanced = self._phone_advanced_requested(args, {
+            "applications", "app", "person", "keywords", "unread_only", "since", "until",
+            "group_by", "collapse_duplicates", "content_mode", "metadata_only", "response_format",
+        })
+        raw = _kdeconnect_bridge.get_recent_notifications(limit=int(args.get("limit", 20)))
+        if not advanced:
+            return raw
+        payload = self._phone_payload(raw)
+        structured = wants_structured(args)
+        if not payload.get("ok"):
+            message = str(payload.get("error") or "Could not read the live notification snapshot.")
+            return error_result(message, code="phone_bridge") if structured else self._json(payload)
+        try:
+            content_mode = "metadata" if bool(args.get("metadata_only", False)) else str(args.get("content_mode") or "metadata")
+            prepared = prepare_notifications(
+                payload.get("notifications") if isinstance(payload.get("notifications"), list) else [],
+                applications=args.get("applications", args.get("app")), person=args.get("person"),
+                keywords=args.get("keywords"), unread_only=bool(args.get("unread_only", False)),
+                since=args.get("since"), until=args.get("until"), group_by=str(args.get("group_by") or "none"),
+                collapse_duplicates=bool(args.get("collapse_duplicates", True)), content_mode=content_mode,
+                limit=int(args.get("limit", 20)),
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="validation") if structured else self._json({"ok": False, "error": str(exc)})
+        result = {
+            "ok": True,
+            "snapshot": bool(payload.get("snapshot", True)),
+            "notifications": prepared["notifications"],
+            "groups": prepared["groups"],
+            "filters": prepared["filters"],
+            "privacy": prepared["privacy"],
+            "metrics": prepared["metrics"],
+        }
+        if structured:
+            return structured_result(
+                prepared["summary"], data=result, metrics=prepared["metrics"],
+                provenance={"source": "live_phone_notification_snapshot", "persisted": False},
+            )
+        return self._json(result)
 
     def _phone_search_contact(self, args: dict) -> str:
         if not self.config or not self.config.phone.enabled:
             return self._phone_disabled()
-        return _kdeconnect_bridge.search_contacts(args["query"])
+        advanced = self._phone_advanced_requested(args, {
+            "mode", "channel", "purpose", "include_people", "limit", "response_format",
+        })
+        raw = _kdeconnect_bridge.search_contacts(str(args["query"]), limit=int(args.get("limit", 20)))
+        if not advanced:
+            return raw
+        payload = self._phone_payload(raw)
+        structured = wants_structured(args)
+        if not payload.get("ok"):
+            message = str(payload.get("error") or "Could not search live phone contacts.")
+            return error_result(message, code="phone_bridge") if structured else self._json(payload)
+        saved_people: list[dict[str, Any]] = []
+        if bool(args.get("include_people", True)) and self.people_store is not None:
+            try:
+                saved_people = self.people_store.search_advanced(
+                    str(args["query"]), limit=max(1, min(int(args.get("limit", 20)), 50)),
+                    channel=str(args.get("channel") or ""), purpose=str(args.get("purpose") or ""),
+                    include_sensitive=True,
+                )
+            except (TypeError, ValueError):
+                # Device results remain useful if a non-search field was
+                # supplied in a format the People Store cannot interpret.
+                saved_people = self.people_store.search(str(args["query"]), limit=max(1, min(int(args.get("limit", 20)), 50)))
+        try:
+            action = str(args.get("purpose") or args.get("channel") or "sms")
+            ranked = rank_contact_candidates(
+                args["query"], device_contacts=payload.get("contacts") or [], saved_people=saved_people,
+                action=action, limit=int(args.get("limit", 20)), reveal_contact_values=False,
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="validation") if structured else self._json({"ok": False, "error": str(exc)})
+        requested_channel = str(args.get("channel") or "").casefold()
+        if requested_channel in {"phone", "sms", "email"}:
+            channel = "phone" if requested_channel == "sms" else requested_channel
+            ranked["candidates"] = [
+                item for item in ranked["candidates"]
+                if any(entry.get("kind") == channel for entry in item.get("channels", []))
+            ]
+            ranked["best_candidate_id"] = None if ranked["requires_disambiguation"] else (
+                ranked["candidates"][0]["candidate_id"] if ranked["candidates"] else None
+            )
+        result = {"ok": True, "contacts": ranked, "bridge": {"snapshot": True, "limit": payload.get("limit")}}
+        if structured:
+            return structured_result(
+                f"Found {len(ranked['candidates'])} ranked contact candidate(s).", data=result,
+                metrics=ranked["metrics"], provenance={"sources": ["live_phone_contacts", "saved_people"], "persisted": False},
+                warnings=["Choose an explicit candidate when requires_disambiguation is true."] if ranked["requires_disambiguation"] else [],
+            )
+        return self._json(result)
 
     def _resolve_phone_recipient(self, value: Any) -> tuple[str, dict[str, Any] | None]:
         """Resolve an exact saved alias to its stored phone number."""
@@ -2570,7 +2665,69 @@ class ToolExecutor:
             number, person = self._resolve_phone_recipient(args.get("number"))
         except PersonResolutionError as exc:
             return self._json({"ok": False, "sent": False, "error": str(exc)})
-        return self._phone_result(_kdeconnect_bridge.send_sms(number, args["message"]), person)
+        advanced = self._phone_advanced_requested(args, {
+            "mode", "template", "variables", "include_message", "retry", "delivery", "response_format",
+        })
+        if not advanced:
+            return self._phone_result(_kdeconnect_bridge.send_sms(number, args["message"]), person)
+        structured = wants_structured(args)
+        mode = str(args.get("mode") or "send").casefold()
+        if mode not in {"preview", "send", "status"}:
+            message = "mode must be preview, send, or status"
+            return error_result(message, code="validation") if structured else self._json({"ok": False, "error": message})
+        if mode == "status":
+            delivery = sms_delivery_status(args.get("delivery") if isinstance(args.get("delivery"), dict) else {})
+            return structured_result("SMS delivery status normalized.", data={"delivery": delivery}) if structured else self._json({"ok": delivery["ok"], "delivery": delivery})
+        bridge = _kdeconnect_bridge.status()
+        try:
+            preview = preview_sms(
+                number, message=args.get("message"), template=args.get("template"),
+                variables=args.get("variables") if isinstance(args.get("variables"), dict) else {},
+                include_message=False, bridge_ready=bool(bridge.get("ok")),
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="validation") if structured else self._json({"ok": False, "sent": False, "error": str(exc)})
+        if mode == "preview" or not bool(args.get("confirm", False)):
+            result = {"ok": bool(preview.get("ok")), "sent": False, "mode": "preview", "preview": preview, "recipient": person.get("canonical_name") if person else None}
+            if structured:
+                return structured_result(
+                    "SMS preview is ready; explicit confirmation is required before sending.",
+                    ok=bool(preview.get("ok")), status="preview", data=result,
+                    next_actions=[{"tool": "phone_send_sms", "arguments": {"number": args.get("number"), "confirm": True, "mode": "send"}}],
+                    provenance={"persisted": False, "recipient_resolved_from_people": bool(person)},
+                )
+            return self._json(result)
+        # Render the template a second time internally so a raw message never
+        # has to be copied into a preview response or an action-ledger field.
+        try:
+            outbound = preview_sms(
+                number, message=args.get("message"), template=args.get("template"),
+                variables=args.get("variables") if isinstance(args.get("variables"), dict) else {},
+                include_message=True, bridge_ready=bool(bridge.get("ok")),
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="validation") if structured else self._json({"ok": False, "sent": False, "error": str(exc)})
+        if not outbound.get("ok"):
+            return error_result(str(outbound.get("error") or "SMS preview failed."), code="validation") if structured else self._json({"ok": False, "sent": False, "preview": preview, "error": outbound.get("error")})
+        bridge_result = self._phone_payload(_kdeconnect_bridge.send_sms(number, str(outbound["message"])))
+        delivery = sms_delivery_status(bridge_result)
+        result = {
+            "ok": bool(bridge_result.get("ok")), "sent": bool(bridge_result.get("sent")), "mode": "send",
+            "recipient": person.get("canonical_name") if person else preview.get("recipient"),
+            "preview": preview, "delivery": delivery,
+            "retry_requested": bool(args.get("retry", False)),
+        }
+        warnings = []
+        if args.get("retry"):
+            warnings.append("No automatic resend was performed; retry is only safe after an explicit follow-up request and a classified transport failure.")
+        if structured:
+            return structured_result(
+                "SMS submitted to the paired phone." if result["sent"] else "SMS was not submitted.",
+                ok=result["ok"], status="completed" if result["ok"] else "failed", data=result, warnings=warnings,
+                errors=[] if result["ok"] else [{"code": "phone_bridge", "message": delivery.get("error") or "Phone bridge failed to submit the SMS."}],
+                provenance={"persisted": False, "recipient_resolved_from_people": bool(person)},
+            )
+        return self._json(result)
 
     def _phone_call_number(self, args: dict) -> str:
         if not self.config or not self.config.phone.enabled:
@@ -2579,10 +2736,83 @@ class ToolExecutor:
             number, person = self._resolve_phone_recipient(args.get("number"))
         except PersonResolutionError as exc:
             return self._json({"ok": False, "dialed": False, "error": str(exc)})
-        return self._phone_result(
-            _adb_bridge.call_number(number, confirm=bool(args.get("confirm", False))),
-            person,
+        advanced = self._phone_advanced_requested(args, {"mode", "device_id", "post_call_note", "call_status", "response_format"})
+        if not advanced:
+            return self._phone_result(
+                _adb_bridge.call_number(number, confirm=bool(args.get("confirm", False))),
+                person,
+            )
+        structured = wants_structured(args)
+        mode = str(args.get("mode") or "call").casefold()
+        if mode not in {"preflight", "call", "status"}:
+            message = "mode must be preflight, call, or status"
+            return error_result(message, code="validation") if structured else self._json({"ok": False, "error": message})
+        if mode == "status":
+            status = normalize_call_status(args.get("call_status") if isinstance(args.get("call_status"), dict) else args)
+            return structured_result("Call status normalized.", data={"call": status}) if structured else self._json({"ok": True, "call": status})
+        phone_status = self._phone_payload(_adb_bridge.phone_status())
+        preflight = call_preflight(
+            number, phone_status=phone_status, device_id=args.get("device_id"),
+            recipient=person.get("canonical_name") if person else None, confirm=bool(args.get("confirm", False)),
+            reveal_number=False,
         )
+        if mode == "preflight" or not preflight["ok"]:
+            result = {"ok": bool(preflight["ready"]), "dialed": False, "mode": "preflight", "preflight": preflight}
+            if structured:
+                return structured_result(
+                    "Call preflight is ready." if preflight["ready"] else "Call preflight failed.",
+                    ok=bool(preflight["ready"]), status="preview" if preflight["ready"] else "failed", data=result,
+                    warnings=preflight["warnings"], errors=[{"code": "phone_preflight", "message": message} for message in preflight["errors"]],
+                    next_actions=[{"tool": "phone_call_number", "arguments": {"number": args.get("number"), "confirm": True, "mode": "call"}}] if preflight["ready"] and not args.get("confirm") else [],
+                )
+            return self._json(result)
+        bridge_result = self._phone_payload(_adb_bridge.call_number(number, confirm=True))
+        normalized = normalize_call_status({**bridge_result, "status": "initiated" if bridge_result.get("dialed") else "failed"})
+        note_result: dict[str, Any] | None = None
+        if bridge_result.get("dialed") and args.get("post_call_note") is not None:
+            note_result = validate_post_call_note(
+                args.get("post_call_note"), person_id=person.get("person_id") if person else None,
+                call_id=normalized.get("call_id"),
+            )
+            if note_result.get("ok") and person is not None and self.people_store is not None:
+                try:
+                    self.people_store.update(
+                        int(person["person_id"]),
+                        timeline=[{"type": "phone_call_note", "note": note_result["note"]}],
+                    )
+                    note_result = {"ok": True, "attached": True, "person_id": person["person_id"], "persisted": True}
+                except Exception as exc:
+                    note_result = {"ok": False, "attached": False, "error": str(exc), "persisted": False}
+            elif note_result.get("ok"):
+                note_result = {"ok": False, "attached": False, "error": "Post-call notes require an explicitly saved person recipient.", "persisted": False}
+        result = {
+            "ok": bool(bridge_result.get("ok")), "dialed": bool(bridge_result.get("dialed")), "mode": "call",
+            "recipient": person.get("canonical_name") if person else preflight.get("number"),
+            "call": normalized, "preflight": preflight, "post_call_note": note_result,
+        }
+        if structured:
+            return structured_result(
+                "Call initiated through the paired phone." if result["dialed"] else "Call was not initiated.",
+                ok=result["ok"], status="completed" if result["ok"] else "failed", data=result,
+                errors=[] if result["ok"] else [{"code": "phone_bridge", "message": str(bridge_result.get("error") or "Phone bridge failed to initiate the call.")}],
+                provenance={"recipient_resolved_from_people": bool(person)},
+            )
+        return self._json(result)
+
+    @staticmethod
+    def _phone_payload(value: Any) -> dict[str, Any]:
+        try:
+            payload = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _phone_advanced_requested(args: dict[str, Any], fields: set[str]) -> bool:
+        try:
+            return wants_structured(args) or any(field in args for field in fields)
+        except ValueError:
+            return True
 
     def _phone_launch_app(self, args: dict) -> str:
         """Launch an app on the phone by package name."""
