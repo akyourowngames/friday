@@ -8,6 +8,9 @@ agent-provided latency records are displayed only as supplemental diagnostics.
 Run from the repository root:
 
     python scripts/benchmark_latency.py --iterations 5
+
+To compare a different checkout (for example an ``ares`` baseline worktree),
+set ``ARES_BENCHMARK_SOURCE_ROOT`` to that checkout before invoking this script.
 """
 
 from __future__ import annotations
@@ -17,11 +20,24 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
 import statistics
+import sys
 import tempfile
 import time
 from typing import Any, AsyncIterator
+
+# A script's directory, rather than the repository root, is normally first on
+# ``sys.path``.  Pin imports to the checked-out source so this benchmark never
+# silently measures a globally installed or stale Ares package.  The explicit
+# override makes before/after worktree comparisons reproducible.
+_SOURCE_ROOT = Path(
+    os.environ.get("ARES_BENCHMARK_SOURCE_ROOT") or Path(__file__).resolve().parents[1]
+).expanduser().resolve()
+if not (_SOURCE_ROOT / "ares").is_dir():
+    raise RuntimeError(f"ARES_BENCHMARK_SOURCE_ROOT is not an Ares checkout: {_SOURCE_ROOT}")
+sys.path.insert(0, str(_SOURCE_ROOT))
 
 from ares.agent import Agent
 from ares.commitments import CommitmentStore
