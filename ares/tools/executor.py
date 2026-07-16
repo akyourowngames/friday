@@ -24,10 +24,13 @@ from ares.tools.filesystem import (
     head_file as _head_file_impl, count_lines as _count_lines_impl,
     file_tree as _file_tree_impl,
 )
-from ares.memory import MemoryStore
+from ares.memory import MemoryConflictError, MemoryStore, calculate_importance
 from ares.config import save_config
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
-from ares.people import PeopleStore, PersonConflictError, PersonResolutionError, mask_email, mask_phone
+from ares.people import (
+    PeopleStore, PersonConflictError, PersonResolutionError,
+    mask_email, mask_phone, normalize_reference,
+)
 from ares.actions import ActionLedger
 from ares.sessions import SessionStore
 from ares.tasks import TaskStore, TaskToolHandlers
@@ -74,6 +77,7 @@ from ares.tools import adb_bridge as _adb_bridge
 from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
 from ares.tools.shell_execution import resolve_project_command
 from ares.tools.project_checks import run_project_check
+from ares.tools.results import error_result, structured_result, wants_structured
 from ares.telephony import TelephonyManager, TelephonyStore
 from ares.telephony.models import CallStatus
 from ares.watcher.database import resolve_watcher_database_path
@@ -443,27 +447,91 @@ class ToolExecutor:
         content = args["content"]
         category = args.get("category", "note")
         confidence = float(args.get("confidence", 1.0))
+        structured = wants_structured(args)
         rejection = memory_rejection_reason(
             content,
             category=category,
             confidence=confidence,
         )
         if rejection:
-            return f"Memory not stored: {rejection}."
+            summary = f"Memory not stored: {rejection}."
+            return error_result(summary, code="memory_policy") if structured else summary
         suggestions = self.memory.suggest_merge(content, category=category)
         duplicate = next((item for item in suggestions if item["kind"] == "duplicate"), None)
-        if duplicate:
-            return (
+        merge_mode = str(args.get("merge_mode") or "skip").strip().casefold()
+        if merge_mode not in {"skip", "merge", "store"}:
+            summary = "merge_mode must be skip, merge, or store"
+            return error_result(summary, code="validation") if structured else summary
+        if duplicate and merge_mode == "skip":
+            summary = (
                 f"Memory not stored: duplicate of #{duplicate['fact_id']}. "
                 f"{duplicate['recommendation']}"
             )
+            return structured_result(
+                summary, status="conflict", data={"duplicate": duplicate},
+                warnings=["No new memory was created."],
+            ) if structured else summary
+        if duplicate and merge_mode == "merge":
+            fact_id = int(duplicate["fact_id"])
+            existing = self.memory.get(fact_id) or {}
+            tags = list(dict.fromkeys([*existing.get("tags", []), *(args.get("tags") or [])]))
+            links = {kind: list(values) for kind, values in existing.get("links", {}).items()}
+            for kind, values in (args.get("links") or {}).items():
+                incoming = values if isinstance(values, list) else [values]
+                links[kind] = list(dict.fromkeys([*links.get(kind, []), *(str(value) for value in incoming)]))
+            self.memory.update(
+                fact_id, tags=tags, links=links,
+                valid_from=args.get("valid_from", existing.get("valid_from")),
+                expires_at=args.get("expires_at", existing.get("expires_at")),
+                project=args.get("project", existing.get("project")),
+                change_summary="merged duplicate metadata",
+            )
+            memory = self.memory.get(fact_id) or existing
+            summary = f"Merged duplicate memory into #{fact_id}."
+            return structured_result(summary, data={"memory": memory, "duplicate": duplicate}) if structured else summary
+        importance = (
+            float(args["importance"]) if args.get("importance") is not None
+            else calculate_importance(content, category)
+        )
         fact_id = self.memory.store(
             content,
             category=category,
             confidence=confidence,
-            importance=float(args.get("importance", 0.5)),
+            importance=importance,
+            source=str(args.get("source") or "conversation"),
+            source_conversation_id=args.get("source_conversation_id"),
+            source_message_id=args.get("source_message_id"),
+            tags=args.get("tags") or [],
+            valid_from=args.get("valid_from"),
+            expires_at=args.get("expires_at"),
+            supersedes_memory_id=args.get("supersedes_memory_id"),
+            project=args.get("project"),
+            links=args.get("links") or {},
         )
-        return f"Stored memory #{fact_id}: {content}"
+        contradictions: list[dict[str, Any]] = []
+        for suggestion in suggestions:
+            if suggestion.get("kind") != "possible_conflict":
+                continue
+            other_id = int(suggestion["fact_id"])
+            self.memory._add_relation(fact_id, other_id, "contradiction", float(suggestion.get("confidence") or 0.5))
+            self.memory._add_relation(other_id, fact_id, "contradiction", float(suggestion.get("confidence") or 0.5))
+            contradictions.append(suggestion)
+        if contradictions:
+            self.memory.conn.commit()
+        summary = f"Stored memory #{fact_id}: {content}"
+        if not structured:
+            return summary
+        return structured_result(
+            summary,
+            data={"memory": self.memory.get(fact_id), "contradictions": contradictions},
+            warnings=["Potential contradiction detected; both versions were preserved."] if contradictions else [],
+            provenance={
+                "source": str(args.get("source") or "conversation"),
+                "conversation_id": args.get("source_conversation_id"),
+                "message_id": args.get("source_message_id"),
+            },
+            metrics={"calculated_importance": importance, "duplicate_candidates": len(suggestions)},
+        )
 
     def _search_memory(self, args: dict) -> str:
         """Search every local memory surface, including persisted JSONL sessions.
@@ -476,6 +544,28 @@ class ToolExecutor:
         query = str(args.get("query", "")).strip()
         limit = max(1, min(int(args.get("limit", 12)), 50))
         since = args.get("since")
+        structured = wants_structured(args)
+        mode = str(args.get("mode") or "relevant").strip().casefold()
+        filter_keys = {
+            "category", "tags", "min_confidence", "min_importance", "person", "goal",
+            "action", "file", "project", "source", "date_from", "date_to", "include_outdated",
+        }
+        if mode != "relevant" or any(key in args for key in filter_keys) or args.get("task"):
+            filters = {key: args.get(key) for key in filter_keys if key in args}
+            try:
+                records = self.memory.search_advanced(
+                    query, mode=mode, limit=limit, memory_id=args.get("memory_id"),
+                    task=str(args.get("task") or ""), filters=filters,
+                )
+            except (TypeError, ValueError) as exc:
+                return error_result(str(exc), code="validation") if structured else self._json({"ok": False, "error": str(exc)})
+            summary = f"Found {len(records)} durable memory result(s) in {mode} mode."
+            if structured:
+                return structured_result(
+                    summary, data={"mode": mode, "query": query, "results": records},
+                    provenance={"sources": ["facts"]}, metrics={"result_count": len(records)},
+                )
+            return self._json({"ok": True, "mode": mode, "query": query, "result_count": len(records), "results": records})
         requested_sources = args.get("sources") or ["facts", "people", "conversations", "sessions", "actions"]
         if isinstance(requested_sources, str):
             requested_sources = [requested_sources]
@@ -590,21 +680,61 @@ class ToolExecutor:
         }
         if not records:
             payload["message"] = f"No matching local recall records found for '{query}'."
+        if structured:
+            return structured_result(
+                payload.get("message") or f"Found {len(records)} local recall result(s).",
+                data=payload,
+                provenance={"sources": sorted(sources)},
+                metrics={"result_count": len(records), "source_counts": counts},
+            )
         return self._json(payload)
 
     def _update_memory(self, args: dict) -> str:
         fact_id = int(args["fact_id"])
-        updated = self.memory.update(
-            fact_id,
-            fact_text=args.get("content"),
-            category=args.get("category"),
-            confidence=float(args["confidence"]) if args.get("confidence") is not None else None,
-            importance=float(args["importance"]) if args.get("importance") is not None else None,
-        )
+        structured = wants_structured(args)
+        mode = str(args.get("mode") or "replace").strip().casefold()
+        if mode not in {"replace", "append", "merge", "outdated"}:
+            summary = "mode must be replace, append, merge, or outdated"
+            return error_result(summary, code="validation") if structured else summary
+        try:
+            if mode == "merge":
+                source_ids = [int(value) for value in (args.get("merge_memory_ids") or [])]
+                if not source_ids:
+                    raise ValueError("merge_memory_ids is required for merge mode")
+                memory = self.memory.merge_memories(
+                    fact_id, source_ids, expected_revision=args.get("expected_revision"),
+                )
+                summary = f"Merged {len(source_ids)} memory record(s) into #{fact_id}."
+                return structured_result(summary, data={"memory": memory, "merged_ids": source_ids}) if structured else summary
+            update_kwargs: dict[str, Any] = {
+                "fact_text": args.get("content"),
+                "category": args.get("category"),
+                "confidence": float(args["confidence"]) if args.get("confidence") is not None else None,
+                "importance": float(args["importance"]) if args.get("importance") is not None else None,
+                "append": mode == "append",
+                "mark_outdated": True if mode == "outdated" else None,
+                "expected_revision": args.get("expected_revision"),
+                "change_summary": mode,
+            }
+            for key in ("tags", "valid_from", "expires_at", "project", "links"):
+                if key in args:
+                    update_kwargs[key] = args[key]
+            updated = self.memory.update(fact_id, **update_kwargs)
+        except MemoryConflictError as exc:
+            return error_result(str(exc), code="revision_conflict", status="conflict") if structured else self._json({"ok": False, "error": str(exc), "conflict": True})
+        except (TypeError, ValueError) as exc:
+            return error_result(str(exc), code="validation") if structured else self._json({"ok": False, "error": str(exc)})
         if not updated:
-            return f"Memory #{fact_id} was not found."
+            summary = f"Memory #{fact_id} was not found."
+            return error_result(summary, code="not_found", status="not_found") if structured else summary
         memory = self.memory.get(fact_id)
-        return f"Updated memory #{fact_id}: {memory['fact_text']}"
+        summary = f"Updated memory #{fact_id}: {memory['fact_text']}"
+        if not structured:
+            return summary
+        return structured_result(
+            summary, data={"memory": memory, "history": self.memory.revision_history(fact_id)},
+            metrics={"revision": memory.get("revision") if memory else None},
+        )
 
     def _delete_memory(self, args: dict) -> str:
         fact_id = int(args["fact_id"])
@@ -628,8 +758,21 @@ class ToolExecutor:
             "relation": person.get("relation", ""),
             "phone": person.get("phone") or "",
             "email": person.get("email") or "",
+            "phone_hint": person.get("phone_hint") or "",
+            "email_hint": person.get("email_hint") or "",
             "important_dates": dict(person.get("important_dates") or {}),
             "notes": person.get("notes") or "",
+            "pronouns": person.get("pronouns") or "",
+            "preferred_address": person.get("preferred_address") or "",
+            "timezone": person.get("timezone") or "",
+            "communication_preferences": dict(person.get("communication_preferences") or {}),
+            "preferred_contact_method": person.get("preferred_contact_method") or "",
+            "organization": person.get("organization") or "",
+            "role": person.get("role") or "",
+            "interests": list(person.get("interests") or []),
+            "reminder_preferences": dict(person.get("reminder_preferences") or {}),
+            "links": dict(person.get("links") or {}),
+            "timeline": list(person.get("timeline") or []),
             "last_referenced_at": person.get("last_referenced_at"),
             "last_contacted_at": person.get("last_contacted_at"),
             "last_contacted_via": person.get("last_contacted_via"),
@@ -637,6 +780,7 @@ class ToolExecutor:
             "updated_at": person.get("updated_at"),
             "source": person.get("source", "manual"),
             "revision": person.get("revision", 1),
+            **({"match_score": person.get("match_score"), "match_reason": person.get("match_reason"), "recommended_channel": person.get("recommended_channel")} if "match_score" in person else {}),
         }
 
     def _people_unavailable(self) -> str:
@@ -645,6 +789,7 @@ class ToolExecutor:
     def _remember_person(self, args: dict) -> str:
         if self.people_store is None:
             return self._people_unavailable()
+        structured = wants_structured(args)
         try:
             person = self.people_store.create(
                 args.get("canonical_name", ""),
@@ -656,45 +801,125 @@ class ToolExecutor:
                 notes=args.get("notes", ""),
                 source=args.get("source", "manual"),
                 confidence=float(args.get("confidence", 1.0)),
+                pronouns=args.get("pronouns", ""),
+                preferred_address=args.get("preferred_address", ""),
+                timezone=args.get("timezone", ""),
+                communication_preferences=args.get("communication_preferences") or {},
+                preferred_contact_method=args.get("preferred_contact_method", ""),
+                organization=args.get("organization", ""),
+                role=args.get("role", ""),
+                interests=args.get("interests") or [],
+                reminder_preferences=args.get("reminder_preferences") or {},
+                links=args.get("links") or {},
+                timeline=args.get("timeline") or [],
             )
         except (ValueError, PersonConflictError) as exc:
-            return self._json({"ok": False, "error": str(exc)})
-        return self._json({"ok": True, "action": "remembered", "person": self._person_view(person)})
+            return error_result(str(exc), code="person_conflict" if isinstance(exc, PersonConflictError) else "validation") if structured else self._json({"ok": False, "error": str(exc)})
+        payload = self._person_view(person)
+        if structured:
+            return structured_result(
+                f"Remembered {payload['canonical_name']} as person #{payload['person_id']}.",
+                data={"action": "remembered", "person": payload},
+                provenance={"source": payload.get("source"), "explicit_tool_call": True},
+            )
+        return self._json({"ok": True, "action": "remembered", "person": payload})
 
     def _search_person(self, args: dict) -> str:
         if self.people_store is None:
             return self._people_unavailable()
+        structured = wants_structured(args)
+        include_sensitive = bool(args.get("include_sensitive", True))
         try:
-            people = self.people_store.search(
-                args.get("query", ""),
-                limit=int(args.get("limit", 5)),
-                include_sensitive=True,
+            people = self.people_store.search_advanced(
+                args.get("query", ""), limit=int(args.get("limit", 5)),
+                relation=str(args.get("relation") or ""), channel=str(args.get("channel") or ""),
+                purpose=str(args.get("purpose") or ""), include_sensitive=include_sensitive,
             )
         except ValueError as exc:
-            return self._json({"ok": False, "error": str(exc)})
-        return self._json({"ok": True, "people": [self._person_view(person) for person in people]})
+            return error_result(str(exc), code="validation") if structured else self._json({"ok": False, "error": str(exc)})
+        views = [self._person_view(person) for person in people]
+        if structured:
+            ambiguous = len(views) > 1 and abs(float(views[0].get("match_score") or 0) - float(views[1].get("match_score") or 0)) < 0.08
+            return structured_result(
+                f"Found {len(views)} matching people record(s).",
+                data={"people": views, "ambiguous": ambiguous},
+                warnings=["Multiple similarly ranked people require disambiguation before an external action."] if ambiguous else [],
+                metrics={"result_count": len(views)},
+            )
+        return self._json({"ok": True, "people": views})
 
     def _update_person(self, args: dict) -> str:
         if self.people_store is None:
             return self._people_unavailable()
+        structured = wants_structured(args)
+        person_id = int(args.get("person_id", 0))
+        mode = str(args.get("mode") or "replace").strip().casefold()
+        if mode not in {"replace", "aliases", "append_note", "merge"}:
+            summary = "mode must be replace, aliases, append_note, or merge"
+            return error_result(summary, code="validation") if structured else self._json({"ok": False, "error": summary})
+        if mode == "merge":
+            try:
+                duplicate_id = int(args.get("merge_person_id") or 0)
+                if not duplicate_id:
+                    raise ValueError("merge_person_id is required for merge mode")
+                person = self.people_store.merge_people(
+                    person_id, duplicate_id, expected_revision=args.get("expected_revision"),
+                )
+            except (TypeError, ValueError, PersonConflictError) as exc:
+                code = "person_conflict" if isinstance(exc, PersonConflictError) else "validation"
+                return error_result(str(exc), code=code, status="conflict" if isinstance(exc, PersonConflictError) else "failed") if structured else self._json({"ok": False, "error": str(exc)})
+            view = self._person_view(person)
+            summary = f"Merged person #{duplicate_id} into #{person_id}."
+            return structured_result(summary, data={"action": "merged", "person": view, "merged_person_id": duplicate_id}) if structured else self._json({"ok": True, "action": "merged", "person": view})
+
         updates = {
             key: args[key]
-            for key in ("canonical_name", "aliases", "relation", "phone", "email", "important_dates", "notes", "source", "confidence")
+            for key in (
+                "canonical_name", "aliases", "relation", "phone", "email", "important_dates", "notes",
+                "source", "confidence", "pronouns", "preferred_address", "timezone",
+                "communication_preferences", "preferred_contact_method", "organization", "role",
+                "interests", "reminder_preferences", "links", "timeline",
+            )
             if key in args
         }
+        existing = self.people_store.get(person_id, include_sensitive=True)
+        if existing is None:
+            summary = "Person not found."
+            return error_result(summary, code="not_found", status="not_found") if structured else self._json({"ok": False, "error": summary})
+        if mode == "aliases":
+            aliases = list(existing.get("aliases") or [])
+            aliases.extend(str(value) for value in (args.get("add_aliases") or []))
+            remove = {normalize_reference(value) for value in (args.get("remove_aliases") or [])}
+            updates["aliases"] = [value for value in dict.fromkeys(aliases) if normalize_reference(value) not in remove]
+        if mode == "append_note":
+            addition = str(args.get("append_note") or "").strip()
+            if not addition:
+                summary = "append_note is required for append_note mode"
+                return error_result(summary, code="validation") if structured else self._json({"ok": False, "error": summary})
+            updates["notes"] = "\n".join(part for part in (str(existing.get("notes") or "").rstrip(), addition) if part)
         if not updates:
-            return self._json({"ok": False, "error": "Provide at least one person field to update."})
+            summary = "Provide at least one person field to update."
+            return error_result(summary, code="validation") if structured else self._json({"ok": False, "error": summary})
         try:
             person = self.people_store.update(
-                int(args.get("person_id", 0)),
+                person_id,
                 expected_revision=args.get("expected_revision"),
                 **updates,
             )
         except (ValueError, PersonConflictError) as exc:
-            return self._json({"ok": False, "error": str(exc)})
+            code = "person_conflict" if isinstance(exc, PersonConflictError) else "validation"
+            return error_result(str(exc), code=code, status="conflict" if isinstance(exc, PersonConflictError) else "failed") if structured else self._json({"ok": False, "error": str(exc)})
         if person is None:
-            return self._json({"ok": False, "error": "Person not found."})
-        return self._json({"ok": True, "action": "updated", "person": self._person_view(person)})
+            summary = "Person not found."
+            return error_result(summary, code="not_found", status="not_found") if structured else self._json({"ok": False, "error": summary})
+        view = self._person_view(person)
+        if structured:
+            return structured_result(
+                f"Updated {view['canonical_name']} (revision {view['revision']}).",
+                data={"action": "updated", "person": view, "history": self.people_store.revision_history(person_id)},
+                metrics={"revision": view["revision"]},
+            )
+        return self._json({"ok": True, "action": "updated", "person": view})
 
     def _forget_person(self, args: dict) -> str:
         if self.people_store is None:

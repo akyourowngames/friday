@@ -48,7 +48,7 @@ def memory_rejection_reason(
         return "memory is too short"
     if confidence < LOW_CONFIDENCE_THRESHOLD:
         return "memory confidence is too low"
-    if category not in {"preference", "fact", "belief", "habit", "relationship", "note"}:
+    if category not in {"preference", "fact", "belief", "habit", "relationship", "project", "plan", "note"}:
         return "memory category is invalid"
     if _INSULT_RE.search(lowered) and not re.search(r"\b(prefers|likes|dislikes|avoids)\b", lowered):
         return "memory looks like a transient insult or mood"
