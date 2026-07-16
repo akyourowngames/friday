@@ -95,7 +95,9 @@ class TestWebSearch:
             {"title": "Fallback", "url": "https://example.com", "snippet": "Fallback snippet."}
         ], [])
 
-        payload = web_search_payload("test query", provider="auto")
+        # This test verifies provider selection, not live page retrieval. Keep
+        # it deterministic instead of depending on example.com availability.
+        payload = web_search_payload("test query", provider="auto", fetch_top=0)
 
         mock_tavily.assert_not_called()
         assert payload["provider"] == "ddgs"

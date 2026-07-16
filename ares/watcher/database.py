@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS events (
  event_type TEXT NOT NULL, old_value TEXT, new_value TEXT, change_summary TEXT,
  severity TEXT NOT NULL DEFAULT 'info', notified INTEGER NOT NULL DEFAULT 0,
  acknowledged INTEGER NOT NULL DEFAULT 0, ai_analyzed INTEGER NOT NULL DEFAULT 0,
- ai_summary TEXT, created_at TEXT NOT NULL
+ ai_summary TEXT, confidence REAL NOT NULL DEFAULT 1.0, change_percent REAL,
+ suppressed INTEGER NOT NULL DEFAULT 0, suppression_reason TEXT, feedback TEXT,
+ feedback_note TEXT, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS notifications (
  id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -105,7 +107,12 @@ class WatcherDatabase:
                 "last_duration_ms":"INTEGER", "last_error":"TEXT",
                 "lease_owner":"TEXT", "lease_expires_at":"TEXT",
             },
-            "events": {"acknowledged":"INTEGER NOT NULL DEFAULT 0", "ai_summary":"TEXT"},
+            "events": {
+                "acknowledged":"INTEGER NOT NULL DEFAULT 0", "ai_summary":"TEXT",
+                "confidence":"REAL NOT NULL DEFAULT 1.0", "change_percent":"REAL",
+                "suppressed":"INTEGER NOT NULL DEFAULT 0", "suppression_reason":"TEXT",
+                "feedback":"TEXT", "feedback_note":"TEXT",
+            },
             "notifications": {"attempts":"INTEGER NOT NULL DEFAULT 0", "next_retry_at":"TEXT"},
         }
         for table, columns in additions.items():
@@ -205,10 +212,15 @@ class WatcherDatabase:
 
     def insert_event(self, event: Event) -> None:
         with self.transaction() as conn:
-            conn.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+            conn.execute("""INSERT INTO events
+             (id,monitor_id,event_type,old_value,new_value,change_summary,severity,notified,acknowledged,
+              ai_analyzed,ai_summary,confidence,change_percent,suppressed,suppression_reason,feedback,feedback_note,created_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 event.id, event.monitor_id, event.event_type, event.old_value, event.new_value,
                 event.change_summary, event.severity, int(event.notified), int(event.acknowledged),
-                int(event.ai_analyzed), event.ai_summary, event.created_at.isoformat(),
+                int(event.ai_analyzed), event.ai_summary, event.confidence, event.change_percent,
+                int(event.suppressed), event.suppression_reason, event.feedback, event.feedback_note,
+                event.created_at.isoformat(),
             ))
 
     def get_event(self, event_id: str) -> Event | None:
@@ -219,9 +231,11 @@ class WatcherDatabase:
     def list_events(self, monitor_id: str | None = None, *, limit: int = 100, severity: str | None = None, unacknowledged: bool = False) -> list[Event]:
         clauses, params = [], []
         if monitor_id:
-            clauses.append("monitor_id=?"); params.append(monitor_id)
+            clauses.append("monitor_id=?")
+            params.append(monitor_id)
         if severity:
-            clauses.append("severity=?"); params.append(severity)
+            clauses.append("severity=?")
+            params.append(severity)
         if unacknowledged:
             clauses.append("acknowledged=0")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -238,9 +252,12 @@ class WatcherDatabase:
         with self.transaction() as conn:
             conn.execute("UPDATE events SET notified=1 WHERE id=?", (event_id,))
 
-    def acknowledge_event(self, event_id: str, acknowledged: bool = True) -> bool:
+    def acknowledge_event(self, event_id: str, acknowledged: bool = True, *, feedback: str | None = None, feedback_note: str | None = None) -> bool:
         with self.transaction() as conn:
-            return conn.execute("UPDATE events SET acknowledged=? WHERE id=?", (int(acknowledged), event_id)).rowcount > 0
+            return conn.execute(
+                "UPDATE events SET acknowledged=?,feedback=COALESCE(?,feedback),feedback_note=COALESCE(?,feedback_note) WHERE id=?",
+                (int(acknowledged), feedback, feedback_note, event_id),
+            ).rowcount > 0
 
     def update_event_analysis(self, event_id: str, summary: str) -> None:
         with self.transaction() as conn:
@@ -267,7 +284,8 @@ class WatcherDatabase:
         query = "SELECT * FROM notifications"
         params: tuple[Any, ...] = ()
         if event_id:
-            query += " WHERE event_id=?"; params = (event_id,)
+            query += " WHERE event_id=?"
+            params = (event_id,)
         with self._lock:
             rows = self.conn.execute(query + " ORDER BY rowid DESC LIMIT ?", (*params, limit)).fetchall()
         return [Notification(id=r["id"], event_id=r["event_id"], channel=r["channel"], status=r["status"], attempts=r["attempts"], next_retry_at=_dt(r["next_retry_at"]), sent_at=_dt(r["sent_at"]), error=r["error"]) for r in rows]
@@ -291,7 +309,8 @@ class WatcherDatabase:
     def list_check_runs(self, monitor_id: str | None = None, limit: int = 200) -> list[CheckRun]:
         query, params = "SELECT * FROM check_runs", []
         if monitor_id:
-            query += " WHERE monitor_id=?"; params.append(monitor_id)
+            query += " WHERE monitor_id=?"
+            params.append(monitor_id)
         with self._lock:
             rows = self.conn.execute(query + " ORDER BY started_at DESC LIMIT ?", (*params, limit)).fetchall()
         return [CheckRun(id=r["id"], monitor_id=r["monitor_id"], status=r["status"], started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]), duration_ms=r["duration_ms"], changed=bool(r["changed"]), http_status=r["http_status"], bytes_received=r["bytes_received"], error=r["error"]) for r in rows]
@@ -338,4 +357,7 @@ class WatcherDatabase:
     def _row_event(r: sqlite3.Row) -> Event:
         return Event(id=r["id"],monitor_id=r["monitor_id"],event_type=r["event_type"],old_value=r["old_value"],
             new_value=r["new_value"],change_summary=r["change_summary"],severity=r["severity"],notified=bool(r["notified"]),
-            acknowledged=bool(r["acknowledged"]),ai_analyzed=bool(r["ai_analyzed"]),ai_summary=r["ai_summary"],created_at=_dt(r["created_at"]))
+            acknowledged=bool(r["acknowledged"]),ai_analyzed=bool(r["ai_analyzed"]),ai_summary=r["ai_summary"],
+            confidence=float(r["confidence"] if r["confidence"] is not None else 1.0), change_percent=r["change_percent"],
+            suppressed=bool(r["suppressed"]), suppression_reason=r["suppression_reason"],
+            feedback=r["feedback"], feedback_note=r["feedback_note"], created_at=_dt(r["created_at"]))

@@ -22,6 +22,11 @@ from typing import Any, Callable, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ares.cron.schedule_utils import next_run_utc, parse_natural_schedule, validate_cron
+from ares.cron.policy import (
+    cron_policy_block_reason,
+    normalize_cron_policy,
+    validate_dependency_graph,
+)
 
 
 class CronConflictError(RuntimeError):
@@ -99,11 +104,12 @@ class CronStore:
     """A small, transactional JSON store with leases for active jobs."""
 
     _ALLOWED_STATES = {"scheduled", "running", "completed", "failed"}
-    _USER_UPDATABLE = {"name", "prompt", "cron", "timezone", "enabled", "max_iterations"}
+    _USER_UPDATABLE = {"name", "prompt", "cron", "timezone", "enabled", "max_iterations", "policy"}
     _SYSTEM_UPDATABLE = {
         "state", "next_run_at", "last_run_at", "run_count", "last_status",
         "last_log_path", "lease_id", "lease_expires_at", "last_heartbeat_at",
         "run_started_at", "output_dir",
+        "run_history", "consecutive_failures", "retry_count", "last_block_reason",
     }
 
     def __init__(self, data_dir: str | Path | None = None):
@@ -196,6 +202,15 @@ class CronStore:
         maximum = job.get("max_iterations")
         if maximum is not None and (isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1):
             raise ValueError("Cron job max_iterations must be a positive integer or null")
+        job["policy"] = normalize_cron_policy(job.get("policy") or {})
+        history = job.setdefault("run_history", [])
+        if not isinstance(history, list) or len(history) > 1000:
+            raise ValueError("Cron job run_history must be a bounded array")
+        for item in history:
+            _parse_iso(item)
+        for key in ("consecutive_failures", "retry_count"):
+            if not isinstance(job.setdefault(key, 0), int) or job[key] < 0:
+                raise ValueError(f"Cron job {key} must be a non-negative integer")
         for key in ("next_run_at", "last_run_at", "lease_expires_at", "last_heartbeat_at", "run_started_at"):
             value = job.get(key)
             if value is not None:
@@ -218,6 +233,7 @@ class CronStore:
             if name in seen_names:
                 raise ValueError("Cron store contains duplicate job names")
             seen_names.add(name)
+        validate_dependency_graph(data["jobs"])
 
     def _transaction(
         self,
@@ -254,6 +270,7 @@ class CronStore:
         timezone_name: str,
         enabled: bool,
         max_iterations: int | None,
+        policy: dict[str, Any] | None,
     ) -> dict[str, Any]:
         now = utc_now()
         job = {
@@ -271,12 +288,17 @@ class CronStore:
             "last_status": None,
             "last_log_path": None,
             "max_iterations": max_iterations,
+            "policy": normalize_cron_policy(policy or {}),
             "output_dir": str(self.log_dir(job_id)),
             "revision": 1,
             "lease_id": None,
             "lease_expires_at": None,
             "last_heartbeat_at": None,
             "run_started_at": None,
+            "run_history": [],
+            "consecutive_failures": 0,
+            "retry_count": 0,
+            "last_block_reason": None,
         }
         job["next_run_at"] = next_run_utc(job["cron"], job["timezone"])
         self._validate_job(job)
@@ -290,6 +312,7 @@ class CronStore:
         timezone: str = "UTC",
         enabled: bool = True,
         max_iterations: int | None = None,
+        policy: dict[str, Any] | None = None,
         *,
         expected_store_revision: int | None = None,
     ) -> dict[str, Any]:
@@ -312,7 +335,9 @@ class CronStore:
             while job_id in jobs:
                 job_id = f"{base}-{suffix}"
                 suffix += 1
-            job = self._new_job(job_id, name, prompt, cron, timezone or "UTC", bool(enabled), max_iterations)
+            job = self._new_job(
+                job_id, name, prompt, cron, timezone or "UTC", bool(enabled), max_iterations, policy,
+            )
             jobs[job_id] = job
             return job
 
@@ -363,6 +388,8 @@ class CronStore:
                 candidate["timezone"] = self._validate_timezone(str(candidate["timezone"]))
             if "cron" in updates or "timezone" in updates:
                 candidate["next_run_at"] = next_run_utc(candidate["cron"], candidate["timezone"])
+            if "policy" in updates:
+                candidate["policy"] = normalize_cron_policy(candidate.get("policy") or {})
             # Preserve the legacy internal state-update API while retaining
             # the invariant that a running job always has a recoverable lease.
             # Public execution uses claim_job instead.
@@ -443,14 +470,40 @@ class CronStore:
     def get_due_jobs(self, now: str | None = None) -> list[dict[str, Any]]:
         now_dt = _parse_iso(now or utc_now())
         self.recover_expired_leases(now_dt)
+        self._advance_skipped_missed_runs(now_dt)
         data = self._read()
         due = []
         for job in data.get("jobs", {}).values():
             if not job.get("enabled", True) or job.get("state") == "running" or not job.get("next_run_at"):
                 continue
             if _parse_iso(job["next_run_at"]) <= now_dt:
-                due.append(job)
+                reason = cron_policy_block_reason(job, data.get("jobs", {}), now=now_dt)
+                if not reason:
+                    due.append(job)
         return [self._copy(job) for job in sorted(due, key=lambda job: job.get("next_run_at", ""))]
+
+    def _advance_skipped_missed_runs(self, now: datetime) -> None:
+        snapshot = self._read()
+
+        def should_skip(job: dict[str, Any]) -> bool:
+            missed = (job.get("policy") or {}).get("missed_runs") or {}
+            if missed.get("mode") != "skip" or not job.get("next_run_at"):
+                return False
+            delay = (now - _parse_iso(job["next_run_at"])).total_seconds()
+            return delay > int(missed.get("grace_seconds", 300))
+
+        if not any(should_skip(job) for job in snapshot.get("jobs", {}).values()):
+            return
+
+        def mutate(data: dict[str, Any]) -> None:
+            for job in data.setdefault("jobs", {}).values():
+                if not should_skip(job) or job.get("state") == "running":
+                    continue
+                job["last_status"] = "missed_skipped"
+                job["next_run_at"] = next_run_utc(job["cron"], job["timezone"], now)
+                job["revision"] = int(job.get("revision", 0)) + 1
+
+        self._transaction(mutate)
 
     def claim_job(self, job_id: str, *, lease_seconds: int = 900) -> dict[str, Any]:
         duration = max(1, int(lease_seconds))
@@ -462,6 +515,9 @@ class CronStore:
             now = datetime.now(timezone.utc)
             if job.get("state") == "running" and not self._lease_expired(job, now):
                 raise CronAlreadyRunningError(f"Cron job '{job_id}' is already running")
+            block_reason = cron_policy_block_reason(job, data.get("jobs", {}), now=now)
+            if block_reason:
+                raise CronConflictError(f"Cron job '{job_id}' is blocked by policy: {block_reason}")
             # An expired lease is considered a completed failed attempt before
             # the new run takes ownership.  Count only the newly accepted run.
             lease_id = uuid.uuid4().hex
@@ -476,6 +532,8 @@ class CronStore:
                 last_status=None,
                 run_count=int(job.get("run_count") or 0) + 1,
                 revision=int(job.get("revision", 0)) + 1,
+                run_history=[*job.get("run_history", []), now_text][-1000:],
+                last_block_reason=None,
             )
             return job
 
@@ -524,6 +582,26 @@ class CronStore:
                 last_heartbeat_at=finished,
                 revision=int(job.get("revision", 0)) + 1,
             )
+            if status == "completed":
+                job["consecutive_failures"] = 0
+                job["retry_count"] = 0
+            else:
+                job["consecutive_failures"] = int(job.get("consecutive_failures") or 0) + 1
+                retry = (job.get("policy") or {}).get("retry") or {}
+                current_retry = int(job.get("retry_count") or 0)
+                if retry and current_retry + 1 < int(retry.get("max_attempts", 1)):
+                    delay = min(
+                        int(float(retry.get("base_seconds", 60)) * (float(retry.get("multiplier", 2.0)) ** current_retry)),
+                        int(retry.get("max_seconds", 21_600)),
+                    )
+                    job["retry_count"] = current_retry + 1
+                    job["state"] = "scheduled"
+                    job["next_run_at"] = (
+                        _parse_iso(finished) + timedelta(seconds=delay)
+                    ).isoformat().replace("+00:00", "Z")
+                pause_after = (job.get("policy") or {}).get("pause_after_failures")
+                if pause_after and job["consecutive_failures"] >= int(pause_after):
+                    job["enabled"] = False
             return job
 
         return self._transaction(mutate)

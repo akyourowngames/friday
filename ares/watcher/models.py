@@ -121,6 +121,12 @@ class Event:
     acknowledged: bool = False
     ai_analyzed: bool = False
     ai_summary: str | None = None
+    confidence: float = 1.0
+    change_percent: float | None = None
+    suppressed: bool = False
+    suppression_reason: str | None = None
+    feedback: str | None = None
+    feedback_note: str | None = None
     created_at: datetime = field(default_factory=utc_now)
 
     def to_dict(self) -> dict[str, Any]:

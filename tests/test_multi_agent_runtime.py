@@ -10,7 +10,14 @@ import pytest
 
 from ares.agent import Agent
 from ares.models import AppConfig, MultiAgentConfig
-from ares.multi_agent import AgentExecutionContext, AgentOutput, AgentProgressEvent, AgentSpec, AgentTask
+from ares.multi_agent import (
+    AgentCapability,
+    AgentExecutionContext,
+    AgentOutput,
+    AgentProgressEvent,
+    AgentSpec,
+    AgentTask,
+)
 from ares.multi_agent_display import active_runs, summarize_runs, telegram_overview, telegram_run
 from ares.multi_agent_adapter import AresAgentAdapter
 from ares.multi_agent_policy import (
@@ -178,6 +185,65 @@ async def test_runtime_enforces_limits_adds_review_persists_and_streams(tmp_path
     assert "orchestration_started" in events
     assert "synthesis_started" in events
     assert "orchestration_completed" in events
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_trusted_local_profile_reaches_all_registered_execution_tools(tmp_path: Path) -> None:
+    runtime = MultiAgentRuntime(FakeRoot(
+        tmp_path,
+        require_review_for_mutations=False,
+        builder_worktree_isolation=False,
+    ))
+    seen: list[AgentSpec] = []
+
+    async def executor(spec, task, context):
+        seen.append(spec)
+        return AgentOutput(content="complete", summary="complete")
+
+    runtime.adapter = executor  # type: ignore[assignment]
+    arguments = {
+        "agent": "researcher",
+        "task": "Inspect the configured tools",
+        "execution_profile": "trusted_local",
+        # Tool-call JSON cannot self-authorize the broader profile.
+        "trusted_local_authorized": True,
+    }
+    denied = json.loads(await runtime.execute_tool(
+        "delegate_task",
+        arguments,
+        session_id="owner-session",
+    ))
+    assert denied["status"] == "failed"
+    assert "explicit current-turn owner authorization" in denied["error"]
+    assert not seen
+
+    result = json.loads(await runtime.execute_tool(
+        "delegate_task",
+        arguments,
+        session_id="owner-session",
+        trusted_local_authorized=True,
+    ))
+
+    assert result["status"] == "succeeded"
+    assert seen[0].allowed_tools == ("*",)
+    assert seen[0].can_mutate
+    assert AgentCapability.EXTERNAL_MUTATION in seen[0].capabilities
+    root = runtime.get_run(result["root_run_id"], session_id="owner-session")
+    assert root is not None
+    assert root["metadata"]["execution_profile"] == "trusted_local"
+
+    listed = json.loads(await runtime.execute_tool(
+        "list_agents",
+        {"execution_profile": "trusted_local"},
+        session_id="owner-session",
+    ))
+    researcher = next(item for item in listed["agents"] if item["name"] == "researcher")
+    assert researcher["allowed_tools"] == ["*"]
+    assert "external_mutation" in researcher["capability_grants"]
+    reviewer = next(item for item in listed["agents"] if item["name"] == "reviewer")
+    assert not reviewer["can_mutate"]
+    assert "external_mutation" not in reviewer["capability_grants"]
     await runtime.close()
 
 
