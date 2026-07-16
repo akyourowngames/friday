@@ -50,8 +50,15 @@ def create_workspace_app(
     artifact_roots: list[str | Path] | None = None,
     voice_config_provider: Callable[[], Any] | None = None,
     artifact_resolver: Callable[[str], str | Path | None] | None = None,
+    vision_service: Any | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Ares Workspace", version="1.0.0", docs_url=None, redoc_url=None)
+    if vision_service is not None:
+        # Keep image pixels inside VisionService.  The router only presents
+        # structured observations/events to the local workspace.
+        from ares.vision.api import create_vision_router
+
+        app.include_router(create_vision_router(vision_service))
     static_dir = resolve_workspace_static_dir()
     safe_artifact_roots = [
         Path(root).expanduser().resolve()

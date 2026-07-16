@@ -16,6 +16,8 @@ from ares.turn_policy import (
     classify_turn_intent,
     issue_action_grant,
 )
+from ares.tool_registry import RootToolRegistry
+from ares.tools.definitions import get_tool_definitions
 
 
 @pytest.mark.parametrize("text", ["hey", "hello!", "thanks", "yo", "okay"])
@@ -39,6 +41,57 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent(
         "hey can you launch multiple agents to research on corruption"
     ) is TurnIntent.DELEGATION
+
+
+@pytest.mark.parametrize(
+    ("user_request", "expected_tool"),
+    [
+        ("Ares, look at my desk and tell me what you see.", "vision_observe"),
+        ("Ares, watch this cup and tell me when it is moved.", "vision_watch"),
+        ("Ares, notify me when the download shown on my screen finishes.", "vision_watch"),
+        ("Ares, compare the current setup with the previous image.", "vision_compare"),
+        ("Ares, verify whether I connected the components correctly.", "vision_verify"),
+        ("Ares, read the error visible on my screen.", "vision_observe"),
+        ("Read any visible text on my screen.", "vision_observe"),
+        ("Start my camera and let me observe it.", "vision_start_source"),
+        ("Ares, remember where I placed my charger.", "vision_remember"),
+        ("Ares, stop watching.", "vision_cancel_watch"),
+        ("Ares, stop all cameras.", "vision_stop_all_sources"),
+        ("Ares, forget what you saw during the last hour.", "vision_erase_recent_events"),
+        ("Ares, delete the saved frame for that memory.", "vision_delete_memory_frame"),
+    ],
+)
+def test_vision_v1_requests_are_routed_to_the_local_vision_tool_surface(
+    user_request: str,
+    expected_tool: str,
+) -> None:
+    context = build_turn_execution_context(user_request)
+    registry = RootToolRegistry(get_tool_definitions())
+    names = {item["function"]["name"] for item in registry.select_for_turn(context)}
+
+    assert context.intent is TurnIntent.LOCAL_MUTATION
+    assert "vision" in context.explicit_targets
+    assert expected_tool in names
+
+
+def test_screen_read_request_does_not_expose_desktop_control_tools() -> None:
+    schemas = get_tool_definitions() + [{
+        "type": "function",
+        "function": {
+            "name": "mcp__windows__TakeScreenshot",
+            "description": "test-only desktop screenshot schema",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+    context = build_turn_execution_context("Read any visible text on my screen.")
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(schemas).select_for_turn(context)
+    }
+
+    assert context.intent is TurnIntent.LOCAL_MUTATION
+    assert "vision_observe" in names
+    assert "mcp__windows__TakeScreenshot" not in names
 
 
 def test_conversation_turn_hard_denies_stale_action_calls() -> None:

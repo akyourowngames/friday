@@ -767,6 +767,12 @@ class Agent:
         self.config = config
         self.llm.config = config
         self.tool_executor.config = config
+        vision_service = getattr(self.tool_executor, "vision_service", None)
+        if vision_service is not None:
+            vision_service.config = config.vision
+            privacy = getattr(vision_service, "privacy", None)
+            if privacy is not None:
+                privacy.apply_config(config.vision)
         if getattr(self.tool_executor, "telephony", None) is not None:
             self.tool_executor.telephony.apply_config(config)
         self.set_model(config.model)
@@ -2281,5 +2287,5 @@ class Agent:
         if self.multi_agent_runtime is not None and self.delegation_depth == 0:
             await self.multi_agent_runtime.close()
         if self._owns_tool_executor:
-            self.tool_executor.close()
+            await self.tool_executor.shutdown()
         await self.llm.close()
