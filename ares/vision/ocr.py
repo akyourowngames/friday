@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
@@ -84,9 +85,13 @@ class PaddleOCRReader:
                 use_angle_cls=self.use_angle_classification,
                 show_log=False,
             )
-        except TypeError:
-            # PaddleOCR 3.x removed/renamed a few constructor switches.  A
-            # minimal language-only construction keeps this provider usable
+        except (TypeError, ValueError) as exc:
+            # PaddleOCR 3.x removed/renamed a few constructor switches. Some
+            # releases report this as ``ValueError: Unknown argument`` rather
+            # than a TypeError, so retry only that compatibility failure.
+            if isinstance(exc, ValueError) and "unknown argument" not in str(exc).casefold():
+                raise
+            # A minimal language-only construction keeps this provider usable
             # across supported local releases.
             return constructor(lang=self.language)
 
@@ -106,6 +111,70 @@ class PaddleOCRReader:
         if hasattr(reader, "predict"):
             return reader.predict(payload)
         raise VisionProviderError("Configured PaddleOCR reader exposes neither ocr() nor predict().")
+
+
+class EasyOCRReader:
+    """EasyOCR provider used by default on Windows local runtimes.
+
+    Some PaddleOCR 3.x CPU wheels currently fail in Windows' oneDNN runtime.
+    EasyOCR runs entirely locally and gives the same small ``list[str]`` OCR
+    contract without making screen-reading depend on that native backend.
+    """
+
+    def __init__(
+        self,
+        *,
+        language: str = "en",
+        reader: Any | None = None,
+        gpu: bool = False,
+    ) -> None:
+        self.language = str(language).strip() or "en"
+        self.gpu = bool(gpu)
+        self._reader = reader
+        self._load_lock: asyncio.Lock | None = None
+
+    @property
+    def loaded(self) -> bool:
+        return self._reader is not None
+
+    async def warmup(self) -> None:
+        await self._ensure_reader()
+
+    async def read(self, frame: VisionFrame) -> list[str]:
+        if frame.image is None:
+            raise ValueError("OCR requires a VisionFrame with an in-memory image")
+        reader = await self._ensure_reader()
+        try:
+            result = await asyncio.to_thread(self._read_sync, reader, frame.image)
+        except VisionDependencyError:
+            raise
+        except Exception as exc:
+            raise VisionProviderError(f"EasyOCR could not read the frame: {exc}") from exc
+        return _extract_text_lines(result)
+
+    async def _ensure_reader(self) -> Any:
+        if self._reader is not None:
+            return self._reader
+        if self._load_lock is None:
+            self._load_lock = asyncio.Lock()
+        async with self._load_lock:
+            if self._reader is None:
+                self._reader = await asyncio.to_thread(self._load_reader)
+        return self._reader
+
+    def _load_reader(self) -> Any:
+        module = require_optional_dependency("easyocr", package_name="easyocr")
+        constructor = getattr(module, "Reader", None)
+        if constructor is None:
+            raise VisionDependencyError("easyocr", detail="The installed package does not expose Reader.")
+        return constructor([self.language], gpu=self.gpu, verbose=False)
+
+    @staticmethod
+    def _read_sync(reader: Any, image: Any) -> Any:
+        import numpy as np
+
+        payload = np.asarray(image.convert("RGB")) if hasattr(image, "convert") else image
+        return reader.readtext(payload, detail=0, paragraph=False)
 
 
 def _extract_text_lines(result: Any) -> list[str]:
@@ -155,9 +224,11 @@ def _extract_text_lines(result: Any) -> list[str]:
     return lines
 
 
-def create_default_ocr(**kwargs: Any) -> PaddleOCRReader:
-    """Create the default lazy OCR provider without importing PaddleOCR yet."""
+def create_default_ocr(**kwargs: Any) -> PaddleOCRReader | EasyOCRReader:
+    """Create the default lazy OCR provider for the current local runtime."""
 
+    if sys.platform == "win32":
+        return EasyOCRReader(**kwargs)
     return PaddleOCRReader(**kwargs)
 
 
@@ -169,6 +240,7 @@ OCRUnavailableError = VisionDependencyError
 __all__ = [
     "NullOCR",
     "OCRUnavailableError",
+    "EasyOCRReader",
     "PaddleOCRProvider",
     "PaddleOCRReader",
     "VisionOCR",

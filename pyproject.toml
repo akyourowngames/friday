@@ -49,6 +49,7 @@ vision = [
     "supervision>=0.25",
     "paddleocr>=2.9",
     "paddlepaddle>=3.0",
+    "easyocr>=1.7",
     "mss>=9.0",
 ]
 # Compatibility extra retained for existing install commands. Watchers are now

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
 from ares.vision.capture import ImageCapture
 from ares.vision.models import SceneSnapshot, VisionFrame, VisionSourceType
-from ares.vision.ocr import PaddleOCRReader
+from ares.vision.ocr import EasyOCRReader, PaddleOCRReader
 from ares.vision.privacy import (
     VisionPermissionController,
     VisionPrivacyConfig,
@@ -109,3 +110,32 @@ async def test_lazy_ocr_and_detector_accept_injected_fakes_without_optional_pack
     assert len(objects) == 1
     assert objects[0].label == "cup"
     assert objects[0].bounding_box == (1, 2, 8, 9)
+
+
+def test_paddle_ocr_retries_when_v3_rejects_legacy_options(monkeypatch) -> None:
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            if "show_log" in kwargs:
+                raise ValueError("Unknown argument: show_log")
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "ares.vision.ocr.require_optional_dependency",
+        lambda *_args, **_kwargs: SimpleNamespace(PaddleOCR=FakePaddleOCR),
+    )
+
+    reader = PaddleOCRReader(language="en")
+    loaded = reader._load_reader()
+
+    assert loaded.kwargs == {"lang": "en"}
+
+
+@pytest.mark.asyncio
+async def test_easy_ocr_normalises_injected_reader_output() -> None:
+    class FakeEasyOCR:
+        def readtext(self, image, **kwargs):
+            return ["Visible text", "Another line"]
+
+    frame = VisionFrame(source_id="screen", source_type=VisionSourceType.SCREEN, image=Image.new("RGB", (10, 10)))
+
+    assert await EasyOCRReader(reader=FakeEasyOCR()).read(frame) == ["Visible text", "Another line"]

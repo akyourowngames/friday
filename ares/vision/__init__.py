@@ -36,6 +36,7 @@ from .models import (
     VisualEvent,
 )
 from .ocr import (
+    EasyOCRReader,
     NullOCR,
     OCRUnavailableError,
     PaddleOCRProvider,
@@ -56,6 +57,7 @@ from .providers.base import VisionDependencyError, VisionProviderError
 __all__ = [
     "CameraCapture",
     "DetectedObject",
+    "EasyOCRReader",
     "DetectorUnavailableError",
     "ImageCapture",
     "ImageFileCapture",
