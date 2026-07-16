@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
+import subprocess
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -78,6 +80,10 @@ from ares.tools import kdeconnect_bridge as _kdeconnect_bridge
 from ares.tools.shell_execution import resolve_project_command
 from ares.tools.project_checks import run_project_check
 from ares.tools.results import error_result, structured_result, wants_structured
+from ares.tools.file_upgrades import (
+    advanced_edit, advanced_read, advanced_search, advanced_write, plan_batch, project_scan,
+)
+from ares.tools.runtime_upgrades import RuntimeUpgradeManager
 from ares.telephony import TelephonyManager, TelephonyStore
 from ares.telephony.models import CallStatus
 from ares.watcher.database import resolve_watcher_database_path
@@ -196,12 +202,17 @@ class ToolExecutor:
         if self.goal_tools is not None:
             self.goal_tools.watcher_db_provider = lambda: self.watcher_tools.db
         self.research = ResearchWorkspace(session_data_dir or data_root or Path("~/.ares/data").expanduser())
+        self.runtime_upgrades = RuntimeUpgradeManager(
+            self.repl,
+            (session_data_dir or data_root or Path("~/.ares/data").expanduser()) / "runtime",
+        )
         # Set by the local Telegram channel at runtime. Keeping the bridge
         # unattached by default prevents a web/CLI process from sending files.
         self.telegram_channel: Any | None = None
 
     def close(self) -> None:
         """Clean up persistent sessions."""
+        self.runtime_upgrades.close()
         self.repl.close()
         self.watcher_tools.close()
         if self._owns_people_store and self.people_store is not None:
@@ -1760,6 +1771,21 @@ class ToolExecutor:
     # ── Filesystem (read) tools ────────────────────────────────────
 
     def _read_file(self, args: dict) -> str:
+        advanced = str(args.get("mode") or "lines").casefold() != "lines" or wants_structured(args) or any(
+            key in args for key in ("symbol", "heading", "selector", "cursor", "encoding")
+        )
+        if advanced:
+            try:
+                data = advanced_read(args)
+            except (OSError, UnicodeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                return error_result(str(exc), code="file_read") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            if wants_structured(args):
+                return structured_result(
+                    f"Read {data['path']} in {data['mode']} mode.", data=data,
+                    provenance={"path": data["path"], "encoding": data["encoding"]},
+                    metrics={"total_lines": data["total_lines"]},
+                )
+            return self._json({"ok": True, **data})
         return read_file(
             args["path"],
             start_line=int(args.get("start_line", 1)),
@@ -1767,6 +1793,21 @@ class ToolExecutor:
         )
 
     def _search_files(self, args: dict) -> str:
+        advanced = str(args.get("mode") or "text").casefold() != "text" or wants_structured(args) or any(
+            key in args for key in ("symbol", "changed_only", "date_from", "date_to", "group_by", "include_related_tests", "cursor")
+        )
+        if advanced:
+            try:
+                data = advanced_search(args)
+            except (OSError, UnicodeError, ValueError, re.error) as exc:
+                return error_result(str(exc), code="file_search") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            if wants_structured(args):
+                return structured_result(
+                    f"Found {len(data['results'])} file result(s) in {data['mode']} mode.",
+                    data=data, provenance={"root": data["root"], "git_available": data["git_available"]},
+                    metrics={"page_results": len(data["results"]), "total_results": data["total_results"]},
+                )
+            return self._json({"ok": True, **data})
         return search_files(
             query=args.get("query", ""),
             path=args.get("path", "."),
@@ -1775,6 +1816,15 @@ class ToolExecutor:
         )
 
     def _list_directory(self, args: dict) -> str:
+        if str(args.get("mode") or "legacy").casefold() == "project" or wants_structured(args):
+            try:
+                data = project_scan(args)
+            except (OSError, ValueError) as exc:
+                return error_result(str(exc), code="directory_scan") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            return structured_result(
+                f"Scanned {data['root']} ({data['total_items']} item(s)).", data=data,
+                provenance={"root": data["root"]}, metrics=data["summary"],
+            ) if wants_structured(args) else self._json({"ok": True, **data})
         return list_directory(
             path=args.get("path", "."),
             max_items=int(args.get("max_items", 30)),
@@ -1792,7 +1842,63 @@ class ToolExecutor:
 
     # ── Filesystem (write) tools ───────────────────────────────────
 
+    def _verify_file_change(self, args: dict, data: dict[str, Any]) -> str | None:
+        command = str(args.get("verify_command") or "").strip()
+        if not command or data.get("dry_run") or data.get("confirm_required") or not data.get("changed"):
+            return None
+        cwd = str(Path(data["path"]).parent)
+        resolved = resolve_project_command(command, cwd)
+        output = self.repl.execute_shell(resolved, timeout=int(args.get("verify_timeout", 120)), cwd=cwd, profile="test")
+        passed = "Exit code: 0" in output and "Error:" not in output
+        if passed:
+            data["verification"] = {"ok": True, "command": command, "output": output}
+            return None
+        rollback = ""
+        if data.get("undo_id"):
+            backup = Path(str(data["undo_id"]))
+            try:
+                shutil.copy2(backup, Path(data["path"]))
+                rollback = f"Restored the exact pre-change snapshot {backup}."
+            except OSError as exc:
+                rollback = f"Rollback failed: {exc}"
+        elif data.get("created"):
+            try:
+                Path(data["path"]).unlink()
+                rollback = "Removed the newly created file."
+            except OSError as exc:
+                rollback = f"Rollback failed: {exc}"
+        data["verification"] = {"ok": False, "command": command, "output": output, "rollback": rollback}
+        summary = f"Verification failed after changing {data['path']}; the change was rolled back."
+        if wants_structured(args):
+            return structured_result(
+                summary, ok=False, status="failed", data=data,
+                errors=[{"code": "verification_failed", "message": output}],
+                warnings=[rollback] if rollback else [],
+            )
+        return self._json({"ok": False, "error": summary, **data})
+
     def _write_file(self, args: dict) -> str:
+        advanced = str(args.get("mode") or "overwrite").casefold() != "overwrite" or wants_structured(args) or any(
+            key in args for key in ("patch", "template", "variables", "encoding", "newline", "formatter", "validation", "verify_command")
+        )
+        if advanced:
+            try:
+                data = advanced_write(args)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                return error_result(str(exc), code="file_write") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            verification = self._verify_file_change(args, data)
+            if verification is not None:
+                return verification
+            if wants_structured(args):
+                status = "preview" if data.get("dry_run") or data.get("confirm_required") else "completed"
+                warnings = ["Explicit confirmation is required before overwriting this file."] if data.get("confirm_required") else []
+                return structured_result(
+                    f"Prepared {data['mode']} operation for {data['path']}." if status == "preview" else f"Updated {data['path']}.",
+                    status=status, data=data, artifacts=[{"path": data["path"], "kind": "file"}] if data.get("changed") else [],
+                    warnings=warnings, metrics={"bytes": data.get("bytes", 0), "changed": bool(data.get("changed"))},
+                    undo_id=data.get("undo_id"),
+                )
+            return self._json({"ok": True, **data})
         return _write_file_impl(
             args["path"],
             args["content"],
@@ -1801,6 +1907,25 @@ class ToolExecutor:
         )
 
     def _edit_file(self, args: dict) -> str:
+        advanced = str(args.get("mode") or "replace").casefold() != "replace" or wants_structured(args) or any(
+            key in args for key in ("match_index", "pattern", "start_line", "patch", "symbol", "fields", "encoding", "formatter", "validation", "verify_command")
+        )
+        if advanced:
+            try:
+                data = advanced_edit(args)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError, re.error, SyntaxError) as exc:
+                return error_result(str(exc), code="file_edit") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            verification = self._verify_file_change(args, data)
+            if verification is not None:
+                return verification
+            if wants_structured(args):
+                return structured_result(
+                    f"{'Previewed' if data.get('dry_run') else 'Edited'} {data['path']} in {data['mode']} mode.",
+                    status="preview" if data.get("dry_run") else "completed", data=data,
+                    artifacts=[{"path": data["path"], "kind": "file"}] if data.get("changed") else [],
+                    metrics={"changed": bool(data.get("changed"))}, undo_id=data.get("undo_id"),
+                )
+            return self._json({"ok": True, **data})
         return _edit_file_impl(
             args["path"],
             args["old_text"],
@@ -1850,6 +1975,64 @@ class ToolExecutor:
         return _move_file_impl(source, destination, dry_run=dry_run)
 
     def _batch_edit(self, args: dict) -> str:
+        if str(args.get("mode") or "execute").casefold() == "plan" or wants_structured(args) or any(
+            isinstance(operation, dict) and (operation.get("depends_on") or operation.get("condition"))
+            for operation in args.get("operations", [])
+        ):
+            try:
+                plan = plan_batch(list(args.get("operations") or []))
+            except (TypeError, ValueError) as exc:
+                return error_result(str(exc), code="batch_plan") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            if str(args.get("mode") or "execute").casefold() == "plan" or bool(args.get("dry_run", False)):
+                data = {**plan, "executed": False}
+                return structured_result(
+                    f"Planned {len(plan['runnable'])} runnable operation(s); {len(plan['skipped'])} skipped.",
+                    status="preview", data=data, metrics={"runnable": len(plan["runnable"]), "skipped": len(plan["skipped"])},
+                ) if wants_structured(args) else self._json({"ok": True, **data})
+            operations = [
+                {key: value for key, value in operation.items() if key not in {"id", "depends_on", "condition"}}
+                for operation in plan["runnable"]
+            ]
+            snapshots: dict[Path, bytes | None] = {}
+            for operation in operations:
+                for key in ("path", "destination"):
+                    if not operation.get(key):
+                        continue
+                    path = Path(str(operation[key])).expanduser().resolve()
+                    if path not in snapshots:
+                        snapshots[path] = path.read_bytes() if path.is_file() else None
+            result = _batch_edit_impl(
+                operations=operations, dry_run=False, confirm=bool(args.get("confirm", False)),
+                max_operations=int(args.get("max_operations", 100)),
+            )
+            ok = "failed and rolled back" not in result.casefold()
+            verification_results: list[dict[str, Any]] = []
+            if ok:
+                for command in args.get("verification") or []:
+                    output = self.repl.execute_shell(str(command), timeout=120, cwd=str(args.get("cwd") or "."), profile="test")
+                    passed = "Exit code: 0" in output and "Error:" not in output
+                    verification_results.append({"command": command, "ok": passed, "output": output})
+                    if not passed:
+                        ok = False
+                        if bool(args.get("rollback_on_failure", True)):
+                            for path, content in snapshots.items():
+                                if content is None:
+                                    if path.is_file():
+                                        path.unlink()
+                                else:
+                                    path.parent.mkdir(parents=True, exist_ok=True)
+                                    path.write_bytes(content)
+                            result += "\nVerification failed; file changes were rolled back."
+                        break
+            data = {**plan, "executed": True, "result": result, "verification": verification_results}
+            if wants_structured(args):
+                return structured_result(
+                    "Batch edit completed." if ok else "Batch edit failed and rolled back.", ok=ok,
+                    status="completed" if ok else "failed", data=data,
+                    errors=[] if ok else [{"code": "batch_failed", "message": result}],
+                    metrics={"runnable": len(operations), "skipped": len(plan["skipped"])},
+                )
+            return self._json({"ok": ok, **data})
         return _batch_edit_impl(
             operations=args.get("operations", []),
             dry_run=bool(args.get("dry_run", False)),
@@ -2003,6 +2186,15 @@ class ToolExecutor:
         )
 
     def _file_tree(self, args: dict) -> str:
+        if str(args.get("mode") or "legacy").casefold() == "project" or wants_structured(args):
+            try:
+                data = project_scan(args, tree=True)
+            except (OSError, ValueError) as exc:
+                return error_result(str(exc), code="file_tree") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            return structured_result(
+                f"Scanned project tree with {data['total_items']} item(s).", data=data,
+                provenance={"root": data["root"]}, metrics=data["summary"],
+            ) if wants_structured(args) else self._json({"ok": True, **data})
         return _file_tree_impl(
             path=args.get("path", "."),
             max_depth=int(args.get("max_depth", 3)),
@@ -2012,6 +2204,22 @@ class ToolExecutor:
     # ── Code execution tools ───────────────────────────────────────
 
     def _run_code(self, args: dict) -> str:
+        mode = str(args.get("mode") or "execute").casefold()
+        if mode != "execute" or wants_structured(args) or any(key in args for key in ("session_id", "cell_name", "checkpoint_id", "capture_artifacts")):
+            try:
+                data = self.runtime_upgrades.python(args)
+            except (OSError, ValueError, RuntimeError) as exc:
+                return error_result(str(exc), code="runtime") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            if wants_structured(args):
+                ok = bool(data.get("execution", {}).get("ok", True))
+                return structured_result(
+                    f"Python {mode} {'completed' if ok else 'failed'} in session {data.get('session_id', 'default')}.",
+                    ok=ok, status="completed" if ok else "failed", data=data,
+                    artifacts=list(data.get("artifacts") or []),
+                    errors=[] if ok else [{"code": "python_execution", "message": str(data.get("output") or "Execution failed")}],
+                    metrics=dict(data.get("metrics") or {}),
+                )
+            return self._json({"ok": True, **data})
         code = args["code"]
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
@@ -2023,10 +2231,35 @@ class ToolExecutor:
         return result
 
     def _run_command(self, args: dict) -> str:
-        command = args.get("command") or f"@{args.get('command_key', '')}"
+        mode = str(args.get("mode") or "execute").casefold()
+        command = args.get("command") or (f"@{args.get('command_key', '')}" if args.get("command_key") else "")
+        if command:
+            command = resolve_project_command(command, args.get("cwd"))
+        if mode != "execute" or wants_structured(args) or any(key in args for key in ("session_id", "job_id", "stdin", "detach", "retry", "checkpoint_id")):
+            advanced_args = {**args, "command": command}
+            try:
+                data = self.runtime_upgrades.command(advanced_args)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                return error_result(str(exc), code="runtime") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            if wants_structured(args):
+                parsed = dict(data.get("parsed") or {})
+                output = str(data.get("output") or "")
+                exit_code = parsed.get("exit_code")
+                ok = exit_code in (None, 0) and "Error:" not in output
+                if mode in {"start", "inspect", "attach", "follow", "stop", "stdin", "jobs", "history", "discover", "git_summary", "checkpoint"}:
+                    ok = True
+                artifacts = []
+                if data.get("job"):
+                    artifacts.append({"kind": "runtime_job", "job_id": data["job"]["job_id"]})
+                return structured_result(
+                    f"Shell {mode} {'completed' if ok else 'failed'}.", ok=ok,
+                    status="completed" if ok else "failed", data=data, artifacts=artifacts,
+                    errors=[] if ok else [{"code": "command_failed", "message": output}],
+                    metrics=dict(data.get("metrics") or {}),
+                )
+            return self._json({"ok": True, **data})
         timeout = int(args.get("timeout", 30))
         cwd = args.get("cwd")
-        command = resolve_project_command(command, cwd)
         if bool(args.get("reset", False)):
             self.repl.reset_shell()
         result = self.repl.execute_shell(command, timeout=timeout, cwd=cwd, profile=args.get("profile"))
@@ -2089,11 +2322,37 @@ class ToolExecutor:
 
     def _terminal_exec(self, args: dict) -> str:
         """Run with exactly run_command semantics plus observable display state."""
+        mode = str(args.get("mode") or "execute").casefold()
+        advanced = mode != "execute" or wants_structured(args) or any(key in args for key in ("session_id", "job_id", "stdin", "signal", "rows", "columns"))
+        command = args.get("command") or (f"@{args.get('command_key', '')}" if args.get("command_key") else "")
+        if command:
+            command = resolve_project_command(command, args.get("cwd"))
+        if advanced:
+            command_args = {**args, "command": command, "detach": mode == "start" or not bool(args.get("wait", True))}
+            if args.get("signal"):
+                command_args["mode"] = "stop"
+            try:
+                data = self.runtime_upgrades.command(command_args)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                return error_result(str(exc), code="terminal") if wants_structured(args) else self._json({"ok": False, "error": str(exc)})
+            data["terminal"] = {"rows": args.get("rows"), "columns": args.get("columns"), "display_requested": bool(command)}
+            callback = getattr(self, "_terminal_display_callback", None)
+            display = "unavailable"
+            if callback is not None and command:
+                try:
+                    callback(command)
+                    display = "delivered"
+                except Exception as exc:
+                    display = f"failed: {exc}"
+            data["terminal"]["display_delivery"] = display
+            if wants_structured(args):
+                return structured_result(
+                    f"Terminal {mode} completed.", data=data,
+                    artifacts=[{"kind": "terminal_job", "job_id": data["job"]["job_id"]}] if data.get("job") else [],
+                    metrics=dict(data.get("metrics") or {}),
+                )
+            return self._json({"ok": True, **data})
         result = self._run_command(args)
-        command = resolve_project_command(
-            args.get("command") or f"@{args.get('command_key', '')}",
-            args.get("cwd"),
-        )
         callback = getattr(self, "_terminal_display_callback", None)
         if callback is None:
             return result + "\nDisplay delivery: unavailable (no visual terminal attached)."
