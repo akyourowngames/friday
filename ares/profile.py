@@ -8,6 +8,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 
 from ares.context_blend import truncate_to_tokens
+from ares.static_cache import MtimeFileCache
 
 PROFILE_TEMPLATE = """# About Me
 
@@ -37,21 +38,18 @@ class ProfileManager:
         self.profile_path = (
             Path(profile_path).expanduser() if profile_path else self.data_dir / "profile.md"
         )
+        self._cache = MtimeFileCache()
 
     def ensure_exists(self) -> None:
         """Create profile.md with a template if it does not exist."""
         if not self.profile_path.exists():
             self.profile_path.parent.mkdir(parents=True, exist_ok=True)
             self.profile_path.write_text(PROFILE_TEMPLATE, encoding="utf-8")
+            self._cache.invalidate(self.profile_path)
 
     def read(self) -> str:
         """Read profile content, returning empty string when missing or unreadable."""
-        if not self.profile_path.exists():
-            return ""
-        try:
-            return self.profile_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        return self._cache.read_text(self.profile_path).strip()
 
     def write(self, content: str) -> None:
         """Atomically replace profile content."""
@@ -71,6 +69,7 @@ class ProfileManager:
                 os.fsync(handle.fileno())
                 temporary = Path(handle.name)
             os.replace(temporary, self.profile_path)
+            self._cache.invalidate(self.profile_path)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -181,13 +180,10 @@ class ProfileManager:
             if stripped.startswith("@") and not stripped.startswith("@@"):
                 ref_path = self._resolve_ref_path(stripped[1:].strip())
                 if ref_path.is_file():
-                    try:
-                        imported = ref_path.read_text(encoding="utf-8").strip()
-                        resolved.append(f"<!-- imported from {ref_path} -->")
-                        if imported:
-                            resolved.append(imported)
-                    except (OSError, UnicodeDecodeError):
-                        resolved.append(f"<!-- could not read {ref_path} -->")
+                    imported = self._cache.read_text(ref_path).strip()
+                    resolved.append(f"<!-- imported from {ref_path} -->")
+                    if imported:
+                        resolved.append(imported)
                 else:
                     resolved.append(f"<!-- file not found: {ref_path} -->")
             else:

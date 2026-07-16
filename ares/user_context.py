@@ -10,6 +10,30 @@ from ares.context_blend import build_context_prompt, get_model_budgets
 
 
 _CONVERSATION_SCOPE_RE = re.compile(r"^(?:conversation|telegram)-(\d+)$")
+_DEEP_CONTEXT_RE = re.compile(
+    r"\b(?:"
+    r"remember(?:\s+(?:this|that))?|previously|what\s+(?:did|have)\s+i\s+say|"
+    r"what\s+do\s+you\s+remember|my\s+(?:memory|memories|profile|preferences|goals?)|"
+    r"pending\s+(?:tasks?|to[- ]?dos?)|open\s+(?:tasks?|to[- ]?dos?)|"
+    r"(?:planning|plan\s+(?:my|our|the))|proactive\s+(?:review|check[- ]?in)|"
+    r"(?:weekly|daily)\s+review|cross[- ]?conversation|another\s+conversation|"
+    r"last\s+time|what\s+(?:is|'s)\s+left"
+    r")\b",
+    re.IGNORECASE,
+)
+_GOAL_SIGNAL_RE = re.compile(
+    r"\b(?:goals?|milestones?|deadline|deadlines|next\s+action|goal\s+progress|project\s+status)\b",
+    re.IGNORECASE,
+)
+_TASK_SIGNAL_RE = re.compile(r"\b(?:tasks?|to[- ]?dos?|workflows?)\b", re.IGNORECASE)
+_COMMITMENT_SIGNAL_RE = re.compile(r"\b(?:commitments?|promises?|obligations?)\b", re.IGNORECASE)
+_FOLLOW_UP_SIGNAL_RE = re.compile(r"\bfollow[- ]?ups?\b", re.IGNORECASE)
+_PERSON_ACTION_RE = re.compile(r"\b(?:email|message|call|text|contact|invite|tell|ask|meet|send)\b", re.IGNORECASE)
+_PERSON_RELATION_RE = re.compile(
+    r"\bmy\s+(?:mom|mum|mother|dad|father|parent|partner|spouse|wife|husband|boss|manager)\b",
+    re.IGNORECASE,
+)
+_GREETING_WORDS = frozenset({"hello", "hey", "hi", "okay", "ok", "thanks", "thank"})
 
 
 def _conversation_id_from_scope(session_id: str | None) -> int | None:
@@ -32,6 +56,29 @@ def _without_history_duplicates(
             " ".join(str(record.get("content") or "").split()),
         ) not in known
     ]
+
+
+def is_deep_context_request(user_input: str) -> bool:
+    """Return whether this turn needs cross-session and proactive retrieval.
+
+    Normal turns already receive their current conversation history from the
+    caller.  Expensive durable layers are therefore reserved for clear recall,
+    planning, or review language, while keeping the existing reference detector
+    as the source of truth for temporal/action references.
+    """
+    text = str(user_input or "")
+    return bool(_DEEP_CONTEXT_RE.search(text) or has_reference_language(text))
+
+
+def _has_people_signal(user_input: str, *, deep_context: bool) -> bool:
+    """Avoid a people-table scan for greetings while retaining direct aliases."""
+    text = str(user_input or "")
+    if deep_context or _PERSON_ACTION_RE.search(text) or _PERSON_RELATION_RE.search(text):
+        return True
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
+    if len(words) == 1:
+        return words[0][:1].isupper() and words[0].casefold() not in _GREETING_WORDS
+    return any(word[:1].isupper() for word in words[1:])
 
 
 def build_user_context(
@@ -84,10 +131,16 @@ def build_user_context(
         recent_sessions=getattr(config, "memory_session_scope", 3),
     )
 
+    deep_context = is_deep_context_request(user_input)
+
     people: list[dict[str, Any]] = []
-    if people_store is not None:
+    if people_store is not None and _has_people_signal(user_input, deep_context=deep_context):
         named = people_store.mentioned_in(user_input, limit=4)
-        recent = people_store.recent_for_context(limit=max(3, min(max_retrieval, 8)))
+        recent = (
+            people_store.recent_for_context(limit=max(3, min(max_retrieval, 8)))
+            if deep_context
+            else []
+        )
         seen: set[int] = set()
         for person in [*named, *recent]:
             person_id = int(person.get("person_id", 0) or 0)
@@ -95,9 +148,24 @@ def build_user_context(
                 seen.add(person_id)
                 people.append(person)
 
-    recent_actions = action_ledger.recent(limit=5) if action_ledger is not None else []
-    active_goals = goal_store.list_all(statuses=["active"], limit=8) if goal_store is not None else []
-    if goal_store is not None and active_goals:
+    goal_signal = bool(_GOAL_SIGNAL_RE.search(user_input))
+    task_signal = bool(_TASK_SIGNAL_RE.search(user_input))
+    commitment_signal = bool(_COMMITMENT_SIGNAL_RE.search(user_input))
+    follow_up_signal = bool(_FOLLOW_UP_SIGNAL_RE.search(user_input))
+
+    recent_actions = action_ledger.recent(limit=5) if action_ledger is not None and deep_context else []
+    active_goals: list[dict[str, Any]] = []
+    if goal_store is not None and deep_context:
+        active_goals = goal_store.list_all(statuses=["active"], limit=8)
+    elif goal_store is not None and goal_signal:
+        try:
+            active_goals = [
+                goal for goal in goal_store.search(user_input, limit=3)
+                if goal.get("status") in {"active", "paused"}
+            ]
+        except ValueError:
+            active_goals = []
+    if goal_store is not None and deep_context and active_goals:
         active_goals = goal_store.contextualize_goals(
             active_goals,
             max_age_hours=48,
@@ -105,21 +173,29 @@ def build_user_context(
             per_goal=3,
             mark_surfaced=False,
         )
-    goals_due_soon = goal_store.due_soon(within_days=7) if goal_store is not None else []
-    goals_overdue = goal_store.overdue() if goal_store is not None else []
+    goals_due_soon = goal_store.due_soon(within_days=7) if goal_store is not None and deep_context else []
+    goals_overdue = goal_store.overdue() if goal_store is not None and deep_context else []
 
     pending_tasks: list[dict[str, Any]] = []
-    if task_store is not None:
+    if task_store is not None and (deep_context or task_signal):
         pending_tasks = task_store.list_tasks(
             statuses=["pending", "running", "awaiting_confirmation", "failed"],
             limit=8,
         )
-    pending_commitments = commitment_store.list_pending(limit=8) if commitment_store is not None else []
-    pending_follow_ups = follow_up_store.list_open(limit=8) if follow_up_store is not None else []
+    pending_commitments = (
+        commitment_store.list_pending(limit=8)
+        if commitment_store is not None and (deep_context or commitment_signal)
+        else []
+    )
+    pending_follow_ups = (
+        follow_up_store.list_open(limit=8)
+        if follow_up_store is not None and (deep_context or follow_up_signal)
+        else []
+    )
 
-    current_conversation_id = _conversation_id_from_scope(session_id)
     recent_conversations: list[dict[str, Any]] = []
-    if conversation_store is not None:
+    if conversation_store is not None and deep_context:
+        current_conversation_id = _conversation_id_from_scope(session_id)
         recent_conversations = conversation_store.get_recent_context_messages(
             limit=15,
             exclude_conversation_id=current_conversation_id,
@@ -130,15 +206,14 @@ def build_user_context(
     relevant_actions: list[dict[str, Any]] = []
     conversation_recall: list[dict[str, Any]] = []
     since = None
-    explicit_recall = has_reference_language(user_input)
-    if explicit_recall:
+    if deep_context:
         try:
             since = extract_since_reference(user_input)
         except ValueError:
             since = None
 
     recall_limit = max(3, min(max_retrieval, 8))
-    if action_ledger is not None and explicit_recall:
+    if action_ledger is not None and deep_context:
         try:
             relevant_actions = action_ledger.search(user_input, since=since, limit=recall_limit)
             fallback = action_ledger.search(since=since, limit=recall_limit)
@@ -148,7 +223,7 @@ def build_user_context(
         except ValueError:
             relevant_actions = []
 
-    if conversation_store is not None and explicit_recall and not session_id:
+    if conversation_store is not None and deep_context and not session_id:
         try:
             conversation_recall = conversation_store.search_recall(
                 user_input, since=since, limit=recall_limit,
@@ -160,7 +235,7 @@ def build_user_context(
         except ValueError:
             conversation_recall = []
 
-    if session_store is not None and explicit_recall:
+    if session_store is not None and deep_context:
         try:
             scan_limit = min(100, recall_limit * 3) if session_id else recall_limit
             session_recall = session_store.search_recall(user_input, since=since, limit=scan_limit)
@@ -195,10 +270,10 @@ def build_user_context(
     ][:3]
 
     summaries = []
-    if conversation_store is not None and not session_id:
+    if conversation_store is not None and deep_context and not session_id:
         summaries = conversation_store.get_recent_summaries(limit=5)
     previous_summary = None
-    if session_id and session_store is not None:
+    if session_id and session_store is not None and deep_context:
         previous_summary = session_store.get_previous_summary(
             session_id,
             block=getattr(config, "block_session_context", False),
@@ -225,7 +300,7 @@ def build_user_context(
         pending_follow_ups=pending_follow_ups,
         token_budget=token_budget,
     )
-    if goal_store is not None and active_goals:
+    if goal_store is not None and deep_context and active_goals:
         surfaced_ids = [
             int(signal["signal_id"])
             for goal in active_goals
@@ -236,4 +311,4 @@ def build_user_context(
     return prepared
 
 
-__all__ = ["build_user_context"]
+__all__ = ["build_user_context", "is_deep_context_request"]

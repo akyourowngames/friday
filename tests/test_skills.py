@@ -77,6 +77,52 @@ def test_skill_manager_discovery_search_crud_and_file_safety(tmp_path):
     assert manager.get_skill("my-skill") is None
 
 
+def test_skill_manager_reuses_parsed_skills_and_invalidates_index_on_changes(tmp_path, monkeypatch):
+    manager = SkillManager([tmp_path])
+    created = manager.create_skill(
+        "Cached Skill",
+        "---\ndescription: Original cached workflow description.\n---\n\n# Cached\nOriginal steps.",
+        category="demo",
+    )
+    original_parse = manager.parse_skill_file
+    parsed: list[str] = []
+
+    def spy_parse(path):
+        parsed.append(str(path))
+        return original_parse(path)
+
+    monkeypatch.setattr(manager, "parse_skill_file", spy_parse)
+    manager.list_all()
+    first_parse_count = len(parsed)
+    assert first_parse_count > 0
+
+    # The second prompt-facing lookup observes signatures but does not reread
+    # and parse every unchanged SKILL.md file.
+    manager.list_all()
+    first_index = manager.compact_index()
+    second_index = manager.compact_index()
+    assert len(parsed) == first_parse_count
+    assert first_index == second_index
+
+    created.path.write_text(
+        "---\nname: cached-skill\ndescription: Updated cached workflow with longer description.\n---\n\n# Cached\nUpdated steps.",
+        encoding="utf-8",
+    )
+    updated_index = manager.compact_index()
+    assert len(parsed) == first_parse_count + 1
+    assert "Updated cached workflow" in updated_index
+
+    # CRUD invalidation is immediate rather than waiting for a later directory
+    # scan, so the prompt index cannot retain deleted/old instructions.
+    manager.update_skill(
+        "cached-skill",
+        "---\ndescription: CRUD refreshed workflow.\n---\n\n# Cached\nFresh steps.",
+    )
+    assert "CRUD refreshed workflow" in manager.compact_index()
+    assert manager.delete_skill("cached-skill") is True
+    assert "cached-skill" not in manager.compact_index()
+
+
 def test_relevant_skills_auto_context_and_invocation_policy(tmp_path):
     manager = SkillManager([tmp_path])
     manager.create_skill(

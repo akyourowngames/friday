@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -25,6 +26,53 @@ class FakeReflectionLLM:
         self.prompts.append(messages)
         assert tools == []
         return {"content": json.dumps(self.payload)}
+
+
+class SlowReflectionLLM:
+    """A reflection provider whose completion is controlled by the test."""
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def chat(self, messages, tools=None):
+        assert tools == []
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return {"content": "{}"}
+
+
+class OrderedRetryReflectionLLM:
+    """Fail the first head job once, then expose the processing order."""
+
+    def __init__(self):
+        self.first_started = asyncio.Event()
+        self.allow_first_failure = asyncio.Event()
+        self.calls: list[str] = []
+        self._first_attempt = True
+
+    async def chat(self, messages, tools=None):
+        assert tools == []
+        prompt = str(messages[0]["content"])
+        user_text = prompt.split("USER:\n", 1)[1].split("\n\nASSISTANT:", 1)[0]
+        self.calls.append(user_text)
+        if user_text == "first" and self._first_attempt:
+            self._first_attempt = False
+            self.first_started.set()
+            await self.allow_first_failure.wait()
+            raise ValueError("temporary reflection provider failure")
+        return {"content": "{}"}
+
+
+async def _wait_for_status(service, reflection_id, status):
+    for _ in range(100):
+        record = service.store.get(reflection_id)
+        if record is not None and record["status"] == status:
+            return record
+        await asyncio.sleep(0)
+    raise AssertionError(f"reflection {reflection_id} did not reach {status}")
 
 
 @pytest.mark.asyncio
@@ -371,3 +419,148 @@ async def test_reflection_follow_up_queue_persists_lifecycle_and_resolution(
     assert resolved["resolution"] == "The production migration completed successfully."
     assert resolved["resolved_at"]
     final_store.close()
+
+
+@pytest.mark.asyncio
+async def test_before_turn_does_not_wait_for_slow_active_reflection(tmp_path, fake_embedding_provider):
+    memory = MemoryStore(tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
+    goals = GoalStore(tmp_path / "ares.db", connection=memory.conn)
+    commitments = CommitmentStore(tmp_path / "ares.db", connection=memory.conn)
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    llm = SlowReflectionLLM()
+    service = ReflectionService(
+        memory_store=memory,
+        goal_store=goals,
+        commitment_store=commitments,
+        profile_manager=profile,
+        config=ReflectionConfig(timeout_seconds=5),
+        llm_client=llm,
+    )
+    reflection_id = service.enqueue_turn(
+        scope="conversation-fast-next-turn",
+        user_text="First durable turn",
+        assistant_text="First answer",
+    )
+    assert reflection_id is not None
+    try:
+        await asyncio.wait_for(llm.started.wait(), timeout=0.5)
+
+        # A following normal turn invokes this method before it can ask the
+        # foreground provider.  It must return while the slow job is still
+        # running, rather than waiting for the reflection LLM response.
+        await asyncio.wait_for(service.before_turn("conversation-fast-next-turn"), timeout=0.1)
+        assert service.store.get(reflection_id)["status"] == "running"
+    finally:
+        llm.release.set()
+        await service.close()
+        memory.close()
+
+
+@pytest.mark.asyncio
+async def test_synchronization_barrier_times_out_without_cancelling_reflection(
+    tmp_path, fake_embedding_provider,
+):
+    memory = MemoryStore(tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
+    goals = GoalStore(tmp_path / "ares.db", connection=memory.conn)
+    commitments = CommitmentStore(tmp_path / "ares.db", connection=memory.conn)
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    llm = SlowReflectionLLM()
+    service = ReflectionService(
+        memory_store=memory,
+        goal_store=goals,
+        commitment_store=commitments,
+        profile_manager=profile,
+        config=ReflectionConfig(timeout_seconds=5),
+        llm_client=llm,
+    )
+    reflection_id = service.enqueue_turn(
+        scope="conversation-sync-barrier",
+        user_text="Remember this durable preference",
+        assistant_text="Understood",
+    )
+    assert reflection_id is not None
+    try:
+        await asyncio.wait_for(llm.started.wait(), timeout=0.5)
+        await service.before_turn(
+            "conversation-sync-barrier", synchronize=True, timeout_seconds=0.01,
+        )
+
+        # ``wait_for`` is shielded inside the service, so timing out the
+        # foreground barrier leaves the durable background request alive.
+        assert service.store.get(reflection_id)["status"] == "running"
+        assert not llm.release.is_set()
+    finally:
+        llm.release.set()
+        await service.close()
+        memory.close()
+
+
+@pytest.mark.asyncio
+async def test_retrying_head_job_blocks_later_same_scope_reflection(tmp_path, fake_embedding_provider):
+    memory = MemoryStore(tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
+    goals = GoalStore(tmp_path / "ares.db", connection=memory.conn)
+    commitments = CommitmentStore(tmp_path / "ares.db", connection=memory.conn)
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    llm = OrderedRetryReflectionLLM()
+    service = ReflectionService(
+        memory_store=memory,
+        goal_store=goals,
+        commitment_store=commitments,
+        profile_manager=profile,
+        config=ReflectionConfig(timeout_seconds=5, max_attempts=3),
+        llm_client=llm,
+    )
+    try:
+        first_id = service.enqueue_turn(scope="conversation-ordered", user_text="first", assistant_text="one")
+        assert first_id is not None
+        await asyncio.wait_for(llm.first_started.wait(), timeout=0.5)
+        second_id = service.enqueue_turn(scope="conversation-ordered", user_text="second", assistant_text="two")
+        assert second_id is not None
+
+        llm.allow_first_failure.set()
+        await _wait_for_status(service, first_id, "pending")
+        assert llm.calls == ["first"]
+        assert service.store.get(second_id)["status"] == "pending"
+
+        # A later lightweight kick retries the head first, then drains the
+        # following turn.  The second mutation cannot overtake the retry.
+        await service.before_turn("conversation-ordered")
+        await service.close()
+        assert llm.calls == ["first", "first", "second"]
+        assert service.store.get(first_id)["status"] == "completed"
+        assert service.store.get(second_id)["status"] == "completed"
+    finally:
+        await service.close()
+        memory.close()
+
+
+@pytest.mark.asyncio
+async def test_before_turn_resumes_a_persisted_pending_scope(tmp_path, fake_embedding_provider):
+    memory = MemoryStore(tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
+    goals = GoalStore(tmp_path / "ares.db", connection=memory.conn)
+    commitments = CommitmentStore(tmp_path / "ares.db", connection=memory.conn)
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    llm = FakeReflectionLLM({})
+    service = ReflectionService(
+        memory_store=memory,
+        goal_store=goals,
+        commitment_store=commitments,
+        profile_manager=profile,
+        config=ReflectionConfig(timeout_seconds=5),
+        llm_client=llm,
+    )
+    reflection_id = service.store.enqueue("conversation-recovered", "saved turn", "saved answer")
+    try:
+        # Direct store insertion models a durable row recovered after an
+        # earlier process stopped before it could create an in-memory task.
+        await service.before_turn("another-conversation")
+        await service.close()
+        assert llm.calls == 1
+        assert service.store.get(reflection_id)["status"] == "completed"
+    finally:
+        await service.close()
+        memory.close()

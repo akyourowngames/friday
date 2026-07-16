@@ -1,6 +1,10 @@
 """Tests for ProjectContext."""
 
+from pathlib import Path
+
 from ares.context import SCAN_TARGETS, ProjectContext
+from ares.profile import ProfileManager
+from ares.soul import SoulManager
 
 
 class TestProjectContext:
@@ -69,3 +73,61 @@ class TestProjectContext:
             assert isinstance(name, str)
             assert isinstance(max_lines, int)
             assert max_lines > 0
+
+
+def test_static_context_file_caches_reuse_reads_and_refresh_after_edits(tmp_path, monkeypatch):
+    soul = SoulManager(tmp_path)
+    soul.ensure_exists()
+    soul.soul_path.write_text("# Soul\nOriginal", encoding="utf-8")
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    imported = tmp_path / "preferences.md"
+    imported.write_text("Original preference", encoding="utf-8")
+    profile.profile_path.write_text("## Preferences\n@preferences.md", encoding="utf-8")
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    readme = project_dir / "README.md"
+    readme.write_text("# Original project", encoding="utf-8")
+    project = ProjectContext(cwd=project_dir)
+
+    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
+    text_reads: list[Path] = []
+    byte_reads: list[Path] = []
+
+    def spy_read_text(path, *args, **kwargs):
+        resolved = path.resolve()
+        if resolved in {soul.soul_path.resolve(), profile.profile_path.resolve(), imported.resolve()}:
+            text_reads.append(resolved)
+        return original_read_text(path, *args, **kwargs)
+
+    def spy_read_bytes(path, *args, **kwargs):
+        if path.resolve() == readme.resolve():
+            byte_reads.append(path.resolve())
+        return original_read_bytes(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+
+    assert "Original" in soul.read()
+    assert "Original" in soul.read()
+    assert "Original preference" in profile.get_context()
+    assert "Original preference" in profile.get_context()
+    assert "Original project" in project.get_context()
+    assert "Original project" in project.get_context()
+    assert text_reads.count(soul.soul_path.resolve()) == 1
+    assert text_reads.count(profile.profile_path.resolve()) == 1
+    assert text_reads.count(imported.resolve()) == 1
+    assert byte_reads.count(readme.resolve()) == 1
+
+    # Different sizes make the invalidation deterministic even on filesystems
+    # with a coarse timestamp resolution; caches also include mtime nanoseconds.
+    soul.soul_path.write_text("# Soul\nUpdated and longer", encoding="utf-8")
+    imported.write_text("Updated preference with extra detail", encoding="utf-8")
+    readme.write_text("# Updated project with extra detail", encoding="utf-8")
+    assert "Updated and longer" in soul.read()
+    assert "Updated preference" in profile.get_context()
+    assert "Updated project" in project.get_context()
+    assert text_reads.count(soul.soul_path.resolve()) == 2
+    assert text_reads.count(imported.resolve()) == 2
+    assert byte_reads.count(readme.resolve()) == 2
