@@ -493,29 +493,79 @@ class VisionStore:
     def delete_frame_references_for_memory(self, fact_id: int) -> list[str]:
         """Delete only a retained frame while preserving its text memory."""
 
-        references = self.frame_references_for_memory(fact_id)
-        with self.transaction() as conn:
-            conn.execute(
-                "UPDATE vision_memory_links SET frame_reference=NULL WHERE fact_id=?",
-                (int(fact_id),),
-            )
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT event_id FROM vision_memory_links WHERE fact_id=?", (int(fact_id),)
+            ).fetchall()
+        references = self._clear_event_frame_references(
+            [str(row["event_id"]) for row in rows],
+        )
         for reference in references:
             self._delete_artifact(reference)
         return references
 
     def delete_memory_links(self, fact_id: int, *, delete_frames: bool = True) -> list[str]:
-        references = self.frame_references_for_memory(fact_id)
         with self.transaction() as conn:
             rows = conn.execute(
-                "SELECT event_id FROM vision_memory_links WHERE fact_id=?", (int(fact_id),)
+                "SELECT event_id, frame_reference FROM vision_memory_links WHERE fact_id=?", (int(fact_id),)
             ).fetchall()
             conn.execute("DELETE FROM vision_memory_links WHERE fact_id=?", (int(fact_id),))
         for row in rows:
             self.mark_event_remembered(str(row["event_id"]), False)
+        references = [str(row["frame_reference"]) for row in rows if row["frame_reference"]]
+        if delete_frames:
+            references.extend(
+                self._clear_event_frame_references([str(row["event_id"]) for row in rows])
+            )
+            references = list(dict.fromkeys(references))
+        else:
+            references = []
         if delete_frames:
             for reference in references:
                 self._delete_artifact(reference)
         return references
+
+    def _clear_event_frame_references(self, event_ids: list[str]) -> list[str]:
+        """Clear every handle for owned frames attached to selected events.
+
+        An event frame is copied into any saved visual memory link.  Once a
+        user deletes that frame (or deletes its memory), leaving the event's
+        path behind would create stale private metadata and could make a later
+        memory link point at an already-erased artifact.  Treat the frame as a
+        single event-owned object and clear all of its handles together.
+        """
+
+        unique_ids = list(dict.fromkeys(str(event_id) for event_id in event_ids if str(event_id)))
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        references: list[str] = []
+        with self.transaction() as conn:
+            rows = conn.execute(
+                f"SELECT event_id, event_json, frame_reference FROM vision_events WHERE event_id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+            for row in rows:
+                event = VisualEvent.model_validate(_load(row["event_json"], {}))
+                if event.frame_reference:
+                    references.append(str(event.frame_reference))
+                if row["frame_reference"]:
+                    references.append(str(row["frame_reference"]))
+                link_rows = conn.execute(
+                    "SELECT frame_reference FROM vision_memory_links WHERE event_id=? AND frame_reference IS NOT NULL",
+                    (event.event_id,),
+                ).fetchall()
+                references.extend(str(link["frame_reference"]) for link in link_rows)
+                event.frame_reference = None
+                conn.execute(
+                    "UPDATE vision_events SET event_json=?, frame_reference=NULL WHERE event_id=?",
+                    (_dump(event.model_dump(mode="json")), event.event_id),
+                )
+                conn.execute(
+                    "UPDATE vision_memory_links SET frame_reference=NULL WHERE event_id=?",
+                    (event.event_id,),
+                )
+        return list(dict.fromkeys(references))
 
     def delete_event(self, event_id: str, *, delete_frame: bool = True) -> bool:
         event = self.get_event(event_id)

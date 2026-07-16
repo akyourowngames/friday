@@ -63,6 +63,7 @@ class VerifyPayload(BaseModel):
     source: VisionSourceType = VisionSourceType.IMAGE
     image_path: str | None = Field(default=None, max_length=4_000)
     reference_snapshot_id: str | None = Field(default=None, max_length=200)
+    grant_observe: bool = False
 
 
 class StartPayload(BaseModel):
@@ -221,7 +222,16 @@ def create_vision_router(service: VisionService) -> APIRouter:
     async def verify(payload: VerifyPayload, request: Request) -> dict[str, Any]:
         await require_local(request)
         try:
-            result = await service.verify(**payload.model_dump())
+            if payload.grant_observe and payload.source_id:
+                if service.store.get_source(payload.source_id) is None:
+                    service.create_source(
+                        source_id=payload.source_id,
+                        source_type=payload.source,
+                        grant_observe=True,
+                    )
+                else:
+                    service.grant_permission(payload.source_id, observe=True)
+            result = await service.verify(**payload.model_dump(exclude={"grant_observe"}))
             return {"ok": True, "verification": _response(result)}
         except Exception as exc:
             raise _http_error(exc) from exc

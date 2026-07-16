@@ -916,6 +916,7 @@ def get_tool_definitions() -> list[dict]:
                 "image_path": {"type": "string"},
                 "expected_result": {"type": "string"},
                 "reference_snapshot_id": {"type": "string"},
+                "grant_observe": {"type": "boolean", "default": False, "description": "Explicit consent to observe a camera or screen source for this verification."},
             },
             ["expected_result"],
         ),

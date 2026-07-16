@@ -16,6 +16,8 @@ from ares.turn_policy import (
     classify_turn_intent,
     issue_action_grant,
 )
+from ares.tool_registry import RootToolRegistry
+from ares.tools.definitions import get_tool_definitions
 
 
 @pytest.mark.parametrize("text", ["hey", "hello!", "thanks", "yo", "okay"])
@@ -39,6 +41,35 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent(
         "hey can you launch multiple agents to research on corruption"
     ) is TurnIntent.DELEGATION
+
+
+@pytest.mark.parametrize(
+    ("user_request", "expected_tool"),
+    [
+        ("Ares, look at my desk and tell me what you see.", "vision_observe"),
+        ("Ares, watch this cup and tell me when it is moved.", "vision_watch"),
+        ("Ares, notify me when the download shown on my screen finishes.", "vision_watch"),
+        ("Ares, compare the current setup with the previous image.", "vision_compare"),
+        ("Ares, verify whether I connected the components correctly.", "vision_verify"),
+        ("Ares, read the error visible on my screen.", "vision_observe"),
+        ("Ares, remember where I placed my charger.", "vision_remember"),
+        ("Ares, stop watching.", "vision_cancel_watch"),
+        ("Ares, stop all cameras.", "vision_stop_all_sources"),
+        ("Ares, forget what you saw during the last hour.", "vision_erase_recent_events"),
+        ("Ares, delete the saved frame for that memory.", "vision_delete_memory_frame"),
+    ],
+)
+def test_vision_v1_requests_are_routed_to_the_local_vision_tool_surface(
+    user_request: str,
+    expected_tool: str,
+) -> None:
+    context = build_turn_execution_context(user_request)
+    registry = RootToolRegistry(get_tool_definitions())
+    names = {item["function"]["name"] for item in registry.select_for_turn(context)}
+
+    assert context.intent is TurnIntent.LOCAL_MUTATION
+    assert "vision" in context.explicit_targets
+    assert expected_tool in names
 
 
 def test_conversation_turn_hard_denies_stale_action_calls() -> None:

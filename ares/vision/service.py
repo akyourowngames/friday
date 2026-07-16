@@ -448,16 +448,7 @@ class VisionService:
                 if registered is None:
                     registered = self.create_source(source_type=kind, source_id=source_id)
                 kind = registered.source_type
-                self._require_observe_permission(source_id, kind)
-                if kind in {VisionSourceType.CAMERA, VisionSourceType.SCREEN} and not self.privacy.is_source_active(source_id):
-                    await self._start_transient_source(registered)
-                    transient_source_id = source_id
-                try:
-                    frame = await self._capture_live(registered)
-                except Exception:
-                    if transient_source_id is not None:
-                        await self.stop_source(transient_source_id)
-                    raise
+                frame, transient_source_id = await self._capture_current_source(registered)
         else:
             kind = frame.source_type
             source_id = frame.source_id
@@ -490,6 +481,30 @@ class VisionService:
         self.store.set_permission(source.source_id, active_indicator=True)
         self.privacy.mark_source_active(source.source_id, source.source_type)
         self._record_action("vision_source_started", source.source_id, f"Started one-shot {source.source_type.value} observation.")
+
+    async def _capture_current_source(self, source: VisionSource) -> tuple[VisionFrame, str | None]:
+        """Capture one current live frame, bracketing temporary hardware use.
+
+        A one-shot observe/verify request must still show the same active
+        indicator and close the device afterward.  Returning the frame lets a
+        caller use it for selected-frame reasoning before the ``finally``
+        path releases the source; it never becomes durable frame storage.
+        """
+
+        self._require_observe_permission(source.source_id, source.source_type)
+        transient_source_id: str | None = None
+        if (
+            source.source_type in {VisionSourceType.CAMERA, VisionSourceType.SCREEN}
+            and not self.privacy.is_source_active(source.source_id)
+        ):
+            await self._start_transient_source(source)
+            transient_source_id = source.source_id
+        try:
+            return await self._capture_live(source), transient_source_id
+        except Exception:
+            if transient_source_id is not None:
+                await self.stop_source(transient_source_id)
+            raise
 
     async def _capture_image(self, image_path: str | Path, *, source_id: str) -> VisionFrame:
         if self.image_capture is None:
@@ -939,19 +954,32 @@ class VisionService:
         else:
             if not source_id:
                 raise ValueError("source_id or image_path is required for visual verification.")
-            snapshot = self.store.latest_snapshot(source_id)
-            if snapshot is None:
-                observed = await self.observe(source=source, source_id=source_id)
-                snapshot = observed.snapshot
-            runtime = self._runtime.get(source_id)
-            if runtime is not None and runtime.latest_image is not None:
-                source_record = self.store.get_source(source_id)
-                reasoning_frame = VisionFrame(
-                    source_id=source_id,
-                    source_type=source_record.source_type if source_record else self._source_type(source),
-                    captured_at=snapshot.captured_at,
-                    image=runtime.latest_image,
-                )
+            source_record = self.store.get_source(source_id)
+            if source_record is None:
+                source_record = self.create_source(source_type=source, source_id=source_id)
+            # Verification is a current-state operation.  For a live source,
+            # capture exactly one fresh selected frame even if an old snapshot
+            # exists, then release a transient source immediately afterward.
+            if source_record.source_type in {VisionSourceType.CAMERA, VisionSourceType.SCREEN}:
+                reasoning_frame, transient_source_id = await self._capture_current_source(source_record)
+                try:
+                    observed = await self.process_frame(reasoning_frame, include_ocr=True, force=True)
+                    snapshot = observed.snapshot
+                finally:
+                    if transient_source_id is not None:
+                        await self.stop_source(transient_source_id)
+            else:
+                snapshot = self.store.latest_snapshot(source_id)
+                if snapshot is None:
+                    raise ValueError("An image_path is required before verifying an image source without a snapshot.")
+                runtime = self._runtime.get(source_id)
+                if runtime is not None and runtime.latest_image is not None:
+                    reasoning_frame = VisionFrame(
+                        source_id=source_id,
+                        source_type=source_record.source_type,
+                        captured_at=snapshot.captured_at,
+                        image=runtime.latest_image,
+                    )
         reference = self.store.get_snapshot(reference_snapshot_id) if reference_snapshot_id else None
         result = await self.verifier.verify(expected_result, snapshot, reference, frame=reasoning_frame)
         event = make_visual_event(

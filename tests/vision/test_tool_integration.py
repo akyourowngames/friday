@@ -52,6 +52,10 @@ async def test_tool_executor_dispatches_vision_tools_and_fails_closed_for_camera
             "source_id": "uploaded-desk",
             "condition": "tell me when the cup moves",
         }))
+        verified = json.loads(await executor.execute_async("vision_verify", {
+            "source_id": "uploaded-desk",
+            "expected_result": "cup",
+        }))
         listed = json.loads(await executor.execute_async("vision_list_watches", {
             "source_id": "uploaded-desk",
         }))
@@ -63,6 +67,8 @@ async def test_tool_executor_dispatches_vision_tools_and_fails_closed_for_camera
         assert "frame_reference" not in json.dumps(observed)
         assert watch["ok"] is True
         assert watch["watch"]["source_id"] == "uploaded-desk"
+        assert verified["ok"] is True
+        assert verified["status"] == "passed"
         assert listed["ok"] is True
         assert [item["watch_id"] for item in listed["watches"]] == [watch["watch"]["watch_id"]]
     finally:

@@ -117,10 +117,14 @@ class VisionToolHandlers:
         expected = str(args.get("expected_result") or "").strip()
         if not expected:
             raise ValueError("expected_result is required")
+        source_id = args.get("source_id")
+        source_type = self._source_type(args.get("source") or "image")
+        if source_id:
+            source_id, source_type = self._ensure_source(args)
         result = await self.service.verify(
             expected_result=expected,
-            source_id=args.get("source_id"),
-            source=self._source_type(args.get("source") or "image"),
+            source_id=source_id,
+            source=source_type,
             reference_snapshot_id=args.get("reference_snapshot_id"),
             image_path=args.get("image_path") or args.get("path"),
         )
