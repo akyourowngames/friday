@@ -409,6 +409,101 @@ async def test_agent_run_stream_detects_and_executes_tool_call(tmp_path, fake_em
     assert mem_store.search("blue")
 
 
+def test_text_tool_markup_maps_search_watchers_to_advertised_watcher_query():
+    calls, cleaned = Agent._text_tool_calls_from_content(
+        "Let me check.\n\n<search_watchers>name: HAHA</search_watchers>",
+        [{"type": "function", "function": {"name": "list_watchers"}}],
+    )
+
+    assert cleaned == "Let me check."
+    assert calls == [{
+        "id": "text_tool_0",
+        "type": "function",
+        "function": {"name": "list_watchers", "arguments": '{"query": "HAHA"}'},
+    }]
+
+
+@pytest.mark.asyncio
+async def test_agent_run_stream_executes_text_tool_markup_without_showing_it(
+    tmp_path, fake_embedding_provider
+):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    config = AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False)
+    config.reflection.enabled = False
+    agent = Agent(memory_store=mem_store, api_key="test-key", config=config)
+    search_files = next(
+        tool for tool in agent.tools
+        if tool["function"]["name"] == "search_files"
+    )
+    agent._tools_for_turn = lambda *_args, **_kwargs: [search_files]
+    calls = []
+    response_count = 0
+
+    async def fake_chat_stream(messages, tools=None):
+        nonlocal response_count
+        response_count += 1
+        assert tools == [search_files]
+        if response_count == 1:
+            yield {
+                "type": "content",
+                "text": "Let me check.\n\n<search_files>path: ~/Desktop</search_files>",
+            }
+        else:
+            assert messages[-1]["role"] == "tool"
+            yield {"type": "content", "text": "Desktop checked."}
+        yield {"type": "done"}
+
+    async def fake_execute_async(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return "Desktop files listed."
+
+    agent.llm.chat_stream = fake_chat_stream
+    agent.tool_executor.execute_async = fake_execute_async
+
+    tokens = [token async for token in agent.run_stream("show desktop files", [])]
+    visible = "".join(token for token in tokens if not token.startswith("[tool"))
+
+    assert calls == [("search_files", {"path": "~/Desktop"})]
+    assert visible == "Desktop checked."
+    assert "<search_files>" not in "".join(tokens)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_executes_text_tool_markup(tmp_path, fake_embedding_provider):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    config = AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False)
+    config.reflection.enabled = False
+    agent = Agent(memory_store=mem_store, api_key="test-key", config=config)
+    list_watchers = next(
+        tool for tool in agent.tools
+        if tool["function"]["name"] == "list_watchers"
+    )
+    agent._tools_for_turn = lambda *_args, **_kwargs: [list_watchers]
+    calls = []
+    response_count = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal response_count
+        response_count += 1
+        assert tools == [list_watchers]
+        if response_count == 1:
+            return {"content": "<search_watchers>name: HAHA</search_watchers>"}
+        assert messages[-1]["role"] == "tool"
+        return {"content": "HAHA has 5 errors."}
+
+    async def fake_execute_async(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return "Watcher: HAHA"
+
+    agent.llm.chat = fake_chat
+    agent.tool_executor.execute_async = fake_execute_async
+
+    tokens = [token async for token in agent.run("what errors in HAHA", [])]
+
+    assert calls == [("list_watchers", {"query": "HAHA"})]
+    assert tokens == ["HAHA has 5 errors."]
+
+
 @pytest.mark.asyncio
 async def test_agent_run_stream_suppresses_preamble_before_tool_call(tmp_path, fake_embedding_provider):
     mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)

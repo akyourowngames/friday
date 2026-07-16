@@ -64,6 +64,13 @@ _EXECUTION_GUARD_SIGNAL_RE = re.compile(
     r"parallel|execution\s+waves?|run\s+id)\b",
     re.IGNORECASE,
 )
+_TEXT_TOOL_CALL_RE = re.compile(
+    r"<(?P<name>[A-Za-z_][A-Za-z0-9_-]*)>\s*(?P<body>.*?)\s*</(?P=name)>",
+    re.DOTALL,
+)
+# Some OpenAI-compatible models emit this intuitive but nonexistent name when
+# they mean ``list_watchers``. Keep the alias deliberately small and explicit.
+_TEXT_TOOL_ALIASES = {"search_watchers": "list_watchers"}
 logger = logging.getLogger(__name__)
 
 
@@ -104,6 +111,63 @@ class _ContentDeltaNormalizer:
         if delta:
             self.content += delta
         return delta
+
+
+class _TextToolMarkupFilter:
+    """Hold recognized XML-style tool markup out of the visible stream.
+
+    A few providers occasionally print ``<tool_name>key: value</tool_name>``
+    instead of returning OpenAI tool-call deltas. The agent validates and
+    executes that form after the stream ends; this filter prevents its protocol
+    syntax from leaking to the user while preserving normal text streaming.
+    """
+
+    def __init__(self, accepted_names: set[str]) -> None:
+        self._accepted_names = {name.casefold() for name in accepted_names}
+        self._pending = ""
+        self.completed_markup = False
+
+    def add(self, text: str) -> str:
+        self._pending += text
+        output: list[str] = []
+        while self._pending:
+            marker = self._pending.find("<")
+            if marker < 0:
+                output.append(self._pending)
+                self._pending = ""
+                break
+            if marker:
+                output.append(self._pending[:marker])
+                self._pending = self._pending[marker:]
+
+            opening = re.match(r"<([A-Za-z_][A-Za-z0-9_-]*)>", self._pending)
+            if opening is None:
+                # Keep a possible opening tag until its next stream delta. A
+                # bare less-than sign remains ordinary prose at stream end.
+                if self._pending == "<" or re.match(r"<[A-Za-z_][A-Za-z0-9_-]*$", self._pending):
+                    break
+                output.append("<")
+                self._pending = self._pending[1:]
+                continue
+
+            name = opening.group(1)
+            if name.casefold() not in self._accepted_names:
+                output.append("<")
+                self._pending = self._pending[1:]
+                continue
+
+            closing = f"</{name}>"
+            end = self._pending.find(closing, opening.end())
+            if end < 0:
+                break
+            self._pending = self._pending[end + len(closing):]
+            self.completed_markup = True
+        return "".join(output)
+
+    def finish(self) -> str:
+        """Release an incomplete tag as normal text at end-of-stream."""
+        pending, self._pending = self._pending, ""
+        return pending
 
 
 class Agent:
@@ -749,6 +813,84 @@ class Agent:
         if isinstance(raw_args, str):
             return json.loads(raw_args)
         return raw_args or {}
+
+    @staticmethod
+    def _parse_text_tool_arguments(raw_arguments: str) -> dict[str, Any]:
+        """Parse the small ``key: value`` form used by text tool fallbacks."""
+        text = str(raw_arguments or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+
+        arguments: dict[str, Any] = {}
+        for line in text.splitlines():
+            match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$", line)
+            if match is None:
+                continue
+            key, value = match.groups()
+            value = value.strip().strip('"\'')
+            lowered = value.casefold()
+            if lowered in {"true", "false"}:
+                arguments[key] = lowered == "true"
+            elif lowered in {"null", "none"}:
+                arguments[key] = None
+            elif re.fullmatch(r"-?\d+", value):
+                arguments[key] = int(value)
+            else:
+                arguments[key] = value
+        return arguments
+
+    @classmethod
+    def _text_tool_calls_from_content(
+        cls,
+        content: str,
+        turn_tools: list[dict],
+    ) -> tuple[list[dict], str]:
+        """Convert standalone XML-style fallback calls to normal tool calls.
+
+        Only names that were actually advertised for this turn are accepted.
+        Text tags embedded in prose remain text, preventing an answer that
+        merely discusses a tag from becoming an unintended tool invocation.
+        """
+        available = {
+            str(schema.get("function", {}).get("name") or "").casefold()
+            for schema in turn_tools
+        }
+        calls: list[dict] = []
+
+        def replace(match: re.Match[str]) -> str:
+            line_start = content.rfind("\n", 0, match.start()) + 1
+            line_end = content.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(content)
+            if content[line_start:match.start()].strip() or content[match.end():line_end].strip():
+                return match.group(0)
+
+            source_name = match.group("name").casefold()
+            tool_name = _TEXT_TOOL_ALIASES.get(source_name, source_name)
+            if tool_name not in available:
+                return match.group(0)
+
+            arguments = cls._parse_text_tool_arguments(match.group("body"))
+            if source_name == "search_watchers":
+                query = arguments.pop("query", arguments.pop("name", arguments.pop("watcher", "")))
+                arguments["query"] = str(query)
+            calls.append({
+                "id": f"text_tool_{len(calls)}",
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            })
+            return ""
+
+        cleaned = _TEXT_TOOL_CALL_RE.sub(replace, str(content or ""))
+        return calls, re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     def _resolve_email_reference(self, value: Any) -> str:
         """Resolve a saved name locally while never surfacing the email to the LLM."""
@@ -1648,6 +1790,15 @@ class Agent:
             if latency is not None:
                 latency.mark("provider_first_token_received")
 
+            if not response.get("tool_calls"):
+                fallback_calls, cleaned_content = self._text_tool_calls_from_content(
+                    str(response.get("content") or ""), turn_tools,
+                )
+                if fallback_calls:
+                    response = dict(response)
+                    response["content"] = cleaned_content
+                    response["tool_calls"] = fallback_calls
+
             # Check for tool calls
             if response.get("tool_calls"):
                 # Ensure every tool call has a non-empty id
@@ -1798,6 +1949,14 @@ class Agent:
             tool_calls: dict[int, dict] = {}
             content = _ContentDeltaNormalizer()
             has_tool_calls = False
+            text_tool_names = {
+                str(schema.get("function", {}).get("name") or "").casefold()
+                for schema in turn_tools
+            }
+            text_markup_filter = _TextToolMarkupFilter(
+                text_tool_names | set(_TEXT_TOOL_ALIASES)
+            )
+            text_markup_seen = False
             # The final execution guard may remove a line or append verified
             # runtime truth.  Keep execution-sensitive turns buffered so a
             # client never sees text that the guard would need to retract.
@@ -1871,16 +2030,26 @@ class Agent:
 
                     if chunk_type == "content":
                         delta = content.add(str(chunk.get("text") or ""))
-                        if not delta or has_tool_calls or not allow_live_content:
+                        if not delta or has_tool_calls or text_markup_seen or not allow_live_content:
+                            continue
+                        visible_delta = text_markup_filter.add(delta)
+                        if text_markup_filter.completed_markup:
+                            # A text fallback is equivalent to a native tool
+                            # call: discard its preamble while we turn the
+                            # validated markup into a real call below.
+                            text_markup_seen = True
+                            decision_buffer = ""
+                            continue
+                        if not visible_delta:
                             continue
                         if stream_committed:
                             if latency is not None:
                                 latency.mark("first_token_sent")
-                            visible_content += delta
-                            yield delta
+                            visible_content += visible_delta
+                            yield visible_delta
                             continue
 
-                        decision_buffer += delta
+                        decision_buffer += visible_delta
                         decision_started_at = decision_started_at or time.monotonic()
                         if len(decision_buffer) >= _STREAM_TOOL_DECISION_BUFFER_CHARS:
                             stream_committed = True
@@ -1928,6 +2097,32 @@ class Agent:
                 if callable(closer):
                     with suppress(asyncio.CancelledError, Exception):
                         await closer()
+
+            trailing_markup_text = text_markup_filter.finish()
+            if trailing_markup_text and not has_tool_calls and not text_markup_seen and allow_live_content:
+                if stream_committed:
+                    if latency is not None:
+                        latency.mark("first_token_sent")
+                    visible_content += trailing_markup_text
+                    yield trailing_markup_text
+                else:
+                    decision_buffer += trailing_markup_text
+
+            if not has_tool_calls:
+                fallback_calls, cleaned_content = self._text_tool_calls_from_content(
+                    content.content, turn_tools,
+                )
+                if fallback_calls:
+                    content.content = cleaned_content
+                    text_markup_seen = True
+                    has_tool_calls = True
+                    for index, call in enumerate(fallback_calls):
+                        function = call["function"]
+                        tool_calls[index] = {
+                            "id": str(call.get("id") or ""),
+                            "name": str(function.get("name") or ""),
+                            "arguments": str(function.get("arguments") or ""),
+                        }
 
             if has_tool_calls:
                 formatted_calls = []
