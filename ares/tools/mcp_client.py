@@ -26,6 +26,17 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, url
 import httpx
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from ares.tools.mcp_upgrades import (
+    MCPResponseCache,
+    MCPUpgradeError,
+    merge_paginated_responses,
+    pagination_page_arguments,
+    prepare_mcp_call,
+    project_mcp_error,
+    project_mcp_health,
+    project_pagination_page,
+)
+
 logger = logging.getLogger(__name__)
 
 _SENSITIVE_MCP_QUERY_KEYS = {
@@ -352,6 +363,9 @@ class MCPClientManager:
         self.tool_definitions: list[dict[str, Any]] = []
         self.schema_cache: dict[str, list[dict[str, Any]]] = {}
         self.server_errors: dict[str, str] = {}
+        # This cache is used only by an explicit, read-only call policy. It
+        # stays in memory so neither MCP output nor request details persist.
+        self._response_cache = MCPResponseCache()
 
     def _iter_config_entries(
         self, server_configs: list[dict[str, Any] | MCPServerConfig] | dict[str, Any]
@@ -433,6 +447,7 @@ class MCPClientManager:
         self._exit_stacks.clear()
         self._http_clients.clear()
         self.tool_definitions.clear()
+        self._response_cache.clear()
 
     async def close_server(self, name: str) -> None:
         """Close one MCP server session and keep all other servers connected."""
@@ -449,6 +464,9 @@ class MCPClientManager:
             tool for tool in self.tool_definitions
             if not tool.get("function", {}).get("name", "").startswith(f"mcp__{name}__")
         ]
+        # A server restart can change even a read-only result. Clearing this
+        # small in-memory cache is conservative and avoids stale projections.
+        self._response_cache.clear()
 
     async def reconnect_server(self, name: str) -> dict[str, Any]:
         """Reconnect one configured MCP server and refresh its cached schemas."""
@@ -490,7 +508,7 @@ class MCPClientManager:
             for name, details in servers.items()
             if details["error"]
         }
-        return {
+        report = {
             "ready": any(item["ready"] for item in servers.values()),
             "configured": len(self.servers),
             "connected": sum(1 for item in servers.values() if item["ready"]),
@@ -498,6 +516,10 @@ class MCPClientManager:
             "servers": servers,
             "errors": errors,
         }
+        # Keep the established report fields while exposing a redacted,
+        # stable health view for upgraded diagnostics and UI consumers.
+        report["health"] = project_mcp_health(self)
+        return report
 
     def tools_by_server(self, server_name: str | None = None) -> dict[str, list[dict[str, str]]]:
         """Return discovered MCP tools grouped into a stable CLI-friendly shape."""
@@ -667,22 +689,146 @@ class MCPClientManager:
         }
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        try:
-            _, server_name, mcp_tool = tool_name.split("__", 2)
-        except ValueError:
-            return f"Error: Invalid MCP tool name '{tool_name}'. Expected mcp__<server>__<tool>."
-        config = self.servers.get(
-            server_name, MCPServerConfig(name=server_name)
-        )
-        timeout = config.timeout_seconds
+        """Call an MCP tool, applying advanced policy only when explicitly requested.
 
-        # Desktop snapshots are expected to be fast. A crashed Windows MCP
-        # process used to leave callers waiting for its generic 90-second
-        # timeout, even after its stdio writer had already died. Keep an
-        # observation bounded, while allowing actions such as a native app
-        # launch to retain the configured server timeout.
-        if server_name == "windows" and mcp_tool.casefold() in {"snapshot", "screenshot"}:
-            timeout = min(timeout, 15.0)
+        Reserved ``__ares``/``_ares`` metadata is stripped before a request is
+        sent to the MCP server. Legacy callers continue to receive the same
+        rendered string; a structured envelope requires an explicit
+        ``response_format``/``result_format`` opt-in.
+        """
+
+        try:
+            raw_server = str(tool_name).removeprefix("mcp__").partition("__")[0]
+            config = self.servers.get(raw_server, MCPServerConfig(name=raw_server))
+            configured_timeout = max(1.0, float(config.timeout_seconds))
+            is_windows_observation = (
+                raw_server == "windows"
+                and str(tool_name).rsplit("__", 1)[-1].casefold()
+                in {"snapshot", "screenshot"}
+            )
+            hard_timeout = (
+                min(configured_timeout, 15.0)
+                if is_windows_observation
+                else configured_timeout
+            )
+            prepared = prepare_mcp_call(
+                tool_name,
+                arguments,
+                default_timeout_seconds=hard_timeout,
+                max_timeout_seconds=hard_timeout,
+            )
+        except (MCPUpgradeError, TypeError, ValueError) as exc:
+            message = redact_mcp_text(exc)
+            if "Invalid MCP tool name" in message:
+                return f"Error: {message}"
+            return f"Error: Invalid MCP call: {message}"
+
+        server_name = prepared.tool.server_name
+        mcp_tool = prepared.tool.tool_name
+        timeout = prepared.timeout.timeout_seconds
+        structured = self._structured_result_requested(prepared.metadata)
+        warnings: list[str] = []
+        read_only = self._is_read_only_tool(mcp_tool)
+        # Cache keys intentionally exclude execution metadata. Do not cache a
+        # paginated aggregate under the same key as a one-shot read.
+        cache_enabled = (
+            prepared.cache_ttl_seconds > 0
+            and read_only
+            and not prepared.pagination.enabled
+        )
+
+        if prepared.cache_ttl_seconds > 0 and not read_only:
+            warnings.append(
+                "Response caching was ignored because this MCP tool is not classified as read-only."
+            )
+        elif prepared.cache_ttl_seconds > 0 and prepared.pagination.enabled:
+            warnings.append(
+                "Response caching was ignored for this paginated call to keep cache entries unambiguous."
+            )
+        if prepared.pagination.enabled and not read_only:
+            warnings.append(
+                "Pagination was ignored because this MCP tool is not classified as read-only."
+            )
+
+        if cache_enabled:
+            cached = self._response_cache.lookup_call(
+                prepared.tool.canonical_name, prepared.arguments
+            )
+            if cached.hit:
+                return self._format_upgraded_result(
+                    rendered=str(cached.value),
+                    structured=structured,
+                    ok=True,
+                    server_name=server_name,
+                    mcp_tool=mcp_tool,
+                    timeout=timeout,
+                    warnings=warnings,
+                    cache={
+                        "enabled": True,
+                        "hit": True,
+                        "age_seconds": cached.age_seconds,
+                        "expires_in_seconds": cached.expires_in_seconds,
+                    },
+                )
+
+        if prepared.pagination.enabled and read_only:
+            rendered, failed, pagination = await self._call_paginated_tool(
+                server_name=server_name,
+                mcp_tool=mcp_tool,
+                base_arguments=prepared.arguments,
+                timeout=timeout,
+                policy=prepared.pagination,
+            )
+        else:
+            rendered, failed, _payload = await self._call_rendered_tool(
+                server_name=server_name,
+                mcp_tool=mcp_tool,
+                arguments=prepared.arguments,
+                timeout=timeout,
+            )
+            pagination = None
+
+        if failed:
+            return self._format_upgraded_result(
+                rendered=rendered,
+                structured=structured,
+                ok=False,
+                server_name=server_name,
+                mcp_tool=mcp_tool,
+                timeout=timeout,
+                warnings=warnings,
+                pagination=pagination,
+            )
+
+        if cache_enabled:
+            self._response_cache.put_call(
+                prepared.tool.canonical_name,
+                prepared.arguments,
+                rendered,
+                ttl_seconds=prepared.cache_ttl_seconds,
+            )
+
+        return self._format_upgraded_result(
+            rendered=rendered,
+            structured=structured,
+            ok=True,
+            server_name=server_name,
+            mcp_tool=mcp_tool,
+            timeout=timeout,
+            warnings=warnings,
+            cache={"enabled": True, "hit": False} if cache_enabled else None,
+            pagination=pagination,
+        )
+
+    async def _call_rendered_tool(
+        self,
+        *,
+        server_name: str,
+        mcp_tool: str,
+        arguments: dict[str, Any],
+        timeout: float,
+    ) -> tuple[str, bool, Any | None]:
+        """Run one MCP call while preserving the previous retry behavior."""
 
         # Retry only genuinely transient Playwright failures. Repeating a bad
         # accessibility ref or invalid input costs seconds and cannot succeed
@@ -698,25 +844,43 @@ class MCPClientManager:
             try:
                 session = self.sessions.get(server_name)
                 if session is None:
-                    return f"Error: MCP server '{server_name}' is not connected."
+                    return f"Error: MCP server '{server_name}' is not connected.", True, None
                 result = await asyncio.wait_for(
                     session.call_tool(mcp_tool, arguments=arguments), timeout=timeout
                 )
                 is_error = bool(getattr(result, "isError", getattr(result, "is_error", False)))
                 rendered = self._render_result(result)
                 if is_error:
-                    # For Playwright, retry on certain errors that might be transient
+                    # For Playwright, retry on certain errors that might be transient.
                     if server_name == "playwright" and attempt < max_retries:
                         error_msg = rendered.lower()
-                        if any(keyword in error_msg for keyword in ["timeout", "browserback", " navigation", "page load"]):
-                            logger.warning("Retrying Playwright MCP call %s (attempt %d/%d)", mcp_tool, attempt + 1, max_retries + 1)
+                        if any(
+                            keyword in error_msg
+                            for keyword in ("timeout", "browserback", " navigation", "page load")
+                        ):
+                            logger.warning(
+                                "Retrying Playwright MCP call %s (attempt %d/%d)",
+                                mcp_tool,
+                                attempt + 1,
+                                max_retries + 1,
+                            )
                             await asyncio.sleep(1.0)
                             continue
-                    return f"Error: MCP tool '{mcp_tool}' on '{server_name}' reported failure: {rendered}"
-                return rendered
+                    return (
+                        f"Error: MCP tool '{mcp_tool}' on '{server_name}' reported failure: "
+                        f"{redact_mcp_text(rendered)}",
+                        True,
+                        None,
+                    )
+                return rendered, False, self._result_payload(result)
             except asyncio.TimeoutError:
                 if server_name == "playwright" and attempt < max_retries:
-                    logger.warning("Retrying Playwright MCP call %s after timeout (attempt %d/%d)", mcp_tool, attempt + 1, max_retries + 1)
+                    logger.warning(
+                        "Retrying Playwright MCP call %s after timeout (attempt %d/%d)",
+                        mcp_tool,
+                        attempt + 1,
+                        max_retries + 1,
+                    )
                     await asyncio.sleep(1.0)
                     continue
                 if can_retry_windows_snapshot and attempt < max_retries:
@@ -724,29 +888,224 @@ class MCPClientManager:
                         f"Snapshot timed out after {timeout:g}s"
                     )
                     continue
-                return f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s."
+                return (
+                    f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s.",
+                    True,
+                    None,
+                )
             except asyncio.CancelledError as exc:
                 _clear_current_task_cancellation()
                 logger.warning(
                     "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
                 )
-                return f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. Check the MCP server logs or increase timeout_seconds."
+                return (
+                    f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. "
+                    "Check the MCP server logs or increase timeout_seconds.",
+                    True,
+                    None,
+                )
             except Exception as exc:
                 error_text = str(exc).casefold()
                 retryable = any(
                     keyword in error_text
-                    for keyword in ("timeout", "navigation", "page load", "target closed", "connection reset")
+                    for keyword in (
+                        "timeout",
+                        "navigation",
+                        "page load",
+                        "target closed",
+                        "connection reset",
+                    )
                 )
                 if server_name == "playwright" and retryable and attempt < max_retries:
-                    logger.warning("Retrying Playwright MCP call %s after error (attempt %d/%d): %s", mcp_tool, attempt + 1, max_retries + 1, exc)
+                    logger.warning(
+                        "Retrying Playwright MCP call %s after error (attempt %d/%d): %s",
+                        mcp_tool,
+                        attempt + 1,
+                        max_retries + 1,
+                        exc,
+                    )
                     await asyncio.sleep(1.0)
                     continue
                 if can_retry_windows_snapshot and attempt < max_retries:
                     await self._recover_windows_server(str(exc) or exc.__class__.__name__)
                     continue
-                return f"Error calling MCP tool '{mcp_tool}' on '{server_name}': {exc}"
+                return (
+                    f"Error calling MCP tool '{mcp_tool}' on '{server_name}': "
+                    f"{redact_mcp_text(exc)}",
+                    True,
+                    None,
+                )
 
-        return f"Error: MCP tool '{mcp_tool}' on '{server_name}' failed after {max_retries + 1} attempts"
+        return (
+            f"Error: MCP tool '{mcp_tool}' on '{server_name}' failed after "
+            f"{max_retries + 1} attempts",
+            True,
+            None,
+        )
+
+    async def _call_paginated_tool(
+        self,
+        *,
+        server_name: str,
+        mcp_tool: str,
+        base_arguments: dict[str, Any],
+        timeout: float,
+        policy: Any,
+    ) -> tuple[str, bool, dict[str, Any] | None]:
+        """Execute bounded pagination without speculating on unstructured output."""
+
+        pages: list[dict[str, Any]] = []
+        cursor = policy.initial_cursor
+        for page_number in range(1, policy.max_pages + 1):
+            page_arguments = pagination_page_arguments(policy, page_number, cursor=cursor)
+            conflicts = {
+                key
+                for key, value in page_arguments.items()
+                if key in base_arguments and base_arguments[key] != value
+            }
+            if conflicts:
+                return (
+                    "Error: Pagination metadata conflicts with MCP argument(s): "
+                    f"{', '.join(sorted(conflicts))}.",
+                    True,
+                    None,
+                )
+            rendered, failed, raw_payload = await self._call_rendered_tool(
+                server_name=server_name,
+                mcp_tool=mcp_tool,
+                arguments={**base_arguments, **page_arguments},
+                timeout=timeout,
+            )
+            if failed:
+                return rendered, True, None
+            payload = raw_payload if raw_payload is not None else self._json_payload(rendered)
+            if payload is None:
+                return rendered, False, {
+                    "enabled": True,
+                    "applied": False,
+                    "reason": "MCP response was not structured JSON; returned the first response only.",
+                    "page_count": 1,
+                }
+            page = project_pagination_page(payload, policy, page_number, cursor=cursor)
+            pages.append(page)
+            if not page["has_more"]:
+                break
+            next_cursor = page.get("next_cursor")
+            if policy.mode == "cursor" and not next_cursor:
+                break
+            cursor = str(next_cursor) if next_cursor is not None else None
+
+        merged = merge_paginated_responses(pages, policy)
+        return (
+            json.dumps(merged, indent=2, default=str),
+            False,
+            {"enabled": True, "applied": True, **merged},
+        )
+
+    @staticmethod
+    def _result_payload(result: Any) -> Any | None:
+        structured = getattr(result, "structured_content", None)
+        return structured if structured is not None else None
+
+    @staticmethod
+    def _json_payload(rendered: str) -> Any | None:
+        try:
+            return json.loads(rendered)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _structured_result_requested(metadata: dict[str, Any]) -> bool:
+        value = metadata.get(
+            "response_format", metadata.get("result_format", metadata.get("structured"))
+        )
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().casefold() in {"structured", "json", "envelope", "true", "on"}
+        return False
+
+    @staticmethod
+    def _is_read_only_tool(mcp_tool: str) -> bool:
+        """Conservatively classify dynamic MCP tools before local caching."""
+
+        normalized = re.sub(r"[^a-z0-9]+", "_", mcp_tool.casefold()).strip("_")
+        if not normalized:
+            return False
+        mutation_tokens = {
+            "add", "approve", "apply", "click", "commit", "create", "delete", "deploy",
+            "disable", "edit", "enable", "execute", "fill", "install", "launch", "merge",
+            "move", "patch", "post", "publish", "put", "remove", "run", "save", "send",
+            "set", "start", "stop", "submit", "type", "update", "upload", "write",
+        }
+        if set(normalized.split("_")) & mutation_tokens:
+            return False
+        read_prefixes = (
+            "browse", "check", "describe", "fetch", "find", "get", "inspect", "list",
+            "lookup", "query", "read", "retrieve", "search", "snapshot", "screenshot",
+            "status", "view",
+        )
+        return normalized.startswith(read_prefixes) or normalized.endswith(
+            ("_snapshot", "_screenshot")
+        )
+
+    @staticmethod
+    def _format_upgraded_result(
+        *,
+        rendered: str,
+        structured: bool,
+        ok: bool,
+        server_name: str,
+        mcp_tool: str,
+        timeout: float,
+        warnings: list[str],
+        cache: dict[str, Any] | None = None,
+        pagination: dict[str, Any] | None = None,
+    ) -> str:
+        """Return legacy text or the shared opt-in structured response shape."""
+
+        if not structured:
+            return rendered
+        error = (
+            project_mcp_error(rendered, server_name=server_name, tool_name=mcp_tool)
+            if not ok
+            else None
+        )
+        data: dict[str, Any] = {"result": rendered}
+        if pagination is not None:
+            data["pagination"] = pagination
+        return json.dumps(
+            {
+                "ok": ok,
+                "status": "completed" if ok else "failed",
+                "summary": (
+                    f"MCP tool '{mcp_tool}' completed."
+                    if ok
+                    else f"MCP tool '{mcp_tool}' failed."
+                ),
+                "data": data,
+                "artifacts": [],
+                "warnings": warnings,
+                "errors": [] if error is None else [error],
+                "next_actions": (
+                    []
+                    if ok or error is None or not error["retryable"]
+                    else ["Retry the operation when the MCP server is ready."]
+                ),
+                "provenance": {"server": server_name, "tool": mcp_tool},
+                "metrics": {
+                    "timeout_seconds": timeout,
+                    "cache": cache or {"enabled": False, "hit": False},
+                    "pagination": {
+                        "requested": pagination is not None,
+                        "applied": bool(pagination and pagination.get("applied")),
+                    },
+                },
+                "undo_id": None,
+            },
+            indent=2,
+            default=str,
+        )
 
     async def _recover_windows_server(self, reason: str) -> None:
         """Replace a crashed Windows MCP process without touching other MCPs."""

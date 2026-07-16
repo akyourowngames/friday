@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import asyncio
+import json
 
 from ares.agent import Agent
 from ares.config import _ensure_mcp_defaults
@@ -196,6 +197,8 @@ def test_readiness_report_uses_schema_cache():
     assert report["connected"] == 0
     assert report["servers"]["calendar"]["schema_cached"] is True
     assert report["servers"]["calendar"]["error"] == "offline"
+    assert report["health"]["status"] == "offline"
+    assert report["health"]["servers"][0]["name"] == "calendar"
 
 
 def test_readiness_report_is_sorted_and_redacts_diagnostics():
@@ -372,3 +375,152 @@ def test_mcp_clear_current_task_cancellation_uncancels_all(monkeypatch):
 
     assert task.count == 0
     assert task.uncancel_calls == 2
+
+
+def test_call_tool_strips_reserved_metadata_caps_timeout_and_returns_structured_envelope():
+    received: list[dict[str, object]] = []
+
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            assert tool_name == "list_events"
+            received.append(arguments)
+            return SimpleNamespace(content=[SimpleNamespace(text="event one")])
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp", "timeout_seconds": 7}]
+    )
+    manager.sessions["calendar"] = FakeSession()
+
+    raw = asyncio.run(
+        manager.call_tool(
+            "mcp__calendar__list_events",
+            {
+                "limit": 2,
+                "__ares": {
+                    "timeout_seconds": 999,
+                    "response_format": "structured",
+                },
+            },
+        )
+    )
+    response = json.loads(raw)
+
+    assert received == [{"limit": 2}]
+    assert set(response) == {
+        "ok",
+        "status",
+        "summary",
+        "data",
+        "artifacts",
+        "warnings",
+        "errors",
+        "next_actions",
+        "provenance",
+        "metrics",
+        "undo_id",
+    }
+    assert response["ok"] is True
+    assert response["data"]["result"] == "event one"
+    assert response["metrics"]["timeout_seconds"] == 7
+    assert response["provenance"] == {"server": "calendar", "tool": "list_events"}
+
+
+def test_call_tool_caches_only_explicit_read_only_operations():
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            return SimpleNamespace(content=[SimpleNamespace(text=f"result {len(calls)}")])
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}]
+    )
+    manager.sessions["calendar"] = FakeSession()
+
+    read_arguments = {"limit": 2, "__ares_cache_ttl_seconds": 60}
+    first = asyncio.run(manager.call_tool("mcp__calendar__list_events", read_arguments))
+    second = asyncio.run(manager.call_tool("mcp__calendar__list_events", read_arguments))
+    assert first == second == "result 1"
+    assert calls == [("list_events", {"limit": 2})]
+
+    write_arguments = {"title": "standup", "__ares_cache_ttl_seconds": 60}
+    third = asyncio.run(manager.call_tool("mcp__calendar__create_event", write_arguments))
+    fourth = asyncio.run(manager.call_tool("mcp__calendar__create_event", write_arguments))
+    assert third == "result 2"
+    assert fourth == "result 3"
+    assert calls[1:] == [
+        ("create_event", {"title": "standup"}),
+        ("create_event", {"title": "standup"}),
+    ]
+
+
+def test_call_tool_paginates_read_only_structured_responses_with_bounded_requests():
+    calls: list[dict[str, object]] = []
+
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            assert tool_name == "list_events"
+            calls.append(arguments)
+            page = arguments["page"]
+            return SimpleNamespace(
+                structured_content={
+                    "items": [{"id": page}],
+                    "has_more": page < 2,
+                }
+            )
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}]
+    )
+    manager.sessions["calendar"] = FakeSession()
+
+    raw = asyncio.run(
+        manager.call_tool(
+            "mcp__calendar__list_events",
+            {
+                "calendar_id": "primary",
+                "__ares": {
+                    "pagination": {"max_pages": 4},
+                    "response_format": "structured",
+                },
+            },
+        )
+    )
+    response = json.loads(raw)
+
+    assert calls == [
+        {"calendar_id": "primary", "page": 1},
+        {"calendar_id": "primary", "page": 2},
+    ]
+    pagination = response["data"]["pagination"]
+    assert [item["id"] for item in pagination["items"]] == [1, 2]
+    assert pagination["page_count"] == 2
+    assert response["metrics"]["pagination"] == {"requested": True, "applied": True}
+
+
+def test_call_tool_structured_errors_are_redacted_before_returning_to_callers():
+    class FailingSession:
+        async def call_tool(self, tool_name, arguments):
+            return SimpleNamespace(
+                isError=True,
+                content=[SimpleNamespace(text="Authorization: Bearer secret-value token=also-secret")],
+            )
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}]
+    )
+    manager.sessions["calendar"] = FailingSession()
+
+    raw = asyncio.run(
+        manager.call_tool(
+            "mcp__calendar__list_events",
+            {"__ares_response_format": "structured"},
+        )
+    )
+    response = json.loads(raw)
+
+    assert response["ok"] is False
+    assert "secret-value" not in raw
+    assert "also-secret" not in raw
+    assert "[redacted]" in response["errors"][0]["diagnostic"]

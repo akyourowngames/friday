@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -14,11 +16,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import urlparse
 
+from PIL import Image
+
 if TYPE_CHECKING:
     from ares.conversations import ConversationStore
     from ares.watcher.service import WatcherService
 
-from ares.tools.exporter import export_data
+from ares.tools.exporter import (
+    build_export_payload,
+    default_export_path,
+    export_data,
+)
+from ares.tools.advanced_export import (
+    AdvancedExportError,
+    plan_advanced_export,
+    write_advanced_export,
+)
 from ares.tools.filesystem import (
     list_directory, read_file, search_files, search_files_async, get_file_info as _get_file_info_impl,
     glob_pattern as _glob_pattern_impl, disk_usage as _disk_usage_impl,
@@ -39,8 +52,14 @@ from ares.sessions import SessionStore
 from ares.tasks import TaskStore, TaskToolHandlers
 from ares.goals import GoalStore, GoalToolHandlers
 from ares.skills import SkillManager
+from ares.delegation.upgrades import DelegationUpgradeError, rank_skills_for_delegation
 from ares.mcp_registry import MCPRegistryClient
-from ares.skill_registry import SafeSkillInstaller, SkillRegistryClient, SkillValidationError
+from ares.skill_registry import (
+    SafeSkillInstaller,
+    SkillRegistryClient,
+    SkillValidationError,
+    marketplace_record,
+)
 from ares.tools.research import ResearchWorkspace, json_result
 from ares.tools.research_upgrades import (
     ResearchUpgradeStore,
@@ -76,6 +95,9 @@ from ares.tools.image_edit import image_info as _image_info
 from ares.tools.image_edit import resize_image as _resize_image
 from ares.tools.image_edit import convert_image as _convert_image
 from ares.tools.image_edit import crop_image as _crop_image
+from ares.tools.image_edit import crop_geometry as _crop_geometry
+from ares.tools.image_edit import resize_geometry as _resize_geometry
+from ares.tools.image_edit import transform_image as _transform_image
 from ares.memory_policy import memory_rejection_reason
 from ares.commitments import CommitmentStore
 from ares.followups import FollowUpStore, future_utc
@@ -98,6 +120,15 @@ from ares.tools.project_checks import run_project_check
 from ares.tools.results import error_result, structured_result, wants_structured
 from ares.tools.file_upgrades import (
     advanced_edit, advanced_read, advanced_search, advanced_write, plan_batch, project_scan,
+)
+from ares.tools.media_export_upgrades import (
+    UpgradeValidationError,
+    build_image_variation_manifest,
+    plan_image_batch_transform,
+    plan_image_transform,
+    project_action_history,
+    validate_image_metadata,
+    validate_transform_result,
 )
 from ares.tools.runtime_upgrades import RuntimeUpgradeManager
 from ares.telephony import TelephonyManager, TelephonyStore
@@ -349,6 +380,7 @@ class ToolExecutor:
             "resize_image": self._resize_image,
             "convert_image": self._convert_image,
             "crop_image": self._crop_image,
+            "batch_transform_images": self._batch_transform_images,
             "terminal_exec": self._terminal_exec,
             "create_cron_job": self.cron.create_cron_job,
             "list_cron_jobs": self.cron.list_cron_jobs,
@@ -442,6 +474,8 @@ class ToolExecutor:
             return await self._web_search_async(arguments)
         if tool_name == "telegram_send_file":
             return await self._telegram_send_file(arguments)
+        if tool_name == "batch_transform_images":
+            return await asyncio.to_thread(self.execute, tool_name, arguments)
         if tool_name == "search_files":
             return await search_files_async(
                 query=arguments.get("query", ""),
@@ -968,7 +1002,46 @@ class ToolExecutor:
 
     def _search_actions(self, args: dict) -> str:
         if self.action_ledger is None:
-            return self._json({"ok": False, "error": "Action ledger is unavailable because Ares has no local data path."})
+            summary = "Action ledger is unavailable because Ares has no local data path."
+            return error_result(summary, code="unavailable") if wants_structured(args) else self._json({"ok": False, "error": summary})
+        advanced_keys = {
+            "action_types", "tags", "tag_match", "target", "tool_name", "task_id", "session_id",
+            "until", "cursor", "sort", "timeline_bucket", "chain_gap_seconds", "response_format",
+        }
+        advanced = any(key in args for key in advanced_keys)
+        if advanced:
+            filters = {
+                key: args[key]
+                for key in (
+                    "action_types", "tags", "tag_match", "target", "tool_name", "task_id",
+                    "session_id", "since", "until", "limit", "cursor", "sort",
+                )
+                if key in args
+            }
+            try:
+                projection = project_action_history(
+                    self.action_ledger.list_all(),
+                    query=str(args.get("query") or ""),
+                    filters=filters,
+                    timeline_bucket=str(args.get("timeline_bucket") or "day"),
+                    chain_gap_seconds=int(args.get("chain_gap_seconds") or 30 * 60),
+                )
+            except (UpgradeValidationError, TypeError, ValueError) as exc:
+                return error_result(str(exc), code="action_history")
+            query = projection["query"]
+            summary = projection["summary"]
+            return structured_result(
+                f"Found {query['total']} matching local action records.",
+                data=projection,
+                warnings=list(query.get("warnings") or ()),
+                provenance={"source": "local_action_ledger"},
+                metrics={
+                    "total": query["total"],
+                    "page_size": len(query["items"]),
+                    "chain_count": projection["chains"]["total"],
+                    "action_types": summary["action_types"],
+                },
+            )
         try:
             actions = self.action_ledger.search(
                 args.get("query", ""),
@@ -1224,6 +1297,8 @@ class ToolExecutor:
             return ("image_generated", "generated image", "Generated an image.", ["image"])
         if lowered in {"resize_image", "convert_image", "crop_image"}:
             return ("image_edited", str(args.get("output") or args.get("path") or "image"), "Edited an image.", ["image"])
+        if lowered == "batch_transform_images":
+            return ("image_edited", str(args.get("output_dir") or "image batch"), "Edited an image batch.", ["image", "batch"])
         if lowered in {"run_command", "terminal_exec"} and self._command_may_change_state(args.get("command") or args.get("command_key")):
             return ("command_run", str(args.get("cwd") or "working directory"), "Ran a state-changing command.", ["command"])
         if lowered == "create_cron_job":
@@ -1384,6 +1459,51 @@ class ToolExecutor:
             query=args.get("query", ""),
             category=args.get("category", ""),
         )
+        if wants_structured(args):
+            requested = args.get("requested_skills") or ()
+            if isinstance(requested, str):
+                requested = [requested]
+            if not isinstance(requested, (list, tuple)):
+                return error_result("requested_skills must be an array", code="invalid_argument")
+            try:
+                ranking = rank_skills_for_delegation(
+                    str(args.get("task") or args.get("query") or ""),
+                    skills,
+                    limit=max(0, min(int(args.get("recommendation_limit") or 3), 12)),
+                    explicitly_requested=[str(item) for item in requested],
+                )
+            except (DelegationUpgradeError, TypeError, ValueError) as exc:
+                return error_result(str(exc), code="skill_ranking_error")
+            catalog = [
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "category": skill.category,
+                    "version": skill.version,
+                    "dependencies": list(skill.metadata.get("dependencies") or skill.metadata.get("requires") or ()),
+                    "required_tools": list(skill.metadata.get("required_tools") or skill.metadata.get("required-tools") or ()),
+                    "examples": list(skill.examples),
+                    "test_commands": list(skill.test_commands),
+                    "lint_messages": list(skill.lint_messages),
+                    "path": str(skill.path),
+                }
+                for skill in skills
+            ]
+            return structured_result(
+                f"Found {len(skills)} matching skills.",
+                data={
+                    "skills": catalog,
+                    "recommendations": ranking.as_dict(),
+                    "categories": manager.list_categories(),
+                },
+                warnings=list(ranking.warnings),
+                next_actions=[
+                    {"tool": "load_skill", "arguments": {"name": item.name}}
+                    for item in ranking.selected
+                ],
+                provenance={"source": "local_skill_manager"},
+                metrics={"skill_count": len(skills), "recommended_count": len(ranking.selected)},
+            )
         if not skills:
             return "No matching skills found."
         lines = [f"Available skills ({len(skills)}):"]
@@ -1416,11 +1536,128 @@ class ToolExecutor:
         )
 
     def _create_skill_tool(self, args: dict) -> str:
-        skill = self._skill_manager().create_skill(
-            name=args["name"],
-            content=args["content"],
-            category=args.get("category", "general"),
+        """Create a versioned skill, with an opt-in preview/lint activation path."""
+        manager = self._skill_manager()
+        structured = wants_structured(args)
+        name = str(args["name"])
+        category = str(args.get("category", "general") or "general")
+        content = str(args["content"])
+        advanced = structured or any(
+            key in args for key in (
+                "version", "description", "required_tools", "examples", "source_action_ids",
+                "preview", "activate", "test_before_activation",
+            )
         )
+        required_tools = args.get("required_tools") or ()
+        examples = args.get("examples") or ()
+        source_action_ids = args.get("source_action_ids") or ()
+        if isinstance(required_tools, str):
+            required_tools = [required_tools]
+        if isinstance(examples, str):
+            examples = [examples]
+        if isinstance(source_action_ids, (str, int)):
+            source_action_ids = [source_action_ids]
+        if not isinstance(required_tools, (list, tuple)) or not isinstance(examples, (list, tuple)) or not isinstance(source_action_ids, (list, tuple)):
+            message = "required_tools, examples, and source_action_ids must be arrays"
+            return error_result(message, code="invalid_argument") if structured else message
+
+        source_actions: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        requested_ids = {str(value) for value in source_action_ids if str(value).strip()}
+        if requested_ids:
+            if self.action_ledger is None:
+                warnings.append("Action provenance is unavailable, so source_action_ids could not be verified.")
+            else:
+                source_actions = [
+                    action for action in self.action_ledger.list_all()
+                    if str(action.get("action_id")) in requested_ids
+                ]
+                found_ids = {str(action.get("action_id")) for action in source_actions}
+                missing = sorted(requested_ids - found_ids)
+                if missing:
+                    warnings.append("No local action record found for: " + ", ".join(missing))
+
+        generated_content = content
+        if advanced and not generated_content.lstrip().startswith("---"):
+            description = str(args.get("description") or f"Reusable {category} workflow for {name}.")
+            version = str(args.get("version") or "1.0.0")
+            frontmatter = {
+                "description": description,
+                "category": category,
+                "version": version,
+                "required_tools": [str(item) for item in required_tools if str(item).strip()],
+                "examples": list(examples),
+                "source_action_ids": [int(item) if str(item).isdigit() else str(item) for item in source_action_ids],
+            }
+            generated_content = "---\n" + "\n".join(
+                f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in frontmatter.items()
+            ) + "\n---\n\n" + generated_content
+        if source_actions:
+            generated_content += "\n\n## Provenance\n\nDerived from successful local action summaries:\n" + "\n".join(
+                f"- [{action.get('action_id')}] {action.get('tool_name')}: {action.get('summary')}"
+                for action in source_actions
+            )
+
+        lint_messages: list[str] = []
+        if advanced and bool(args.get("test_before_activation", False)):
+            with tempfile.TemporaryDirectory(prefix="ares-skill-check-") as directory:
+                candidate = Path(directory) / "SKILL.md"
+                candidate.write_text(manager._ensure_frontmatter(name, generated_content, category), encoding="utf-8")
+                lint_messages = SkillManager.lint_skill_file(candidate)
+            if lint_messages and bool(args.get("activate", True)):
+                message = "Skill activation blocked by validation: " + "; ".join(lint_messages)
+                return structured_result(
+                    message,
+                    ok=False,
+                    status="failed",
+                    data={"name": name, "category": category, "lint_messages": lint_messages},
+                    warnings=warnings,
+                    next_actions=[{"tool": "create_skill", "arguments": {**args, "preview": True}}],
+                    provenance={"source": "local_skill_manager"},
+                ) if structured else message
+
+        preview = advanced and (bool(args.get("preview", False)) or not bool(args.get("activate", True)))
+        if preview:
+            return structured_result(
+                f"Skill '{name}' is ready for review; no files were written.",
+                status="preview",
+                data={
+                    "name": name,
+                    "category": category,
+                    "content": generated_content,
+                    "lint_messages": lint_messages,
+                    "source_actions": source_actions,
+                },
+                warnings=warnings,
+                next_actions=[{"tool": "create_skill", "arguments": {**args, "preview": False, "activate": True}}],
+                provenance={"source": "local_skill_manager"},
+            )
+
+        skill = manager.create_skill(
+            name=name,
+            content=generated_content,
+            category=category,
+        )
+        if structured:
+            return structured_result(
+                f"Created skill '{skill.name}' in category '{skill.category}'.",
+                data={
+                    "skill": {
+                        "name": skill.name,
+                        "category": skill.category,
+                        "version": skill.version,
+                        "path": str(skill.path),
+                        "required_tools": list(skill.metadata.get("required_tools") or skill.metadata.get("required-tools") or ()),
+                        "examples": list(skill.examples),
+                        "test_commands": list(skill.test_commands),
+                        "lint_messages": list(skill.lint_messages),
+                    },
+                    "source_actions": source_actions,
+                },
+                warnings=[*warnings, *skill.lint_messages],
+                next_actions=[{"tool": "load_skill", "arguments": {"name": skill.name}}],
+                provenance={"source": "local_skill_manager", "path": str(skill.path)},
+            )
         return f"Created skill '{skill.name}' in category '{skill.category}' at {skill.path}."
 
     @staticmethod
@@ -1441,110 +1678,961 @@ class ToolExecutor:
         dirs = list(config.skill_dirs or [])
         return Path(dirs[0] if dirs else "~/.ares/skills").expanduser()
 
+    @staticmethod
+    def _marketplace_strings(value: Any) -> list[str]:
+        """Normalize a bounded list of marketplace identifiers."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            return []
+        values: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text and text not in values:
+                values.append(text)
+        return values
+
+    @staticmethod
+    def _marketplace_requested_mode(args: dict, *, allowed: set[str], default: str) -> str:
+        mode = str(args.get("mode") or default).strip().casefold()
+        if mode not in allowed:
+            raise ValueError("mode must be one of " + ", ".join(sorted(allowed)))
+        return mode
+
+    @staticmethod
+    def _marketplace_advanced(args: dict, structured: bool, fields: set[str]) -> bool:
+        return structured or any(field in args for field in fields)
+
+    @staticmethod
+    def _marketplace_error(
+        message: str,
+        *,
+        structured: bool,
+        code: str,
+        data: dict[str, Any] | None = None,
+        status: str = "failed",
+    ) -> str:
+        if structured:
+            return structured_result(
+                message,
+                ok=False,
+                status=status,
+                data=data or {},
+                errors=[{"code": code, "message": message}],
+            )
+        return message
+
+    def _marketplace_dependency_status(self, dependencies: list[Any]) -> tuple[list[dict[str, Any]], list[str]]:
+        """Project dependency availability without executing or installing anything."""
+        config = self._marketplace_config()
+        configured_servers = {
+            str(server.get("name") or "").casefold()
+            for server in config.mcp_servers
+            if isinstance(server, dict)
+        }
+        try:
+            from ares.tools.definitions import get_tool_definitions
+
+            known_tools = {
+                str(tool.get("function", {}).get("name") or "").casefold()
+                for tool in get_tool_definitions()
+            }
+            known_tools.update(
+                str(tool.get("function", {}).get("name") or "").casefold()
+                for tool in (getattr(self.mcp_manager, "tool_definitions", []) or [])
+            )
+        except Exception:
+            # Tool discovery is advisory. A failure here cannot make a safe
+            # marketplace preview unavailable.
+            known_tools = set()
+        manager = self._skill_manager()
+        records: list[dict[str, Any]] = []
+        missing_required: list[str] = []
+        for dependency in dependencies:
+            if isinstance(dependency, dict):
+                kind = str(dependency.get("type") or "mcp_server")
+                name = str(dependency.get("name") or "")
+                required = bool(dependency.get("required", True))
+                auto_install = bool(dependency.get("auto_install", False))
+            else:
+                kind = str(getattr(dependency, "type", "mcp_server"))
+                name = str(getattr(dependency, "name", ""))
+                required = bool(getattr(dependency, "required", True))
+                auto_install = bool(getattr(dependency, "auto_install", False))
+            kind = kind.casefold()
+            name = name.strip()
+            if not name:
+                continue
+            if kind == "mcp_server":
+                available = name.casefold() in configured_servers
+            elif kind == "tool":
+                available = name.casefold() in known_tools
+            elif kind == "skill":
+                available = manager.get_skill(name) is not None
+            else:
+                available = False
+            record = {
+                "type": kind,
+                "name": name,
+                "required": required,
+                "auto_install": auto_install,
+                "available": available,
+            }
+            records.append(record)
+            if required and not available:
+                missing_required.append(f"{kind}:{name}")
+        return records, missing_required
+
+    def _installed_marketplace_skill(self, detail: Any) -> dict[str, Any]:
+        """Find a local marketplace installation using its provenance record."""
+        registry = str(getattr(detail, "registry", "") or "").casefold()
+        slug = str(getattr(detail, "slug", "") or "").casefold()
+        reference = str(getattr(detail, "reference", "") or "").casefold()
+        for skill in self._skill_manager().list_all():
+            record = marketplace_record(skill)
+            if not record:
+                continue
+            record_registry = str(record.get("registry") or "").casefold()
+            record_slug = str(record.get("slug") or "").casefold()
+            if record_registry != registry or record_slug not in {slug, reference}:
+                continue
+            return {
+                "installed": True,
+                "name": skill.name,
+                "version": skill.version,
+                "path": str(skill.path),
+                "installed_at": record.get("installed_at"),
+                "pinned_version": record.get("pinned_version"),
+                "source_version": record.get("version"),
+            }
+        return {"installed": False}
+
+    @staticmethod
+    def _skill_risk_summary(item: Any, *, missing_dependencies: list[str] | None = None) -> dict[str, Any]:
+        """Explain review signals from registry metadata without inventing trust."""
+        signals: list[dict[str, str]] = []
+        suspicious = bool(getattr(item, "suspicious", False))
+        security_status = str(getattr(item, "security_status", "") or "").strip()
+        canonical_url = str(getattr(item, "canonical_url", "") or "").strip()
+        version = str(getattr(item, "version", "") or "").strip()
+        if suspicious:
+            signals.append({"level": "blocked", "code": "registry_flagged", "message": "The registry flagged this skill as suspicious."})
+        if not security_status or security_status.casefold() in {"unknown", "unreviewed"}:
+            signals.append({"level": "review", "code": "security_status_unknown", "message": "The registry did not publish a clear security verdict."})
+        if not canonical_url:
+            signals.append({"level": "review", "code": "source_url_missing", "message": "The registry did not publish a canonical source URL."})
+        if not version or version.casefold() == "unknown":
+            signals.append({"level": "review", "code": "version_unknown", "message": "The registry did not publish a concrete version."})
+        if missing_dependencies:
+            signals.append({
+                "level": "review",
+                "code": "missing_dependencies",
+                "message": "Required local dependencies are not currently configured.",
+            })
+        level = "blocked" if suspicious else "review" if signals else "low"
+        return {
+            "level": level,
+            "suspicious": suspicious,
+            "security_status": security_status or "unknown",
+            "signals": signals,
+        }
+
+    async def _marketplace_skill_versions(
+        self, client: Any, slug: str, registry: str | None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        getter = getattr(client, "get_versions", None)
+        if not callable(getter):
+            return [], "This registry client does not expose version history."
+        try:
+            versions = await getter(slug, registry)
+        except (RuntimeError, ValueError) as exc:
+            return [], str(exc)
+        return [
+            {
+                "version": str(getattr(item, "version", "unknown")),
+                "created_at": str(getattr(item, "created_at", "") or ""),
+                "changelog": str(getattr(item, "changelog", "") or ""),
+                "security_status": str(getattr(item, "security_status", "") or ""),
+            }
+            for item in versions
+        ], None
+
+    @staticmethod
+    def _skill_result_projection(item: Any) -> dict[str, Any]:
+        return {
+            "reference": str(getattr(item, "reference", "") or ""),
+            "name": str(getattr(item, "name", "") or ""),
+            "description": str(getattr(item, "description", "") or ""),
+            "version": str(getattr(item, "version", "") or ""),
+            "registry": str(getattr(item, "registry", "") or ""),
+            "canonical_url": str(getattr(item, "canonical_url", "") or ""),
+            "suspicious": bool(getattr(item, "suspicious", False)),
+            "stars": getattr(item, "stars", None),
+            "downloads": getattr(item, "downloads", None),
+        }
+
+    @staticmethod
+    def _mcp_result_projection(item: Any) -> dict[str, Any]:
+        return {
+            "name": str(getattr(item, "name", "") or ""),
+            "title": str(getattr(item, "title", "") or ""),
+            "description": str(getattr(item, "description", "") or ""),
+            "version": str(getattr(item, "version", "") or ""),
+            "registry": str(getattr(item, "registry", "") or ""),
+            "repository": str(getattr(item, "repository", "") or ""),
+            "canonical_url": str(getattr(item, "canonical_url", "") or ""),
+            "verified": bool(getattr(item, "verified", False)),
+            "stars": getattr(item, "stars", None),
+            "downloads": getattr(item, "downloads", None),
+        }
+
+    @staticmethod
+    def _mcp_plan_projection(payload: dict[str, Any]) -> dict[str, Any]:
+        """Expose a reviewable config plan without ever exposing env values."""
+        return {
+            "name": str(payload.get("name") or ""),
+            "transport": str(payload.get("transport") or ""),
+            "command": str(payload.get("command") or ""),
+            "args": [str(item) for item in (payload.get("args") or [])],
+            "server_url": str(payload.get("server_url") or ""),
+            "required_environment": sorted(str(key) for key in (payload.get("env") or {})),
+            "marketplace": dict(payload.get("marketplace") or {}),
+        }
+
+    def _mcp_risk_summary(self, payload: dict[str, Any], *, verified: bool, existing: bool) -> dict[str, Any]:
+        signals: list[dict[str, str]] = []
+        if not verified:
+            signals.append({"level": "review", "code": "unverified_listing", "message": "The registry did not mark this MCP listing as verified."})
+        if payload.get("command"):
+            signals.append({"level": "review", "code": "local_process", "message": "This plan would start a local process after it is explicitly enabled and connected."})
+        if payload.get("env"):
+            signals.append({"level": "review", "code": "required_environment", "message": "The plan requires locally supplied environment values; registry values are never imported."})
+        if existing:
+            signals.append({"level": "review", "code": "existing_configuration", "message": "A configuration with this name already exists and needs an explicit update plan."})
+        return {"level": "review" if signals else "low", "signals": signals, "verified": verified}
+
     async def _search_skill_marketplace(self, args: dict) -> str:
+        try:
+            structured = wants_structured(args)
+            mode = self._marketplace_requested_mode(
+                args, allowed={"search", "inspect", "compare"}, default="search",
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="invalid_argument")
+        advanced = self._marketplace_advanced(
+            args,
+            structured,
+            {"mode", "compare_slugs", "include_details", "include_versions", "max_results"},
+        )
+        comparison_targets = self._marketplace_strings(args.get("compare_slugs"))
+        query = str(args.get("query") or "").strip() or (comparison_targets[0] if comparison_targets else "")
         config = self._marketplace_config()
         client = SkillRegistryClient(config.skill_registries)
         try:
-            results = await client.search(str(args.get("query") or ""), args.get("registry"))
+            results = await client.search(query, args.get("registry"))
         except (ValueError, RuntimeError) as exc:
-            return f"Marketplace search failed: {exc}"
+            return self._marketplace_error(
+                f"Marketplace search failed: {exc}", structured=structured, code="marketplace_search_failed",
+            )
+        if not advanced:
+            if not results:
+                errors = "; ".join(f"{name}: {message}" for name, message in client.last_errors.items())
+                return "No marketplace skills found." + (f" Registry notes: {errors}" if errors else "")
+            lines = [f"Marketplace skills ({len(results)}):"]
+            for item in results[:12]:
+                lines.append(
+                    f"- {item.reference} [{item.registry}, {item.version}] — {item.description or 'No description.'}"
+                )
+            return "\n".join(lines)
         if not results:
             errors = "; ".join(f"{name}: {message}" for name, message in client.last_errors.items())
-            return "No marketplace skills found." + (f" Registry notes: {errors}" if errors else "")
-        lines = [f"Marketplace skills ({len(results)}):"]
-        for item in results[:12]:
-            lines.append(
-                f"- {item.reference} [{item.registry}, {item.version}] — {item.description or 'No description.'}"
+            return structured_result(
+                "No marketplace skills found.",
+                status="not_found",
+                warnings=[errors] if errors else [],
+                provenance={"source": "configured_skill_registries"},
+                metrics={"result_count": 0},
             )
-        return "\n".join(lines)
+
+        try:
+            max_results = max(1, min(int(args.get("max_results") or 12), 25))
+        except (TypeError, ValueError):
+            return self._marketplace_error("max_results must be an integer", structured=structured, code="invalid_argument")
+        include_details = bool(args.get("include_details")) or mode in {"inspect", "compare"} or bool(comparison_targets)
+        include_versions = bool(args.get("include_versions"))
+        compare_keys = {item.casefold() for item in comparison_targets}
+        if mode == "compare" and not compare_keys:
+            compare_keys = {item.reference.casefold() for item in results[:2]}
+        warnings: list[str] = []
+        rows: list[dict[str, Any]] = []
+        for item in results[:max_results]:
+            is_compare_target = not compare_keys or item.reference.casefold() in compare_keys or item.slug.casefold() in compare_keys
+            detail = None
+            versions: list[dict[str, Any]] = []
+            if include_details and (mode != "compare" or is_compare_target):
+                try:
+                    detail = await client.get_skill(item.reference, item.registry)
+                except (RuntimeError, ValueError) as exc:
+                    warnings.append(f"Could not inspect {item.reference}: {exc}")
+            if include_versions and (mode != "compare" or is_compare_target):
+                versions, version_warning = await self._marketplace_skill_versions(client, item.reference, item.registry)
+                if version_warning:
+                    warnings.append(f"{item.reference}: {version_warning}")
+            dependencies = list(getattr(detail, "dependencies", []) or []) if detail is not None else []
+            dependency_status, missing = self._marketplace_dependency_status(dependencies)
+            subject = detail or item
+            row = self._skill_result_projection(item)
+            row.update(
+                {
+                    "risk": self._skill_risk_summary(subject, missing_dependencies=missing),
+                    "permission_summary": {
+                        "registry_access": "read-only metadata lookup",
+                        "filesystem": "none during search",
+                        "execution": "none",
+                    },
+                    "dependencies": dependency_status,
+                    "compatibility": {
+                        "known": detail is not None,
+                        "missing_required": missing,
+                        "installed": self._installed_marketplace_skill(subject),
+                    },
+                }
+            )
+            if detail is not None:
+                row["detail"] = {
+                    "files": [str(file) for file in (getattr(detail, "files", []) or [])],
+                    "security_status": str(getattr(detail, "security_status", "") or "unknown"),
+                    "owner": str(getattr(detail, "owner", "") or ""),
+                }
+            if versions:
+                row["versions"] = versions
+            rows.append(row)
+        comparison = [
+            row for row in rows
+            if row["reference"].casefold() in compare_keys
+            or row["reference"].lstrip("@").casefold() in compare_keys
+        ] if compare_keys else []
+        registry_errors = getattr(client, "last_errors", {}) or {}
+        warnings.extend(f"{name}: {message}" for name, message in registry_errors.items())
+        return structured_result(
+            f"Found {len(results)} marketplace skill{'s' if len(results) != 1 else ''}.",
+            status="partial" if registry_errors else "completed",
+            data={"mode": mode, "results": rows, "comparison": comparison},
+            warnings=warnings,
+            next_actions=[
+                {"tool": "install_marketplace_skill", "arguments": {"slug": row["reference"], "registry": row["registry"], "preview": True, "response_format": "structured"}}
+                for row in rows[:3]
+            ],
+            provenance={"source": "configured_skill_registries", "registry": args.get("registry") or "all"},
+            metrics={"result_count": len(results), "returned_count": len(rows), "comparison_count": len(comparison)},
+        )
 
     async def _install_marketplace_skill(self, args: dict) -> str:
-        if not bool(args.get("confirm", False)):
-            return "CONFIRM REQUIRED: Installing a community skill writes instructions to disk. Re-call only after the user explicitly approves this exact skill with confirm=true."
+        try:
+            structured = wants_structured(args)
+            mode = self._marketplace_requested_mode(
+                args, allowed={"install", "update", "preview"}, default="install",
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="invalid_argument")
+        preview = bool(args.get("preview", False)) or mode == "preview"
+        advanced = self._marketplace_advanced(
+            args,
+            structured,
+            {"mode", "version", "pin_version", "preview", "sandbox_validate", "replace", "expected_version"},
+        )
+        if not preview and not bool(args.get("confirm", False)):
+            message = "CONFIRM REQUIRED: Installing a community skill writes instructions to disk. Re-call only after the user explicitly approves this exact skill with confirm=true."
+            if not advanced:
+                return message
+            return self._marketplace_error(
+                message,
+                structured=structured,
+                code="confirmation_required",
+                data={"mode": mode, "slug": str(args.get("slug") or "")},
+            )
         config = self._marketplace_config()
         slug = str(args.get("slug") or "").strip()
         client = SkillRegistryClient(config.skill_registries)
-        detail = await client.get_skill(slug, args.get("registry"))
+        try:
+            detail = await client.get_skill(slug, args.get("registry"))
+        except (RuntimeError, ValueError) as exc:
+            return self._marketplace_error(
+                f"Skill lookup failed: {exc}", structured=structured, code="marketplace_lookup_failed",
+            )
         if detail is None:
-            return f"Skill '{slug}' was not found in configured registries."
+            return self._marketplace_error(
+                f"Skill '{slug}' was not found in configured registries.", structured=structured, code="not_found", status="not_found",
+            )
+        requested_version = str(args.get("pin_version") or args.get("version") or "").strip()
+        warnings: list[str] = []
+        versions: list[dict[str, Any]] = []
+        if requested_version or bool(args.get("include_versions", False)):
+            versions, version_warning = await self._marketplace_skill_versions(client, detail.reference, detail.registry)
+            if version_warning:
+                warnings.append(version_warning)
+            elif requested_version and requested_version not in {entry["version"] for entry in versions}:
+                message = f"Version '{requested_version}' is not published for skill '{detail.reference}'."
+                return self._marketplace_error(message, structured=structured, code="version_not_found", data={"available_versions": versions})
+        selected_version = requested_version or detail.version
+        dependency_status, missing = self._marketplace_dependency_status(list(detail.dependencies or []))
+        installed = self._installed_marketplace_skill(detail)
+        expected_version = str(args.get("expected_version") or "").strip()
+        if expected_version and installed.get("installed") and str(installed.get("source_version") or installed.get("version")) != expected_version:
+            message = f"Installed skill version does not match expected_version '{expected_version}'."
+            return self._marketplace_error(
+                message,
+                structured=structured,
+                code="version_conflict",
+                data={"installed": installed, "expected_version": expected_version},
+                status="conflict",
+            )
+        risk = self._skill_risk_summary(detail, missing_dependencies=missing)
+        replace = bool(args.get("replace", False)) or mode == "update"
+        plan = {
+            "reference": detail.reference,
+            "registry": detail.registry,
+            "selected_version": selected_version,
+            "pinned_version": str(args.get("pin_version") or "") or None,
+            "replace_existing": replace,
+            "installed": installed,
+            "dependencies": dependency_status,
+            "missing_required_dependencies": missing,
+            "risk": risk,
+            "permission_summary": {
+                "registry_access": "hosted instruction archive download from the selected configured registry",
+                "filesystem": "temporary sandbox only" if preview else "local skill directory after explicit confirmation",
+                "execution": "none; downloaded skills are never executed during install",
+            },
+            "available_versions": versions,
+            "sandbox": {"requested": bool(args.get("sandbox_validate", False)), "performed": False},
+        }
+        if preview:
+            if bool(args.get("sandbox_validate", False)):
+                try:
+                    archive = await client.download(detail.reference, selected_version, detail.registry)
+                except (RuntimeError, ValueError) as exc:
+                    archive = None
+                    warnings.append(f"Sandbox validation download failed: {exc}")
+                if archive is None:
+                    warnings.append("Sandbox validation could not obtain a safe hosted ZIP archive.")
+                else:
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="ares-skill-marketplace-preview-") as directory:
+                            validated = SafeSkillInstaller(Path(directory) / "skills").install(
+                                archive,
+                                provenance={"registry": detail.registry, "slug": detail.reference, "version": selected_version},
+                            )
+                        plan["sandbox"] = {
+                            "requested": True,
+                            "performed": True,
+                            "valid": True,
+                            "skill_name": validated.skill.name,
+                            "files": [str(path.name) for path in validated.skill.files],
+                        }
+                    except (OSError, SkillValidationError) as exc:
+                        plan["sandbox"] = {"requested": True, "performed": True, "valid": False, "error": str(exc)}
+                        warnings.append("Sandbox validation rejected the archive.")
+            summary = f"Install preview for skill '{detail.reference}' is ready; no files were written."
+            if structured:
+                return structured_result(
+                    summary,
+                    status="preview",
+                    data={"plan": plan},
+                    warnings=warnings,
+                    next_actions=[
+                        {"tool": "install_marketplace_skill", "arguments": {**args, "preview": False, "mode": "install", "confirm": True, "response_format": "structured"}}
+                    ],
+                    provenance={"registry": detail.registry, "reference": detail.reference},
+                    metrics={"dependency_count": len(dependency_status), "missing_required_count": len(missing)},
+                )
+            return "PREVIEW: " + summary
         if detail.suspicious:
-            return "Install blocked: the selected registry skill is flagged suspicious. Ask the user to review the source manually."
-        archive = await client.download(detail.reference, detail.version, detail.registry)
+            message = "Install blocked: the selected registry skill is flagged suspicious. Ask the user to review the source manually."
+            return self._marketplace_error(message, structured=structured, code="registry_flagged", data={"plan": plan})
+        try:
+            archive = await client.download(detail.reference, selected_version, detail.registry)
+        except (RuntimeError, ValueError) as exc:
+            return self._marketplace_error(
+                f"Install blocked: {exc}", structured=structured, code="marketplace_download_failed", data={"plan": plan},
+            )
         if archive is None:
-            return "Install blocked: the registry did not provide a safe hosted ZIP archive."
+            return self._marketplace_error(
+                "Install blocked: the registry did not provide a safe hosted ZIP archive.",
+                structured=structured,
+                code="archive_unavailable",
+                data={"plan": plan},
+            )
+        if bool(args.get("sandbox_validate", False)):
+            try:
+                with tempfile.TemporaryDirectory(prefix="ares-skill-marketplace-validate-") as directory:
+                    validated = SafeSkillInstaller(Path(directory) / "skills").install(
+                        archive,
+                        provenance={"registry": detail.registry, "slug": detail.reference, "version": selected_version},
+                    )
+                plan["sandbox"] = {
+                    "requested": True,
+                    "performed": True,
+                    "valid": True,
+                    "skill_name": validated.skill.name,
+                }
+            except (OSError, SkillValidationError) as exc:
+                plan["sandbox"] = {"requested": True, "performed": True, "valid": False, "error": str(exc)}
+                return self._marketplace_error(
+                    f"Install blocked: sandbox validation rejected the archive: {exc}",
+                    structured=structured,
+                    code="sandbox_validation_failed",
+                    data={"plan": plan},
+                )
         try:
             installation = SafeSkillInstaller(self._marketplace_skills_dir()).install(
                 archive,
                 provenance={
                     "registry": detail.registry,
                     "slug": detail.reference,
-                    "version": detail.version,
+                    "version": selected_version,
                     "canonical_url": detail.canonical_url,
+                    **({"pinned_version": str(args.get("pin_version"))} if args.get("pin_version") else {}),
                 },
+                replace=replace,
             )
         except (FileExistsError, SkillValidationError) as exc:
-            return f"Skill was not installed: {exc}"
+            return self._marketplace_error(
+                f"Skill was not installed: {exc}", structured=structured, code="installation_rejected", data={"plan": plan},
+            )
         self.skill_manager = SkillManager(skill_dirs=list(config.skill_dirs or []) or None)
-        missing = [
-            dependency.name
-            for dependency in installation.dependencies
-            if dependency.type == "mcp_server"
-            and not any(str(server.get("name") or "").casefold() == dependency.name.casefold() for server in config.mcp_servers)
-        ]
         suffix = (
             " Missing MCP dependencies (not added automatically): " + ", ".join(missing) + "."
             if missing else ""
         )
+        if structured:
+            return structured_result(
+                f"Installed skill '{installation.skill.name}'.",
+                status="partial" if missing else "completed",
+                data={
+                    "installation": {
+                        "name": installation.skill.name,
+                        "version": installation.skill.version,
+                        "path": str(installation.path),
+                        "replaced": installation.replaced,
+                    },
+                    "plan": plan,
+                },
+                artifacts=[{"type": "skill", "path": str(installation.path), "name": installation.skill.name}],
+                warnings=warnings,
+                next_actions=[{"tool": "load_skill", "arguments": {"name": installation.skill.name}}],
+                provenance={"registry": detail.registry, "reference": detail.reference, "version": selected_version},
+                metrics={"dependency_count": len(dependency_status), "missing_required_count": len(missing)},
+            )
         return f"Installed skill '{installation.skill.name}' at {installation.path}.{suffix}"
 
     async def _search_mcp_marketplace(self, args: dict) -> str:
+        try:
+            structured = wants_structured(args)
+            mode = self._marketplace_requested_mode(
+                args, allowed={"search", "inspect", "compare"}, default="search",
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="invalid_argument")
+        advanced = self._marketplace_advanced(
+            args, structured, {"mode", "compare_names", "include_details", "max_results"},
+        )
+        comparison_targets = self._marketplace_strings(args.get("compare_names"))
+        query = str(args.get("query") or "").strip() or (comparison_targets[0] if comparison_targets else "")
         config = self._marketplace_config()
         client = MCPRegistryClient(config.mcp_registries)
         try:
-            results = await client.search(str(args.get("query") or ""), args.get("registry"))
+            results = await client.search(query, args.get("registry"))
         except (ValueError, RuntimeError) as exc:
-            return f"MCP marketplace search failed: {exc}"
+            return self._marketplace_error(
+                f"MCP marketplace search failed: {exc}", structured=structured, code="marketplace_search_failed",
+            )
+        if not advanced:
+            if not results:
+                errors = "; ".join(f"{name}: {message}" for name, message in client.last_errors.items())
+                return "No MCP servers found." + (f" Registry notes: {errors}" if errors else "")
+            lines = [f"MCP marketplace servers ({len(results)}):"]
+            for item in results[:12]:
+                trust = "verified" if item.verified else "registry listing"
+                lines.append(f"- {item.name} [{item.registry}, {trust}] — {item.description or 'No description.'}")
+            return "\n".join(lines)
         if not results:
             errors = "; ".join(f"{name}: {message}" for name, message in client.last_errors.items())
-            return "No MCP servers found." + (f" Registry notes: {errors}" if errors else "")
-        lines = [f"MCP marketplace servers ({len(results)}):"]
-        for item in results[:12]:
-            trust = "verified" if item.verified else "registry listing"
-            lines.append(f"- {item.name} [{item.registry}, {trust}] — {item.description or 'No description.'}")
-        return "\n".join(lines)
+            return structured_result(
+                "No MCP servers found.",
+                status="not_found",
+                warnings=[errors] if errors else [],
+                provenance={"source": "configured_mcp_registries"},
+                metrics={"result_count": 0},
+            )
+        try:
+            max_results = max(1, min(int(args.get("max_results") or 12), 25))
+        except (TypeError, ValueError):
+            return self._marketplace_error("max_results must be an integer", structured=structured, code="invalid_argument")
+        include_details = bool(args.get("include_details")) or mode in {"inspect", "compare"} or bool(comparison_targets)
+        compare_keys = {item.casefold() for item in comparison_targets}
+        if mode == "compare" and not compare_keys:
+            compare_keys = {item.name.casefold() for item in results[:2]}
+        configured_names = {
+            str(server.get("name") or "").casefold()
+            for server in config.mcp_servers
+            if isinstance(server, dict)
+        }
+        rows: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for item in results[:max_results]:
+            is_compare_target = not compare_keys or item.name.casefold() in compare_keys
+            detail = None
+            plan = None
+            if include_details and (mode != "compare" or is_compare_target):
+                getter = getattr(client, "get_server", None)
+                if callable(getter):
+                    try:
+                        detail = await getter(item.name, item.registry)
+                    except (RuntimeError, ValueError) as exc:
+                        warnings.append(f"Could not inspect {item.name}: {exc}")
+                planner = getattr(client, "get_install_command", None)
+                if callable(planner):
+                    try:
+                        plan = await planner(item.name, item.registry)
+                    except (RuntimeError, ValueError) as exc:
+                        warnings.append(f"Could not plan {item.name}: {exc}")
+            payload = plan.as_config(existing_names=configured_names) if plan is not None else {}
+            existing = item.name.casefold() in configured_names or str(payload.get("name") or "").casefold() in configured_names
+            subject = detail or item
+            row = self._mcp_result_projection(item)
+            row.update(
+                {
+                    "risk": self._mcp_risk_summary(payload, verified=bool(getattr(subject, "verified", False)), existing=existing),
+                    "permission_summary": {
+                        "registry_access": "read-only metadata lookup",
+                        "configuration": "none during search",
+                        "execution": "none",
+                    },
+                    "compatibility": {
+                        "configured": existing,
+                        "install_plan_available": plan is not None,
+                        "transport": str(payload.get("transport") or ""),
+                        "required_environment": sorted(str(key) for key in (payload.get("env") or {})),
+                    },
+                }
+            )
+            if detail is not None:
+                row["detail"] = {
+                    "packages": len(getattr(detail, "packages", []) or []),
+                    "remotes": len(getattr(detail, "remotes", []) or []),
+                }
+            if payload:
+                row["plan"] = self._mcp_plan_projection(payload)
+            rows.append(row)
+        comparison = [row for row in rows if row["name"].casefold() in compare_keys] if compare_keys else []
+        registry_errors = getattr(client, "last_errors", {}) or {}
+        warnings.extend(f"{name}: {message}" for name, message in registry_errors.items())
+        return structured_result(
+            f"Found {len(results)} MCP marketplace server{'s' if len(results) != 1 else ''}.",
+            status="partial" if registry_errors else "completed",
+            data={"mode": mode, "results": rows, "comparison": comparison},
+            warnings=warnings,
+            next_actions=[
+                {"tool": "add_marketplace_mcp", "arguments": {"name": row["name"], "registry": row["registry"], "preview": True, "response_format": "structured"}}
+                for row in rows[:3]
+            ],
+            provenance={"source": "configured_mcp_registries", "registry": args.get("registry") or "all"},
+            metrics={"result_count": len(results), "returned_count": len(rows), "comparison_count": len(comparison)},
+        )
 
     async def _add_marketplace_mcp(self, args: dict) -> str:
+        try:
+            structured = wants_structured(args)
+            mode = self._marketplace_requested_mode(
+                args, allowed={"add", "update", "preview"}, default="add",
+            )
+        except ValueError as exc:
+            return error_result(str(exc), code="invalid_argument")
+        preview = bool(args.get("preview", False)) or mode == "preview"
+        advanced = self._marketplace_advanced(
+            args,
+            structured,
+            {"mode", "preview", "sandbox_validate", "pin_version", "version", "replace", "expected_version"},
+        )
         config = self._marketplace_config()
         source_name = str(args.get("name") or "").strip()
         existing = {str(server.get("name") or "") for server in config.mcp_servers if isinstance(server, dict)}
-        if source_name in existing:
+        existing_folded = {name.casefold() for name in existing}
+        if source_name in existing and not advanced:
             return f"MCP server '{source_name}' is already configured."
         builtin = next((server for server in DEFAULT_MCP_SERVERS if server["name"] == source_name), None)
         plan = None
+        detail = None
+        warnings: list[str] = []
         if builtin is not None:
             payload = dict(builtin)
             source = "Ares built-in configuration"
         else:
             client = MCPRegistryClient(config.mcp_registries)
-            plan = await client.get_install_command(source_name, args.get("registry"))
+            getter = getattr(client, "get_server", None)
+            if callable(getter) and advanced:
+                try:
+                    detail = await getter(source_name, args.get("registry"))
+                except (RuntimeError, ValueError) as exc:
+                    warnings.append(f"Could not inspect registry metadata: {exc}")
+            try:
+                plan = await client.get_install_command(source_name, args.get("registry"))
+            except (RuntimeError, ValueError) as exc:
+                return self._marketplace_error(
+                    f"No safe install plan was found for MCP server '{source_name}': {exc}",
+                    structured=structured,
+                    code="install_plan_unavailable",
+                )
             if plan is None:
-                return f"No safe install plan was found for MCP server '{source_name}'."
-            payload = plan.as_config(existing_names=existing)
+                return self._marketplace_error(
+                    f"No safe install plan was found for MCP server '{source_name}'.",
+                    structured=structured,
+                    code="install_plan_unavailable",
+                )
+            payload = plan.as_config(existing_names=existing_folded)
             source = f"{plan.registry} registry"
+        requested_pin = str(args.get("pin_version") or args.get("version") or "").strip()
+        detail_version = str(getattr(detail, "version", "") or "").strip()
+        if requested_pin:
+            if builtin is not None:
+                return self._marketplace_error(
+                    "Version pinning is not available for built-in MCP configurations.",
+                    structured=structured,
+                    code="pin_unsupported",
+                )
+            if not detail_version:
+                return self._marketplace_error(
+                    "The registry did not provide a version that can be safely pinned.",
+                    structured=structured,
+                    code="pin_unverified",
+                )
+            if requested_pin != detail_version:
+                return self._marketplace_error(
+                    f"Requested MCP version '{requested_pin}' is not the registry's currently planned version '{detail_version}'.",
+                    structured=structured,
+                    code="version_not_available",
+                    data={"available_version": detail_version},
+                )
+        if advanced:
+            payload["marketplace"] = {
+                "source_name": source_name,
+                "registry": str(getattr(detail, "registry", "") or getattr(plan, "registry", "") or "builtin"),
+                "version": detail_version or None,
+                "pinned_version": requested_pin or None,
+            }
+        existing_index = next(
+            (
+                index for index, server in enumerate(config.mcp_servers)
+                if isinstance(server, dict)
+                and str(server.get("name") or "").casefold() in {source_name.casefold(), str(payload.get("name") or "").casefold()}
+            ),
+            None,
+        )
+        replacing = bool(args.get("replace", False)) or mode == "update"
+        existing_server = config.mcp_servers[existing_index] if existing_index is not None else None
+        if existing_index is not None and not replacing:
+            if advanced:
+                message = f"MCP server '{source_name}' is already configured; use mode='update' with a new explicit confirmation to replace it."
+                return self._marketplace_error(
+                    message,
+                    structured=structured,
+                    code="already_configured",
+                    data={"existing": self._mcp_plan_projection(existing_server), "planned": self._mcp_plan_projection(payload)},
+                    status="conflict",
+                )
+            return f"MCP server '{source_name}' is already configured."
+        if mode == "update" and existing_index is None:
+            return self._marketplace_error(
+                f"MCP server '{source_name}' is not configured, so there is nothing to update.",
+                structured=structured,
+                code="not_found",
+                status="not_found",
+            )
+        if existing_server is not None:
+            payload["name"] = str(existing_server.get("name") or payload.get("name") or source_name)
+        expected_version = str(args.get("expected_version") or "").strip()
+        if expected_version and isinstance(existing_server, dict):
+            installed_version = str((existing_server.get("marketplace") or {}).get("version") or "")
+            if installed_version != expected_version:
+                return self._marketplace_error(
+                    f"Configured MCP version does not match expected_version '{expected_version}'.",
+                    structured=structured,
+                    code="version_conflict",
+                    data={"installed_version": installed_version or None, "expected_version": expected_version},
+                    status="conflict",
+                )
         review = (
             f"MCP plan for {payload['name']}: source={source}; transport={payload['transport']}; "
             f"target={payload.get('server_url') or payload.get('command') or '-'}; "
             f"args={' '.join(payload.get('args') or []) or '-'}"
         )
+        if preview:
+            summary = f"MCP {'update' if replacing else 'add'} preview for '{payload['name']}' is ready; shared config was not changed."
+            if structured:
+                return structured_result(
+                    summary,
+                    status="preview",
+                    data={
+                        "plan": self._mcp_plan_projection(payload),
+                        "existing": self._mcp_plan_projection(existing_server) if isinstance(existing_server, dict) else None,
+                        "risk": self._mcp_risk_summary(
+                            payload,
+                            verified=bool(getattr(detail, "verified", builtin is not None)),
+                            existing=existing_index is not None,
+                        ),
+                        "permission_summary": {
+                            "configuration": "shared config is unchanged during preview",
+                            "execution": "no MCP command or remote is executed during marketplace planning",
+                        },
+                        "sandbox": {
+                            "requested": bool(args.get("sandbox_validate", False)),
+                            "performed": False,
+                            "reason": "MCP packages and remotes are never executed during marketplace planning.",
+                        },
+                    },
+                    warnings=warnings,
+                    next_actions=[
+                        {"tool": "add_marketplace_mcp", "arguments": {**args, "preview": False, "mode": "update" if replacing else "add", "confirm": True, "response_format": "structured"}}
+                    ],
+                    provenance={"source": source, "registry": args.get("registry") or "builtin"},
+                )
+            return "PREVIEW: " + summary
         if not bool(args.get("confirm", False)):
-            return "CONFIRM REQUIRED: " + review + ". Re-call with confirm=true only after the user approves this exact plan."
-        config.mcp_servers.append(payload)
+            message = "CONFIRM REQUIRED: " + review + ". Re-call with confirm=true only after the user approves this exact plan."
+            if not advanced:
+                return message
+            return self._marketplace_error(
+                message,
+                structured=structured,
+                code="confirmation_required",
+                data={"plan": self._mcp_plan_projection(payload), "mode": mode},
+            )
+        if existing_index is not None:
+            config.mcp_servers[existing_index] = payload
+        else:
+            config.mcp_servers.append(payload)
         save_config(config)
+        action = "Updated" if existing_index is not None else "Added"
+        if structured:
+            return structured_result(
+                review + f". {action} shared config; use /mcp refresh before calling its tools.",
+                data={"plan": self._mcp_plan_projection(payload), "mode": mode, "updated": existing_index is not None},
+                warnings=warnings,
+                next_actions=[{"tool": "mcp_status", "arguments": {}}],
+                provenance={"source": source, "registry": args.get("registry") or "builtin"},
+            )
         return review + ". Added to shared config; use /mcp refresh before calling its tools."
 
     # ── Export ─────────────────────────────────────────────────────
 
     def _export_data(self, args: dict) -> str:
+        advanced_keys = {
+            "preview", "redact", "incremental", "previous_manifest", "manifest_path",
+            "verify", "response_format", "include_categories", "exclude_categories", "since", "until",
+            "encryption_password",
+        }
+        advanced = any(key in args for key in advanced_keys)
+        if advanced:
+            profile = str(args.get("profile") or "full")
+            output_path = Path(args["path"]).expanduser() if args.get("path") else default_export_path()
+            manifest_path = Path(args.get("manifest_path") or f"{output_path}.manifest.json").expanduser()
+            encryption_password = args.get("encryption_password")
+            try:
+                payload = build_export_payload(
+                    memory_store=self.memory,
+                    conversation_store=self.conversations,
+                    people_store=self.people_store,
+                    action_ledger=self.action_ledger,
+                    goal_store=self.goal_store,
+                    commitment_store=self.commitment_store,
+                    config=self.config,
+                    profile=profile,
+                )
+                plan = plan_advanced_export(
+                    payload,
+                    profile=profile,
+                    redact=bool(args.get("redact", True)),
+                    include_categories=args.get("include_categories"),
+                    exclude_categories=args.get("exclude_categories"),
+                    since=args.get("since"),
+                    until=args.get("until"),
+                    previous_manifest=args.get("previous_manifest"),
+                    incremental=bool(args.get("incremental", False)),
+                    output_path=output_path,
+                    manifest_path=manifest_path,
+                    encryption_password=encryption_password,
+                )
+            except (AdvancedExportError, UpgradeValidationError, OSError, TypeError, ValueError) as exc:
+                return error_result(str(exc), code="export_plan")
+            preview_data = plan.as_dict()
+            safe_next_arguments = {
+                key: value for key, value in args.items()
+                if key != "encryption_password"
+            }
+            safe_next_arguments["preview"] = False
+            next_action: dict[str, Any] = {
+                "tool": "export_data",
+                "arguments": safe_next_arguments,
+            }
+            if encryption_password is not None:
+                next_action["note"] = "Provide encryption_password again when executing; it is intentionally not retained in the preview."
+            if bool(args.get("preview", False)):
+                return structured_result(
+                    "Export plan is ready for review; no files were written.",
+                    status="preview",
+                    data=preview_data,
+                    warnings=list(preview_data["warnings"]),
+                    next_actions=[next_action],
+                    provenance={"source": "local_export_planner"},
+                    metrics={
+                        "sections": preview_data["write_manifest"]["section_counts"],
+                        "payload_bytes": preview_data["write"]["payload_bytes"],
+                        "encrypted": bool(preview_data["encryption"]["enabled"]),
+                    },
+                )
+            try:
+                result = write_advanced_export(plan, encryption_password=encryption_password)
+            except (AdvancedExportError, UpgradeValidationError, OSError, TypeError, ValueError) as exc:
+                return error_result(f"Export write failed: {exc}", code="export_write")
+            verification = result["verification"]
+            file_verification = verification.get("file") if isinstance(verification, dict) else None
+            file_ok = bool(file_verification.get("ok")) if isinstance(file_verification, dict) else False
+            round_trip = verification.get("round_trip") if isinstance(verification, dict) else None
+            ok = file_ok and (round_trip in {None, True})
+            return structured_result(
+                f"Exported Ares data to {result['output_path']}" if ok else f"Export wrote to {result['output_path']}, but verification failed.",
+                ok=ok,
+                status="completed" if ok else "failed",
+                data={
+                    **preview_data,
+                    "written_path": result["output_path"],
+                    "manifest_path": result["manifest_path"],
+                    "write_result": result,
+                },
+                artifacts=[
+                    {
+                        "path": artifact["path"],
+                        "media_type": "application/json",
+                        "description": "Encrypted Ares export" if result["encrypted"] else "Ares export",
+                    }
+                    for artifact in result["artifacts"]
+                ],
+                warnings=list(result["warnings"]),
+                errors=[] if ok else [{"code": "export_verification", "message": "export verification did not complete"}],
+                provenance={
+                    "source": "local_export_planner",
+                    "checksum_sha256": result["write_manifest"]["checksum_sha256"],
+                    "encrypted": bool(result["encrypted"]),
+                },
+                metrics={
+                    "sections": result["write_manifest"]["section_counts"],
+                    "redactions": preview_data["redaction"]["count"],
+                    "encrypted": bool(result["encrypted"]),
+                },
+            )
         path = export_data(
             memory_store=self.memory,
             conversation_store=self.conversations,
@@ -2441,6 +3529,63 @@ class ToolExecutor:
 
     # ── Image tools ────────────────────────────────────────────────
 
+    @staticmethod
+    def _decoded_image_metadata(path: str | Path) -> dict[str, Any]:
+        image_path = Path(path).expanduser()
+        if not image_path.is_file():
+            raise ValueError(f"image file does not exist: {image_path}")
+        with Image.open(image_path) as image:
+            image.load()
+            return {
+                "path": str(image_path),
+                "width": int(image.width),
+                "height": int(image.height),
+                "format": str(image.format or "").upper(),
+                "mode": str(image.mode),
+                "bytes": image_path.stat().st_size,
+                "frame_count": int(getattr(image, "n_frames", 1) or 1),
+                "animated": bool(getattr(image, "is_animated", False)),
+            }
+
+    @staticmethod
+    def _image_result_path(message: str) -> str | None:
+        match = re.search(r"(?:Image saved to|saved to)\s+(.+?)(?:\r?\n|$)", str(message or ""), re.IGNORECASE)
+        if match is None:
+            return None
+        candidate = match.group(1).strip()
+        return candidate if candidate else None
+
+    @staticmethod
+    def _image_upgrade_requested(args: dict) -> bool:
+        # ``response_format=legacy`` must not itself switch a legacy tool onto
+        # the JSON path.  Schema-aware callers often send the default value.
+        if wants_structured(args):
+            return True
+        if bool(args.get("preview")) or bool(args.get("estimate_only")):
+            return True
+        if any(args.get(key) not in (None, "", [], {}) for key in (
+            "style", "aspect_ratio", "negative_prompt", "fallbacks", "expected", "preset",
+            "crop_width", "crop_height", "target_bytes",
+        )):
+            return True
+        try:
+            variations = int(args.get("variations", 1))
+        except (TypeError, ValueError):
+            return True
+        return any((
+            variations != 1,
+            str(args.get("fit") or "contain").casefold() != "contain",
+            args.get("clamp", True) is not True,
+            bool(args.get("flatten_animation", False)),
+            bool(args.get("pad", False)),
+            str(args.get("pad_color") or "transparent").casefold() != "transparent",
+            str(args.get("metadata_policy") or "strip").casefold() != "strip",
+            str(args.get("transparency_policy") or "flatten").casefold() != "flatten",
+            str(args.get("background") or "white").casefold() != "white",
+            str(args.get("mode") or "box").casefold() != "box",
+            str(args.get("anchor") or "center").casefold() != "center",
+        ))
+
     def _generate_image(self, args: dict) -> str:
         prompt = args["prompt"]
         width = int(args.get("width", 1024))
@@ -2449,12 +3594,275 @@ class ToolExecutor:
         seed = args.get("seed")
         if seed is not None:
             seed = int(seed)
+        if self._image_upgrade_requested(args):
+            try:
+                manifest = build_image_variation_manifest(
+                    prompt,
+                    width=width,
+                    height=height,
+                    model=model,
+                    seed=seed,
+                    variations=int(args.get("variations") or 1),
+                    style=args.get("style"),
+                    aspect_ratio=args.get("aspect_ratio"),
+                    negative_prompt=args.get("negative_prompt"),
+                    fallbacks=args.get("fallbacks"),
+                    request_id=str(args.get("request_id") or "") or None,
+                )
+            except (UpgradeValidationError, TypeError, ValueError) as exc:
+                return error_result(str(exc), code="image_plan")
+            if bool(args.get("preview", False)):
+                return structured_result(
+                    "Image generation plan is ready for review; no image was generated.",
+                    status="preview",
+                    data={"manifest": manifest},
+                    warnings=["The current image provider adapter does not send negative_prompt separately; it remains in the reproducibility manifest."] if manifest["negative_prompt"] else [],
+                    next_actions=[{"tool": "generate_image", "arguments": {**args, "preview": False}}],
+                    provenance={"source": "image_generation_planner", "reproducibility_id": manifest["reproducibility_id"]},
+                    metrics={"variations": len(manifest["variants"])},
+                )
+            attempts: list[dict[str, Any]] = []
+            artifacts: list[dict[str, Any]] = []
+            warnings: list[str] = []
+            if manifest["negative_prompt"]:
+                warnings.append("The current image provider adapter does not send negative_prompt separately; it remains in the reproducibility manifest.")
+            for variant in manifest["variants"]:
+                candidates = [manifest["model"], *[
+                    fallback.get("model", manifest["model"])
+                    for fallback in manifest["fallback_policy"]
+                ]]
+                generated = ""
+                used_model = manifest["model"]
+                for attempt_index, candidate_model in enumerate(candidates, 1):
+                    generated = generate_image(
+                        variant["prompt"],
+                        width=variant["target_size"]["width"],
+                        height=variant["target_size"]["height"],
+                        model=str(candidate_model),
+                        seed=variant["seed"],
+                    )
+                    attempts.append({
+                        "variant_id": variant["variant_id"],
+                        "attempt": attempt_index,
+                        "model": candidate_model,
+                        "ok": not str(generated).lstrip().startswith("Error:"),
+                        "result": generated,
+                    })
+                    used_model = str(candidate_model)
+                    if not str(generated).lstrip().startswith("Error:"):
+                        break
+                variant["executed_model"] = used_model
+                variant["result"] = generated
+                image_path = self._image_result_path(generated)
+                if image_path is None:
+                    continue
+                try:
+                    actual = self._decoded_image_metadata(image_path)
+                    verification = validate_image_metadata(actual, variant["target_size"])
+                    variant["actual"] = actual
+                    variant["verification"] = verification
+                    artifacts.append({
+                        "path": image_path,
+                        "media_type": f"image/{actual['format'].casefold()}",
+                        "description": f"Generated image variation {variant['index'] + 1}",
+                    })
+                    if not verification["ok"]:
+                        warnings.extend(verification["errors"])
+                except (OSError, UpgradeValidationError, ValueError) as exc:
+                    warnings.append(f"Could not verify generated image {image_path}: {exc}")
+            completed = sum(1 for variant in manifest["variants"] if not str(variant.get("result") or "").lstrip().startswith("Error:"))
+            ok = completed == len(manifest["variants"])
+            return structured_result(
+                f"Generated {completed}/{len(manifest['variants'])} requested image variations.",
+                ok=ok,
+                status="completed" if ok else "partial" if completed else "failed",
+                data={"manifest": manifest, "attempts": attempts},
+                artifacts=artifacts,
+                warnings=list(dict.fromkeys(warnings)),
+                errors=[
+                    {"variant_id": variant["variant_id"], "message": variant.get("result")}
+                    for variant in manifest["variants"]
+                    if str(variant.get("result") or "").lstrip().startswith("Error:")
+                ],
+                provenance={"source": "image_generation", "reproducibility_id": manifest["reproducibility_id"]},
+                metrics={"requested": len(manifest["variants"]), "completed": completed, "attempts": len(attempts)},
+            )
         return generate_image(prompt, width=width, height=height, model=model, seed=seed)
 
     def _image_info(self, args: dict) -> str:
+        if wants_structured(args):
+            try:
+                metadata = self._decoded_image_metadata(args["path"])
+            except (OSError, ValueError) as exc:
+                return error_result(str(exc), code="image_metadata")
+            expected = args.get("expected")
+            try:
+                verification = validate_image_metadata(metadata, expected) if isinstance(expected, dict) else None
+            except (UpgradeValidationError, TypeError, ValueError) as exc:
+                return error_result(str(exc), code="image_validation")
+            return structured_result(
+                f"Loaded image metadata for {metadata['path']}.",
+                ok=verification is None or bool(verification["ok"]),
+                status="completed" if verification is None or verification["ok"] else "failed",
+                data={"image": metadata, "verification": verification},
+                artifacts=[{"path": metadata["path"], "media_type": f"image/{metadata['format'].casefold()}", "description": "Inspected image"}],
+                errors=[] if verification is None or verification["ok"] else [{"code": "image_validation", "message": error} for error in verification["errors"]],
+                provenance={"source": "Pillow"},
+            )
         return _image_info(args["path"])
 
+    def _image_transform_plan(self, args: dict, *, operation: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        source = self._decoded_image_metadata(args["path"])
+        resize = None
+        crop = None
+        convert = None
+        if operation == "resize":
+            resize = {
+                key: args[key]
+                for key in ("width", "height", "percent", "fit", "preset", "pad", "pad_color", "metadata_policy")
+                if key in args
+            }
+        elif operation == "crop":
+            crop = {
+                key: args[key]
+                for key in (
+                    "left", "top", "right", "bottom", "clamp", "mode", "percent", "aspect_ratio",
+                    "crop_width", "crop_height", "anchor", "metadata_policy",
+                )
+                if key in args
+            }
+        elif operation == "convert":
+            convert = {
+                key: args[key]
+                for key in (
+                    "format", "quality", "flatten_animation", "metadata_policy", "transparency_policy", "background",
+                )
+                if key in args
+            }
+        advanced_resize = operation == "resize" and (
+            any(key in resize for key in ("preset", "pad", "pad_color", "metadata_policy"))
+            or str(resize.get("fit") or "contain").casefold() == "pad"
+        )
+        advanced_crop = operation == "crop" and any(
+            key in crop for key in ("mode", "percent", "aspect_ratio", "crop_width", "crop_height", "anchor", "metadata_policy")
+        )
+        if advanced_resize:
+            geometry = _resize_geometry(
+                source["width"], source["height"], width=resize.get("width"), height=resize.get("height"),
+                percent=resize.get("percent"), fit=str(resize.get("fit") or "contain"),
+                preset=resize.get("preset"), pad=bool(resize.get("pad", False)),
+            )
+            plan = {
+                "kind": "image_transform_plan", "schema_version": 1, "source": source,
+                "operations": [{"operation": "resize", "before": {"width": source["width"], "height": source["height"]}, "after": geometry["target"], "details": geometry}],
+                "target": {**source, **geometry["target"], **({"output": str(Path(args["output"]).expanduser())} if args.get("output") else {})},
+                "warnings": [], "valid": True,
+            }
+        elif advanced_crop:
+            geometry = _crop_geometry(
+                source["width"], source["height"], left=crop.get("left", 0), top=crop.get("top", 0),
+                right=crop.get("right"), bottom=crop.get("bottom"), mode=str(crop.get("mode") or "box"),
+                percent=crop.get("percent"), aspect_ratio=crop.get("aspect_ratio"),
+                crop_width=crop.get("crop_width"), crop_height=crop.get("crop_height"),
+                anchor=str(crop.get("anchor") or "center"), clamp=bool(crop.get("clamp", True)),
+            )
+            plan = {
+                "kind": "image_transform_plan", "schema_version": 1, "source": source,
+                "operations": [{"operation": "crop", "before": {"width": source["width"], "height": source["height"]}, "after": geometry["target"], "details": geometry["details"]}],
+                "target": {**source, **geometry["target"], **({"output": str(Path(args["output"]).expanduser())} if args.get("output") else {})},
+                "warnings": ["crop coordinates were clamped to the image bounds"] if geometry["details"]["clamped"] else [],
+                "valid": True,
+            }
+        else:
+            # The shared planner owns the baseline geometry and animation
+            # validation used by both single and batch image transforms.
+            normalized_resize = {key: value for key, value in (resize or {}).items() if key in {"width", "height", "percent", "fit"}} or None
+            normalized_crop = {key: value for key, value in (crop or {}).items() if key in {"left", "top", "right", "bottom", "clamp"}} or None
+            normalized_convert = {key: value for key, value in (convert or {}).items() if key in {"format", "quality", "flatten_animation"}} or None
+            plan = plan_image_transform(source, resize=normalized_resize, crop=normalized_crop, convert=normalized_convert, output=args.get("output"))
+            if operation == "convert" and convert:
+                plan["operations"][0]["details"].update({
+                    key: convert[key] for key in ("metadata_policy", "transparency_policy", "background") if key in convert
+                })
+        estimated_bytes = max(1, round(
+            int(source["bytes"]) * (plan["target"]["width"] * plan["target"]["height"]) / (source["width"] * source["height"])
+        ))
+        plan["estimate"] = {"bytes": estimated_bytes, "basis": "source-byte-to-pixel-ratio", "exact": False}
+        return source, plan
+
+    def _structured_image_transform(self, args: dict, *, operation: str) -> str:
+        try:
+            source, plan = self._image_transform_plan(args, operation=operation)
+        except (OSError, UpgradeValidationError, TypeError, ValueError) as exc:
+            return error_result(str(exc), code="image_plan")
+        target_bytes = args.get("target_bytes")
+        if target_bytes is not None:
+            try:
+                maximum = int(target_bytes)
+            except (TypeError, ValueError):
+                return error_result("target_bytes must be a positive integer", code="image_plan")
+            if maximum <= 0:
+                return error_result("target_bytes must be a positive integer", code="image_plan")
+            plan["target_bytes"] = maximum
+            if plan["estimate"]["bytes"] > maximum:
+                plan["warnings"].append("Estimated output is above target_bytes; adjust dimensions or compression quality before writing.")
+        if bool(args.get("preview", False)) or bool(args.get("estimate_only", False)):
+            return structured_result(
+                f"{operation.title()} plan is ready for review; no image was changed.",
+                status="preview",
+                data={"source": source, "plan": plan},
+                warnings=list(plan["warnings"]),
+                next_actions=[{"tool": f"{operation}_image", "arguments": {**args, "preview": False}}],
+                provenance={"source": "image_transform_planner"},
+            )
+        if operation == "resize":
+            result = _resize_image(
+                args["path"], width=args.get("width"), height=args.get("height"),
+                percent=args.get("percent"), output=args.get("output"), fit=str(args.get("fit") or "contain"),
+                preset=args.get("preset"), pad=bool(args.get("pad", False)),
+                pad_color=args.get("pad_color", "transparent"), metadata_policy=str(args.get("metadata_policy") or "strip"),
+            )
+        elif operation == "crop":
+            result = _crop_image(
+                args["path"], left=int(args.get("left", 0)), top=int(args.get("top", 0)),
+                right=args.get("right"), bottom=args.get("bottom"), output=args.get("output"),
+                clamp=bool(args.get("clamp", True)),
+                mode=str(args.get("mode") or "box"), percent=args.get("percent"),
+                aspect_ratio=args.get("aspect_ratio"), crop_width=args.get("crop_width"),
+                crop_height=args.get("crop_height"), anchor=str(args.get("anchor") or "center"),
+                metadata_policy=str(args.get("metadata_policy") or "strip"),
+            )
+        else:
+            result = _convert_image(
+                args["path"], format=args["format"], output=args.get("output"),
+                quality=int(args.get("quality", 85)), flatten_animation=bool(args.get("flatten_animation", False)),
+                metadata_policy=str(args.get("metadata_policy") or "strip"),
+                transparency_policy=str(args.get("transparency_policy") or "flatten"),
+                background=args.get("background", "white"),
+            )
+        if str(result).lstrip().startswith("Error:"):
+            return error_result(str(result), code="image_transform")
+        output_path = self._image_result_path(result) or str(args.get("output") or args["path"])
+        try:
+            actual = self._decoded_image_metadata(output_path)
+            verification = validate_transform_result(plan, actual)
+        except (OSError, UpgradeValidationError, ValueError) as exc:
+            return error_result(f"Image was transformed but verification failed: {exc}", code="image_verification")
+        return structured_result(
+            f"{operation.title()} image completed.",
+            ok=bool(verification["ok"]),
+            status="completed" if verification["ok"] else "failed",
+            data={"source": source, "plan": plan, "result": result, "actual": actual, "verification": verification},
+            artifacts=[{"path": output_path, "media_type": f"image/{actual['format'].casefold()}", "description": f"{operation.title()} image"}],
+            warnings=[*plan["warnings"], *verification["warnings"]],
+            errors=[] if verification["ok"] else [{"code": "image_verification", "message": error} for error in verification["errors"]],
+            provenance={"source": "Pillow", "operation": operation},
+            metrics={"width": actual["width"], "height": actual["height"], "bytes": actual["bytes"]},
+        )
+
     def _resize_image(self, args: dict) -> str:
+        if self._image_upgrade_requested(args):
+            return self._structured_image_transform(args, operation="resize")
         return _resize_image(
             args["path"],
             width=args.get("width"),
@@ -2464,6 +3872,8 @@ class ToolExecutor:
         )
 
     def _convert_image(self, args: dict) -> str:
+        if self._image_upgrade_requested(args):
+            return self._structured_image_transform(args, operation="convert")
         return _convert_image(
             args["path"],
             format=args["format"],
@@ -2472,6 +3882,17 @@ class ToolExecutor:
         )
 
     def _crop_image(self, args: dict) -> str:
+        advanced_crop = (
+            args.get("percent") is not None
+            or args.get("aspect_ratio") is not None
+            or args.get("crop_width") is not None
+            or args.get("crop_height") is not None
+            or str(args.get("mode") or "box").casefold() != "box"
+            or str(args.get("anchor") or "center").casefold() != "center"
+            or str(args.get("metadata_policy") or "strip").casefold() != "strip"
+        )
+        if self._image_upgrade_requested(args) or advanced_crop:
+            return self._structured_image_transform(args, operation="crop")
         return _crop_image(
             args["path"],
             left=int(args.get("left", 0)),
@@ -2479,6 +3900,220 @@ class ToolExecutor:
             right=args["right"],
             bottom=args["bottom"],
             output=args.get("output"),
+        )
+
+    def _batch_transform_images(self, args: dict) -> str:
+        """Preview and, after confirmation, atomically transform a file batch.
+
+        Batch writes deliberately require an output directory.  That makes the
+        default operation copy-on-write and allows a failed batch to remove all
+        outputs it created instead of leaving a half-completed set behind.
+        """
+        raw_paths = args.get("paths")
+        if not isinstance(raw_paths, list) or not raw_paths:
+            return error_result("paths must be a non-empty array of image paths", code="image_batch")
+        if len(raw_paths) > 100:
+            return error_result("batch size is limited to 100 images", code="image_batch")
+        paths = [str(value).strip() for value in raw_paths]
+        if any(not path for path in paths):
+            return error_result("paths cannot contain empty values", code="image_batch")
+        if len({str(Path(path).expanduser()).casefold() for path in paths}) != len(paths):
+            return error_result("paths must not contain duplicates", code="image_batch")
+        transform = args.get("transform")
+        if not isinstance(transform, dict):
+            return error_result("transform must be an object containing resize, crop, and/or convert", code="image_batch")
+        if not any(transform.get(key) is not None for key in ("resize", "crop", "convert")):
+            return error_result("transform must contain at least one of resize, crop, or convert", code="image_batch")
+        if transform.get("output"):
+            return error_result("batch transforms use output_dir; transform.output is not allowed", code="image_batch")
+        output_dir_value = str(args.get("output_dir") or "").strip()
+        if not output_dir_value:
+            return error_result("output_dir is required for a safe batch transform", code="image_batch")
+        output_dir = Path(output_dir_value).expanduser()
+        collision_policy = str(args.get("collision_policy") or "suffix").casefold()
+        if collision_policy not in {"suffix", "error"}:
+            return error_result("collision_policy must be suffix or error", code="image_batch")
+
+        # The shared planner currently owns the exact batch geometry.  Keep
+        # richer single-file controls separate rather than silently applying a
+        # partially supported pad/aspect/metadata policy to a batch.
+        allowed_options = {
+            "resize": {"width", "height", "percent", "fit"},
+            "crop": {"left", "top", "right", "bottom", "clamp"},
+            "convert": {"format", "quality", "flatten_animation"},
+        }
+        for operation, allowed in allowed_options.items():
+            options = transform.get(operation)
+            if options is None:
+                continue
+            if not isinstance(options, dict):
+                return error_result(f"transform.{operation} must be an object", code="image_batch")
+            unsupported = set(options) - allowed
+            if unsupported:
+                fields = ", ".join(sorted(unsupported))
+                return error_result(
+                    f"Batch {operation} does not support {fields}; preview and apply that advanced option per image.",
+                    code="image_batch",
+                )
+
+        sources: list[dict[str, Any]] = []
+        source_errors: dict[int, str] = {}
+        for index, path in enumerate(paths):
+            try:
+                sources.append(self._decoded_image_metadata(path))
+            except (OSError, ValueError) as exc:
+                # Supply a deliberately invalid record so the shared planner
+                # retains index alignment and produces a per-item preview.
+                sources.append({"path": path, "width": 0, "height": 0, "format": "PNG"})
+                source_errors[index] = str(exc)
+        try:
+            plan = plan_image_batch_transform(
+                sources,
+                transform,
+                output_dir=output_dir,
+                collision_policy=collision_policy,
+            )
+        except (UpgradeValidationError, TypeError, ValueError) as exc:
+            return error_result(str(exc), code="image_batch")
+
+        allow_overwrite = bool(args.get("allow_overwrite", False))
+        for item in plan["items"]:
+            index = int(item["index"])
+            if index in source_errors:
+                item.update({"ok": False, "error": source_errors[index]})
+                continue
+            if not item.get("ok"):
+                continue
+            source_path = Path(paths[index]).expanduser()
+            output_path = Path(item["plan"]["target"]["output"]).expanduser()
+            try:
+                same_path = source_path.resolve() == output_path.resolve()
+            except OSError:
+                same_path = str(source_path) == str(output_path)
+            if same_path:
+                item.update({"ok": False, "error": "planned output would overwrite its source; choose another output_dir"})
+            elif output_path.exists() and not allow_overwrite:
+                item.update({"ok": False, "error": f"planned output already exists: {output_path}"})
+            item["source_path"] = str(source_path)
+            item["output_path"] = str(output_path)
+        plan["summary"] = {
+            "total": len(plan["items"]),
+            "valid": sum(1 for item in plan["items"] if item.get("ok")),
+            "invalid": sum(1 for item in plan["items"] if not item.get("ok")),
+        }
+        valid_items = [item for item in plan["items"] if item.get("ok")]
+        invalid_errors = [str(item.get("error") or "invalid image plan") for item in plan["items"] if not item.get("ok")]
+        preview = bool(args.get("preview", True))
+        confirm = args.get("confirm") is True
+        requires_confirmation = len(valid_items) > 1 or allow_overwrite
+        next_arguments = {**args, "preview": False, "confirm": True}
+        if preview or (requires_confirmation and not confirm):
+            warnings = list(dict.fromkeys(invalid_errors))
+            if requires_confirmation and not confirm:
+                warnings.append("No files were written. Set confirm=true to execute this batch.")
+            return structured_result(
+                f"Batch image transform plan prepared for {len(valid_items)} of {len(paths)} image(s); no files were changed.",
+                status="preview",
+                data={"plan": plan, "confirmation_required": requires_confirmation},
+                warnings=warnings,
+                next_actions=[{"tool": "batch_transform_images", "arguments": next_arguments}],
+                provenance={"source": "image_batch_transform_planner"},
+                metrics={"requested": len(paths), "valid": len(valid_items), "invalid": len(invalid_errors)},
+            )
+        if not valid_items:
+            return error_result("No valid batch items remain after planning", code="image_batch")
+        if allow_overwrite and len(valid_items) > 1:
+            return error_result(
+                "Multi-file batch overwrite is not supported; choose a new output_dir to keep rollback safe.",
+                code="image_batch",
+            )
+
+        completed: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        created_paths: list[Path] = []
+        overwrite_backups: list[tuple[Path, Path]] = []
+        for item in valid_items:
+            source_path = str(item["source_path"])
+            output_path = Path(item["output_path"])
+            if allow_overwrite and output_path.exists():
+                descriptor, backup_name = tempfile.mkstemp(
+                    prefix=f".{output_path.stem}.ares-batch-backup.",
+                    suffix=output_path.suffix,
+                    dir=output_path.parent,
+                )
+                os.close(descriptor)
+                backup_path = Path(backup_name)
+                try:
+                    shutil.copy2(output_path, backup_path)
+                except OSError as exc:
+                    with suppress(FileNotFoundError):
+                        backup_path.unlink()
+                    failures.append({"path": source_path, "error": f"could not back up existing output: {exc}"})
+                    break
+                overwrite_backups.append((output_path, backup_path))
+            result = _transform_image(
+                source_path,
+                resize=transform.get("resize"),
+                crop=transform.get("crop"),
+                convert=transform.get("convert"),
+                output=str(output_path),
+                action="batch_transform_images",
+            )
+            if str(result).lstrip().startswith("Error:"):
+                failures.append({"path": source_path, "error": result})
+                break
+            try:
+                actual = self._decoded_image_metadata(output_path)
+                verification = validate_transform_result(item["plan"], actual)
+            except (OSError, UpgradeValidationError, ValueError) as exc:
+                failures.append({"path": source_path, "error": f"verification failed: {exc}"})
+                with suppress(FileNotFoundError):
+                    output_path.unlink()
+                break
+            if not verification["ok"]:
+                failures.append({"path": source_path, "error": "; ".join(verification["errors"])})
+                with suppress(FileNotFoundError):
+                    output_path.unlink()
+                break
+            created_paths.append(output_path)
+            completed.append({
+                "source": source_path,
+                "output": str(output_path),
+                "result": result,
+                "actual": actual,
+                "verification": verification,
+            })
+        rolled_back: list[str] = []
+        if failures:
+            for path in reversed(created_paths):
+                with suppress(FileNotFoundError, OSError):
+                    path.unlink()
+                    rolled_back.append(str(path))
+            for output_path, backup_path in reversed(overwrite_backups):
+                with suppress(OSError):
+                    shutil.copy2(backup_path, output_path)
+                    rolled_back.append(str(output_path))
+                with suppress(FileNotFoundError, OSError):
+                    backup_path.unlink()
+            completed = []
+        else:
+            for _output_path, backup_path in overwrite_backups:
+                with suppress(FileNotFoundError, OSError):
+                    backup_path.unlink()
+        artifacts = [
+            {"path": item["output"], "media_type": f"image/{item['actual']['format'].casefold()}", "description": "Batch-transformed image"}
+            for item in completed
+        ]
+        return structured_result(
+            f"Batch image transform {'completed' if not failures else 'failed and rolled back'} for {len(completed)} of {len(valid_items)} image(s).",
+            ok=not failures and not invalid_errors,
+            status="completed" if not failures and not invalid_errors else "partial" if not failures else "failed",
+            data={"plan": plan, "completed": completed, "rolled_back": rolled_back},
+            artifacts=artifacts,
+            warnings=list(dict.fromkeys(invalid_errors)),
+            errors=failures,
+            provenance={"source": "Pillow", "operation": "batch_transform"},
+            metrics={"requested": len(paths), "planned": len(valid_items), "completed": len(completed), "rolled_back": len(rolled_back)},
         )
 
     # ── Terminal ───────────────────────────────────────────────────
