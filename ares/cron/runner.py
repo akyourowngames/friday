@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import traceback
@@ -12,6 +13,7 @@ from time import perf_counter
 from typing import Any
 
 from ares.config import load_config
+from ares.cron.policy import expand_variables
 from ares.cron.store import CronLeaseLostError, CronStore, utc_now
 
 
@@ -87,12 +89,16 @@ class CronRunner:
         cancelled = False
 
         try:
-            prompt = str(job["prompt"])
+            policy = dict(job.get("policy") or {})
+            budget = dict(policy.get("budget") or {})
+            prompt = expand_variables(str(job["prompt"]), policy)
             previous = self.latest_summary(job_id)
             if previous:
                 prompt = f"## Previous Run Summary\n{previous}\n\n## Scheduled Job Prompt\n{prompt}"
             config = self.config.model_copy(deep=True)
-            if job.get("max_iterations"):
+            if budget.get("max_iterations"):
+                config.agent_max_iterations = int(budget["max_iterations"])
+            elif job.get("max_iterations"):
                 config.agent_max_iterations = int(job["max_iterations"])
             else:
                 config.agent_max_iterations = int(getattr(config, "cron_max_iterations", 10))
@@ -105,11 +111,24 @@ class CronRunner:
             conversation_store = ConversationStore()
             agent = Agent(memory_store, conversation_store, config=config, is_cron_session=True)
             chunks: list[str] = []
-            async for chunk in agent.run_stream(prompt, []):
-                # Keep internal tool lifecycle telemetry out of persisted cron
-                # answers and their downstream delivery channels.
-                if not str(chunk).startswith("[tool"):
-                    chunks.append(str(chunk))
+            output_chars = 0
+            output_limit = int(budget.get("max_output_chars", 2_000_000))
+            async with asyncio.timeout(float(budget.get("max_duration_seconds", 86_400))):
+                async for chunk in agent.run_stream(prompt, []):
+                    # Keep internal tool lifecycle telemetry out of persisted cron
+                    # answers and their downstream delivery channels.
+                    text = str(chunk)
+                    if text.startswith("[tool"):
+                        continue
+                    remaining = output_limit - output_chars
+                    if remaining <= 0:
+                        chunks.append("\n[Output stopped at the configured cron budget.]\n")
+                        break
+                    chunks.append(text[:remaining])
+                    output_chars += min(len(text), remaining)
+                    if len(text) > remaining:
+                        chunks.append("\n[Output stopped at the configured cron budget.]\n")
+                        break
             output = "".join(chunks)
         except asyncio.CancelledError:
             cancelled = True
@@ -160,7 +179,8 @@ class CronRunner:
             # claim this stale execution changed its terminal state.
             raise
 
-        if self.on_complete:
+        notification_statuses = set((job.get("policy") or {}).get("notifications", {}).get("on", ["completed", "failed"]))
+        if self.on_complete and status in notification_statuses:
             clean = re.sub(r"\[tool:[^\]]*\]", "", output).strip()
             summary = clean.split("\n\n")[0] if clean else ("Run failed." if status == "failed" else "No output.")
             with suppress(Exception):
@@ -195,6 +215,8 @@ class CronRunner:
             f"## Agent Output\n{output}\n\n"
             f"## Summary\n{summary}\n\n"
             f"## Run Metadata\n- Model: {getattr(self.config, 'model', '')}\n"
+            f"- Retry attempt: {int(job.get('retry_count') or 0) + 1}\n"
+            f"- Policy budget: {json.dumps((job.get('policy') or {}).get('budget') or {}, ensure_ascii=False)}\n"
         )
         if error_text:
             text += f"\n## Error\n{error_text}\n"

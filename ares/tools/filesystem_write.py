@@ -687,7 +687,7 @@ def backup_file(path: str, label: str = "") -> str:
         return f"File not found: {path}"
     safe_label = _safe_label(label)
     backup_path = _create_backup(resolved, safe_label or "manual")
-    return f"Backed up {_display_path(resolved)} → {_display_path(backup_path)}\nRestore point: {safe_label or timestamp}"
+    return f"Backed up {_display_path(resolved)} → {_display_path(backup_path)}\nRestore point: {safe_label or backup_path.name}"
 
 
 def _backup_path(path: Path, label: str = "") -> Path:
@@ -758,7 +758,10 @@ def undo_last_edit(path: str, dry_run: bool = False) -> str:
     """Restore the newest backup for path from its .ares_backups folder."""
     resolved = resolve_write_path(path)
     backup_root = resolved.parent / ".ares_backups"
-    backups = sorted(backup_root.glob(f"{resolved.name}.*.bak"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # copy2 preserves the source mtime, so filesystem mtimes cannot identify
+    # the newest restore point. The UTC microsecond timestamp is embedded in
+    # every backup filename and sorts chronologically.
+    backups = sorted(backup_root.glob(f"{resolved.name}.*.bak"), key=lambda p: p.name, reverse=True)
     if not backups:
         return f"No backup found for {_display_path(resolved)}"
     latest = backups[0]

@@ -22,6 +22,7 @@ from ares.multi_agent import (
     RetryableAgentError,
     AgentExecutionManifest,
     ChildRunManifest,
+    trusted_local_agent_spec,
 )
 from ares.multi_agent_adapter import AresAgentAdapter
 from ares.multi_agent_policy import (
@@ -145,6 +146,68 @@ def test_semantically_read_only_mcp_operation_remains_available() -> None:
         capabilities=(AgentCapability.FILESYSTEM_READ,),
     )
     assert authorize_tool_call(spec, "mcp__calendar__list_events", {}).allowed
+
+
+def test_trusted_local_profile_broadens_tool_visibility_but_keeps_dispatch_guards(
+    tmp_path: Path,
+) -> None:
+    profile = trusted_local_agent_spec(AgentSpec(
+        "researcher", "research", "read only", ("web_search",),
+    ))
+    schemas = [
+        {"type": "function", "function": {"name": name, "parameters": {}}}
+        for name in (
+            "read_file",
+            "write_file",
+            "run_command",
+            "mcp__custom__perform_unusual_operation",
+            "delegate_task",
+        )
+    ]
+    visible = filter_tool_schemas(schemas, profile)
+    assert [item["function"]["name"] for item in visible] == [
+        "read_file",
+        "write_file",
+        "run_command",
+        "mcp__custom__perform_unusual_operation",
+    ]
+    assert profile.can_mutate
+    assert profile.permits_capability(AgentCapability.EXTERNAL_MUTATION)
+    assert not profile.permits_capability(AgentCapability.DELEGATION)
+    assert profile.permits_tool("mcp__custom__perform_unusual_operation")
+
+    reviewer = trusted_local_agent_spec(AgentSpec(
+        "reviewer", "review", "read only", ("read_file",),
+        capabilities=(AgentCapability.FILESYSTEM_READ,),
+    ))
+    assert reviewer.allowed_tools == ("read_file",)
+    assert not reviewer.can_mutate
+    assert not reviewer.permits_capability(AgentCapability.FILESYSTEM_WRITE)
+
+    no_grant = authorize_tool_call(
+        profile,
+        "mcp__custom__perform_unusual_operation",
+        {},
+    )
+    assert not no_grant.allowed
+    assert "action grant" in no_grant.reason
+
+    confirmation = authorize_tool_call(
+        profile,
+        "mcp__custom__perform_unusual_operation",
+        {"confirm": True},
+    )
+    assert not confirmation.allowed
+    assert "cannot originate user confirmation" in confirmation.reason
+
+    escaped_path = authorize_tool_call(
+        profile,
+        "write_file",
+        {"path": str(tmp_path.parent / "outside.txt")},
+        workspace_root=str(tmp_path),
+    )
+    assert not escaped_path.allowed
+    assert "outside its assigned workspace" in escaped_path.reason
 
 
 def test_action_grants_are_exact_and_single_use() -> None:

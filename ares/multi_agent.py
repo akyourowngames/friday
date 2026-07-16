@@ -7,8 +7,9 @@ import inspect
 import time
 from datetime import UTC, datetime
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
+from fnmatch import fnmatchcase
 from types import MappingProxyType
 from typing import Any, Protocol, TypeAlias
 
@@ -145,10 +146,35 @@ class AgentSpec:
         )))
 
     def permits_tool(self, name: str) -> bool:
-        return name in self.allowed_tools
+        return any(fnmatchcase(name, pattern) for pattern in self.allowed_tools)
 
     def permits_capability(self, capability: AgentCapability) -> bool:
         return capability in self.capabilities
+
+
+def trusted_local_agent_spec(spec: AgentSpec) -> AgentSpec:
+    """Return an operator-requested broad execution view of a specialist.
+
+    This profile removes the *role-template* allowlist and capability gaps for
+    local, operator-owned work. The reviewer remains read-only so independent
+    patch review is meaningful. The profile deliberately does not grant
+    recursive delegation: nested orchestration needs a parent-bound facade so
+    it cannot escape the root run's budget or session ownership. Runtime
+    authorization, action grants, confirmation ownership, and workspace
+    containment remain mandatory at dispatch time.
+    """
+    if spec.name.casefold() == "reviewer":
+        return spec
+    return replace(
+        spec,
+        allowed_tools=("*",),
+        can_mutate=True,
+        capabilities=tuple(
+            capability
+            for capability in AgentCapability
+            if capability is not AgentCapability.DELEGATION
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)

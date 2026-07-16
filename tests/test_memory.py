@@ -9,6 +9,18 @@ from ares import embeddings
 from ares.memory import MemoryStore
 
 
+class CountingEmbeddingProvider:
+    """Wrap the deterministic test embedder while recording query work."""
+
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.calls: list[str] = []
+
+    def embed_bytes(self, text: str) -> bytes:
+        self.calls.append(text)
+        return self.delegate.embed_bytes(text)
+
+
 @pytest.fixture
 def store(tmp_path, fake_embedding_provider):
     """Create a fresh MemoryStore with a temp database."""
@@ -145,6 +157,74 @@ class TestMemoryStore:
         """Searching an empty database returns empty list."""
         results = store.search("anything")
         assert results == []
+
+    def test_trivial_greetings_and_confirmations_use_fts_without_embedding(
+        self, tmp_path, fake_embedding_provider,
+    ):
+        provider = CountingEmbeddingProvider(fake_embedding_provider)
+        memory = MemoryStore(tmp_path / "trivial.db", embedding_provider=provider)
+        try:
+            memory.store("hello saved memory")
+            memory.store("thanks saved memory")
+            if not memory.vector_enabled:
+                pytest.skip("sqlite-vec is unavailable in this environment")
+
+            stored_embedding_calls = len(provider.calls)
+            greeting = memory.search("hello!")
+            assert any("hello" in item["fact_text"] for item in greeting)
+            assert len(provider.calls) == stored_embedding_calls
+            assert memory.last_search_diagnostics["vector"] == "skipped-trivial"
+
+            confirmation = memory.search("thanks")
+            assert any("thanks" in item["fact_text"] for item in confirmation)
+            assert len(provider.calls) == stored_embedding_calls
+
+            # A caller can explicitly retain semantic behavior for an otherwise
+            # trivial string when it has application-specific meaning.
+            memory.search("hello!", semantic=True)
+            assert len(provider.calls) == stored_embedding_calls + 1
+        finally:
+            memory.close()
+
+    def test_query_embedding_cache_is_bounded_lru(self, tmp_path, fake_embedding_provider):
+        provider = CountingEmbeddingProvider(fake_embedding_provider)
+        memory = MemoryStore(
+            tmp_path / "cache.db",
+            embedding_provider=provider,
+            query_embedding_cache_size=2,
+        )
+        try:
+            memory.store("memory cache seed")
+            if not memory.vector_enabled:
+                pytest.skip("sqlite-vec is unavailable in this environment")
+
+            stored_embedding_calls = len(provider.calls)
+            for query in ("first lookup", "second lookup", "first lookup", "third lookup", "second lookup"):
+                memory.search(query)
+
+            # first and second populate the cache; first is reused; third
+            # evicts second; second must be embedded again.
+            assert provider.calls[stored_embedding_calls:] == [
+                "first lookup", "second lookup", "third lookup", "second lookup",
+            ]
+        finally:
+            memory.close()
+
+    def test_search_defers_and_batches_access_stat_writes(self, store):
+        fact_id = store.store("User prefers batched memory counters")
+
+        assert store.get(fact_id)["access_count"] == 0
+        assert store.search("batched memory counters")
+        assert store.get(fact_id)["access_count"] == 0
+
+        # Repeated retrieval of the same fact becomes one batched row update
+        # with the correct cumulative access count.
+        assert store.search("batched memory counters")
+        assert store.flush_access_stats() == 1
+        refreshed = store.get(fact_id)
+        assert refreshed["access_count"] == 2
+        assert refreshed["last_accessed"] is not None
+        assert store.flush_access_stats() == 0
 
     def test_store_works_when_sentence_transformers_import_fails(self, tmp_path, monkeypatch):
         """Memory storage falls back instead of failing when optional embedding deps break."""

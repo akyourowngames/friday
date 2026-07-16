@@ -30,13 +30,25 @@ from ares.multi_agent import (
     MultiAgentOrchestrator,
     default_agent_specs,
     mutable_metadata,
+    trusted_local_agent_spec,
 )
 from ares.multi_agent_adapter import AresAgentAdapter
 from ares.multi_agent_policy import ActionGrant, ActionGrantRegistry
 from ares.multi_agent_resources import BuilderWorkspace, BuilderWorktreeManager, ResourceCoordinator
 from ares.multi_agent_store import MultiAgentRunStore
+from ares.delegation.upgrades import (
+    DelegationBudget,
+    DelegationUpgradeError,
+    TaskGraphPlan,
+    enforce_delegation_budget,
+    normalize_delegation_budget,
+    plan_delegation_dag,
+    project_delegation_progress,
+    validate_evidence_artifact_contract,
+)
 from ares.delegation_router import DelegationRoleUnavailableError, DelegationTaskLimitError
 from ares.tools.project_checks import snapshot_agent_checks
+from ares.tools.results import error_result, structured_result, wants_structured
 
 
 EventListener = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -48,6 +60,38 @@ def _now() -> str:
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+STANDARD_EXECUTION_PROFILE = "standard"
+TRUSTED_LOCAL_EXECUTION_PROFILE = "trusted_local"
+_EXECUTION_PROFILES = frozenset({
+    STANDARD_EXECUTION_PROFILE,
+    TRUSTED_LOCAL_EXECUTION_PROFILE,
+})
+
+
+def _normalize_execution_profile(value: Any = None) -> str:
+    """Validate an explicit child execution profile without silently widening it."""
+    profile = str(value or STANDARD_EXECUTION_PROFILE).strip().casefold()
+    if profile not in _EXECUTION_PROFILES:
+        options = ", ".join(sorted(_EXECUTION_PROFILES))
+        raise ValueError(f"unknown execution_profile {profile!r}; expected one of: {options}")
+    return profile
+
+
+def _require_execution_profile_authorization(
+    execution_profile: str,
+    *,
+    trusted_local_authorized: bool,
+) -> None:
+    """Keep broad child authority tied to an explicit root-owned decision."""
+    if (
+        execution_profile == TRUSTED_LOCAL_EXECUTION_PROFILE
+        and not trusted_local_authorized
+    ):
+        raise PermissionError(
+            "trusted_local execution requires an explicit current-turn owner authorization"
+        )
 
 
 class MultiAgentRuntime:
@@ -240,7 +284,19 @@ class MultiAgentRuntime:
             payload["session_id"] = parent_session_id
         await self._emit(event.event_type, **payload)
 
-    def list_agents(self) -> list[dict[str, Any]]:
+    def _profiled_specs(self, execution_profile: str = STANDARD_EXECUTION_PROFILE) -> tuple[AgentSpec, ...]:
+        profile = _normalize_execution_profile(execution_profile)
+        specs = tuple(self.registry.snapshot().values())
+        if profile == TRUSTED_LOCAL_EXECUTION_PROFILE:
+            return tuple(trusted_local_agent_spec(spec) for spec in specs)
+        return specs
+
+    def list_agents(
+        self,
+        *,
+        execution_profile: str = STANDARD_EXECUTION_PROFILE,
+    ) -> list[dict[str, Any]]:
+        profile = _normalize_execution_profile(execution_profile)
         return [
             {
                 "name": spec.name,
@@ -256,8 +312,9 @@ class MultiAgentRuntime:
                 "model": spec.model or self.root_agent.config.model,
                 "retry_limit": spec.retry_limit,
                 "fallback_models": list(spec.fallback_models),
+                "execution_profile": profile,
             }
-            for spec in self.registry.snapshot().values()
+            for spec in self._profiled_specs(profile)
         ]
 
     def doctor(self) -> dict[str, Any]:
@@ -337,35 +394,337 @@ class MultiAgentRuntime:
             explicit_user_confirmation=explicit_user_confirmation,
         )
 
-    async def execute_tool(self, name: str, arguments: dict[str, Any], *, session_id: str | None) -> str:
+    def _upgrade_budget(self, value: Any = None):
+        """Normalize an optional caller budget against administrator ceilings."""
+        if value not in (None, "") and not isinstance(value, Mapping):
+            raise ValueError("budget must be an object")
+        config = self.config
+        hard_limits = {
+            "max_tasks": config.max_tasks_per_run,
+            "max_parallel": config.max_parallel_agents,
+            "max_depth": max(1, config.max_depth),
+            "max_iterations": config.max_total_iterations,
+            "max_output_tokens": config.max_total_tokens,
+            "max_duration_seconds": config.max_total_duration_seconds,
+            # These two limits do not exist in the older app config.  Keep
+            # conservative hard defaults until they become administrator
+            # settings, rather than accepting an unbounded caller value.
+            "max_artifacts": 32,
+            "max_artifact_bytes": 64 * 1024 * 1024,
+        }
+        return normalize_delegation_budget(
+            value if isinstance(value, Mapping) else None,
+            hard_limits=hard_limits,
+            defaults=hard_limits,
+        )
+
+    @staticmethod
+    def _optional_evidence_contract(value: Any) -> dict[str, Any]:
+        """Validate and normalize the optional child-output acceptance contract."""
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("evidence_contract must be an object")
+        roots = value.get("allowed_artifact_roots", ())
+        if isinstance(roots, str):
+            roots = [roots]
+        if not isinstance(roots, (list, tuple)):
+            raise ValueError("evidence_contract.allowed_artifact_roots must be an array")
+        max_artifacts = value.get("max_artifacts", 32)
+        if isinstance(max_artifacts, bool):
+            raise ValueError("evidence_contract.max_artifacts must be a number")
         try:
-            if name == "list_agents":
-                return json.dumps({"agents": self.list_agents()}, ensure_ascii=False)
-            if name == "list_agent_runs":
-                return json.dumps({
-                    "runs": self.list_runs(
-                        limit=int(arguments.get("limit") or 30),
-                        session_id=session_id,
-                        status=str(arguments.get("status") or "") or None,
+            max_artifacts = int(max_artifacts)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("evidence_contract.max_artifacts must be a number") from exc
+        if max_artifacts < 0:
+            raise ValueError("evidence_contract.max_artifacts must not be negative")
+        return {
+            "require_evidence": bool(value.get("require_evidence", False)),
+            "require_claims": bool(value.get("require_claims", True)),
+            "require_content": bool(value.get("require_content", False)),
+            "allowed_artifact_roots": [str(root) for root in roots if str(root).strip()],
+            "artifact_must_exist": bool(value.get("artifact_must_exist", False)),
+            "max_artifacts": max_artifacts,
+        }
+
+    @staticmethod
+    def _task_timeout_for_budget(
+        timeout: float | None, budget: DelegationBudget | None,
+    ) -> float | None:
+        if timeout is None or budget is None:
+            return timeout
+        return min(timeout, budget.max_duration_seconds)
+
+    @staticmethod
+    def _plan_runtime_tasks(
+        raw_tasks: Sequence[Mapping[str, Any]], plan: TaskGraphPlan,
+    ) -> list[dict[str, Any]]:
+        """Apply deterministic DAG dependencies without discarding legacy fields."""
+        originals = {
+            str(item.get("task_id") or item.get("id") or "").strip(): dict(item)
+            for item in raw_tasks
+        }
+        planned: list[dict[str, Any]] = []
+        for node in plan.tasks:
+            if node.task_id in originals:
+                item = dict(originals[node.task_id])
+                item["depends_on"] = list(plan.dependencies[node.task_id])
+            else:
+                item = {
+                    "task_id": node.task_id,
+                    "agent": node.agent,
+                    "prompt": node.prompt,
+                    "depends_on": list(plan.dependencies[node.task_id]),
+                    "context": dict(node.metadata),
+                    "result_format": str(node.metadata.get("result_format") or "json"),
+                    "allowed_context": list(node.metadata.get("allowed_context") or ()),
+                }
+            planned.append(item)
+        return planned
+
+    @staticmethod
+    def _team_artifacts(team: AgentTeamResult) -> list[dict[str, str]]:
+        return [
+            {
+                "path": artifact.path,
+                "media_type": artifact.media_type,
+                "description": artifact.description,
+            }
+            for result in team.results
+            for artifact in result.artifacts
+        ]
+
+    def _project_run_progress(self, run: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Attach a non-authoritative, replay-safe progress projection to a run view."""
+        metadata = run.get("metadata") if isinstance(run, Mapping) else None
+        launch_plan = metadata.get("launch_plan") if isinstance(metadata, Mapping) else None
+        raw_tasks = launch_plan.get("tasks") if isinstance(launch_plan, Mapping) else None
+        if not isinstance(raw_tasks, list) or not raw_tasks:
+            return None
+        try:
+            plan = plan_delegation_dag(raw_tasks, synthesize=False)
+            events = [
+                {"task_id": child.get("task_id"), "status": child.get("status")}
+                for child in (run.get("children") or ())
+                if isinstance(child, Mapping) and child.get("task_id")
+            ]
+            checkpoint = run.get("checkpoint") if isinstance(run.get("checkpoint"), Mapping) else None
+            return project_delegation_progress(
+                plan, events=events, checkpoint=checkpoint,
+            ).as_dict()
+        except (DelegationUpgradeError, ValueError, TypeError):
+            return None
+
+    def _structured_team_result(
+        self,
+        team: AgentTeamResult,
+        *,
+        budget: Any = None,
+        plan: TaskGraphPlan | None = None,
+        contract: Mapping[str, Any] | None = None,
+        warnings: Sequence[str] = (),
+    ) -> str:
+        payload = team.as_dict()
+        status = "completed" if team.succeeded else "partial" if any(item.ok for item in team.results) else "failed"
+        run = self.get_run(team.root_run_id) or {}
+        progress = self._project_run_progress(run)
+        return structured_result(
+            f"Completed {sum(item.ok for item in team.results)}/{len(team.results)} specialist tasks.",
+            ok=team.succeeded,
+            status=status,
+            data={
+                "run": payload,
+                "budget": budget.as_dict() if budget is not None else self._upgrade_budget().budget.as_dict(),
+                "plan": plan.as_dict() if plan is not None else None,
+                "progress": progress,
+                "evidence_contract": dict(contract or {}),
+            },
+            artifacts=self._team_artifacts(team),
+            warnings=list(warnings),
+            errors=[
+                {"task_id": item.task_id, "message": item.error}
+                for item in team.results if item.error
+            ],
+            next_actions=[
+                {"tool": "get_agent_run", "arguments": {"run_id": team.root_run_id, "response_format": "structured"}}
+            ] if team.root_run_id else [],
+            provenance={"source": "native_multi_agent", "run_id": team.root_run_id},
+            metrics={
+                "task_count": len(team.results),
+                "succeeded": sum(item.ok for item in team.results),
+                "execution_waves": len(team.execution_waves),
+            },
+        )
+
+    def _structured_run_view(self, run: Mapping[str, Any], *, summary: str) -> str:
+        progress = self._project_run_progress(run)
+        return structured_result(
+            summary,
+            ok=True,
+            data={"run": dict(run), "progress": progress},
+            artifacts=[
+                dict(artifact)
+                for child in (run.get("children") or ()) if isinstance(child, Mapping)
+                for artifact in (child.get("artifacts") or ()) if isinstance(artifact, Mapping)
+            ],
+            provenance={"source": "native_multi_agent", "run_id": str(run.get("root_run_id") or run.get("run_id") or "")},
+            metrics={"child_count": len(run.get("children") or ())},
+        )
+
+    @staticmethod
+    def _apply_output_constraints(
+        team: AgentTeamResult,
+        *,
+        budget: DelegationBudget | None,
+        contract: Mapping[str, Any] | None,
+    ) -> tuple[AgentTeamResult, tuple[str, ...]]:
+        """Reject opt-in results that exceed their declared evidence/artifact bounds.
+
+        This happens before the root is given the ``AgentTeamResult`` and
+        before durable final result fields are written.  It deliberately does
+        not alter a legacy delegation with no optional budget or contract.
+        """
+        if budget is None and not contract:
+            return team, ()
+
+        used_artifacts = 0
+        used_artifact_bytes = 0
+        warnings: list[str] = []
+        constrained: list[AgentResult] = []
+        for result in team.results:
+            metadata = mutable_metadata(result.metadata)
+            errors: list[str] = []
+            validation_data: dict[str, Any] | None = None
+            if contract:
+                payload = {
+                    "content": result.content,
+                    "summary": result.summary,
+                    "artifacts": [
+                        {
+                            "path": artifact.path,
+                            "media_type": artifact.media_type,
+                            "description": artifact.description,
+                        }
+                        for artifact in result.artifacts
+                    ],
+                    "evidence": metadata.get("evidence", ()),
+                    "metadata": metadata,
+                }
+                validation = validate_evidence_artifact_contract(payload, **dict(contract))
+                validation_data = validation.as_dict()
+                errors.extend(validation.errors)
+                warnings.extend(validation.warnings)
+
+            result_artifact_bytes = 0
+            for artifact in result.artifacts:
+                try:
+                    result_artifact_bytes += max(0, Path(artifact.path).expanduser().stat().st_size)
+                except OSError:
+                    # Not all valid artifacts are files (for example a remote
+                    # report URL).  They still count as an artifact but have
+                    # no local byte size available to charge.
+                    warnings.append(f"Could not measure artifact bytes for {artifact.path}")
+            used_artifacts += len(result.artifacts)
+            used_artifact_bytes += result_artifact_bytes
+            if budget is not None:
+                if used_artifacts > budget.max_artifacts:
+                    errors.append(
+                        f"artifact budget exceeded ({used_artifacts} > {budget.max_artifacts})"
                     )
-                }, ensure_ascii=False)
+                if used_artifact_bytes > budget.max_artifact_bytes:
+                    errors.append(
+                        "artifact byte budget exceeded "
+                        f"({used_artifact_bytes} > {budget.max_artifact_bytes})"
+                    )
+                metadata["delegation_budget_usage"] = {
+                    "artifact_count": used_artifacts,
+                    "artifact_bytes": used_artifact_bytes,
+                }
+            if validation_data is not None:
+                metadata["evidence_contract"] = validation_data
+            if errors and result.ok:
+                detail = "; ".join(dict.fromkeys(errors))
+                constrained.append(replace(
+                    result,
+                    status=AgentRunStatus.BLOCKED,
+                    error=f"output acceptance contract failed: {detail}",
+                    metadata=metadata,
+                ))
+            elif metadata != mutable_metadata(result.metadata):
+                constrained.append(replace(result, metadata=metadata))
+            else:
+                constrained.append(result)
+        return replace(team, results=tuple(constrained)), tuple(dict.fromkeys(warnings))
+
+    async def execute_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        session_id: str | None,
+        trusted_local_authorized: bool = False,
+    ) -> str:
+        structured = str(arguments.get("response_format") or "legacy").strip().casefold() == "structured"
+        try:
+            # Validate the opt-in response selector once. Existing callers do
+            # not send it and continue to receive their historical payloads.
+            structured = wants_structured(arguments)
+            if name == "list_agents":
+                execution_profile = _normalize_execution_profile(
+                    arguments.get("execution_profile")
+                )
+                agents = self.list_agents(execution_profile=execution_profile)
+                if structured:
+                    return structured_result(
+                        f"Found {len(agents)} available specialist roles.",
+                        data={"agents": agents, "execution_profile": execution_profile},
+                        provenance={"source": "native_multi_agent"},
+                        metrics={"agent_count": len(agents)},
+                    )
+                return json.dumps({"agents": agents}, ensure_ascii=False)
+            if name == "list_agent_runs":
+                runs = self.list_runs(
+                    limit=int(arguments.get("limit") or 30),
+                    session_id=session_id,
+                    status=str(arguments.get("status") or "") or None,
+                )
+                if structured:
+                    return structured_result(
+                        f"Found {len(runs)} agent runs.",
+                        data={
+                            "runs": [
+                                {**run, "progress": self._project_run_progress(run)}
+                                for run in runs
+                            ]
+                        },
+                        provenance={"source": "native_multi_agent"},
+                        metrics={"run_count": len(runs)},
+                    )
+                return json.dumps({"runs": runs}, ensure_ascii=False)
             if name == "get_latest_agent_run":
-                return json.dumps(
-                    self.get_latest_run(session_id=session_id)
-                    or {"error": "no agent run found in this session"},
-                    ensure_ascii=False,
-                )
+                run = self.get_latest_run(session_id=session_id)
+                if run is None:
+                    return error_result("No agent run found in this session", code="not_found", status="not_found") if structured else json.dumps({"error": "no agent run found in this session"}, ensure_ascii=False)
+                return self._structured_run_view(run, summary="Loaded the latest agent run.") if structured else json.dumps(run, ensure_ascii=False)
             if name == "get_agent_run":
-                return json.dumps(
-                    self.get_run(
-                        str(arguments.get("run_id") or ""), session_id=session_id
-                    ) or {"error": "run not found in this session"},
-                    ensure_ascii=False,
-                )
+                run = self.get_run(str(arguments.get("run_id") or ""), session_id=session_id)
+                if run is None:
+                    return error_result("Run not found in this session", code="not_found", status="not_found") if structured else json.dumps({"error": "run not found in this session"}, ensure_ascii=False)
+                return self._structured_run_view(run, summary="Loaded the requested agent run.") if structured else json.dumps(run, ensure_ascii=False)
             if name == "cancel_agent_run":
                 cancelled = await self.cancel(
                     str(arguments.get("run_id") or ""), session_id=session_id
                 )
+                if structured:
+                    return structured_result(
+                        "Agent run cancellation requested." if cancelled else "No active agent run could be cancelled.",
+                        ok=cancelled,
+                        status="completed" if cancelled else "not_found",
+                        data={"cancelled": cancelled, "run_id": arguments.get("run_id")},
+                        next_actions=[] if cancelled else [{"tool": "list_agent_runs", "arguments": {"response_format": "structured"}}],
+                        provenance={"source": "native_multi_agent"},
+                    )
                 return json.dumps({"cancelled": cancelled, "run_id": arguments.get("run_id")}, ensure_ascii=False)
             if name == "resume_agent_run":
                 result = await self.resume(
@@ -373,51 +732,165 @@ class MultiAgentRuntime:
                     session_id=session_id,
                     request_id=str(arguments.get("request_id") or ""),
                 )
+                if structured:
+                    return self._structured_team_result(result)
                 return json.dumps(result.as_dict(), ensure_ascii=False)
             if name == "delegate_task":
+                execution_profile = _normalize_execution_profile(
+                    arguments.get("execution_profile")
+                )
+                _require_execution_profile_authorization(
+                    execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
+                )
+                raw_budget = arguments.get("budget")
+                normalization = self._upgrade_budget(raw_budget)
+                budget = normalization.budget if raw_budget is not None else None
+                admission = enforce_delegation_budget(
+                    normalization,
+                    increment={"task_count": 1, "active_agents": 1, "depth": 1},
+                )
+                if not admission.allowed:
+                    raise DelegationTaskLimitError("; ".join(admission.violations))
+                contract = self._optional_evidence_contract(arguments.get("evidence_contract"))
+                timeout = self._task_timeout_for_budget(
+                    self._timeout(arguments.get("timeout_seconds")), budget,
+                )
+                context: dict[str, Any] = {"context": str(arguments.get("context") or "")}
+                if budget is not None or contract:
+                    context["delegation_upgrade"] = {
+                        "budget": normalization.budget.as_dict(),
+                        "evidence_contract": contract,
+                    }
                 task = AgentTask(
                     task_id="task",
                     agent=str(arguments.get("agent") or ""),
                     prompt=str(arguments.get("task") or ""),
-                    context={"context": str(arguments.get("context") or "")},
-                    timeout_seconds=self._timeout(arguments.get("timeout_seconds")),
+                    context=context,
+                    timeout_seconds=timeout,
                     required=bool(arguments.get("required", True)),
                     result_format=str(arguments.get("result_format") or "text"),
                 )
                 result = await self.delegate(
                     [task], shared_context=str(arguments.get("context") or ""),
                     session_id=session_id, request_id=str(arguments.get("request_id") or ""),
+                    budget=budget,
+                    evidence_contract=contract or None,
+                    execution_profile=execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
                 )
+                if structured:
+                    return self._structured_team_result(
+                        result,
+                        budget=normalization.budget,
+                        contract=contract,
+                        warnings=normalization.warnings,
+                    )
                 return json.dumps(result.as_dict(), ensure_ascii=False)
             if name == "delegate_tasks_parallel":
+                execution_profile = _normalize_execution_profile(
+                    arguments.get("execution_profile")
+                )
+                _require_execution_profile_authorization(
+                    execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
+                )
                 raw_tasks = arguments.get("tasks")
                 if not isinstance(raw_tasks, list):
                     raise ValueError("tasks must be an array")
-                tasks = [self._task_from_dict(item) for item in raw_tasks]
+                if not all(isinstance(item, Mapping) for item in raw_tasks):
+                    raise ValueError("each task must be an object")
+                raw_budget = arguments.get("budget")
+                normalization = self._upgrade_budget(raw_budget)
+                budget = normalization.budget if raw_budget is not None else None
+                contract = self._optional_evidence_contract(arguments.get("evidence_contract"))
+                planning_requested = bool(
+                    structured
+                    or arguments.get("plan")
+                    or arguments.get("synthesize")
+                    or any(
+                        item.get("resource_keys") or item.get("write_targets") or item.get("exclusive_resources")
+                        for item in raw_tasks
+                    )
+                )
+                plan: TaskGraphPlan | None = None
+                task_inputs: list[dict[str, Any]] = [dict(item) for item in raw_tasks]
+                if planning_requested:
+                    plan = plan_delegation_dag(
+                        task_inputs,
+                        synthesize=bool(arguments.get("synthesize", False)),
+                        synthesis_task_id=str(arguments.get("synthesis_task_id") or "synthesize"),
+                        synthesis_agent=str(arguments.get("synthesis_agent") or "synthesizer"),
+                        synthesis_prompt=str(arguments.get("synthesis_prompt") or "Synthesize the independent specialist results into one evidence-backed answer."),
+                    )
+                    task_inputs = self._plan_runtime_tasks(task_inputs, plan)
+                admission = enforce_delegation_budget(
+                    normalization,
+                    increment={
+                        "task_count": len(task_inputs),
+                        "active_agents": min(len(task_inputs), normalization.budget.max_parallel),
+                        "depth": 1,
+                    },
+                )
+                if not admission.allowed:
+                    raise DelegationTaskLimitError("; ".join(admission.violations))
+                tasks = [
+                    self._task_from_dict(item, budget=budget, evidence_contract=contract)
+                    for item in task_inputs
+                ]
                 result = await self.delegate(
                     tasks, shared_context=str(arguments.get("context") or ""),
                     session_id=session_id, request_id=str(arguments.get("request_id") or ""),
+                    budget=budget,
+                    evidence_contract=contract or None,
+                    upgrade_plan=plan.as_dict() if plan is not None else None,
+                    execution_profile=execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
                 )
+                if structured:
+                    return self._structured_team_result(
+                        result,
+                        budget=normalization.budget,
+                        plan=plan,
+                        contract=contract,
+                        warnings=normalization.warnings,
+                    )
                 return json.dumps(result.as_dict(), ensure_ascii=False)
             raise ValueError(f"unknown delegation tool {name!r}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if structured:
+                return error_result(f"{type(exc).__name__}: {exc}", code="delegation_error")
             return json.dumps({"status": "failed", "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False)
 
-    def _task_from_dict(self, item: Any) -> AgentTask:
+    def _task_from_dict(
+        self,
+        item: Any,
+        *,
+        budget: DelegationBudget | None = None,
+        evidence_contract: Mapping[str, Any] | None = None,
+    ) -> AgentTask:
         if not isinstance(item, Mapping):
             raise ValueError("each task must be an object")
         context = item.get("context")
         if not isinstance(context, Mapping):
             context = {"context": str(context or "")}
+        context_data = dict(context)
+        if budget is not None or evidence_contract:
+            context_data["delegation_upgrade"] = {
+                "budget": budget.as_dict() if budget is not None else None,
+                "evidence_contract": dict(evidence_contract or {}),
+            }
         return AgentTask(
             task_id=str(item.get("task_id") or ""),
             agent=str(item.get("agent") or ""),
             prompt=str(item.get("prompt") or item.get("task") or ""),
             depends_on=tuple(str(value) for value in (item.get("depends_on") or [])),
-            context=dict(context),
-            timeout_seconds=self._timeout(item.get("timeout_seconds")),
+            context=context_data,
+            timeout_seconds=self._task_timeout_for_budget(
+                self._timeout(item.get("timeout_seconds")), budget,
+            ),
             required=bool(item.get("required", True)),
             result_format=str(item.get("result_format") or "text"),
             allowed_context=tuple(str(value) for value in (item.get("allowed_context") or [])),
@@ -616,14 +1089,22 @@ class MultiAgentRuntime:
         self._checkpoint(root_run_id)
         return manifest
 
-    def _with_reviews(self, tasks: Sequence[AgentTask]) -> tuple[AgentTask, ...]:
+    def _with_reviews(
+        self,
+        tasks: Sequence[AgentTask],
+        *,
+        registry: AgentRegistry | None = None,
+        config: Any | None = None,
+    ) -> tuple[AgentTask, ...]:
         result = list(tasks)
-        if not self.config.require_review_for_mutations:
+        config = config or self.config
+        registry = registry or self.registry
+        if not config.require_review_for_mutations:
             return tuple(result)
-        review_role = str(self.config.review_role or "reviewer")
-        available = self.registry.snapshot()
+        review_role = str(config.review_role or "reviewer")
+        available = registry.snapshot()
         for task in tasks:
-            spec = self.registry.get(task.agent)
+            spec = registry.get(task.agent)
             if not any(spec.permits_capability(capability) for capability in (
                 AgentCapability.FILESYSTEM_WRITE,
                 AgentCapability.SHELL_EXECUTION,
@@ -787,9 +1268,29 @@ class MultiAgentRuntime:
         depth: int = 1,
         initial_results: Mapping[str, AgentResult] | None = None,
         resumed_from: str = "",
+        budget: DelegationBudget | None = None,
+        evidence_contract: Mapping[str, Any] | None = None,
+        upgrade_plan: Mapping[str, Any] | None = None,
+        execution_profile: str = STANDARD_EXECUTION_PROFILE,
+        trusted_local_authorized: bool = False,
     ) -> AgentTeamResult:
+        execution_profile = _normalize_execution_profile(execution_profile)
+        _require_execution_profile_authorization(
+            execution_profile,
+            trusted_local_authorized=trusted_local_authorized,
+        )
         launch_app_config = self.root_agent.config.model_copy(deep=True)
         run_config = launch_app_config.multi_agent
+        if budget is not None:
+            run_config = run_config.model_copy(update={
+                "max_parallel_agents": min(run_config.max_parallel_agents, budget.max_parallel),
+                "max_tasks_per_run": min(run_config.max_tasks_per_run, budget.max_tasks),
+                "max_depth": min(run_config.max_depth, budget.max_depth),
+                "max_total_iterations": min(run_config.max_total_iterations, budget.max_iterations),
+                "max_total_tokens": min(run_config.max_total_tokens, budget.max_output_tokens),
+                "max_total_duration_seconds": min(run_config.max_total_duration_seconds, budget.max_duration_seconds),
+            })
+            launch_app_config = launch_app_config.model_copy(update={"multi_agent": run_config})
         if not run_config.enabled:
             raise RuntimeError("native multi-agent mode is disabled")
         if not tasks:
@@ -802,11 +1303,25 @@ class MultiAgentRuntime:
             raise DelegationTaskLimitError(
                 f"at most {run_config.max_tasks_per_run} tasks may be delegated"
             )
-        tasks = self._with_reviews(tuple(tasks))
+        profile_registry = AgentRegistry(self._profiled_specs(execution_profile))
+        tasks = self._with_reviews(
+            tuple(tasks), registry=profile_registry, config=run_config
+        )
         if len(tasks) > run_config.max_tasks_per_run:
             raise DelegationTaskLimitError(
                 "required mutation review would exceed the task limit; submit fewer builder tasks"
             )
+        if budget is not None:
+            admission = enforce_delegation_budget(
+                budget,
+                increment={
+                    "task_count": len(tasks),
+                    "active_agents": min(len(tasks), run_config.max_parallel_agents),
+                    "depth": depth,
+                },
+            )
+            if not admission.allowed:
+                raise DelegationTaskLimitError("; ".join(admission.violations))
 
         initial_results = dict(initial_results or {})
         unknown_initial = sorted(set(initial_results) - {task.task_id for task in tasks})
@@ -828,7 +1343,7 @@ class MultiAgentRuntime:
         project_checks = snapshot_agent_checks(Path.cwd())
         mutation_tasks = [
             task for task in tasks
-            if any(self.registry.get(task.agent).permits_capability(capability) for capability in (
+            if any(profile_registry.get(task.agent).permits_capability(capability) for capability in (
                 AgentCapability.FILESYSTEM_WRITE,
                 AgentCapability.SHELL_EXECUTION,
                 AgentCapability.CODE_EXECUTION,
@@ -881,8 +1396,9 @@ class MultiAgentRuntime:
                 spec,
                 max_iterations=min(spec.max_iterations, per_agent_budget),
                 max_output_tokens=min(spec.max_output_tokens, per_agent_token_budget),
+                timeout_seconds=min(spec.timeout_seconds, run_config.max_total_duration_seconds),
             )
-            for spec in self.registry.snapshot().values()
+            for spec in profile_registry.snapshot().values()
         )
         run_registry = AgentRegistry(run_specs)
         planned_waves = self._planned_task_waves(tasks)
@@ -894,6 +1410,7 @@ class MultiAgentRuntime:
             "max_total_iterations": run_config.max_total_iterations,
             "max_total_tokens": run_config.max_total_tokens,
             "max_total_duration_seconds": run_config.max_total_duration_seconds,
+            "execution_profile": execution_profile,
             "builder_workspaces": builder_workspaces,
             "project_checks": project_checks,
             "launch_plan": {
@@ -901,10 +1418,18 @@ class MultiAgentRuntime:
                 "tasks": [self._task_as_dict(task) for task in tasks],
                 "shared_context": str(shared_context or ""),
                 "depth": depth,
+                "execution_profile": execution_profile,
             },
             "resumed_from": str(resumed_from or ""),
             "checkpoint_reused_tasks": sorted(initial_results),
         }
+        if budget is not None or evidence_contract or upgrade_plan:
+            launch_metadata["upgrade"] = {
+                "budget": budget.as_dict() if budget is not None else None,
+                "evidence_contract": dict(evidence_contract or {}),
+                "plan": dict(upgrade_plan or {}),
+            }
+            launch_metadata["launch_plan"]["upgrade"] = dict(launch_metadata["upgrade"])
         root_record = {
             "run_id": root_run_id,
             "root_run_id": root_run_id,
@@ -924,7 +1449,8 @@ class MultiAgentRuntime:
                 "terminal": {
                     task_id: AgentRunStatus.SUCCEEDED.value for task_id in initial_results
                 },
-                "resume_supported": bool(len(initial_results) < len(tasks)),
+                "resume_supported": bool(len(initial_results) < len(tasks))
+                and execution_profile != TRUSTED_LOCAL_EXECUTION_PROFILE,
             },
         }
         self._save(root_record)
@@ -1051,6 +1577,7 @@ class MultiAgentRuntime:
                         "project_checks": project_checks,
                         "depth": depth,
                         "resumed_from": str(resumed_from or ""),
+                        "upgrade": launch_metadata.get("upgrade", {}),
                     },
                     progress_callback=progress,
                     max_duration_seconds=run_config.max_total_duration_seconds,
@@ -1115,6 +1642,11 @@ class MultiAgentRuntime:
                     detail=f"{type(exc).__name__}: {exc}", manifest=manifest.as_dict(),
                 )
                 raise
+            team, output_constraint_warnings = self._apply_output_constraints(
+                team,
+                budget=budget,
+                contract=evidence_contract,
+            )
             for result in team.results:
                 run_id = child_ids[result.task_id]
                 self._update(
@@ -1193,6 +1725,7 @@ class MultiAgentRuntime:
                     "max_total_tokens": run_config.max_total_tokens,
                     "resumed_from": str(resumed_from or ""),
                     "patch_application": patch_application,
+                    "output_constraint_warnings": list(output_constraint_warnings),
                 },
             )
             team = replace(team, manifest=manifest)
@@ -1208,6 +1741,7 @@ class MultiAgentRuntime:
                         for result in team.results
                     ),
                     "patch_application": patch_application,
+                    "output_constraint_warnings": list(output_constraint_warnings),
                 },
                 manifest=manifest.as_dict(),
             )
@@ -1443,6 +1977,13 @@ class MultiAgentRuntime:
         if not unfinished:
             raise RuntimeError("agent run already completed successfully")
 
+        if _normalize_execution_profile(
+            launch_plan.get("execution_profile")
+        ) == TRUSTED_LOCAL_EXECUTION_PROFILE:
+            raise PermissionError(
+                "trusted_local runs are not automatically resumable; submit a fresh explicit assignment"
+            )
+
         consequential = {
             AgentCapability.FILESYSTEM_WRITE,
             AgentCapability.CODE_EXECUTION,
@@ -1452,10 +1993,16 @@ class MultiAgentRuntime:
             AgentCapability.COMMUNICATION,
             AgentCapability.EXTERNAL_MUTATION,
         }
+        resumed_execution_profile = _normalize_execution_profile(
+            launch_plan.get("execution_profile")
+        )
+        resumed_registry = AgentRegistry(
+            self._profiled_specs(resumed_execution_profile)
+        )
         unsafe_roles: list[str] = []
         for task in unfinished:
             try:
-                spec = self.registry.get(task.agent)
+                spec = resumed_registry.get(task.agent)
             except KeyError as exc:
                 raise RuntimeError(
                     f"cannot resume because specialist role {task.agent!r} is disabled"
@@ -1469,6 +2016,14 @@ class MultiAgentRuntime:
                 f"specialists: {roles}; submit a fresh explicit assignment instead"
             )
 
+        upgraded = launch_plan.get("upgrade") if isinstance(launch_plan, Mapping) else None
+        raw_budget = upgraded.get("budget") if isinstance(upgraded, Mapping) else None
+        resumed_budget = self._upgrade_budget(raw_budget).budget if isinstance(raw_budget, Mapping) else None
+        resumed_contract = self._optional_evidence_contract(
+            upgraded.get("evidence_contract") if isinstance(upgraded, Mapping) else None
+        )
+        resumed_plan = upgraded.get("plan") if isinstance(upgraded, Mapping) else None
+
         return await self.delegate(
             tasks,
             shared_context=str(launch_plan.get("shared_context") or ""),
@@ -1477,6 +2032,11 @@ class MultiAgentRuntime:
             depth=int(launch_plan.get("depth") or 1),
             initial_results=initial_results,
             resumed_from=root_run_id,
+            budget=resumed_budget,
+            evidence_contract=resumed_contract or None,
+            upgrade_plan=resumed_plan if isinstance(resumed_plan, Mapping) else None,
+            execution_profile=resumed_execution_profile,
+            trusted_local_authorized=False,
         )
 
     async def delegate_request(
@@ -1486,6 +2046,8 @@ class MultiAgentRuntime:
         session_id: str | None = None,
         request_id: str = "",
         roles: Sequence[str] = (),
+        execution_profile: str = STANDARD_EXECUTION_PROFILE,
+        trusted_local_authorized: bool = False,
     ) -> AgentTeamResult:
         """Force native delegation for a direct ``/agents run`` request."""
         request = str(request or "").strip()
@@ -1510,7 +2072,11 @@ class MultiAgentRuntime:
             for index, role in enumerate(selected, 1)
         )
         return await self.delegate(
-            tasks, session_id=session_id, request_id=request_id
+            tasks,
+            session_id=session_id,
+            request_id=request_id,
+            execution_profile=execution_profile,
+            trusted_local_authorized=trusted_local_authorized,
         )
 
     async def smoke_test(

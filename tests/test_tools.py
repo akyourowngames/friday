@@ -15,7 +15,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 155
+        assert len(tools) == 156
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -40,6 +40,7 @@ class TestToolDefinitions:
             "forget_person",
             "search_actions",
             "list_skills",
+            "list_follow_ups",
             "load_skill",
             "create_skill",
             "search_skill_marketplace",
@@ -64,6 +65,7 @@ class TestToolDefinitions:
             "delete_file",
             "move_file",
             "batch_edit",
+            "batch_transform_images",
             "glob_apply",
             "show_file_with_line_numbers",
             "insert_line",
@@ -148,12 +150,14 @@ class TestToolDefinitions:
             "acknowledge_watcher_event",
             "get_watcher_overview",
             "delete_watcher",
+            "dismiss_follow_up",
             "create_task",
             "list_tasks",
             "get_task_status",
             "update_task",
             "cancel_task",
             "run_task",
+            "resolve_follow_up",
             "create_goal",
             "update_goal",
             "list_goals",
@@ -171,6 +175,7 @@ class TestToolDefinitions:
             "get_goal_signals",
             "acknowledge_goal_signal",
             "snooze_goal_signal",
+            "snooze_follow_up",
             "delete_goal",
             "list_follow_ups",
             "snooze_follow_up",
@@ -178,6 +183,16 @@ class TestToolDefinitions:
             "resolve_follow_up",
             "get_current_datetime",
         }
+
+    def test_delegation_tools_expose_the_opt_in_trusted_local_profile(self):
+        by_name = {
+            item["function"]["name"]: item["function"]["parameters"]
+            for item in get_tool_definitions()
+        }
+        for name in ("list_agents", "delegate_task", "delegate_tasks_parallel"):
+            profile = by_name[name]["properties"]["execution_profile"]
+            assert profile["enum"] == ["standard", "trusted_local"]
+            assert profile["default"] == "standard"
 
     def test_durable_task_tools_are_registered_without_legacy_aliases(self):
         """The continuity plan replaces the old unfinished task-list gap."""
