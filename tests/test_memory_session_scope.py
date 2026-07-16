@@ -8,10 +8,12 @@ from ares.memory import MemoryStore
 
 
 @pytest.fixture
-def scoped_store(tmp_path):
+def scoped_store(tmp_path, fake_embedding_provider):
     """Create a MemoryStore with a temporary database."""
     db_path = tmp_path / "test_memory.db"
-    return MemoryStore(db_path=db_path)
+    store = MemoryStore(db_path=db_path, embedding_provider=fake_embedding_provider)
+    yield store
+    store.close()
 
 
 def test_store_with_session_id(scoped_store):
