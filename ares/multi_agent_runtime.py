@@ -30,6 +30,7 @@ from ares.multi_agent import (
     MultiAgentOrchestrator,
     default_agent_specs,
     mutable_metadata,
+    trusted_local_agent_spec,
 )
 from ares.multi_agent_adapter import AresAgentAdapter
 from ares.multi_agent_policy import ActionGrant, ActionGrantRegistry
@@ -59,6 +60,38 @@ def _now() -> str:
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+STANDARD_EXECUTION_PROFILE = "standard"
+TRUSTED_LOCAL_EXECUTION_PROFILE = "trusted_local"
+_EXECUTION_PROFILES = frozenset({
+    STANDARD_EXECUTION_PROFILE,
+    TRUSTED_LOCAL_EXECUTION_PROFILE,
+})
+
+
+def _normalize_execution_profile(value: Any = None) -> str:
+    """Validate an explicit child execution profile without silently widening it."""
+    profile = str(value or STANDARD_EXECUTION_PROFILE).strip().casefold()
+    if profile not in _EXECUTION_PROFILES:
+        options = ", ".join(sorted(_EXECUTION_PROFILES))
+        raise ValueError(f"unknown execution_profile {profile!r}; expected one of: {options}")
+    return profile
+
+
+def _require_execution_profile_authorization(
+    execution_profile: str,
+    *,
+    trusted_local_authorized: bool,
+) -> None:
+    """Keep broad child authority tied to an explicit root-owned decision."""
+    if (
+        execution_profile == TRUSTED_LOCAL_EXECUTION_PROFILE
+        and not trusted_local_authorized
+    ):
+        raise PermissionError(
+            "trusted_local execution requires an explicit current-turn owner authorization"
+        )
 
 
 class MultiAgentRuntime:
@@ -251,7 +284,19 @@ class MultiAgentRuntime:
             payload["session_id"] = parent_session_id
         await self._emit(event.event_type, **payload)
 
-    def list_agents(self) -> list[dict[str, Any]]:
+    def _profiled_specs(self, execution_profile: str = STANDARD_EXECUTION_PROFILE) -> tuple[AgentSpec, ...]:
+        profile = _normalize_execution_profile(execution_profile)
+        specs = tuple(self.registry.snapshot().values())
+        if profile == TRUSTED_LOCAL_EXECUTION_PROFILE:
+            return tuple(trusted_local_agent_spec(spec) for spec in specs)
+        return specs
+
+    def list_agents(
+        self,
+        *,
+        execution_profile: str = STANDARD_EXECUTION_PROFILE,
+    ) -> list[dict[str, Any]]:
+        profile = _normalize_execution_profile(execution_profile)
         return [
             {
                 "name": spec.name,
@@ -267,8 +312,9 @@ class MultiAgentRuntime:
                 "model": spec.model or self.root_agent.config.model,
                 "retry_limit": spec.retry_limit,
                 "fallback_models": list(spec.fallback_models),
+                "execution_profile": profile,
             }
-            for spec in self.registry.snapshot().values()
+            for spec in self._profiled_specs(profile)
         ]
 
     def doctor(self) -> dict[str, Any]:
@@ -611,18 +657,28 @@ class MultiAgentRuntime:
                 constrained.append(result)
         return replace(team, results=tuple(constrained)), tuple(dict.fromkeys(warnings))
 
-    async def execute_tool(self, name: str, arguments: dict[str, Any], *, session_id: str | None) -> str:
+    async def execute_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        session_id: str | None,
+        trusted_local_authorized: bool = False,
+    ) -> str:
         structured = str(arguments.get("response_format") or "legacy").strip().casefold() == "structured"
         try:
             # Validate the opt-in response selector once. Existing callers do
             # not send it and continue to receive their historical payloads.
             structured = wants_structured(arguments)
             if name == "list_agents":
-                agents = self.list_agents()
+                execution_profile = _normalize_execution_profile(
+                    arguments.get("execution_profile")
+                )
+                agents = self.list_agents(execution_profile=execution_profile)
                 if structured:
                     return structured_result(
                         f"Found {len(agents)} available specialist roles.",
-                        data={"agents": agents},
+                        data={"agents": agents, "execution_profile": execution_profile},
                         provenance={"source": "native_multi_agent"},
                         metrics={"agent_count": len(agents)},
                     )
@@ -680,6 +736,13 @@ class MultiAgentRuntime:
                     return self._structured_team_result(result)
                 return json.dumps(result.as_dict(), ensure_ascii=False)
             if name == "delegate_task":
+                execution_profile = _normalize_execution_profile(
+                    arguments.get("execution_profile")
+                )
+                _require_execution_profile_authorization(
+                    execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
+                )
                 raw_budget = arguments.get("budget")
                 normalization = self._upgrade_budget(raw_budget)
                 budget = normalization.budget if raw_budget is not None else None
@@ -713,6 +776,8 @@ class MultiAgentRuntime:
                     session_id=session_id, request_id=str(arguments.get("request_id") or ""),
                     budget=budget,
                     evidence_contract=contract or None,
+                    execution_profile=execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
                 )
                 if structured:
                     return self._structured_team_result(
@@ -723,6 +788,13 @@ class MultiAgentRuntime:
                     )
                 return json.dumps(result.as_dict(), ensure_ascii=False)
             if name == "delegate_tasks_parallel":
+                execution_profile = _normalize_execution_profile(
+                    arguments.get("execution_profile")
+                )
+                _require_execution_profile_authorization(
+                    execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
+                )
                 raw_tasks = arguments.get("tasks")
                 if not isinstance(raw_tasks, list):
                     raise ValueError("tasks must be an array")
@@ -772,6 +844,8 @@ class MultiAgentRuntime:
                     budget=budget,
                     evidence_contract=contract or None,
                     upgrade_plan=plan.as_dict() if plan is not None else None,
+                    execution_profile=execution_profile,
+                    trusted_local_authorized=trusted_local_authorized,
                 )
                 if structured:
                     return self._structured_team_result(
@@ -1015,14 +1089,22 @@ class MultiAgentRuntime:
         self._checkpoint(root_run_id)
         return manifest
 
-    def _with_reviews(self, tasks: Sequence[AgentTask]) -> tuple[AgentTask, ...]:
+    def _with_reviews(
+        self,
+        tasks: Sequence[AgentTask],
+        *,
+        registry: AgentRegistry | None = None,
+        config: Any | None = None,
+    ) -> tuple[AgentTask, ...]:
         result = list(tasks)
-        if not self.config.require_review_for_mutations:
+        config = config or self.config
+        registry = registry or self.registry
+        if not config.require_review_for_mutations:
             return tuple(result)
-        review_role = str(self.config.review_role or "reviewer")
-        available = self.registry.snapshot()
+        review_role = str(config.review_role or "reviewer")
+        available = registry.snapshot()
         for task in tasks:
-            spec = self.registry.get(task.agent)
+            spec = registry.get(task.agent)
             if not any(spec.permits_capability(capability) for capability in (
                 AgentCapability.FILESYSTEM_WRITE,
                 AgentCapability.SHELL_EXECUTION,
@@ -1189,7 +1271,14 @@ class MultiAgentRuntime:
         budget: DelegationBudget | None = None,
         evidence_contract: Mapping[str, Any] | None = None,
         upgrade_plan: Mapping[str, Any] | None = None,
+        execution_profile: str = STANDARD_EXECUTION_PROFILE,
+        trusted_local_authorized: bool = False,
     ) -> AgentTeamResult:
+        execution_profile = _normalize_execution_profile(execution_profile)
+        _require_execution_profile_authorization(
+            execution_profile,
+            trusted_local_authorized=trusted_local_authorized,
+        )
         launch_app_config = self.root_agent.config.model_copy(deep=True)
         run_config = launch_app_config.multi_agent
         if budget is not None:
@@ -1214,7 +1303,10 @@ class MultiAgentRuntime:
             raise DelegationTaskLimitError(
                 f"at most {run_config.max_tasks_per_run} tasks may be delegated"
             )
-        tasks = self._with_reviews(tuple(tasks))
+        profile_registry = AgentRegistry(self._profiled_specs(execution_profile))
+        tasks = self._with_reviews(
+            tuple(tasks), registry=profile_registry, config=run_config
+        )
         if len(tasks) > run_config.max_tasks_per_run:
             raise DelegationTaskLimitError(
                 "required mutation review would exceed the task limit; submit fewer builder tasks"
@@ -1251,7 +1343,7 @@ class MultiAgentRuntime:
         project_checks = snapshot_agent_checks(Path.cwd())
         mutation_tasks = [
             task for task in tasks
-            if any(self.registry.get(task.agent).permits_capability(capability) for capability in (
+            if any(profile_registry.get(task.agent).permits_capability(capability) for capability in (
                 AgentCapability.FILESYSTEM_WRITE,
                 AgentCapability.SHELL_EXECUTION,
                 AgentCapability.CODE_EXECUTION,
@@ -1306,7 +1398,7 @@ class MultiAgentRuntime:
                 max_output_tokens=min(spec.max_output_tokens, per_agent_token_budget),
                 timeout_seconds=min(spec.timeout_seconds, run_config.max_total_duration_seconds),
             )
-            for spec in self.registry.snapshot().values()
+            for spec in profile_registry.snapshot().values()
         )
         run_registry = AgentRegistry(run_specs)
         planned_waves = self._planned_task_waves(tasks)
@@ -1318,6 +1410,7 @@ class MultiAgentRuntime:
             "max_total_iterations": run_config.max_total_iterations,
             "max_total_tokens": run_config.max_total_tokens,
             "max_total_duration_seconds": run_config.max_total_duration_seconds,
+            "execution_profile": execution_profile,
             "builder_workspaces": builder_workspaces,
             "project_checks": project_checks,
             "launch_plan": {
@@ -1325,6 +1418,7 @@ class MultiAgentRuntime:
                 "tasks": [self._task_as_dict(task) for task in tasks],
                 "shared_context": str(shared_context or ""),
                 "depth": depth,
+                "execution_profile": execution_profile,
             },
             "resumed_from": str(resumed_from or ""),
             "checkpoint_reused_tasks": sorted(initial_results),
@@ -1355,7 +1449,8 @@ class MultiAgentRuntime:
                 "terminal": {
                     task_id: AgentRunStatus.SUCCEEDED.value for task_id in initial_results
                 },
-                "resume_supported": bool(len(initial_results) < len(tasks)),
+                "resume_supported": bool(len(initial_results) < len(tasks))
+                and execution_profile != TRUSTED_LOCAL_EXECUTION_PROFILE,
             },
         }
         self._save(root_record)
@@ -1882,6 +1977,13 @@ class MultiAgentRuntime:
         if not unfinished:
             raise RuntimeError("agent run already completed successfully")
 
+        if _normalize_execution_profile(
+            launch_plan.get("execution_profile")
+        ) == TRUSTED_LOCAL_EXECUTION_PROFILE:
+            raise PermissionError(
+                "trusted_local runs are not automatically resumable; submit a fresh explicit assignment"
+            )
+
         consequential = {
             AgentCapability.FILESYSTEM_WRITE,
             AgentCapability.CODE_EXECUTION,
@@ -1891,10 +1993,16 @@ class MultiAgentRuntime:
             AgentCapability.COMMUNICATION,
             AgentCapability.EXTERNAL_MUTATION,
         }
+        resumed_execution_profile = _normalize_execution_profile(
+            launch_plan.get("execution_profile")
+        )
+        resumed_registry = AgentRegistry(
+            self._profiled_specs(resumed_execution_profile)
+        )
         unsafe_roles: list[str] = []
         for task in unfinished:
             try:
-                spec = self.registry.get(task.agent)
+                spec = resumed_registry.get(task.agent)
             except KeyError as exc:
                 raise RuntimeError(
                     f"cannot resume because specialist role {task.agent!r} is disabled"
@@ -1927,6 +2035,8 @@ class MultiAgentRuntime:
             budget=resumed_budget,
             evidence_contract=resumed_contract or None,
             upgrade_plan=resumed_plan if isinstance(resumed_plan, Mapping) else None,
+            execution_profile=resumed_execution_profile,
+            trusted_local_authorized=False,
         )
 
     async def delegate_request(
@@ -1936,6 +2046,8 @@ class MultiAgentRuntime:
         session_id: str | None = None,
         request_id: str = "",
         roles: Sequence[str] = (),
+        execution_profile: str = STANDARD_EXECUTION_PROFILE,
+        trusted_local_authorized: bool = False,
     ) -> AgentTeamResult:
         """Force native delegation for a direct ``/agents run`` request."""
         request = str(request or "").strip()
@@ -1960,7 +2072,11 @@ class MultiAgentRuntime:
             for index, role in enumerate(selected, 1)
         )
         return await self.delegate(
-            tasks, session_id=session_id, request_id=request_id
+            tasks,
+            session_id=session_id,
+            request_id=request_id,
+            execution_profile=execution_profile,
+            trusted_local_authorized=trusted_local_authorized,
         )
 
     async def smoke_test(

@@ -165,6 +165,16 @@ class TestToolDefinitions:
             "get_current_datetime",
         }
 
+    def test_delegation_tools_expose_the_opt_in_trusted_local_profile(self):
+        by_name = {
+            item["function"]["name"]: item["function"]["parameters"]
+            for item in get_tool_definitions()
+        }
+        for name in ("list_agents", "delegate_task", "delegate_tasks_parallel"):
+            profile = by_name[name]["properties"]["execution_profile"]
+            assert profile["enum"] == ["standard", "trusted_local"]
+            assert profile["default"] == "standard"
+
     def test_durable_task_tools_are_registered_without_legacy_aliases(self):
         """The continuity plan replaces the old unfinished task-list gap."""
         tools = get_tool_definitions()

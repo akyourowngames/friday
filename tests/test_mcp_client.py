@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import asyncio
 import json
 
+import pytest
+
 from ares.agent import Agent
 from ares.config import _ensure_mcp_defaults
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
@@ -61,6 +63,24 @@ def test_mcp_server_config_defaults():
     config = MCPServerConfig(name="calendar", server_url="https://example.com/mcp")
     assert config.oauth_client_id == ""
     assert config.oauth_scopes == []
+    assert config.timeout_seconds == 60
+    assert config.max_timeout_seconds == 600
+
+
+def test_mcp_server_config_validates_finite_default_and_max_timeouts():
+    config = MCPServerConfig(
+        name="calendar",
+        server_url="https://example.com/mcp",
+        timeout_seconds=12,
+        max_timeout_seconds=45,
+    )
+
+    assert config.timeout_seconds == 12
+    assert config.max_timeout_seconds == 45
+    with pytest.raises(ValueError, match="timeout_seconds cannot exceed"):
+        MCPServerConfig(name="calendar", timeout_seconds=46, max_timeout_seconds=45)
+    with pytest.raises(ValueError, match="must be finite"):
+        MCPServerConfig(name="calendar", max_timeout_seconds=float("inf"))
 
 
 def test_auth_provider_stores_expiry_and_detects_expiration(tmp_path):
@@ -197,6 +217,7 @@ def test_readiness_report_uses_schema_cache():
     assert report["connected"] == 0
     assert report["servers"]["calendar"]["schema_cached"] is True
     assert report["servers"]["calendar"]["error"] == "offline"
+    assert report["servers"]["calendar"]["max_timeout_seconds"] == 600
     assert report["health"]["status"] == "offline"
     assert report["health"]["servers"][0]["name"] == "calendar"
 
@@ -387,7 +408,14 @@ def test_call_tool_strips_reserved_metadata_caps_timeout_and_returns_structured_
             return SimpleNamespace(content=[SimpleNamespace(text="event one")])
 
     manager = MCPClientManager(
-        [{"name": "calendar", "server_url": "https://example.com/mcp", "timeout_seconds": 7}]
+        [
+            {
+                "name": "calendar",
+                "server_url": "https://example.com/mcp",
+                "timeout_seconds": 7,
+                "max_timeout_seconds": 7,
+            }
+        ]
     )
     manager.sessions["calendar"] = FakeSession()
 
@@ -423,6 +451,173 @@ def test_call_tool_strips_reserved_metadata_caps_timeout_and_returns_structured_
     assert response["data"]["result"] == "event one"
     assert response["metrics"]["timeout_seconds"] == 7
     assert response["provenance"] == {"server": "calendar", "tool": "list_events"}
+
+
+def test_call_tool_honors_per_call_timeout_up_to_configured_maximum():
+    received: list[dict[str, object]] = []
+
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            received.append(arguments)
+            return SimpleNamespace(content=[SimpleNamespace(text="event one")])
+
+    manager = MCPClientManager(
+        [
+            {
+                "name": "calendar",
+                "server_url": "https://example.com/mcp",
+                "timeout_seconds": 7,
+                "max_timeout_seconds": 45,
+            }
+        ]
+    )
+    manager.sessions["calendar"] = FakeSession()
+
+    requested = json.loads(
+        asyncio.run(
+            manager.call_tool(
+                "mcp__calendar__list_events",
+                {"__ares": {"timeout_seconds": 30, "response_format": "structured"}},
+            )
+        )
+    )
+    capped = json.loads(
+        asyncio.run(
+            manager.call_tool(
+                "mcp__calendar__list_events",
+                {"__ares": {"timeout_seconds": 999, "response_format": "structured"}},
+            )
+        )
+    )
+
+    assert received == [{}, {}]
+    assert requested["metrics"]["timeout_seconds"] == 30
+    assert capped["metrics"]["timeout_seconds"] == 45
+
+
+def test_operation_timeout_for_matches_call_policy_without_connecting():
+    manager = MCPClientManager(
+        [
+            {
+                "name": "calendar",
+                "server_url": "https://example.com/mcp",
+                "timeout_seconds": 7,
+                "max_timeout_seconds": 45,
+            },
+            {
+                "name": "windows",
+                "command": "windows-mcp",
+                "timeout_seconds": 90,
+                "max_timeout_seconds": 90,
+            },
+        ]
+    )
+
+    assert manager.operation_timeout_for(
+        "mcp__calendar__list_events", {"__ares": {"timeout_seconds": 30}}
+    ) == 30
+    assert manager.operation_timeout_for(
+        "mcp__calendar__list_events", {"__ares": {"timeout_seconds": 999}}
+    ) == 45
+    assert manager.operation_timeout_for("mcp__windows__Snapshot", {}) == 15
+    assert manager.sessions == {}
+    assert manager._exit_stacks == {}
+
+
+def test_windows_snapshot_keeps_short_default_but_can_use_configured_maximum():
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            return SimpleNamespace(content=[SimpleNamespace(text="desktop")])
+
+    manager = MCPClientManager(
+        [
+            {
+                "name": "windows",
+                "command": "windows-mcp",
+                "timeout_seconds": 90,
+                "max_timeout_seconds": 90,
+            }
+        ]
+    )
+    manager.sessions["windows"] = FakeSession()
+
+    default = json.loads(
+        asyncio.run(
+            manager.call_tool(
+                "mcp__windows__Snapshot",
+                {"__ares": {"response_format": "structured"}},
+            )
+        )
+    )
+    extended = json.loads(
+        asyncio.run(
+            manager.call_tool(
+                "mcp__windows__Snapshot",
+                {"__ares": {"timeout_seconds": 75, "response_format": "structured"}},
+            )
+        )
+    )
+
+    assert default["metrics"]["timeout_seconds"] == 15
+    assert extended["metrics"]["timeout_seconds"] == 75
+
+
+def test_call_tool_reconnects_configured_server_once_before_first_call(monkeypatch):
+    connections: list[str] = []
+    closed: list[str] = []
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            return SimpleNamespace(content=[SimpleNamespace(text="event one")])
+
+    async def fake_connect(self, name, config):
+        connections.append(name)
+        self.sessions[name] = FakeSession()
+
+    async def fake_close(self, name):
+        closed.append(name)
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}]
+    )
+    monkeypatch.setattr(MCPClientManager, "_connect_server", fake_connect)
+    monkeypatch.setattr(MCPClientManager, "close_server", fake_close)
+
+    result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {"limit": 1}))
+
+    assert result == "event one"
+    assert closed == ["calendar"]
+    assert connections == ["calendar"]
+    assert calls == [("list_events", {"limit": 1})]
+
+
+def test_call_tool_never_replays_started_playwright_mutation_after_reconnect(monkeypatch):
+    connections: list[str] = []
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FailingSession:
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            raise ConnectionError("connection reset after request started")
+
+    async def fake_connect(self, name, config):
+        connections.append(name)
+        self.sessions[name] = FailingSession()
+
+    manager = MCPClientManager(
+        [{"name": "playwright", "server_url": "https://example.com/mcp"}]
+    )
+    monkeypatch.setattr(MCPClientManager, "_connect_server", fake_connect)
+
+    result = asyncio.run(
+        manager.call_tool("mcp__playwright__browser_click", {"selector": "#submit"})
+    )
+
+    assert "connection reset after request started" in result
+    assert connections == ["playwright"]
+    assert calls == [("browser_click", {"selector": "#submit"})]
 
 
 def test_call_tool_caches_only_explicit_read_only_operations():

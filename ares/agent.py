@@ -1,6 +1,7 @@
 """Core agent loop: LLM interaction, tool execution, context building."""
 
 import asyncio
+import inspect
 import json
 import re
 import time
@@ -50,6 +51,18 @@ ToolProgressCallback = Callable[[str, str], Awaitable[None]]
 _RESEARCH_EVIDENCE_TOOLS = frozenset({
     "web_search", "fetch_url", "extract_document", "read_file", "search_files",
 })
+_TRUSTED_LOCAL_EXECUTION_REQUEST = re.compile(
+    r"(?:\btrusted[\s_-]*local\b|\b(?:full|unrestricted|all)\s+(?:local\s+)?"
+    r"(?:tool|tools|mcp|mcps|execution|access)\b|\b(?:remove|lift)\s+(?:all\s+)?"
+    r"(?:tool|mcp|agent)?\s*restrictions\b|\b(?:tool|tools|mcp|mcps|agent|agents)"
+    r".{0,48}\bwithout\s+(?:any\s+)?restrictions\b)",
+    re.IGNORECASE,
+)
+
+
+def _trusted_local_execution_requested(user_input: str) -> bool:
+    """Recognize an unambiguous owner request for the broad child profile."""
+    return bool(_TRUSTED_LOCAL_EXECUTION_REQUEST.search(str(user_input or "")))
 
 
 class Agent:
@@ -906,9 +919,20 @@ class Agent:
                 turn_context = self.turn_context
                 if turn_context is not None:
                     runtime_args.setdefault("request_id", turn_context.request_id)
-                result = await self.multi_agent_runtime.execute_tool(
-                    tool_name, runtime_args, session_id=self.session_id
+                execute_tool = self.multi_agent_runtime.execute_tool
+                parameters = inspect.signature(execute_tool).parameters.values()
+                supports_profile_authorization = any(
+                    parameter.name == "trusted_local_authorized"
+                    or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters
                 )
+                runtime_kwargs: dict[str, Any] = {"session_id": self.session_id}
+                if supports_profile_authorization:
+                    runtime_kwargs["trusted_local_authorized"] = (
+                        turn_context is not None
+                        and _trusted_local_execution_requested(turn_context.user_input)
+                    )
+                result = await execute_tool(tool_name, runtime_args, **runtime_kwargs)
             external = False
         elif tool_name == "run_task":
             if progress_callback is not None:
@@ -945,6 +969,23 @@ class Agent:
             multi_agent = getattr(getattr(self, "config", None), "multi_agent", None)
             timeout_seconds = max(1.0, float(getattr(multi_agent, "tool_operation_timeout_seconds", 120.0)))
             cleanup_grace = max(0.1, float(getattr(multi_agent, "tool_cancel_grace_seconds", 2.0)))
+            if tool_name.startswith("mcp__"):
+                # The MCP layer owns the normalized per-server/per-call limit.
+                # Let its finite limit finish instead of pre-empting a valid
+                # long-running connected integration at the generic tool cap.
+                timeout_for = getattr(self.mcp_manager, "operation_timeout_for", None)
+                if callable(timeout_for):
+                    try:
+                        mcp_timeout = float(timeout_for(tool_name, args))
+                    except (TypeError, ValueError):
+                        # call_tool will return the canonical validation error;
+                        # do not turn malformed metadata into a generic timeout.
+                        pass
+                    else:
+                        if mcp_timeout > 0:
+                            timeout_seconds = max(
+                                timeout_seconds, mcp_timeout + cleanup_grace
+                            )
 
             async def await_operation(dispatch: asyncio.Task[tuple[bool, str]]) -> tuple[bool, str]:
                 done, _pending = await asyncio.wait({dispatch}, timeout=timeout_seconds)

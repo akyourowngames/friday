@@ -13,6 +13,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -24,11 +25,15 @@ from typing import Any, Literal
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from ares.tools.mcp_upgrades import (
+    DEFAULT_MCP_TIMEOUT_SECONDS,
+    MAX_MCP_TIMEOUT_SECONDS,
+    MIN_MCP_TIMEOUT_SECONDS,
     MCPResponseCache,
     MCPUpgradeError,
+    PreparedMCPCall,
     merge_paginated_responses,
     pagination_page_arguments,
     prepare_mcp_call,
@@ -140,7 +145,29 @@ class MCPServerConfig(BaseModel):
     oauth_client_id: str = ""
     oauth_client_secret: str = ""
     oauth_scopes: list[str] = Field(default_factory=list)
-    timeout_seconds: float = 60.0
+    # ``timeout_seconds`` is the default for one request.  The separate cap
+    # lets a caller opt in to a longer, still finite operation without making
+    # every MCP call wait that long by default.
+    timeout_seconds: float = DEFAULT_MCP_TIMEOUT_SECONDS
+    max_timeout_seconds: float = MAX_MCP_TIMEOUT_SECONDS
+
+    @field_validator("timeout_seconds", "max_timeout_seconds", mode="before")
+    @classmethod
+    def validate_timeout_seconds(cls, value: Any, info: Any) -> float:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be a number of seconds, not a boolean")
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{info.field_name} must be a number of seconds") from exc
+        if not math.isfinite(seconds):
+            raise ValueError(f"{info.field_name} must be finite")
+        if not MIN_MCP_TIMEOUT_SECONDS <= seconds <= MAX_MCP_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"{info.field_name} must be between {MIN_MCP_TIMEOUT_SECONDS:g} and "
+                f"{MAX_MCP_TIMEOUT_SECONDS:g} seconds"
+            )
+        return seconds
 
     @model_validator(mode="after")
     def normalize(self) -> "MCPServerConfig":
@@ -150,6 +177,8 @@ class MCPServerConfig(BaseModel):
             self.transport = "stdio"
         if self.transport == "http":
             self.transport = "streamable_http"
+        if self.timeout_seconds > self.max_timeout_seconds:
+            raise ValueError("timeout_seconds cannot exceed max_timeout_seconds")
         return self
 
     @property
@@ -363,6 +392,7 @@ class MCPClientManager:
         self.tool_definitions: list[dict[str, Any]] = []
         self.schema_cache: dict[str, list[dict[str, Any]]] = {}
         self.server_errors: dict[str, str] = {}
+        self._reconnect_locks: dict[str, asyncio.Lock] = {}
         # This cache is used only by an explicit, read-only call policy. It
         # stays in memory so neither MCP output nor request details persist.
         self._response_cache = MCPResponseCache()
@@ -396,6 +426,15 @@ class MCPClientManager:
             logger.warning("Ignoring invalid MCP server config %r: %s", data, exc)
             return None
 
+    @staticmethod
+    def _connection_timeout(config: MCPServerConfig) -> float:
+        """Bound one connection attempt without turning a call timeout into a retry."""
+
+        return min(
+            config.max_timeout_seconds,
+            max(MIN_MCP_TIMEOUT_SECONDS, config.timeout_seconds * 2 + 1),
+        )
+
     async def start(self) -> None:
         """Connect to all configured MCP servers.
 
@@ -411,7 +450,7 @@ class MCPClientManager:
             try:
                 await asyncio.wait_for(
                     self._connect_server(name, config),
-                    timeout=max(1.0, float(config.timeout_seconds) * 2 + 1),
+                    timeout=self._connection_timeout(config),
                 )
                 self.server_errors.pop(name, None)
             except asyncio.CancelledError as exc:
@@ -475,7 +514,10 @@ class MCPClientManager:
             return {"name": name, "ready": False, "error": f"MCP server '{name}' is not configured."}
         await self.close_server(name)
         try:
-            await self._connect_server(name, config)
+            await asyncio.wait_for(
+                self._connect_server(name, config),
+                timeout=self._connection_timeout(config),
+            )
             self.server_errors.pop(name, None)
             return self.readiness_report()["servers"][name]
         except BaseException as exc:
@@ -499,6 +541,7 @@ class MCPClientManager:
                 "endpoint": redact_mcp_text(config.endpoint),
                 "command": config.command,
                 "timeout_seconds": config.timeout_seconds,
+                "max_timeout_seconds": config.max_timeout_seconds,
                 "tools": len(cached),
                 "schema_cached": bool(cached),
                 "error": error,
@@ -688,6 +731,41 @@ class MCPClientManager:
             },
         }
 
+    def operation_timeout_for(self, tool_name: str, arguments: dict[str, Any] | None) -> float:
+        """Return a tool call's normalized timeout without connecting or calling MCP.
+
+        Callers that impose an outer deadline (such as the agent runtime) can
+        use this before dispatching :meth:`call_tool`, keeping that deadline in
+        sync with the per-server and per-call MCP policy.  Invalid names or
+        metadata raise the same normalization errors as a call would report.
+        """
+
+        return self._prepare_call(tool_name, arguments).timeout.timeout_seconds
+
+    def _prepare_call(
+        self, tool_name: str, arguments: dict[str, Any] | None
+    ) -> PreparedMCPCall:
+        """Normalize one call's metadata without touching connection state."""
+
+        raw_server = str(tool_name).removeprefix("mcp__").partition("__")[0]
+        config = self.servers.get(raw_server, MCPServerConfig(name=raw_server))
+        is_windows_observation = (
+            raw_server == "windows"
+            and str(tool_name).rsplit("__", 1)[-1].casefold()
+            in {"snapshot", "screenshot"}
+        )
+        default_timeout = (
+            min(config.timeout_seconds, 15.0)
+            if is_windows_observation
+            else config.timeout_seconds
+        )
+        return prepare_mcp_call(
+            tool_name,
+            arguments,
+            default_timeout_seconds=default_timeout,
+            max_timeout_seconds=config.max_timeout_seconds,
+        )
+
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Call an MCP tool, applying advanced policy only when explicitly requested.
 
@@ -698,25 +776,7 @@ class MCPClientManager:
         """
 
         try:
-            raw_server = str(tool_name).removeprefix("mcp__").partition("__")[0]
-            config = self.servers.get(raw_server, MCPServerConfig(name=raw_server))
-            configured_timeout = max(1.0, float(config.timeout_seconds))
-            is_windows_observation = (
-                raw_server == "windows"
-                and str(tool_name).rsplit("__", 1)[-1].casefold()
-                in {"snapshot", "screenshot"}
-            )
-            hard_timeout = (
-                min(configured_timeout, 15.0)
-                if is_windows_observation
-                else configured_timeout
-            )
-            prepared = prepare_mcp_call(
-                tool_name,
-                arguments,
-                default_timeout_seconds=hard_timeout,
-                max_timeout_seconds=hard_timeout,
-            )
+            prepared = self._prepare_call(tool_name, arguments)
         except (MCPUpgradeError, TypeError, ValueError) as exc:
             message = redact_mcp_text(exc)
             if "Invalid MCP tool name" in message:
@@ -771,6 +831,21 @@ class MCPClientManager:
                     },
                 )
 
+        # A missing configured session is a connection-state failure, not a
+        # reason to replay an operation.  Reconnect exactly once before the
+        # first remote call; after a call starts its result is returned as-is.
+        reconnect_error = await self._reconnect_before_first_call(server_name)
+        if reconnect_error is not None:
+            return self._format_upgraded_result(
+                rendered=reconnect_error,
+                structured=structured,
+                ok=False,
+                server_name=server_name,
+                mcp_tool=mcp_tool,
+                timeout=timeout,
+                warnings=warnings,
+            )
+
         if prepared.pagination.enabled and read_only:
             rendered, failed, pagination = await self._call_paginated_tool(
                 server_name=server_name,
@@ -820,6 +895,48 @@ class MCPClientManager:
             pagination=pagination,
         )
 
+    async def _reconnect_before_first_call(self, server_name: str) -> str | None:
+        """Reconnect an explicitly configured server once before a tool call.
+
+        This intentionally runs only while no call has been issued.  Retrying
+        a request after it reached an MCP server could duplicate a mutation,
+        so transport recovery after a started call is left for the next call.
+        """
+
+        if server_name not in self.servers or server_name in self.sessions:
+            return None
+        lock = self._reconnect_locks.setdefault(server_name, asyncio.Lock())
+        async with lock:
+            if server_name in self.sessions:
+                return None
+            config = self.servers[server_name]
+            # A prior failed connection can leave a transport context without
+            # a usable session.  Release it before constructing the one retry.
+            await self.close_server(server_name)
+            try:
+                await asyncio.wait_for(
+                    self._connect_server(server_name, config),
+                    timeout=self._connection_timeout(config),
+                )
+            except asyncio.CancelledError as exc:
+                _clear_current_task_cancellation()
+                reason = f"Connection cancelled: {exc or 'cancelled'}"
+            except Exception as exc:
+                reason = str(exc) or exc.__class__.__name__
+            else:
+                if server_name in self.sessions:
+                    self.server_errors.pop(server_name, None)
+                    return None
+                reason = "Connection completed without an active session."
+
+            safe_reason = redact_mcp_text(reason)
+            self.server_errors[server_name] = safe_reason
+            await self.close_server(server_name)
+            return (
+                f"Error: MCP server '{server_name}' is not connected and reconnect failed: "
+                f"{safe_reason}"
+            )
+
     async def _call_rendered_tool(
         self,
         *,
@@ -828,120 +945,61 @@ class MCPClientManager:
         arguments: dict[str, Any],
         timeout: float,
     ) -> tuple[str, bool, Any | None]:
-        """Run one MCP call while preserving the previous retry behavior."""
+        """Run one MCP call without replaying a request that has started."""
 
-        # Retry only genuinely transient Playwright failures. Repeating a bad
-        # accessibility ref or invalid input costs seconds and cannot succeed
-        # without new page evidence, which the Agent handles separately.
-        # Snapshot is read-only, so a single retry after reconnecting a crashed
-        # Windows MCP is safe and lets the agent continue without manual restart.
-        can_retry_windows_snapshot = (
+        # A Windows snapshot is observational, so refreshing the local process
+        # after failure is safe.  The snapshot itself is *not* replayed here;
+        # callers can issue a new request after the reconnect completes.
+        can_recover_windows_snapshot = (
             server_name == "windows" and mcp_tool.casefold() == "snapshot"
         )
-        max_retries = 1 if server_name == "playwright" or can_retry_windows_snapshot else 0
-
-        for attempt in range(max_retries + 1):
-            try:
-                session = self.sessions.get(server_name)
-                if session is None:
-                    return f"Error: MCP server '{server_name}' is not connected.", True, None
-                result = await asyncio.wait_for(
-                    session.call_tool(mcp_tool, arguments=arguments), timeout=timeout
-                )
-                is_error = bool(getattr(result, "isError", getattr(result, "is_error", False)))
-                rendered = self._render_result(result)
-                if is_error:
-                    # For Playwright, retry on certain errors that might be transient.
-                    if server_name == "playwright" and attempt < max_retries:
-                        error_msg = rendered.lower()
-                        if any(
-                            keyword in error_msg
-                            for keyword in ("timeout", "browserback", " navigation", "page load")
-                        ):
-                            logger.warning(
-                                "Retrying Playwright MCP call %s (attempt %d/%d)",
-                                mcp_tool,
-                                attempt + 1,
-                                max_retries + 1,
-                            )
-                            await asyncio.sleep(1.0)
-                            continue
-                    return (
-                        f"Error: MCP tool '{mcp_tool}' on '{server_name}' reported failure: "
-                        f"{redact_mcp_text(rendered)}",
-                        True,
-                        None,
-                    )
-                return rendered, False, self._result_payload(result)
-            except asyncio.TimeoutError:
-                if server_name == "playwright" and attempt < max_retries:
-                    logger.warning(
-                        "Retrying Playwright MCP call %s after timeout (attempt %d/%d)",
-                        mcp_tool,
-                        attempt + 1,
-                        max_retries + 1,
-                    )
-                    await asyncio.sleep(1.0)
-                    continue
-                if can_retry_windows_snapshot and attempt < max_retries:
-                    await self._recover_windows_server(
-                        f"Snapshot timed out after {timeout:g}s"
-                    )
-                    continue
+        try:
+            session = self.sessions.get(server_name)
+            if session is None:
+                return f"Error: MCP server '{server_name}' is not connected.", True, None
+            result = await asyncio.wait_for(
+                session.call_tool(mcp_tool, arguments=arguments), timeout=timeout
+            )
+            is_error = bool(getattr(result, "isError", getattr(result, "is_error", False)))
+            rendered = self._render_result(result)
+            if is_error:
                 return (
-                    f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s.",
+                    f"Error: MCP tool '{mcp_tool}' on '{server_name}' reported failure: "
+                    f"{redact_mcp_text(rendered)}",
                     True,
                     None,
                 )
-            except asyncio.CancelledError as exc:
-                _clear_current_task_cancellation()
-                logger.warning(
-                    "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
+            return rendered, False, self._result_payload(result)
+        except asyncio.TimeoutError:
+            if can_recover_windows_snapshot:
+                await self._recover_windows_server(
+                    f"Snapshot timed out after {timeout:g}s"
                 )
-                return (
-                    f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. "
-                    "Check the MCP server logs or increase timeout_seconds.",
-                    True,
-                    None,
-                )
-            except Exception as exc:
-                error_text = str(exc).casefold()
-                retryable = any(
-                    keyword in error_text
-                    for keyword in (
-                        "timeout",
-                        "navigation",
-                        "page load",
-                        "target closed",
-                        "connection reset",
-                    )
-                )
-                if server_name == "playwright" and retryable and attempt < max_retries:
-                    logger.warning(
-                        "Retrying Playwright MCP call %s after error (attempt %d/%d): %s",
-                        mcp_tool,
-                        attempt + 1,
-                        max_retries + 1,
-                        exc,
-                    )
-                    await asyncio.sleep(1.0)
-                    continue
-                if can_retry_windows_snapshot and attempt < max_retries:
-                    await self._recover_windows_server(str(exc) or exc.__class__.__name__)
-                    continue
-                return (
-                    f"Error calling MCP tool '{mcp_tool}' on '{server_name}': "
-                    f"{redact_mcp_text(exc)}",
-                    True,
-                    None,
-                )
-
-        return (
-            f"Error: MCP tool '{mcp_tool}' on '{server_name}' failed after "
-            f"{max_retries + 1} attempts",
-            True,
-            None,
-        )
+            return (
+                f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s.",
+                True,
+                None,
+            )
+        except asyncio.CancelledError as exc:
+            _clear_current_task_cancellation()
+            logger.warning(
+                "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
+            )
+            return (
+                f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. "
+                "Check the MCP server logs or increase timeout_seconds.",
+                True,
+                None,
+            )
+        except Exception as exc:
+            if can_recover_windows_snapshot:
+                await self._recover_windows_server(str(exc) or exc.__class__.__name__)
+            return (
+                f"Error calling MCP tool '{mcp_tool}' on '{server_name}': "
+                f"{redact_mcp_text(exc)}",
+                True,
+                None,
+            )
 
     async def _call_paginated_tool(
         self,

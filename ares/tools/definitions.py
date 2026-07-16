@@ -25,7 +25,14 @@ def get_tool_definitions() -> list[dict]:
         _tool(
             "list_agents",
             "List native Ares specialist roles, capabilities, tool boundaries, mutation status, timeouts, and iteration budgets.",
-            {},
+            {
+                "execution_profile": {
+                    "type": "string",
+                    "enum": ["standard", "trusted_local"],
+                    "default": "standard",
+                    "description": "trusted_local previews the broad local profile: every registered/connected execution tool is visible to assigned specialists, while the dedicated reviewer remains read-only. Consequential actions still require root-issued exact grants.",
+                },
+            },
         ),
         _tool(
             "delegate_task",
@@ -37,6 +44,12 @@ def get_tool_definitions() -> list[dict]:
                 "timeout_seconds": {"type": "number", "description": "Optional bounded timeout."},
                 "required": {"type": "boolean", "default": True},
                 "result_format": {"type": "string", "default": "text", "description": "text, markdown, or json."},
+                "execution_profile": {
+                    "type": "string",
+                    "enum": ["standard", "trusted_local"],
+                    "default": "standard",
+                    "description": "trusted_local gives assigned specialists access to all registered local and connected MCP execution tools; the dedicated reviewer remains read-only. It requires an explicit current-turn owner request. Action grants, user-confirmation ownership, and workspace containment still apply.",
+                },
                 "budget": {
                     "type": "object",
                     "description": "Optional strict per-run ceilings. Values are capped by administrator limits.",
@@ -94,6 +107,12 @@ def get_tool_definitions() -> list[dict]:
                     },
                 },
                 "context": {"type": "string", "description": "Shared bounded context for every specialist."},
+                "execution_profile": {
+                    "type": "string",
+                    "enum": ["standard", "trusted_local"],
+                    "default": "standard",
+                    "description": "trusted_local gives assigned specialists access to all registered local and connected MCP execution tools; the dedicated reviewer remains read-only. It requires an explicit current-turn owner request. Action grants, user-confirmation ownership, and workspace containment still apply.",
+                },
                 "plan": {"type": "boolean", "default": False, "description": "Validate dependencies and serialize declared resource conflicts before launch."},
                 "synthesize": {"type": "boolean", "default": False, "description": "Add one final synthesizer task when multiple independent terminal tasks exist."},
                 "synthesis_task_id": {"type": "string", "default": "synthesize"},
