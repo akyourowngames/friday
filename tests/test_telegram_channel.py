@@ -27,6 +27,12 @@ class FakeConversationStore:
     def get_messages(self, conversation_id):
         return [message for message in self.messages if message["conversation_id"] == conversation_id]
 
+    def list_conversations(self):
+        return [
+            {"id": identifier, "summary": f"Chat {identifier}", "started_at": "2026-07-16T10:00:00"}
+            for identifier in range(self.started, 0, -1)
+        ]
+
     def add_message(self, conversation_id, role, content, tool_calls=None):
         self.messages.append(
             {
@@ -187,6 +193,30 @@ async def test_authorized_message_uses_persistent_conversation_and_reports_tool_
     assert conversations.messages[1]["content"] == "Here is the answer."
     assert any("Using tool: web search" in edit[2] for edit in api.edits)
     assert any(message[1] == "Here is the answer." for message in api.messages)
+
+
+@pytest.mark.asyncio
+async def test_telegram_resume_lists_only_chat_owned_conversations_and_restores_one(telegram_channel):
+    channel, _conversations, api, state = telegram_channel
+    await channel._handle_update({
+        "update_id": 30,
+        "message": {"message_id": 30, "chat": {"id": 123, "type": "private"}, "text": "first chat"},
+    })
+    await channel._handle_update({
+        "update_id": 31,
+        "message": {"message_id": 31, "chat": {"id": 123, "type": "private"}, "text": "/new"},
+    })
+    await channel._handle_update({
+        "update_id": 32,
+        "message": {"message_id": 32, "chat": {"id": 123, "type": "private"}, "text": "/resume"},
+    })
+    assert "/resume 1" in api.messages[-1][1]
+    await channel._handle_update({
+        "update_id": 33,
+        "message": {"message_id": 33, "chat": {"id": 123, "type": "private"}, "text": "/resume 1"},
+    })
+    assert state.get_conversation_id("telegram", 123) == 1
+    assert "Resumed chat #1" in api.messages[-1][1]
 
 
 @pytest.mark.asyncio

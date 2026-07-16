@@ -31,6 +31,17 @@ class ChannelStore:
         )
         self.conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS channel_conversation_history (
+                channel TEXT NOT NULL,
+                external_chat_id TEXT NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                last_selected_at TEXT NOT NULL,
+                PRIMARY KEY (channel, external_chat_id, conversation_id)
+            )
+            """
+        )
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS channel_conversations (
                 channel TEXT NOT NULL,
                 external_chat_id TEXT NOT NULL,
@@ -73,6 +84,7 @@ class ChannelStore:
         return int(row["conversation_id"]) if row else None
 
     def set_conversation_id(self, channel: str, chat_id: int | str, conversation_id: int) -> None:
+        now = now_local_iso()
         self.conn.execute(
             """
             INSERT INTO channel_conversations (channel, external_chat_id, conversation_id, updated_at)
@@ -81,9 +93,26 @@ class ChannelStore:
                 conversation_id = excluded.conversation_id,
                 updated_at = excluded.updated_at
             """,
-            (channel, str(chat_id), int(conversation_id), now_local_iso()),
+            (channel, str(chat_id), int(conversation_id), now),
+        )
+        self.conn.execute(
+            """INSERT INTO channel_conversation_history
+               (channel, external_chat_id, conversation_id, last_selected_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(channel, external_chat_id, conversation_id) DO UPDATE SET
+                   last_selected_at = excluded.last_selected_at""",
+            (channel, str(chat_id), int(conversation_id), now),
         )
         self.conn.commit()
+
+    def list_conversation_ids(self, channel: str, chat_id: int | str, limit: int = 12) -> list[int]:
+        rows = self.conn.execute(
+            """SELECT conversation_id FROM channel_conversation_history
+               WHERE channel = ? AND external_chat_id = ?
+               ORDER BY last_selected_at DESC LIMIT ?""",
+            (channel, str(chat_id), max(1, min(int(limit), 50))),
+        ).fetchall()
+        return [int(row["conversation_id"]) for row in rows]
 
     def close(self) -> None:
         self.conn.close()

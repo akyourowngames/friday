@@ -100,17 +100,34 @@ class AresAgentAdapter:
         ):
             research_contract = """
 
-Research output contract (mandatory):
-- The timeout is only a maximum safety deadline, never a target. As soon as you
-  have usable source evidence, stop searching and return the final JSON.
-- Do not make extra tool calls merely to consume the remaining time or iteration budget.
-- Return one JSON object and no prose outside it.
-- Include `summary`, `claims`, `disagreements`, and `caveats`.
-- Every claim must contain: claim, source_urls, evidence, confidence (0..1), caveats,
-  publication_dates, and benchmark_conditions.
-- Tie every exact figure to its own URL and evidence. Performance figures require
-  benchmark conditions. Preserve conflicting findings explicitly. A synthesis
-  may never assign confidence above the strongest underlying source claim.
+Research output guidelines (IMPORTANT):
+- As soon as you have usable source evidence, stop searching and return results.
+- Do not make extra tool calls to consume remaining time.
+- Return structured findings with sources. Format:
+  ```json
+  {
+    "summary": "brief overview",
+    "claims": [
+      {
+        "claim": "the finding",
+        "source_urls": ["https://..."],
+        "evidence": "supporting quote or paraphrase",
+        "confidence": 0.85,
+        "caveats": ["limitations"],
+        "publication_dates": ["date"],
+        "benchmark_conditions": []
+      }
+    ],
+    "disagreements": [],
+    "caveats": ["overall limitations"]
+  }
+  ```
+- If you cannot produce perfect JSON, at minimum provide:
+  - Clear claims with source URLs
+  - Evidence for each claim
+  - Confidence level (0-1)
+- Tie every exact figure to its own URL and evidence.
+- Preserve conflicting findings explicitly.
 """
         return f"""You are an internal Ares specialist named {spec.name}.
 

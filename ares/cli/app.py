@@ -270,6 +270,30 @@ class AresCLI(MarketplaceCommandMixin):
             rows = loader(conversation_id)
         return list(rows or [])
 
+    def _resume_conversations(self, limit: int = 10) -> list[dict]:
+        listing = getattr(self.conversation_store, "list_conversations", None)
+        if not callable(listing):
+            return []
+        return list(listing() or [])[:max(1, min(int(limit), 50))]
+
+    def _resume_conversation(self, conversation_id: int) -> bool:
+        available = {int(row.get("id")) for row in self._resume_conversations(50) if row.get("id") is not None}
+        if conversation_id not in available:
+            return False
+        if conversation_id != self.conversation_id:
+            with suppress(Exception):
+                self.conversation_store.end_conversation(self.conversation_id)
+            self.conversation_id = conversation_id
+        self.conversation_history = self._conversation_history_for_model(conversation_id)
+        self.session_manager = SessionManager()
+        set_session_id = getattr(self.agent, "set_session_id", None)
+        if callable(set_session_id):
+            set_session_id(self.session_manager.get_id())
+        if hasattr(self.agent, "last_messages"):
+            self.agent.last_messages = []
+        self._session_finalized = False
+        return True
+
     def _create_prompt_session(self) -> PromptSession | None:
         """Create an interactive prompt session when attached to a TTY."""
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -1518,6 +1542,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/export", "Export data to JSON")
             table.add_row("/import PATH [--config]", "Import data from an Ares JSON export")
             table.add_row("/reset", "Reset conversation context")
+            table.add_row("/resume [ID|latest]", "List or restore a saved conversation")
             table.add_row("/soul [show|edit]", "View or edit Ares' personality")
             table.add_row("/profile [show|edit]", "View or edit your profile")
             table.add_row("/context", "Show active context for this session")
@@ -1902,6 +1927,38 @@ class AresCLI(MarketplaceCommandMixin):
                 self.agent.last_messages = []
             self._session_finalized = False
             self.console.print(f"[dim]Started a new conversation #{self.conversation_id}. Memory preserved.[/dim]")
+
+        elif command == "/resume":
+            options = self._resume_conversations()
+            if not arg:
+                if not options:
+                    self.console.print("[dim]No saved conversations are available yet.[/dim]")
+                else:
+                    table = Table(title="Saved conversations", border_style="bright_cyan", box=CLI_BOX)
+                    table.add_column("ID", style="cyan", no_wrap=True)
+                    table.add_column("Summary", ratio=4)
+                    table.add_column("Last active", style="dim")
+                    for row in options:
+                        marker = "  current" if int(row.get("id") or 0) == self.conversation_id else ""
+                        summary = " ".join(str(row.get("summary") or "Untitled chat").split())[:100]
+                        stamp = str(row.get("ended_at") or row.get("started_at") or "")[:19].replace("T", " ")
+                        table.add_row(str(row.get("id")), summary + marker, stamp)
+                    self.console.print(table)
+                    self.console.print("[dim]Use /resume ID or /resume latest.[/dim]")
+            else:
+                if arg.casefold() == "latest":
+                    target = next((int(row["id"]) for row in options if int(row.get("id") or 0) != self.conversation_id), None)
+                else:
+                    try:
+                        target = int(arg)
+                    except ValueError:
+                        target = None
+                if target is None or not self._resume_conversation(target):
+                    self.console.print("[red]Conversation not found. Use /resume to choose a saved chat.[/red]")
+                else:
+                    self.console.print(
+                        f"[green]Resumed conversation #{target} with {len(self.conversation_history)} messages in context.[/green]"
+                    )
 
         elif command == "/soul":
             if not arg or arg == "show":

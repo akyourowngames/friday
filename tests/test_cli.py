@@ -272,6 +272,12 @@ class DummyConversationStore:
     def get_messages_for_model(self, conversation_id, limit=20):
         return []
 
+    def list_conversations(self):
+        return [
+            {"id": 2, "summary": "Older discussion", "started_at": "2026-07-16T09:00:00"},
+            {"id": 1, "summary": "Current discussion", "started_at": "2026-07-16T08:00:00"},
+        ]
+
 
 class DummySkill:
     def __init__(self, name, category, description):
@@ -758,6 +764,17 @@ def test_reset_starts_new_conversation_and_agent_session():
     assert app.conversation_history == []
     assert app.agent.last_messages == []
     assert app.agent.session_id != old_session
+
+
+def test_resume_lists_and_restores_saved_conversation():
+    app = make_cli()
+    app.conversation_id = 1
+
+    assert app._handle_command("/resume")
+    assert "Saved conversations" in app.console_file.getvalue()
+    assert app._handle_command("/resume 2")
+    assert app.conversation_id == 2
+    assert "Resumed conversation #2" in app.console_file.getvalue()
 
 
 def test_cli_model_history_never_uses_global_recent_messages():

@@ -175,6 +175,19 @@ async def test_greeting_exposes_no_tools_and_stale_action_cannot_execute(
     await agent.close()
 
 
+def test_greeting_skips_expensive_memory_context(tmp_path, fake_embedding_provider, monkeypatch):
+    agent = _agent(tmp_path, fake_embedding_provider, enabled=False)
+
+    def forbidden_context(**_kwargs):
+        raise AssertionError("a greeting must not retrieve semantic memory")
+
+    monkeypatch.setattr("ares.agent.build_user_context", forbidden_context)
+    context = build_turn_execution_context("hi", request_id="req-greeting")
+    with agent.turn_scope(context):
+        assert agent.get_context("hi", []) == ""
+    asyncio.run(agent.close())
+
+
 @pytest.mark.asyncio
 async def test_real_child_agent_does_not_reenter_delegation_and_edits_isolated_worktree(
     tmp_path, fake_embedding_provider

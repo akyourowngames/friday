@@ -13,7 +13,7 @@ DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_ONNX_FILE_NAME = "onnx/model.onnx"
 SUPPORTED_BACKENDS = {"torch", "onnx", "hash"}
 
-_MODEL_CACHE: dict[tuple[str, str, str, str, bool | None], Any] = {}
+_MODEL_CACHE: dict[tuple[str, str, str, str, bool | None, bool], Any] = {}
 
 
 class HashEmbeddingModel:
@@ -42,6 +42,7 @@ class EmbeddingProvider:
     export: bool | None = None
     fallback_to_torch: bool = True
     fallback_to_hash: bool = True
+    local_files_only: bool = True
 
     def __post_init__(self) -> None:
         if self.backend not in SUPPORTED_BACKENDS:
@@ -51,7 +52,10 @@ class EmbeddingProvider:
 
     def _load_model(self) -> Any:
         effective_file_name = self._effective_file_name()
-        cache_key = (self.model_name, self.backend, self.provider, effective_file_name, self.export)
+        cache_key = (
+            self.model_name, self.backend, self.provider, effective_file_name,
+            self.export, self.local_files_only,
+        )
         cached = _MODEL_CACHE.get(cache_key)
         if cached is not None:
             return cached
@@ -77,9 +81,12 @@ class EmbeddingProvider:
                     self.model_name,
                     backend="onnx",
                     model_kwargs=model_kwargs,
+                    local_files_only=self.local_files_only,
                 )
             else:
-                model = SentenceTransformer(self.model_name, backend="torch")
+                model = SentenceTransformer(
+                    self.model_name, backend="torch", local_files_only=self.local_files_only
+                )
         except Exception as exc:
             if self.backend != "onnx" or not self.fallback_to_torch:
                 if self.fallback_to_hash:
@@ -87,12 +94,14 @@ class EmbeddingProvider:
                 raise
             self.backend_used = "torch"
             self.fallback_error = str(exc)
-            cache_key = (self.model_name, "torch", "", "", None)
+            cache_key = (self.model_name, "torch", "", "", None, self.local_files_only)
             cached = _MODEL_CACHE.get(cache_key)
             if cached is not None:
                 return cached
             try:
-                model = SentenceTransformer(self.model_name, backend="torch")
+                model = SentenceTransformer(
+                    self.model_name, backend="torch", local_files_only=self.local_files_only
+                )
             except Exception as torch_exc:
                 if self.fallback_to_hash:
                     return self._load_hash_model(torch_exc)
@@ -114,7 +123,7 @@ class EmbeddingProvider:
         self.backend_used = "hash"
         if exc is not None:
             self.fallback_error = str(exc)
-        cache_key = (self.model_name, "hash", "", "", None)
+        cache_key = (self.model_name, "hash", "", "", None, self.local_files_only)
         cached = _MODEL_CACHE.get(cache_key)
         if cached is not None:
             return cached

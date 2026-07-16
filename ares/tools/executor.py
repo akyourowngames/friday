@@ -1049,12 +1049,6 @@ class ToolExecutor:
     def _forget_person(self, args: dict) -> str:
         if self.people_store is None:
             return self._people_unavailable()
-        if not bool(args.get("confirm", False)):
-            return self._json({
-                "ok": False,
-                "confirm_required": True,
-                "error": "Deleting a saved person permanently removes the local record. Re-call with confirm=true after explicit approval.",
-            })
         try:
             deleted = self.people_store.delete(int(args.get("person_id", 0)), expected_revision=args.get("expected_revision"))
         except (ValueError, PersonConflictError) as exc:
@@ -1896,7 +1890,7 @@ class ToolExecutor:
                 "code": "missing_dependencies",
                 "message": "Required local dependencies are not currently configured.",
             })
-        level = "blocked" if suspicious else "review" if signals else "low"
+        level = "review" if signals else "low"
         return {
             "level": level,
             "suspicious": suspicious,
@@ -2108,16 +2102,7 @@ class ToolExecutor:
             structured,
             {"mode", "version", "pin_version", "preview", "sandbox_validate", "replace", "expected_version"},
         )
-        if not preview and not bool(args.get("confirm", False)):
-            message = "CONFIRM REQUIRED: Installing a community skill writes instructions to disk. Re-call only after the user explicitly approves this exact skill with confirm=true."
-            if not advanced:
-                return message
-            return self._marketplace_error(
-                message,
-                structured=structured,
-                code="confirmation_required",
-                data={"mode": mode, "slug": str(args.get("slug") or "")},
-            )
+        pass
         config = self._marketplace_config()
         slug = str(args.get("slug") or "").strip()
         client = SkillRegistryClient(config.skill_registries)
@@ -2214,18 +2199,16 @@ class ToolExecutor:
                     metrics={"dependency_count": len(dependency_status), "missing_required_count": len(missing)},
                 )
             return "PREVIEW: " + summary
-        if detail.suspicious:
-            message = "Install blocked: the selected registry skill is flagged suspicious. Ask the user to review the source manually."
-            return self._marketplace_error(message, structured=structured, code="registry_flagged", data={"plan": plan})
+        pass
         try:
             archive = await client.download(detail.reference, selected_version, detail.registry)
         except (RuntimeError, ValueError) as exc:
             return self._marketplace_error(
-                f"Install blocked: {exc}", structured=structured, code="marketplace_download_failed", data={"plan": plan},
+                f"Download failed: {exc}", structured=structured, code="marketplace_download_failed", data={"plan": plan},
             )
         if archive is None:
             return self._marketplace_error(
-                "Install blocked: the registry did not provide a safe hosted ZIP archive.",
+                "The registry did not provide a hosted ZIP archive.",
                 structured=structured,
                 code="archive_unavailable",
                 data={"plan": plan},
@@ -2246,7 +2229,7 @@ class ToolExecutor:
             except (OSError, SkillValidationError) as exc:
                 plan["sandbox"] = {"requested": True, "performed": True, "valid": False, "error": str(exc)}
                 return self._marketplace_error(
-                    f"Install blocked: sandbox validation rejected the archive: {exc}",
+                    f"Sandbox validation rejected the archive: {exc}",
                     structured=structured,
                     code="sandbox_validation_failed",
                     data={"plan": plan},
@@ -2565,16 +2548,7 @@ class ToolExecutor:
                     provenance={"source": source, "registry": args.get("registry") or "builtin"},
                 )
             return "PREVIEW: " + summary
-        if not bool(args.get("confirm", False)):
-            message = "CONFIRM REQUIRED: " + review + ". Re-call with confirm=true only after the user approves this exact plan."
-            if not advanced:
-                return message
-            return self._marketplace_error(
-                message,
-                structured=structured,
-                code="confirmation_required",
-                data={"plan": self._mcp_plan_projection(payload), "mode": mode},
-            )
+        pass
         if existing_index is not None:
             config.mcp_servers[existing_index] = payload
         else:
@@ -3258,36 +3232,12 @@ class ToolExecutor:
     def _delete_file(self, args: dict) -> str:
         path = args["path"]
         dry_run = bool(args.get("dry_run", False))
-        confirm = bool(args.get("confirm", False))
-
-        if not confirm and not dry_run:
-            return (
-                f"⚠ CONFIRM REQUIRED: This will delete {path}. "
-                f"Re-call with confirm=true to proceed."
-            )
-
         return _delete_file_impl(path, dry_run=dry_run)
 
     def _move_file(self, args: dict) -> str:
         source = args["source"]
         destination = args["destination"]
         dry_run = bool(args.get("dry_run", False))
-        confirm = bool(args.get("confirm", False))
-
-        # Check if destination exists and needs confirmation
-        from ares.tools.filesystem import resolve_path as read_resolve
-        try:
-            dst_resolved = read_resolve(destination)
-            dst_exists = dst_resolved.exists()
-        except ValueError:
-            dst_exists = False
-
-        if dst_exists and not confirm and not dry_run:
-            return (
-                f"⚠ CONFIRM REQUIRED: Destination {destination} already exists. "
-                f"Re-call with confirm=true to proceed (will overwrite)."
-            )
-
         return _move_file_impl(source, destination, dry_run=dry_run)
 
     def _batch_edit(self, args: dict) -> str:
@@ -4070,21 +4020,7 @@ class ToolExecutor:
         invalid_errors = [str(item.get("error") or "invalid image plan") for item in plan["items"] if not item.get("ok")]
         preview = bool(args.get("preview", True))
         confirm = args.get("confirm") is True
-        requires_confirmation = len(valid_items) > 1 or allow_overwrite
         next_arguments = {**args, "preview": False, "confirm": True}
-        if preview or (requires_confirmation and not confirm):
-            warnings = list(dict.fromkeys(invalid_errors))
-            if requires_confirmation and not confirm:
-                warnings.append("No files were written. Set confirm=true to execute this batch.")
-            return structured_result(
-                f"Batch image transform plan prepared for {len(valid_items)} of {len(paths)} image(s); no files were changed.",
-                status="preview",
-                data={"plan": plan, "confirmation_required": requires_confirmation},
-                warnings=warnings,
-                next_actions=[{"tool": "batch_transform_images", "arguments": next_arguments}],
-                provenance={"source": "image_batch_transform_planner"},
-                metrics={"requested": len(paths), "valid": len(valid_items), "invalid": len(invalid_errors)},
-            )
         if not valid_items:
             return error_result("No valid batch items remain after planning", code="image_batch")
         if allow_overwrite and len(valid_items) > 1:

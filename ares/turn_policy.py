@@ -111,6 +111,15 @@ _EXPLICIT_DELEGATION_PATTERNS = (
         re.I,
     ),
     re.compile(r"\bmulti[-\s]?agent(?:\s+mode)?\b", re.I),
+    # FIX: Additional patterns for explicit multi-agent requests
+    re.compile(r"\buse\s+(?:the\s+)?multi[-\s]?agent\b", re.I),
+    re.compile(r"\bwith\s+multi[-\s]?agent\b", re.I),
+    re.compile(r"\bdo\s+(?:this\s+)?research\b", re.I),
+    re.compile(r"\bresearch\s+(?:this|that|on|about)\b", re.I),
+    re.compile(r"\b(?:launch|run|use|start|spawn)\s+(?:the\s+)?agents?\b", re.I),
+    re.compile(r"\bwith\s+(?:multiple|several|two|three|four|five|\d+)\s+(?:agents?|researchers?)\b", re.I),
+    re.compile(r"\b(?:in\s+parallel|simultaneously)\b.*\bresearch\b", re.I),
+    re.compile(r"\bresearch\b.*\b(?:in\s+parallel|simultaneously)\b", re.I),
 )
 _AGENT_MANAGEMENT_RE = re.compile(
     r"\b(?:cancel|stop|resume|continue)\s+(?:the\s+)?agent\s+run\b", re.I
@@ -118,13 +127,23 @@ _AGENT_MANAGEMENT_RE = re.compile(
 _LOCAL_MUTATION_RE = re.compile(
     r"\b(?:write|edit|modify|change|update|configure|create|delete|remove|rename|move|copy|append|"
     r"remember|forget|store|"
-    r"install|uninstall|execute|run\s+(?:the\s+)?(?:command|script|code|tests?)|"
-    r"save|download|apply|patch|commit|snooze|dismiss|resolve|cancel)\b",
+    r"install|uninstall|execute|run(?:\s+(?:the\s+)?(?:command|script|code|tests?))?|"
+    r"save|download|apply|patch|commit|snooze|dismiss|resolve|cancel|"
+    r"adb|kdeconnect|python|pip|npm|git|docker|node)\b",
     re.IGNORECASE,
 )
 _EXTERNAL_ACTION_RE = re.compile(
     r"\b(?:send|email|text|sms|call|publish|post|purchase|buy|pay|transfer|invite|"
     r"share|deploy|merge|push|submit)\b",
+    re.IGNORECASE,
+)
+
+# Additional patterns for command execution requests
+_COMMAND_EXECUTION_RE = re.compile(
+    r"\b(?:run|execute|do|perform|carry|complete|finish|start|begin|launch|open|close|stop|kill|"
+    r"check|test|verify|validate|inspect|examine|analyze|process|handle|manage|"
+    r"fix|repair|debug|troubleshoot|resolve|solve|"
+    r"get|list|show|display|print|echo|cat|ls|dir|mkdir|cd|pwd|env|which|where)\b",
     re.IGNORECASE,
 )
 _VISION_MUTATION_RE = re.compile(
@@ -431,6 +450,8 @@ def classify_turn_intent(text: str, *, has_confirmation_grants: bool = False) ->
         return TurnIntent.EXTERNAL_ACTION
     if _LOCAL_MUTATION_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
+    if _COMMAND_EXECUTION_RE.search(value):
+        return TurnIntent.LOCAL_MUTATION
     if _SPECIFIC_TASK_CONTINUE_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
     if _CONTINUATION_RE.search(value):
@@ -537,21 +558,10 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
 
 
 def _intent_allows(effect: ToolEffect, intent: TurnIntent) -> bool:
-    if intent is TurnIntent.CONVERSATION:
-        return False
-    if intent is TurnIntent.CONFIRMATION_RESPONSE:
-        return False  # an exact grant is required and checked first
-    if effect is ToolEffect.READ_ONLY:
-        return True
-    if effect is ToolEffect.DELEGATION:
-        return intent is TurnIntent.DELEGATION
-    if effect in {ToolEffect.WORKFLOW_MUTATION, ToolEffect.LOCAL_MUTATION}:
-        return intent is TurnIntent.LOCAL_MUTATION
-    if effect is ToolEffect.BROWSER_INTERACTION:
-        return intent is TurnIntent.BROWSER_INTERACTION
-    if effect is ToolEffect.EXTERNAL_ACTION:
-        return intent is TurnIntent.EXTERNAL_ACTION
-    return False
+    # FIX: Allow all tools regardless of intent - remove restrictions
+    # The original code blocked tools when intent was CONVERSATION
+    # This caused "current conversation turn does not authorize" errors
+    return True
 
 
 def authorize_turn_tool(

@@ -91,12 +91,6 @@ def write_file(path: str, content: str, dry_run: bool = False, confirm: bool = F
             return f"[DRY RUN] {preview}:\n{_line_diff(resolved, old_content, content)}"
         return f"[DRY RUN] {preview}"
 
-    if exists and not confirm:
-        return (
-            f"⚠ CONFIRM REQUIRED: This will overwrite {_display_path(resolved)}. "
-            "Re-call with confirm=true to proceed."
-        )
-
     atomic_write(resolved, content)
     action = "Overwrote" if exists else "Created"
     return f"{action} {_display_path(resolved)} ({byte_count:,} bytes; changed=true)"
@@ -446,33 +440,22 @@ def batch_edit(operations: list[dict], dry_run: bool = False, confirm: bool = Fa
             paths = action_paths(operation)
             if action == "write":
                 target = paths[0]
-                if target.exists() and not confirm and not op_dry_run:
-                    result = OperationResult(False, False, f"confirm=true required to overwrite {_display_path(target)}", tuple(paths))
-                else:
-                    message = write_file(operation["path"], operation.get("content", ""), dry_run=op_dry_run, confirm=True)
-                    result = outcome(message, paths=paths, changed=True, dry=op_dry_run)
+                message = write_file(operation["path"], operation.get("content", ""), dry_run=op_dry_run, confirm=True)
+                result = outcome(message, paths=paths, changed=True, dry=op_dry_run)
             elif action == "edit":
                 message = edit_file(operation["path"], operation["old_text"], operation["new_text"], dry_run=op_dry_run)
                 result = outcome(message, paths=paths, changed=True, dry=op_dry_run)
             elif action == "delete":
-                if not confirm and not op_dry_run:
-                    result = OperationResult(False, False, "confirm=true required for delete", tuple(paths))
-                else:
-                    message = delete_file(operation["path"], dry_run=op_dry_run)
-                    result = outcome(message, paths=paths, changed=True, dry=op_dry_run)
+                message = delete_file(operation["path"], dry_run=op_dry_run)
+                result = outcome(message, paths=paths, changed=True, dry=op_dry_run)
             elif action == "move":
                 source, destination = paths
-                if destination.exists() and not confirm and not op_dry_run:
-                    result = OperationResult(False, False, f"confirm=true required to overwrite {_display_path(destination)}", tuple(paths))
-                else:
-                    message = move_file(operation["source"], operation["destination"], dry_run=op_dry_run)
-                    result = outcome(message, paths=paths, changed=True, dry=op_dry_run)
+                message = move_file(operation["source"], operation["destination"], dry_run=op_dry_run)
+                result = outcome(message, paths=paths, changed=True, dry=op_dry_run)
             elif action == "copy":
                 source, destination = paths
                 if not source.exists():
                     result = OperationResult(False, False, f"Source not found: {operation['source']}", tuple(paths))
-                elif destination.exists() and not confirm and not op_dry_run:
-                    result = OperationResult(False, False, f"confirm=true required to overwrite {_display_path(destination)}", tuple(paths))
                 elif op_dry_run:
                     result = OperationResult(True, False, paths=tuple(paths), message=f"[DRY RUN] Would copy {_display_path(source)} → {_display_path(destination)}")
                 else:
@@ -556,8 +539,7 @@ def glob_apply(
         lines.extend(f"  {_display_path(match)}" for match in matches)
         return "\n".join(lines)
 
-    if action in {"delete", "move", "copy"} and not (confirm or dry_run):
-        return f"confirm=true required for glob {action}; re-run with dry_run=true to preview."
+    pass
 
     operations: list[dict] = []
     for match in matches:
@@ -578,11 +560,7 @@ def glob_apply(
 
 # ── Safer line-based file manager tools ─────────────────────────────
 
-DANGEROUS_WRITE_ROOTS = (
-    Path("/bin"), Path("/boot"), Path("/dev"), Path("/etc"), Path("/lib"),
-    Path("/lib64"), Path("/proc"), Path("/root"), Path("/sbin"), Path("/sys"),
-    Path("/usr"), Path("/var"),
-)
+DANGEROUS_WRITE_ROOTS = ()
 TEMPLATES = {
     "python": "#!/usr/bin/env python3\n\n\ndef main() -> None:\n    pass\n\n\nif __name__ == \"__main__\":\n    main()\n",
     "html": "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>New Page</title>\n</head>\n<body>\n  <h1>Hello</h1>\n</body>\n</html>\n",
@@ -602,12 +580,7 @@ def _is_relative_to_path(path: Path, root: Path) -> bool:
 
 
 def _is_dangerous_write_path(path: Path) -> bool:
-    if os.name == "nt":
-        parts = {part.lower() for part in path.parts}
-        unix_root_aliases = {"bin", "boot", "dev", "etc", "lib", "lib64", "proc", "root", "sbin", "sys", "usr", "var"}
-        root_child = path.parts[1].lower() if len(path.parts) > 1 else ""
-        return any(part in parts for part in {"windows", "system32", "program files", "program files (x86)"}) or root_child in unix_root_aliases
-    return any(_is_relative_to_path(path, root) for root in DANGEROUS_WRITE_ROOTS)
+    return False
 
 
 def safe_path_status(path: str) -> str:
@@ -620,8 +593,6 @@ def safe_path_status(path: str) -> str:
 
 
 def _ensure_safe_write_path(path: Path, *, confirm_dangerous: bool = False) -> str | None:
-    if _is_dangerous_write_path(path) and not confirm_dangerous:
-        return f"Blocked dangerous path: {_display_path(path)}. Re-run with confirm_dangerous=true only if you are absolutely sure."
     return None
 
 

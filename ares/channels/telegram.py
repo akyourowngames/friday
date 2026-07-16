@@ -456,7 +456,7 @@ class TelegramChannel:
                     chat_id,
                     "Ares is connected to this PC. Send a message, document, photo, or voice note. "
                     "Hindi, English, and Hinglish voice notes are transcribed to English.\n\n"
-                    "Commands:\n/new — start a fresh Ares session\n/status — channel status\n"
+                    "Commands:\n/new — start a fresh Ares session\n/resume [ID|latest] — continue a saved chat\n/status — channel status\n"
                     "/file <path> — upload a local PC file\n"
                     "/skills [list|search|info|install] — manage skills\n"
                     "/mcp [list|search|info|add|test|refresh] — manage MCPs\n"
@@ -475,6 +475,9 @@ class TelegramChannel:
             if command == "/new":
                 await self._start_new_session(chat_id)
                 await self.api.send_message(chat_id, "Started a new Ares session for this chat.", reply_to_message_id=reply_to)
+                return
+            if command == "/resume":
+                await self._handle_resume_command(chat_id, argument, reply_to)
                 return
             if command == "/status":
                 runtime = getattr(self.agent, "multi_agent_runtime", None)
@@ -844,7 +847,9 @@ class TelegramChannel:
         conversation_id = self.state_store.get_conversation_id(CHANNEL_NAME, chat_id)
         if conversation_id is None:
             conversation_id = self.conversation_store.start_conversation()
-            self.state_store.set_conversation_id(CHANNEL_NAME, chat_id, conversation_id)
+        # Also records the current legacy conversation in the resumable-chat
+        # history once, without exposing another Telegram chat's data.
+        self.state_store.set_conversation_id(CHANNEL_NAME, chat_id, conversation_id)
         return conversation_id
 
     def _telegram_runtime_session(self, chat_id: int) -> str:
@@ -859,6 +864,49 @@ class TelegramChannel:
         self._clear_pending_marketplace_actions(chat_id)
         new_id = self.conversation_store.start_conversation()
         self.state_store.set_conversation_id(CHANNEL_NAME, chat_id, new_id)
+
+    def _resume_options(self, chat_id: int, limit: int = 8) -> list[dict[str, Any]]:
+        ids = self.state_store.list_conversation_ids(CHANNEL_NAME, chat_id, limit=limit)
+        rows = getattr(self.conversation_store, "list_conversations", lambda: [])()
+        by_id = {int(row.get("id")): row for row in rows if row.get("id") is not None}
+        return [{"id": conversation_id, **dict(by_id.get(conversation_id) or {})} for conversation_id in ids]
+
+    async def _handle_resume_command(self, chat_id: int, argument: str, reply_to: int | None) -> None:
+        options = self._resume_options(chat_id)
+        selected = argument.strip().casefold()
+        if not selected:
+            if not options:
+                await self.api.send_message(chat_id, "No earlier chats are available yet. Use /new to start one.", reply_to_message_id=reply_to)
+                return
+            lines = ["Saved chats — reply with /resume ID:"]
+            for row in options:
+                label = " ".join(str(row.get("summary") or "Untitled chat").split())[:80]
+                stamp = str(row.get("ended_at") or row.get("started_at") or "")[:16].replace("T", " ")
+                lines.append(f"• /resume {row['id']} — {label} {f'({stamp})' if stamp else ''}")
+            await self.api.send_message(chat_id, "\n".join(lines), reply_to_message_id=reply_to)
+            return
+        if selected == "latest":
+            target = next((int(row["id"]) for row in options if int(row["id"]) != self._conversation_id(chat_id)), None)
+        else:
+            try:
+                target = int(selected)
+            except ValueError:
+                target = None
+        allowed = {int(row["id"]) for row in options}
+        if target is None or target not in allowed:
+            await self.api.send_message(chat_id, "That chat is not available in this Telegram conversation. Use /resume to choose one.", reply_to_message_id=reply_to)
+            return
+        current = self._conversation_id(chat_id)
+        if target != current:
+            with suppress(Exception):
+                self.conversation_store.end_conversation(current)
+            self.state_store.set_conversation_id(CHANNEL_NAME, chat_id, target)
+        history = self._conversation_history(target)
+        await self.api.send_message(
+            chat_id,
+            f"Resumed chat #{target}. {len(history)} recent messages are back in context.",
+            reply_to_message_id=reply_to,
+        )
 
     def _conversation_history(self, conversation_id: int) -> list[dict[str, str]]:
         history: list[dict[str, str]] = []

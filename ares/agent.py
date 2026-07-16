@@ -44,6 +44,7 @@ from ares.turn_policy import (
     ActionGrant as TurnActionGrant,
     ActionGrantUseRegistry,
     TurnExecutionContext,
+    TurnIntent,
     authorize_turn_tool,
     build_turn_execution_context,
 )
@@ -725,6 +726,11 @@ class Agent:
         if getattr(self, "context_mode", ContextMode.FULL) is ContextMode.BOUNDED_SPECIALIST:
             # Specialist agents receive only the assignment and context the
             # root explicitly delegated; never add global personal context.
+            return ""
+        # A greeting must never wait on semantic-memory initialization or a
+        # background embedding model. There is no retrieval value in it.
+        active_turn = self.turn_context
+        if active_turn is not None and active_turn.intent is TurnIntent.CONVERSATION:
             return ""
         return build_user_context(
             user_input,

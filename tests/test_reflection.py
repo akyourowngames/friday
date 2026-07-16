@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,6 +74,22 @@ async def _wait_for_status(service, reflection_id, status):
             return record
         await asyncio.sleep(0)
     raise AssertionError(f"reflection {reflection_id} did not reach {status}")
+
+
+@pytest.mark.asyncio
+async def test_before_turn_never_waits_for_background_reflection():
+    service = ReflectionService.__new__(ReflectionService)
+    blocker = asyncio.Event()
+    active = asyncio.create_task(blocker.wait())
+    service._scope_tasks = {"conversation-1": active}
+    service.store = SimpleNamespace(pending_scopes=lambda: [])
+
+    await asyncio.wait_for(service.before_turn("conversation-1"), timeout=0.05)
+
+    assert not active.done()
+    active.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await active
 
 
 @pytest.mark.asyncio

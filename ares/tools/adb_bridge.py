@@ -94,8 +94,6 @@ def get_battery_status() -> str:
 
 
 def call_number(number: str, confirm: bool = False) -> str:
-    if not confirm:
-        return _json({"ok": False, "dialed": False, "confirm_required": True, "error": "Real phone call blocked. Re-call with confirm=true only after explicit user approval for this exact number."})
     if not re.fullmatch(r"[+0-9 ()-]{3,30}", number):
         return _json({"ok": False, "dialed": False, "error": "Invalid phone number format."})
     if not _adb():

@@ -10,7 +10,7 @@
 
 **Remember what matters. Search every saved session. Take action with tools. Keep control local.**
 
-[Quick start](#-quick-start) · [Watchers](#-proactive-watchers) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
+[Quick start](#-quick-start) · [Vision](#-local-vision-v1) · [Watchers](#-proactive-watchers) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
 
 </div>
 
@@ -23,13 +23,16 @@ Ares is a terminal-first AI assistant with a separate Next.js power workspace, a
 <table>
   <tr>
     <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
-    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 136 local tools for goals, watchers, native specialists, files, configured project checks, code, web research, images, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
+    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 156 local tools for goals, watchers, native specialists, files, configured project checks, code, web research, images, local vision, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
     <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
   </tr>
 </table>
 
 ### Latest upgrades
 
+- **Local Vision V1:** inspect user-supplied images or, with explicit per-source consent, observe local camera and screen sources. Vision can detect objects, read text, compare snapshots, verify visual conditions, and run bounded watches with conservative local retention.
+- **Faster foreground responses:** ordinary chat streams through a short tool-call decision buffer; durable reflection, memory statistics, and reusable context work move off the first-token path when safe.
+- **More capable existing tools:** legacy calls remain compatible while opt-in structured responses add previews, plans, provenance, verification, undo metadata, safer batch operations, and protected exports. See the [existing-tool upgrades guide](docs/existing-tool-upgrades-guide.md).
 - **Native multi-agent supervisor:** Ares can delegate bounded research, code analysis, implementation, review, and synthesis to isolated specialists; independent work runs concurrently, dependencies run in waves, and the root Ares agent still owns the final answer.
 - **Goal-aware monitoring:** link one watcher to multiple goals, review routed signals in both watcher consoles, and keep progress changes explicit instead of automatic.
 - **Research delivery:** search and rank web sources, fetch online pages/PDFs/reports, extract readable content, save sourced artifacts, and deliver supported files through Telegram.
@@ -64,6 +67,27 @@ python -m ares --all
 ```
 
 `--all` owns one agent, one integration manager, one watcher scheduler, the Next.js power workspace, the advanced watcher console, the desktop API, and Telegram when it is enabled. `--server` remains a compatibility alias; watchers are tools used by Ares and are not launched as an independent product process.
+
+### Local Vision V1
+
+Ares can inspect a user-provided image directly and can observe a local camera or screen only after explicit per-source consent. It supports local object detection, OCR, scene events, visual comparisons, evidence-based verification, bounded watches, and opt-in visual memory.
+
+Install the optional local CV/OCR providers when you need camera or screen capture, object detection, or OCR:
+
+```bash
+pip install -e ".[vision]"
+```
+
+Camera and screen capture are disabled by default. Ares requires an explicit observation grant to activate a source, shows active-source state, redacts sensitive text from stored metadata, and does not retain frames unless you separately configure retention. Visual events are evidence—not automatic goal completion or external action.
+
+Example prompts:
+
+```text
+Describe this image and read the visible text.
+With my permission, watch this screen for a successful build message.
+Compare this new photo with the previous snapshot and tell me what changed.
+Verify whether the package label is visible; say uncertain if the evidence is weak.
+```
 
 ### Next.js power workspace
 
@@ -291,6 +315,10 @@ search_memory("Rohit Instagram")
     <td>Search the web, fetch pages and PDFs, label source quality, summarize findings, and use connected MCP browser tools when available.</td>
   </tr>
   <tr>
+    <td>👁️ Vision</td>
+    <td>Inspect user-provided images and, with explicit per-source consent, observe local camera or screen sources; run OCR, object/scene detection, comparisons, evidence-based verification, and bounded visual watches.</td>
+  </tr>
+  <tr>
     <td>🖼️ Images</td>
     <td>Generate, inspect, resize, convert, crop, and track image assets with local metadata and transformation history.</td>
   </tr>
@@ -327,6 +355,7 @@ search_memory("Rohit Instagram")
 | File operations | `read_file`, `search_files`, `write_file`, `edit_file`, `batch_edit`, `preview_diff`, `undo_last_edit`, `find_duplicates` |
 | Runtime | `run_code`, `run_command`, `terminal_exec` |
 | Research & media | `web_search`, `fetch_url`, `generate_image`, `resize_image`, `convert_image`, `crop_image` |
+| Local Vision | `vision_observe`, `vision_watch`, `vision_compare`, `vision_verify`, `vision_remember`, `vision_start_source`, `vision_stop_source`, `vision_list_events` |
 | Scheduling & workflows | `create_cron_job`, `run_cron_job_now`, `create_task`, `get_task_status`, `run_task` |
 | Phone & device | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number` |
 | Provider telephony | `telephony_call`, `telephony_hangup`, `telephony_mute`, `telephony_list_calls`, `telephony_list_contacts`, `telephony_save_contact`, `telephony_transfer` |
@@ -568,6 +597,7 @@ npm run build
 
 - Ares stores its local state under `~/.ares` by default.
 - Web search sends queries to the selected provider; connected MCP servers run according to your local configuration.
+- Camera and screen observation require explicit per-source consent; sensitive visual text is redacted and frames are not retained by default.
 - Phone controls operate through your paired Android device.
 - Real-world and destructive actions remain explicit in their relevant tool workflows.
 - Do not commit API keys, OAuth tokens, or secrets. Exported configuration redacts recognized secret fields.
@@ -575,6 +605,7 @@ npm run build
 ## 📚 Further reading
 
 - [MCP configuration and management](docs/mcp.md)
+- [Existing-tool upgrades guide](docs/existing-tool-upgrades-guide.md)
 - [Native multi-agent mode](docs/multi-agent.md)
 - [Marketplace guide](docs/marketplace.md)
 - [Watcher service design](docs/superpowers/specs/2026-07-12-watcher-service-design.md)

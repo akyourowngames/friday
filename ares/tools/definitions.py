@@ -744,7 +744,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "write_file",
-            "Create a NEW file or FULLY OVERWRITE an existing one. Dry runs include a patch preview for overwrites. NEVER use for adding/inserting text into an existing file. For adding/inserting: use edit_file (find+replace), insert_line (by line number), append_to_file (end), prepend_to_file (start), or batch_file_ops. If overwriting, confirm=true is required.",
+            "Create a NEW file or FULLY OVERWRITE an existing one. Dry runs include a patch preview for overwrites. For adding/inserting text into an existing file, use edit_file (find+replace), insert_line (by line number), append_to_file (end), prepend_to_file (start), or batch_file_ops.",
             {
                 "path": {"type": "string", "description": "File path to write."},
                 "content": {"type": "string", "description": "File content to write."},
@@ -1081,7 +1081,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "run_command",
-            "Execute a shell command (bash, git, npm, python, docker, etc.) in the pinned persistent shell session. Supports command profiles, timeout hints, structured summaries, pipes, redirects, && chaining. DO NOT use for phone operations — use phone_status, phone_get_notifications, phone_send_sms, phone_call_number, or phone_search_contact instead.",
+            "Execute a shell command (bash, git, npm, python, docker, adb, kdeconnect-cli, etc.) in the pinned persistent shell session. Supports command profiles, timeout hints, structured summaries, pipes, redirects, && chaining. Works for phone operations via adb/kdeconnect-cli, or use dedicated phone_* tools.",
             {
                 "command": {"type": "string", "description": "Shell command to execute, or @key from the project command registry."},
                 "command_key": {"type": "string", "description": "Optional key from [tool.ares.commands] or npm:<script>."},
@@ -1103,7 +1103,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "run_project_check",
-            "Run one named project verification check pre-configured by the repository owner. This accepts only the check name; it cannot execute arbitrary shell text, use pipes, redirects, nested interpreters, or network commands.",
+            "Run one named project verification check pre-configured by the repository owner. Pass the check name.",
             {
                 "check": {"type": "string", "description": "Configured [tool.ares.agent_checks] name."},
                 "cwd": {"type": "string", "description": "Assigned builder workspace."},
@@ -1287,7 +1287,6 @@ def get_tool_definitions() -> list[dict]:
                 "include_ocr": {"type": "boolean", "default": True},
                 "reasoning_prompt": {"type": "string", "description": "Optional narrow question for a selected still frame."},
                 "prompts": {"type": "array", "items": {"type": "string"}, "description": "Optional detector hints."},
-                "grant_observe": {"type": "boolean", "default": False, "description": "Set true when the user directly asks in this turn to inspect their camera or screen; this grants the requested local observation."},
             },
         ),
         _tool(
@@ -1304,7 +1303,6 @@ def get_tool_definitions() -> list[dict]:
                 "cooldown_seconds": {"type": "integer", "minimum": 0, "default": 0},
                 "condition_type": {"type": "string"},
                 "target_labels": {"type": "array", "items": {"type": "string"}},
-                "grant_observe": {"type": "boolean", "default": False, "description": "Set true when the user directly asks in this turn to start their camera or screen source."},
                 "grant_remember": {"type": "boolean", "default": False},
             },
             ["condition"],
@@ -1328,7 +1326,7 @@ def get_tool_definitions() -> list[dict]:
                 "image_path": {"type": "string"},
                 "expected_result": {"type": "string"},
                 "reference_snapshot_id": {"type": "string"},
-                "grant_observe": {"type": "boolean", "default": False, "description": "Explicit consent to observe a camera or screen source for this verification."},
+
             },
             ["expected_result"],
         ),
@@ -1345,13 +1343,12 @@ def get_tool_definitions() -> list[dict]:
         _tool("vision_cancel_watch", "Stop one active visual watch while preserving its auditable history.", {"watch_id": {"type": "string"}}, ["watch_id"]),
         _tool(
             "vision_start_source",
-            "Start an approved local camera or screen source in a non-blocking worker. Camera and screen observation require grant_observe=true in this explicit request.",
+            "Start a local camera or screen source in a non-blocking worker.",
             {
                 "source": {"type": "string", "enum": ["camera", "screen"], "default": "camera"},
                 "source_id": {"type": "string", "default": "default"},
                 "source_config": {"type": "object"},
                 "check_interval_seconds": {"type": "number", "minimum": 0.25, "default": 3},
-                "grant_observe": {"type": "boolean", "default": False},
             },
         ),
         _tool("vision_stop_source", "Stop one visual source immediately and release its local capture worker.", {"source_id": {"type": "string"}}, ["source_id"]),
@@ -1546,23 +1543,23 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "phone_status",
-            "PHONE TOOL — the ONLY way to check Android phone status. Do NOT use run_command with kdeconnect-cli or adb for this. Checks KDE Connect and ADB bridge health. No arguments.",
+            "Check Android phone status via KDE Connect and ADB bridge. No arguments.",
             {},
         ),
         _tool(
             "phone_get_notifications",
-            "PHONE TOOL — the ONLY way to read Android notifications. Do NOT use run_command with kdeconnect-cli for this. Read a live snapshot of recent Android notifications via KDE Connect. Advanced filtering is transient and metadata-only by default.",
+            "Read a live snapshot of recent Android notifications via KDE Connect. Advanced filtering is transient and metadata-only by default.",
             {"limit": {"type": "integer", "default": 20, "description": "Maximum notifications to return."}, "applications": {"type": "array", "items": {"type": "string"}}, "person": {"type": "string"}, "keywords": {"type": "array", "items": {"type": "string"}}, "unread_only": {"type": "boolean", "default": False}, "since": {"type": "string"}, "until": {"type": "string"}, "group_by": {"type": "string", "enum": ["none", "application", "conversation"], "default": "none"}, "collapse_duplicates": {"type": "boolean", "default": True}, "content_mode": {"type": "string", "enum": ["metadata", "redacted", "full"], "default": "metadata"}, "response_format": {"type": "string", "enum": ["legacy", "structured"], "default": "legacy"}},
         ),
         _tool(
             "phone_search_contact",
-            "PHONE TOOL — the ONLY way to search contacts. Do NOT use run_command with kdeconnect-cli for this. Advanced mode merges transient device contacts with explicit People records, ranks fuzzy aliases, and masks values until a confirmed action.",
+            "Search contacts via KDE Connect. Advanced mode merges transient device contacts with explicit People records, ranks fuzzy aliases, and masks values until a confirmed action.",
             {"query": {"type": "string", "description": "Name or phone number to search for."}, "mode": {"type": "string", "enum": ["search", "resolve"], "default": "search"}, "channel": {"type": "string", "enum": ["phone", "sms", "email"]}, "purpose": {"type": "string", "enum": ["sms", "call", "email", "invite"]}, "include_people": {"type": "boolean", "default": True}, "limit": {"type": "integer", "default": 20}, "response_format": {"type": "string", "enum": ["legacy", "structured"], "default": "legacy"}},
             ["query"],
         ),
         _tool(
             "phone_send_sms",
-            "PHONE TOOL — the ONLY way to send SMS. Do NOT use run_command with kdeconnect-cli for this. Advanced mode supports privacy-preserving previews, named templates, segment accounting, and exact confirmation before a real SMS is sent.",
+            "Send SMS via KDE Connect. Advanced mode supports privacy-preserving previews, named templates, segment accounting, and exact confirmation before a real SMS is sent.",
             {
                 "number": {"type": "string", "description": "Recipient phone number or one exact explicitly saved person alias such as mom."},
                 "message": {"type": "string", "description": "SMS body to send."},
@@ -1577,7 +1574,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "phone_call_number",
-            "PHONE TOOL — the ONLY way to make phone calls. Do NOT use run_command with adb for this. Place a real phone call through ADB. Use preflight to inspect reachability; confirm=true is required for an exact call.",
+            "Place a real phone call through ADB. Use preflight to inspect reachability; confirm=true is required for an exact call.",
             {
                 "number": {"type": "string", "description": "Phone number or one exact explicitly saved person alias to call."},
                 "confirm": {"type": "boolean", "default": False, "description": "Must be true after explicit user approval for this exact call."},
@@ -1591,13 +1588,13 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "phone_launch_app",
-            "PHONE TOOL — the ONLY way to open an app on the phone. Do NOT use run_command with adb for this. Pass the Android package name (e.g. com.google.android.youtube, com.whatsapp, com.instagram.android).",
+            "Open an app on the phone via ADB. Pass the Android package name (e.g. com.google.android.youtube, com.whatsapp, com.instagram.android).",
             {"package": {"type": "string", "description": "Android package name of the app to launch (e.g. com.google.android.youtube)."}},
             ["package"],
         ),
         _tool(
             "phone_open_url",
-            "PHONE TOOL — the ONLY way to open a URL on the phone. Do NOT use run_command with adb for this. Opens the URL in the default browser or matching app.",
+            "Open a URL on the phone via ADB. Opens the URL in the default browser or matching app.",
             {"url": {"type": "string", "description": "URL to open on the phone (e.g. https://youtube.com)."}},
             ["url"],
         ),

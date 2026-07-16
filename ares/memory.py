@@ -82,6 +82,7 @@ def _get_default_provider() -> EmbeddingProvider:
             backend=config.embedding_backend,
             provider=config.embedding_provider,
             file_name=config.embedding_file_name,
+            local_files_only=not config.embedding_allow_download,
         )
     return _default_provider
 
@@ -135,6 +136,7 @@ class MemoryStore:
             backend=embedding_backend or config.embedding_backend,
             provider=config.embedding_provider,
             file_name=config.embedding_file_name,
+            local_files_only=not config.embedding_allow_download,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = connect_sqlite(self.db_path)
@@ -1168,6 +1170,62 @@ class MemoryStore:
         """Return the total number of stored memories."""
         row = self.conn.execute("SELECT COUNT(*) FROM facts_meta").fetchone()
         return int(row[0]) if row else 0
+
+    def recall_context(
+        self,
+        query: str,
+        session_id: str | None = None,
+        limit: int = 5,
+    ) -> str:
+        """FIX: Build context from long-term memory for recall requests.
+
+        This method handles "do you remember" style queries by searching
+        for entities and providing relevant context from durable memories.
+        """
+        context_parts: list[str] = []
+        try:
+            # Extract entities to search for
+            entities = self._extract_recall_entities(query)
+            for entity in entities[:3]:
+                results = self.search(entity, limit=2, session_id=session_id, scope="all")
+                for result in results:
+                    fact_text = result.get("fact_text", "")
+                    if fact_text and fact_text not in context_parts:
+                        context_parts.append(f"- {fact_text}")
+
+            # Also do a general semantic search
+            general_results = self.search(query, limit=limit, session_id=session_id, scope="all")
+            for result in general_results:
+                fact_text = result.get("fact_text", "")
+                if fact_text and fact_text not in context_parts:
+                    context_parts.append(f"- {fact_text}")
+        except Exception:
+            pass
+
+        if context_parts:
+            return "## Long-term Memory Context\n" + "\n".join(context_parts[:limit])
+        return ""
+
+    @staticmethod
+    def _extract_recall_entities(text: str) -> list[str]:
+        """Extract entities that should be searched in long-term memory."""
+        entities: list[str] = []
+        # Extract quoted phrases
+        quoted = re.findall(r'"([^"]+)"', text)
+        entities.extend(quoted)
+        # Extract capitalized words (likely proper nouns)
+        proper_nouns = re.findall(r"\b[A-Z][a-z]+\b", text)
+        entities.extend(proper_nouns)
+        # Extract common entity patterns
+        entity_patterns = (
+            re.compile(r"\b(?:file|document|folder)\s+(?:called|named|titled)\s+(\S+)\b", re.I),
+            re.compile(r"\b(?:email|message)\s+(?:to|from|about)\s+(\S+)\b", re.I),
+            re.compile(r"\b(?:task|project)\s+(?:called|named|titled)\s+(\S+)\b", re.I),
+        )
+        for pattern in entity_patterns:
+            matches = pattern.findall(text)
+            entities.extend(matches)
+        return list(dict.fromkeys(entities))[:5]  # Deduplicate, limit to 5
 
     def close(self):
         """Close the database connection."""

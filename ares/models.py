@@ -496,6 +496,9 @@ class AppConfig(BaseModel):
     embedding_backend: str = "onnx"
     embedding_provider: str = "CPUExecutionProvider"
     embedding_file_name: str = ""
+    # Interactive turns must not stall while Hugging Face retries a model
+    # download. Set this true only when deliberately provisioning a model.
+    embedding_allow_download: bool = False
     reminder_poll_seconds: int = 30
     enable_desktop_notifications: bool = True
     session_summary_messages: int = 2

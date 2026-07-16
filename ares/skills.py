@@ -242,8 +242,51 @@ class SkillManager:
                 results.append(skill)
         return results
 
+    @staticmethod
+    def _should_skip_skill_loading(user_input: str) -> bool:
+        """Determine if skill loading should be skipped for this input.
+
+        FIX: Prevents unnecessary skill loading for conversation continuations,
+        memory recall requests, and simple acknowledgements.
+        """
+        text_l = user_input.lower().strip()
+
+        # Pure conversation patterns - no skills needed
+        _CONVERSATION_ONLY = re.compile(
+            r"^\s*(?:hi|hello|hey|yo|thanks?|thank\s+you|thx|ok(?:ay)?|k|sure|yes|yep|no|nope|nah|"
+            r"got\s+it|sounds\s+good|all\s+good|cool|great|perfect|fine|bye|goodbye)\s*[!.?,]*\s*$",
+            re.I,
+        )
+        if _CONVERSATION_ONLY.match(text_l):
+            return True
+
+        # Memory recall requests - handled by memory system, not skills
+        _MEMORY_RECALL = re.compile(
+            r"\b(?:do\s+you|can\s+you|could\s+you)\s+(?:remember|recall)\b", re.I,
+        )
+        if _MEMORY_RECALL.search(text_l):
+            return True
+
+        # Continuation keywords without specific task
+        _CONTINUATION_ONLY = re.compile(
+            r"^\s*(?:continue|resume|go\s+on|keep\s+going|proceed|next)\s*[!.?]*\s*$",
+            re.I,
+        )
+        if _CONTINUATION_ONLY.match(text_l):
+            return True
+
+        # Very short inputs (likely acknowledgements)
+        if len(text_l.split()) < 3:
+            return True
+
+        return False
+
     def relevant_skills(self, user_input: str, limit: int = 3, min_score: int = 4) -> list[Skill]:
         """Return model-invocable skills that should silently guide this turn."""
+        # FIX: Skip skill loading for conversation continuations and memory recall
+        if self._should_skip_skill_loading(user_input):
+            return []
+
         query_tokens = self._tokens(user_input)
         query_l = user_input.lower()
         if not query_tokens and not query_l.strip():

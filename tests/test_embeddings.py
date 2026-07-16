@@ -14,8 +14,8 @@ def test_embedding_provider_uses_onnx_backend(monkeypatch):
     calls = []
 
     class FakeSentenceTransformer:
-        def __init__(self, model_name, *, backend, model_kwargs=None):
-            calls.append((model_name, backend, model_kwargs))
+        def __init__(self, model_name, *, backend, model_kwargs=None, local_files_only=False):
+            calls.append((model_name, backend, model_kwargs, local_files_only))
 
         def encode(self, text):
             return np.ones(384, dtype="float32")
@@ -37,6 +37,7 @@ def test_embedding_provider_uses_onnx_backend(monkeypatch):
             "test-model",
             "onnx",
             {"provider": "CPUExecutionProvider", "file_name": "onnx/model.onnx"},
+            True,
         )
     ]
 
@@ -45,7 +46,7 @@ def test_embedding_cache_includes_onnx_file_name(monkeypatch):
     calls = []
 
     class FakeSentenceTransformer:
-        def __init__(self, model_name, *, backend, model_kwargs=None):
+        def __init__(self, model_name, *, backend, model_kwargs=None, local_files_only=False):
             calls.append((model_name, backend, model_kwargs))
             self.file_name = (model_kwargs or {}).get("file_name", "")
 
@@ -82,8 +83,8 @@ def test_default_onnx_file_name_is_set_for_default_model(monkeypatch):
     calls = []
 
     class FakeSentenceTransformer:
-        def __init__(self, model_name, *, backend, model_kwargs=None):
-            calls.append((model_name, backend, model_kwargs))
+        def __init__(self, model_name, *, backend, model_kwargs=None, local_files_only=False):
+            calls.append((model_name, backend, model_kwargs, local_files_only))
 
         def encode(self, text):
             return np.ones(384, dtype="float32")

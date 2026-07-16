@@ -131,6 +131,24 @@ def build_user_context(
         recent_sessions=getattr(config, "memory_session_scope", 3),
     )
 
+    # FIX: For continuation requests, also search for recent context
+    _CONTINUATION_RE = re.compile(r"\b(?:continue|resume|go\s+on|keep\s+going|next)\b", re.I)
+    is_continuation = bool(_CONTINUATION_RE.search(user_input))
+    if is_continuation and conversation_history:
+        # Add recent conversation context to memories
+        recent_context = []
+        for msg in conversation_history[-6:]:  # Last 3 turns
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content and len(content) > 10:
+                # Extract key entities from recent messages
+                entities = re.findall(r"\b[A-Z][a-z]+\b", content)
+                for entity in entities[:3]:
+                    entity_memories = memory_store.search(entity, limit=1, scope="all")
+                    for mem in entity_memories:
+                        if mem not in memories:
+                            memories.append(mem)
+
     deep_context = is_deep_context_request(user_input)
 
     people: list[dict[str, Any]] = []
@@ -279,6 +297,18 @@ def build_user_context(
             block=getattr(config, "block_session_context", False),
         )
 
+    # FIX: Build memory recall context for "do you remember" style queries
+    memory_recall_context = ""
+    if memory_store is not None and deep_context:
+        try:
+            memory_recall_context = memory_store.recall_context(
+                user_input,
+                session_id=session_id,
+                limit=5,
+            )
+        except Exception:
+            memory_recall_context = ""
+
     prepared = build_context_prompt(
         soul_context=soul_context,
         profile_context=profile_context,
@@ -298,6 +328,7 @@ def build_user_context(
         pending_tasks=pending_tasks,
         pending_commitments=pending_commitments,
         pending_follow_ups=pending_follow_ups,
+        memory_recall_context=memory_recall_context,
         token_budget=token_budget,
     )
     if goal_store is not None and deep_context and active_goals:

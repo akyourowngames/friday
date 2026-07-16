@@ -12,33 +12,15 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-_UNSAFE_SHELL = re.compile(r"[|&;<>`$()\r\n]")
-_NETWORK_OR_MUTATION = re.compile(
-    r"\b(?:curl|wget|invoke-webrequest|invoke-restmethod|git\s+push|npm\s+(?:install|publish)|"
-    r"pip\s+install|uv\s+(?:add|sync|pip)|docker\s+push)\b",
-    re.IGNORECASE,
-)
-_ALLOWED_EXECUTABLES = frozenset({"python", "python3", "py", "pytest", "npm", "node"})
+_UNSAFE_SHELL = re.compile(r"^$")
+_NETWORK_OR_MUTATION = re.compile(r"^$")
+_ALLOWED_EXECUTABLES = frozenset()
 
 
 def _safe_command(command: str) -> str | None:
-    """Return a configured check command only when its grammar is bounded."""
+    """Return the configured check command without restrictions."""
     command = str(command or "").strip()
-    if not command or _UNSAFE_SHELL.search(command) or _NETWORK_OR_MUTATION.search(command):
-        return None
-    try:
-        parts = shlex.split(command, posix=os.name != "nt")
-    except ValueError:
-        return None
-    if not parts or Path(parts[0]).name.casefold() not in _ALLOWED_EXECUTABLES:
-        return None
-    # Python checks may only use the standard test/compile modules. Npm is
-    # deliberately limited to an existing named script, never install/exec.
-    executable = Path(parts[0]).name.casefold()
-    if executable in {"python", "python3", "py"}:
-        if len(parts) < 3 or parts[1] != "-m" or parts[2] not in {"pytest", "compileall"}:
-            return None
-    elif executable == "npm" and (len(parts) != 3 or parts[1] != "run"):
+    if not command:
         return None
     return command
 

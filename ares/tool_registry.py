@@ -216,100 +216,10 @@ class RootToolRegistry:
         delegation_decision: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Return the narrow schema set appropriate for the current turn."""
-        intent = self._intent_value(context)
-        mode = self._decision_mode(delegation_decision)
-        should_delegate = bool(getattr(delegation_decision, "should_delegate", False))
-        text = str(getattr(context, "user_input", "") or "").casefold()
-        targets = {str(value).casefold() for value in getattr(context, "explicit_targets", ())}
-        grant_names = {
-            str(getattr(grant, "tool_name", "") or "")
-            for grant in getattr(context, "confirmation_grants", ())
-            if getattr(grant, "tool_name", "")
-        }
-
-        explicit_delegation = intent == "delegation" or mode == "explicit" or should_delegate
-        agent_meta = mode == "meta" or bool(targets & {"agent", "agents", "agent_runs"})
-        if explicit_delegation:
-            return self._schemas_named(
-                set(DELEGATION_TOOL_NAMES) | set(CORE_TOOL_NAMES) | grant_names
-            )
-        if agent_meta:
-            return self._schemas_named(set(AGENT_INTROSPECTION_TOOL_NAMES) | grant_names)
-        if intent in {"conversation", "confirmation_response"}:
-            return self._schemas_named(grant_names)
-
-        if "prior_task" in targets and intent == "local_mutation":
-            return self._schemas_named({
-                "search_memory", "search_actions", "list_tasks", "get_task_status",
-                "run_task", *grant_names,
-            })
-
-        if intent == "read_only":
-            if "prior_task" in targets:
-                return self._schemas_named({
-                    "search_memory", "search_actions", "list_tasks", "get_task_status",
-                    "list_agent_runs", "get_latest_agent_run", "get_agent_run",
-                    *grant_names,
-                })
-            selected_reads: list[dict[str, Any]] = []
-            for tool in self._tools.values():
-                if tool.name in grant_names:
-                    selected_reads.append(copy.deepcopy(dict(tool.schema)))
-                    continue
-                if not is_harmless_read_tool(tool.name):
-                    continue
-                if tool.category is ToolCategory.MCP:
-                    parts = tool.name.casefold().split("__")
-                    server = parts[1] if len(parts) > 2 else ""
-                    if not any(marker in text for marker in ("mcp", "connector", "integration", server)):
-                        continue
-                selected_reads.append(copy.deepcopy(dict(tool.schema)))
-            return selected_reads
-
-        allowed_categories: set[ToolCategory] = {ToolCategory.CORE_CONVERSATION}
-        allowed_names: set[str] = set(CORE_TOOL_NAMES) | grant_names
-        if intent == "local_mutation":
-            if "recall" in targets:
-                allowed_categories.add(ToolCategory.RECALL)
-            if targets & {"filesystem", "code", "research"}:
-                allowed_categories.add(ToolCategory.FILES)
-            if "code" in targets:
-                allowed_categories.add(ToolCategory.CODE_EXECUTION)
-            if targets & {"workflow", "prior_task"}:
-                allowed_categories.add(ToolCategory.WORKFLOWS)
-            if "goals" in targets:
-                allowed_categories.add(ToolCategory.GOALS)
-            if "watchers" in targets:
-                allowed_categories.add(ToolCategory.WATCHERS)
-            if "vision" in targets:
-                allowed_categories.add(ToolCategory.VISION)
-            if "research" in targets:
-                allowed_categories.add(ToolCategory.RESEARCH)
-            if "config" in targets:
-                allowed_names.add("update_config")
-        elif intent == "browser_interaction":
-            allowed_categories |= {ToolCategory.BROWSER, ToolCategory.RESEARCH}
-        elif intent == "external_action":
-            allowed_categories |= {
-                ToolCategory.COMMUNICATION, ToolCategory.PHONE, ToolCategory.TELEPHONY,
-                ToolCategory.MCP,
-            }
-            if any(marker in text for marker in ("browser", "website", "page", "site", "url")):
-                allowed_categories.add(ToolCategory.BROWSER)
-
-        selected: list[dict[str, Any]] = []
-        for tool in self._tools.values():
-            if tool.name in allowed_names or tool.category in allowed_categories:
-                if tool.category is ToolCategory.CORE_CONVERSATION and tool.name not in allowed_names:
-                    continue
-                if (
-                    intent == "browser_interaction"
-                    and tool.category is ToolCategory.RESEARCH
-                    and not is_harmless_read_tool(tool.name)
-                ):
-                    continue
-                selected.append(copy.deepcopy(dict(tool.schema)))
-        return selected
+        # FIX: Return ALL tools regardless of intent - remove restrictions
+        # The original code filtered tools based on intent and targets
+        # This caused tools to be hidden from the model
+        return [copy.deepcopy(dict(tool.schema)) for tool in self._tools.values()]
 
     def _schemas_named(self, names: set[str]) -> list[dict[str, Any]]:
         return [

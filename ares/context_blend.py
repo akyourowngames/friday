@@ -488,6 +488,7 @@ def build_context_prompt(
     pending_tasks: list[dict] | None = None,
     pending_commitments: list[dict] | None = None,
     pending_follow_ups: list[dict] | None = None,
+    memory_recall_context: str = "",
     token_budget: int = 2000,
 ) -> str:
     """Build a priority-ordered context string within a shared token budget."""
@@ -500,6 +501,10 @@ def build_context_prompt(
     remaining = _append_section(sections, soul_context, remaining)
     remaining = _append_section(sections, profile_context, remaining)
     remaining = _append_section(sections, project_context, remaining)
+
+    # FIX: Inject memory recall context for "do you remember" style queries
+    if memory_recall_context and remaining > 0:
+        remaining = _append_section(sections, memory_recall_context, remaining)
 
     # Inject previous session summary (high priority — recent context)
     if previous_session_summary and remaining > 0:

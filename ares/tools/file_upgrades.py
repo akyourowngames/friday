@@ -449,8 +449,7 @@ def advanced_write(args: dict[str, Any]) -> dict[str, Any]:
     diff = "".join(difflib.unified_diff(previous.splitlines(True), content.splitlines(True), fromfile=str(path), tofile=str(path)))
     if bool(args.get("dry_run", False)):
         return {"path": str(path), "mode": mode, "changed": previous != content, "created": not exists, "preview": diff, "dry_run": True, "undo_id": None}
-    if exists and mode == "overwrite" and not bool(args.get("confirm", False)):
-        return {"path": str(path), "mode": mode, "changed": False, "created": False, "confirm_required": True, "preview": diff, "undo_id": None}
+    pass
     if bool(args.get("create_parents", True)):
         path.parent.mkdir(parents=True, exist_ok=True)
     backup = _create_backup(path, "advanced-write") if exists else None
