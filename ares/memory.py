@@ -1,6 +1,7 @@
 """Memory system: SQLite + sqlite-vec for vector search + FTS5 for keyword search."""
 
 from datetime import datetime, timezone
+from collections import OrderedDict
 import json
 import logging
 import re
@@ -23,6 +24,21 @@ logger = logging.getLogger(__name__)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
 _UNSET = object()
+_DEFAULT_QUERY_EMBEDDING_CACHE_SIZE = 128
+# Keep this deliberately narrow.  A standalone greeting or acknowledgement
+# cannot benefit from semantic recall, but a longer request that merely starts
+# with one of these words still takes the normal hybrid path.
+_TRIVIAL_MEMORY_QUERY_RE = re.compile(
+    r"^\s*(?:"
+    r"hi|hello|hey|yo|"
+    r"good\s+(?:morning|afternoon|evening)|"
+    r"thanks?|thank\s+you|thx|"
+    r"ok(?:ay)?|k|sure|yeah|yep|yes|"
+    r"no|nope|nah|got\s+it|sounds\s+good|"
+    r"all\s+good|cool|great|perfect|fine"
+    r")\s*[!.?,]*\s*$",
+    re.IGNORECASE,
+)
 
 
 class MemoryConflictError(ValueError):
@@ -107,6 +123,7 @@ class MemoryStore:
         embedding_provider: EmbeddingProvider | None = None,
         embedding_backend: str | None = None,
         embedding_model: str | None = None,
+        query_embedding_cache_size: int = _DEFAULT_QUERY_EMBEDDING_CACHE_SIZE,
     ):
         config = load_config()
         self.db_path = db_path or get_db_path()
@@ -119,6 +136,12 @@ class MemoryStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = connect_sqlite(self.db_path)
         self.vector_enabled = False
+        self._query_embedding_cache_size = max(0, int(query_embedding_cache_size))
+        self._query_embedding_cache: OrderedDict[str, bytes] = OrderedDict()
+        # Search is part of the response critical path.  Queue access counters
+        # and commit them later in one batch instead of making every retrieval
+        # wait for a SQLite write.
+        self._pending_access_counts: dict[int, int] = {}
         self._init_db()
 
     def _init_db(self):
@@ -236,6 +259,65 @@ class MemoryStore:
     def _embed(self, text: str) -> bytes:
         return self.embedding_provider.embed_bytes(text)
 
+    def _embed_query(self, query: str) -> bytes:
+        """Embed a search query with a small per-store LRU cache."""
+        if self._query_embedding_cache_size <= 0:
+            return self._embed(query)
+
+        cached = self._query_embedding_cache.get(query)
+        if cached is not None:
+            self._query_embedding_cache.move_to_end(query)
+            return cached
+
+        embedding = self._embed(query)
+        self._query_embedding_cache[query] = embedding
+        self._query_embedding_cache.move_to_end(query)
+        while len(self._query_embedding_cache) > self._query_embedding_cache_size:
+            self._query_embedding_cache.popitem(last=False)
+        return embedding
+
+    @staticmethod
+    def _should_use_semantic_search(query: str) -> bool:
+        """Return whether semantic retrieval is useful for this short query."""
+        return not bool(_TRIVIAL_MEMORY_QUERY_RE.match(query))
+
+    def _queue_access_stats(self, fact_ids: list[int]) -> None:
+        """Accumulate retrieval access counts without issuing SQLite writes."""
+        for fact_id in fact_ids:
+            normalized_id = int(fact_id)
+            self._pending_access_counts[normalized_id] = (
+                self._pending_access_counts.get(normalized_id, 0) + 1
+            )
+
+    def flush_access_stats(self) -> int:
+        """Persist queued memory access counters in one SQLite transaction.
+
+        Returns the number of distinct memories updated.  This is safe to call
+        after a streamed response, from a periodic maintenance path, or during
+        shutdown.  Failed writes are returned to the queue for a later retry.
+        """
+        if not self._pending_access_counts:
+            return 0
+
+        pending = self._pending_access_counts
+        self._pending_access_counts = {}
+        try:
+            self.conn.executemany(
+                """UPDATE facts_meta
+                   SET last_accessed = datetime('now'),
+                       access_count = access_count + ?
+                   WHERE fact_id = ?""",
+                [(count, fact_id) for fact_id, count in pending.items()],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            for fact_id, count in pending.items():
+                self._pending_access_counts[fact_id] = (
+                    self._pending_access_counts.get(fact_id, 0) + count
+                )
+            raise
+        return len(pending)
     def _delete_fts_entry(self, fact_id: int, fact_text: str) -> None:
         """Remove an external-content FTS5 row without corrupting its index."""
         self.conn.execute(
@@ -593,8 +675,16 @@ class MemoryStore:
         confidence_boost = confidence * 0.02
         return base_score + age_term - importance_boost - confidence_boost - access_boost
 
-    def search(self, query: str, limit: int = 5, scope: str = "all",
-               session_id: str | None = None, recent_sessions: int = 3) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        scope: str = "all",
+        session_id: str | None = None,
+        recent_sessions: int = 3,
+        *,
+        semantic: bool | None = None,
+    ) -> list[dict]:
         """Hybrid search: vector similarity + FTS5 keyword match, merged.
 
         Args:
@@ -603,10 +693,24 @@ class MemoryStore:
             scope: "session" to search current + recent N, "all" for everything.
             session_id: Current session ID (required when scope="session").
             recent_sessions: Number of recent sessions to include (default 3).
+            semantic: Force semantic retrieval on/off.  ``None`` keeps hybrid
+                retrieval except for standalone greetings and confirmations.
         """
+        query_text = str(query)
         results: dict[int, dict[str, object]] = {}
         bounded_limit = max(1, min(int(limit), 100))
-        diagnostics: dict[str, object] = {"query": query, "scope": scope, "vector": "disabled", "fts": "not-run", "mode": "degraded"}
+        use_semantic = (
+            self._should_use_semantic_search(query_text)
+            if semantic is None
+            else bool(semantic)
+        )
+        diagnostics: dict[str, object] = {
+            "query": query_text,
+            "scope": scope,
+            "vector": "disabled",
+            "fts": "not-run",
+            "mode": "degraded",
+        }
 
         # Build session filter for scoped search
         session_filter = ""
@@ -622,9 +726,9 @@ class MemoryStore:
             session_params = [session_id, recent_sessions]
 
         # 1. Vector search (semantic)
-        if self.vector_enabled:
+        if self.vector_enabled and use_semantic:
             try:
-                query_vec = self._embed(query)
+                query_vec = self._embed_query(query_text)
                 # Pull a larger bounded candidate window when a vec0 join is
                 # unavailable, then apply the scope before accepting entries.
                 candidate_limit = max(bounded_limit * 20, 100)
@@ -648,16 +752,20 @@ class MemoryStore:
             except Exception as exc:
                 diagnostics["vector"] = f"failed: {type(exc).__name__}"
                 logger.debug("Vector memory search failed; falling back to FTS only: %s", exc)
+        elif self.vector_enabled:
+            diagnostics["vector"] = (
+                "skipped-trivial" if semantic is None else "skipped-by-request"
+            )
 
         # 2. FTS5 keyword search
         candidate_limit = max(bounded_limit * 4, 50)
         structured_error = None
         fts_rows = []
-        queries: list[tuple[str, str]] = [(str(query), "structured")]
-        literal_terms = re.findall(r"[\w]+", str(query), flags=re.UNICODE)
+        queries: list[tuple[str, str]] = [(query_text, "structured")]
+        literal_terms = re.findall(r"[\w]+", query_text, flags=re.UNICODE)
         if literal_terms:
             literal_query = " AND ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in literal_terms)
-            if literal_query != query:
+            if literal_query != query_text:
                 queries.append((literal_query, "literal"))
         for fts_query, mode in queries:
             try:
@@ -723,15 +831,11 @@ class MemoryStore:
         # Sort by score (lower distance = more similar)
         enriched.sort(key=lambda x: x["_score"])
 
-        # 4. Update access stats
-        for entry in enriched[:bounded_limit]:
-            self.conn.execute(
-                "UPDATE facts_meta SET last_accessed = datetime('now'), access_count = access_count + 1 WHERE fact_id = ?",
-                (entry["fact_id"],),
-            )
-        self.conn.commit()
-
-        return enriched[:bounded_limit]
+        selected = enriched[:bounded_limit]
+        # Defer this write until after the response's first-token path.  The
+        # explicit flush method batches repeated searches into one commit.
+        self._queue_access_stats([int(entry["fact_id"]) for entry in selected])
+        return selected
 
     def search_advanced(
         self,
@@ -906,6 +1010,7 @@ class MemoryStore:
         self._delete_fts_entry(fact_id, existing["fact_text"])
         self.conn.execute("DELETE FROM facts_meta WHERE fact_id = ?", (fact_id,))
         self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fact_id,))
+        self._pending_access_counts.pop(int(fact_id), None)
         self.conn.execute("DELETE FROM memory_links WHERE fact_id = ?", (fact_id,))
         self.conn.execute("DELETE FROM memory_revisions WHERE fact_id = ?", (fact_id,))
         self.conn.execute(
@@ -946,6 +1051,7 @@ class MemoryStore:
         )
         for fid in existing:
             self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fid,))
+            self._pending_access_counts.pop(int(fid), None)
         self.conn.execute(f"DELETE FROM memory_links WHERE fact_id IN ({existing_placeholders})", existing)
         self.conn.execute(f"DELETE FROM memory_revisions WHERE fact_id IN ({existing_placeholders})", existing)
         self.conn.execute(
@@ -1004,7 +1110,10 @@ class MemoryStore:
 
     def close(self):
         """Close the database connection."""
-        self.conn.close()
+        try:
+            self.flush_access_stats()
+        finally:
+            self.conn.close()
 
 
 def _normalize_memory_text(text: str) -> str:

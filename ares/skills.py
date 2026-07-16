@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from ares.static_cache import FileSignature, file_signature
 from ares.turn_policy import is_browser_action_request
 
 SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
@@ -152,6 +153,11 @@ class SkillManager:
         if BUILTIN_SKILLS_DIR not in dirs:
             dirs.append(BUILTIN_SKILLS_DIR)
         self.skill_dirs = dirs
+        self._parsed_cache: dict[Path, tuple[FileSignature, Skill | None]] = {}
+        self._inventory_signature: tuple[tuple[str, FileSignature], ...] | None = None
+        self._cached_skills: tuple[Skill, ...] = ()
+        self._inventory_generation = 0
+        self._compact_index_cache: dict[tuple[int, int], str] = {}
 
     @staticmethod
     def _project_skill_dirs(start: Path | None = None) -> list[Path]:
@@ -169,19 +175,59 @@ class SkillManager:
         return dirs
 
     def list_all(self) -> list[Skill]:
-        """Return discovered skills with parsed metadata and content."""
-        by_name: dict[str, Skill] = {}
+        """Return discovered skills with parsed metadata and content.
+
+        Discovery still observes every ``SKILL.md`` path so external edits and
+        newly installed skills become visible immediately.  Unchanged files are
+        not reparsed (or recursively scanned for supporting files) on each
+        request, which keeps the hot prompt-building path bounded.
+        """
+        discovered: list[tuple[Path, FileSignature]] = []
         for root in self.skill_dirs:
             if not root.exists():
                 continue
-            for skill_file in sorted(root.rglob("SKILL.md")):
+            try:
+                skill_files = sorted(root.rglob("SKILL.md"))
+            except OSError:
+                continue
+            for skill_file in skill_files:
+                path = skill_file.resolve()
+                signature = file_signature(path)
+                if signature[1] is not None:
+                    discovered.append((path, signature))
+
+        inventory = tuple((str(path), signature) for path, signature in discovered)
+        if inventory == self._inventory_signature:
+            return list(self._cached_skills)
+
+        by_name: dict[str, Skill] = {}
+        next_cache: dict[Path, tuple[FileSignature, Skill | None]] = {}
+        for skill_file, signature in discovered:
+            cached = self._parsed_cache.get(skill_file)
+            if cached is not None and cached[0] == signature:
+                skill = cached[1]
+            else:
                 try:
                     skill = self.parse_skill_file(skill_file)
                 except ValueError:
-                    continue
+                    skill = None
+            next_cache[skill_file] = (signature, skill)
+            if skill is not None:
                 # Earlier directories win, so user skills override built-ins.
                 by_name.setdefault(skill.name, skill)
-        return sorted(by_name.values(), key=lambda s: (s.category, s.name))
+        self._parsed_cache = next_cache
+        self._inventory_signature = inventory
+        self._cached_skills = tuple(sorted(by_name.values(), key=lambda s: (s.category, s.name)))
+        self._inventory_generation += 1
+        self._compact_index_cache.clear()
+        return list(self._cached_skills)
+
+    def invalidate_cache(self) -> None:
+        """Forget parsed skill and index state after explicit local CRUD."""
+        self._parsed_cache.clear()
+        self._inventory_signature = None
+        self._cached_skills = ()
+        self._compact_index_cache.clear()
 
     def search(self, query: str = "", category: str = "") -> list[Skill]:
         """Search skills by name, description, category, or body content."""
@@ -211,8 +257,9 @@ class SkillManager:
         browser_named = "browser-use" in query_l or "browser use" in query_l
         browser_request = browser_named or is_browser_action_request(user_input)
 
+        all_skills = self.list_all()
         scored: list[tuple[int, Skill]] = []
-        for skill in self.list_all():
+        for skill in all_skills:
             if not skill.model_invocable:
                 continue
             if skill.requires_primary and not browser_request:
@@ -228,7 +275,7 @@ class SkillManager:
 
         if browser_request:
             browser_skill = next(
-                (skill for skill in self.list_all() if skill.model_invocable and skill.name == "browser-use"),
+                (skill for skill in all_skills if skill.model_invocable and skill.name == "browser-use"),
                 None,
             )
             if browser_skill is not None:
@@ -482,6 +529,7 @@ class SkillManager:
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text(self._ensure_frontmatter(normalized, content, category), encoding="utf-8")
+        self.invalidate_cache()
         return self.parse_skill_file(skill_file)
 
     def update_skill(self, name: str, content: str) -> Skill:
@@ -492,6 +540,7 @@ class SkillManager:
         if not self._is_in_user_dir(skill.path):
             raise ValueError("Built-in skills cannot be updated; create a user override instead.")
         skill.path.write_text(self._ensure_frontmatter(skill.name, content, skill.category), encoding="utf-8")
+        self.invalidate_cache()
         return self.parse_skill_file(skill.path)
 
     def delete_skill(self, name: str) -> bool:
@@ -500,6 +549,7 @@ class SkillManager:
         if skill is None or not self._is_in_user_dir(skill.path):
             return False
         shutil.rmtree(skill.root)
+        self.invalidate_cache()
         return True
 
     def is_editable(self, skill: Skill) -> bool:
@@ -514,14 +564,22 @@ class SkillManager:
 
     def compact_index(self, limit: int = 30) -> str:
         skills = self.list_all()[:limit]
+        cache_key = (self._inventory_generation, int(limit))
+        cached = self._compact_index_cache.get(cache_key)
+        if cached is not None:
+            return cached
         if not skills:
-            return "No skills installed."
+            index = "No skills installed."
+            self._compact_index_cache[cache_key] = index
+            return index
         lines = [
             "## Available Skills",
             "Ares may auto-load relevant skills silently. Full instructions load only when a skill matches the current task.",
         ]
         lines.extend(skill.summary_line() for skill in skills)
-        return "\n".join(lines)
+        index = "\n".join(lines)
+        self._compact_index_cache[cache_key] = index
+        return index
 
     def lint_all(self) -> dict[str, list[str]]:
         """Return lint messages for all discovered skills."""

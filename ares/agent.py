@@ -3,9 +3,11 @@
 import asyncio
 import inspect
 import json
+import logging
 import re
 import time
 import uuid
+from collections import deque
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -20,6 +22,7 @@ from ares.memory import MemoryStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.llm import LLMClient
+from ares.latency import RequestLatency
 from ares.models import AppConfig
 from ares.delegation_router import (
     DelegationAvailability,
@@ -51,6 +54,121 @@ ToolProgressCallback = Callable[[str, str], Awaitable[None]]
 _RESEARCH_EVIDENCE_TOOLS = frozenset({
     "web_search", "fetch_url", "extract_document", "read_file", "search_files",
 })
+_RECENT_LATENCY_RECORDS = 32
+# Hold a small first-response buffer so common provider preambles are not
+# exposed before an immediately following tool-call delta arrives.  The grace
+# keeps normal single-token responses live even when their next chunk is slow.
+_STREAM_TOOL_DECISION_BUFFER_CHARS = 256
+_STREAM_TOOL_DECISION_GRACE_SECONDS = 0.03
+_EXECUTION_GUARD_SIGNAL_RE = re.compile(
+    r"\b(?:agents?|researchers?|specialists?|tool\s+calls?|delegat(?:e|ion)|"
+    r"parallel|execution\s+waves?|run\s+id)\b",
+    re.IGNORECASE,
+)
+_TEXT_TOOL_CALL_RE = re.compile(
+    r"<(?P<name>[A-Za-z_][A-Za-z0-9_-]*)>\s*(?P<body>.*?)\s*</(?P=name)>",
+    re.DOTALL,
+)
+# Some OpenAI-compatible models emit this intuitive but nonexistent name when
+# they mean ``list_watchers``. Keep the alias deliberately small and explicit.
+_TEXT_TOOL_ALIASES = {"search_watchers": "list_watchers"}
+logger = logging.getLogger(__name__)
+
+
+class _ContentDeltaNormalizer:
+    """Normalize ordinary deltas and proxy-style accumulated content snapshots."""
+
+    def __init__(self) -> None:
+        self.content = ""
+        self._snapshot_mode = False
+
+    def add(self, text: str) -> str:
+        """Return only the newly observed text while retaining complete content."""
+        if not text:
+            return ""
+        if not self.content:
+            self.content = text
+            return text
+
+        if self._snapshot_mode:
+            if text.startswith(self.content):
+                delta = text[len(self.content):]
+            elif self.content.startswith(text):
+                return ""
+            else:
+                # A proxy can switch back to true deltas after a snapshot.
+                self._snapshot_mode = False
+                delta = text
+        elif text.startswith(self.content):
+            self._snapshot_mode = True
+            delta = text[len(self.content):]
+        elif self.content.startswith(text):
+            # Preserve the old behavior for a repeated accumulated snapshot.
+            self._snapshot_mode = True
+            return ""
+        else:
+            delta = text
+
+        if delta:
+            self.content += delta
+        return delta
+
+
+class _TextToolMarkupFilter:
+    """Hold recognized XML-style tool markup out of the visible stream.
+
+    A few providers occasionally print ``<tool_name>key: value</tool_name>``
+    instead of returning OpenAI tool-call deltas. The agent validates and
+    executes that form after the stream ends; this filter prevents its protocol
+    syntax from leaking to the user while preserving normal text streaming.
+    """
+
+    def __init__(self, accepted_names: set[str]) -> None:
+        self._accepted_names = {name.casefold() for name in accepted_names}
+        self._pending = ""
+        self.completed_markup = False
+
+    def add(self, text: str) -> str:
+        self._pending += text
+        output: list[str] = []
+        while self._pending:
+            marker = self._pending.find("<")
+            if marker < 0:
+                output.append(self._pending)
+                self._pending = ""
+                break
+            if marker:
+                output.append(self._pending[:marker])
+                self._pending = self._pending[marker:]
+
+            opening = re.match(r"<([A-Za-z_][A-Za-z0-9_-]*)>", self._pending)
+            if opening is None:
+                # Keep a possible opening tag until its next stream delta. A
+                # bare less-than sign remains ordinary prose at stream end.
+                if self._pending == "<" or re.match(r"<[A-Za-z_][A-Za-z0-9_-]*$", self._pending):
+                    break
+                output.append("<")
+                self._pending = self._pending[1:]
+                continue
+
+            name = opening.group(1)
+            if name.casefold() not in self._accepted_names:
+                output.append("<")
+                self._pending = self._pending[1:]
+                continue
+
+            closing = f"</{name}>"
+            end = self._pending.find(closing, opening.end())
+            if end < 0:
+                break
+            self._pending = self._pending[end + len(closing):]
+            self.completed_markup = True
+        return "".join(output)
+
+    def finish(self) -> str:
+        """Release an incomplete tag as normal text at end-of-stream."""
+        pending, self._pending = self._pending, ""
+        return pending
 _TRUSTED_LOCAL_EXECUTION_REQUEST = re.compile(
     r"(?:\btrusted[\s_-]*local\b|\b(?:full|unrestricted|all)\s+(?:local\s+)?"
     r"(?:tool|tools|mcp|mcps|execution|access)\b|\b(?:remove|lift)\s+(?:all\s+)?"
@@ -152,6 +270,11 @@ class Agent:
         self.last_iteration_count = 0
         self.tool_execution_records: list[dict[str, Any]] = []
         self.unresponsive_tool_records: list[dict[str, str]] = []
+        # Lightweight, bounded diagnostics only: identifiers, relative event
+        # timings, and durations.  Never include prompt, memory, or tool data.
+        self.recent_latency_metrics: deque[dict[str, object]] = deque(
+            maxlen=_RECENT_LATENCY_RECORDS
+        )
 
         kwargs = {}
         if api_key or config:
@@ -210,6 +333,9 @@ class Agent:
             and self.goal_store is not None
             and self.commitment_store is not None
             and bool(getattr(getattr(self.config, "reflection", None), "enabled", True))
+            # Child specialists must not create durable reflection work or make
+            # their close path wait on root-only memory processing.
+            and delegation_depth == 0
         ):
             self.reflection_service = ReflectionService(
                 memory_store=self.memory_store,
@@ -337,6 +463,30 @@ class Agent:
             root_run_id=getattr(self, "root_run_id", "") or None,
             child_run_id=getattr(self, "child_run_id", "") or None,
         )
+
+    def _new_request_latency(self, request_id: str | None) -> tuple[str, RequestLatency]:
+        """Create request-scoped timing without exposing any user content."""
+        effective_request_id = str(
+            request_id or getattr(self, "request_id", "") or f"req_{uuid.uuid4().hex}"
+        )
+        session_id = str(self.session_id) if self.session_id is not None else None
+        return effective_request_id, RequestLatency(effective_request_id, session_id)
+
+    def _record_request_latency(self, latency: RequestLatency) -> None:
+        """Finish diagnostics, then persist deferred retrieval metadata off TTFT."""
+        self.recent_latency_metrics.append(latency.finish())
+        flush_access_stats = getattr(self.memory_store, "flush_access_stats", None)
+        if callable(flush_access_stats):
+            try:
+                # Context retrieval intentionally queues these writes.  This
+                # runs after the caller has consumed the response, so it never
+                # adds a SQLite commit to the visible first-token path.
+                flush_access_stats()
+            except Exception:
+                # ``MemoryStore`` retains the batch for a later retry.  A
+                # bookkeeping failure must not turn a completed chat into an
+                # error while its response generator is unwinding.
+                logger.debug("Deferred memory access-stat flush failed", exc_info=True)
 
     @staticmethod
     def _resolve_referential_delegation(
@@ -676,6 +826,84 @@ class Agent:
         if isinstance(raw_args, str):
             return json.loads(raw_args)
         return raw_args or {}
+
+    @staticmethod
+    def _parse_text_tool_arguments(raw_arguments: str) -> dict[str, Any]:
+        """Parse the small ``key: value`` form used by text tool fallbacks."""
+        text = str(raw_arguments or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+
+        arguments: dict[str, Any] = {}
+        for line in text.splitlines():
+            match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$", line)
+            if match is None:
+                continue
+            key, value = match.groups()
+            value = value.strip().strip('"\'')
+            lowered = value.casefold()
+            if lowered in {"true", "false"}:
+                arguments[key] = lowered == "true"
+            elif lowered in {"null", "none"}:
+                arguments[key] = None
+            elif re.fullmatch(r"-?\d+", value):
+                arguments[key] = int(value)
+            else:
+                arguments[key] = value
+        return arguments
+
+    @classmethod
+    def _text_tool_calls_from_content(
+        cls,
+        content: str,
+        turn_tools: list[dict],
+    ) -> tuple[list[dict], str]:
+        """Convert standalone XML-style fallback calls to normal tool calls.
+
+        Only names that were actually advertised for this turn are accepted.
+        Text tags embedded in prose remain text, preventing an answer that
+        merely discusses a tag from becoming an unintended tool invocation.
+        """
+        available = {
+            str(schema.get("function", {}).get("name") or "").casefold()
+            for schema in turn_tools
+        }
+        calls: list[dict] = []
+
+        def replace(match: re.Match[str]) -> str:
+            line_start = content.rfind("\n", 0, match.start()) + 1
+            line_end = content.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(content)
+            if content[line_start:match.start()].strip() or content[match.end():line_end].strip():
+                return match.group(0)
+
+            source_name = match.group("name").casefold()
+            tool_name = _TEXT_TOOL_ALIASES.get(source_name, source_name)
+            if tool_name not in available:
+                return match.group(0)
+
+            arguments = cls._parse_text_tool_arguments(match.group("body"))
+            if source_name == "search_watchers":
+                query = arguments.pop("query", arguments.pop("name", arguments.pop("watcher", "")))
+                arguments["query"] = str(query)
+            calls.append({
+                "id": f"text_tool_{len(calls)}",
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            })
+            return ""
+
+        cleaned = _TEXT_TOOL_CALL_RE.sub(replace, str(content or ""))
+        return calls, re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     def _resolve_email_reference(self, value: Any) -> str:
         """Resolve a saved name locally while never surfacing the email to the LLM."""
@@ -1509,50 +1737,58 @@ class Agent:
         confirmation_grants: Iterable[TurnActionGrant] = (),
     ) -> AsyncIterator[str]:
         """Run one request under immutable current-turn authority."""
-        if self.reflection_service is not None:
-            # Tests and embedders sometimes replace ``agent.llm`` after
-            # construction. Reflection is a separate call, but it should use
-            # the agent's current client rather than a stale network client.
-            self.reflection_service.llm = self.llm
-            self.reflection_service.reflector.llm = self.llm
-            await self.reflection_service.before_turn(self.session_id)
-        routing_input, reference_error = self._resolve_referential_delegation(
-            user_input, conversation_history
-        )
-        turn_context = self._new_turn_context(
-            routing_input,
-            request_id=request_id,
-            confirmation_grants=confirmation_grants,
-        )
-        with self.turn_scope(turn_context):
-            if reference_error is not None:
-                self._set_execution_record(turn_context, {
-                    "kind": "delegation_failure", "agent_count": 0,
-                    "status": "unresolved_reference", "reason": reference_error,
-                })
-                yield reference_error
-                return
-            decision, evidence, terminal = await self._prepare_delegation_turn(turn_context)
-            if terminal is not None:
-                self.last_messages = [
-                    {"role": "user", "content": user_input},
-                    {"role": "assistant", "content": terminal},
-                ]
-                yield terminal
-                return
-            tools_override = (
-                [] if decision.mode is DelegationMode.META or decision.should_delegate else None
+        effective_request_id, latency = self._new_request_latency(request_id)
+        try:
+            if self.reflection_service is not None:
+                # Tests and embedders sometimes replace ``agent.llm`` after
+                # construction. Reflection is a separate call, but it should use
+                # the agent's current client rather than a stale network client.
+                self.reflection_service.llm = self.llm
+                self.reflection_service.reflector.llm = self.llm
+                await self.reflection_service.before_turn(self.session_id)
+            latency.mark("reflection_check_finished")
+            routing_input, reference_error = self._resolve_referential_delegation(
+                user_input, conversation_history
             )
-            async for chunk in self._run_scoped(
-                user_input,
-                conversation_history,
-                turn_context,
-                delegation_decision=decision,
-                agent_evidence=evidence,
-                tools_override=tools_override,
-                reflection_input=reflection_input,
-            ):
-                yield chunk
+            turn_context = self._new_turn_context(
+                routing_input,
+                request_id=effective_request_id,
+                confirmation_grants=confirmation_grants,
+            )
+            with self.turn_scope(turn_context):
+                if reference_error is not None:
+                    self._set_execution_record(turn_context, {
+                        "kind": "delegation_failure", "agent_count": 0,
+                        "status": "unresolved_reference", "reason": reference_error,
+                    })
+                    latency.mark("first_token_sent")
+                    yield reference_error
+                    return
+                decision, evidence, terminal = await self._prepare_delegation_turn(turn_context)
+                if terminal is not None:
+                    self.last_messages = [
+                        {"role": "user", "content": user_input},
+                        {"role": "assistant", "content": terminal},
+                    ]
+                    latency.mark("first_token_sent")
+                    yield terminal
+                    return
+                tools_override = (
+                    [] if decision.mode is DelegationMode.META or decision.should_delegate else None
+                )
+                async for chunk in self._run_scoped(
+                    user_input,
+                    conversation_history,
+                    turn_context,
+                    delegation_decision=decision,
+                    agent_evidence=evidence,
+                    tools_override=tools_override,
+                    reflection_input=reflection_input,
+                    latency=latency,
+                ):
+                    yield chunk
+        finally:
+            self._record_request_latency(latency)
 
     async def _run_scoped(
         self,
@@ -1564,9 +1800,12 @@ class Agent:
         agent_evidence: str = "",
         tools_override: list[dict] | None = None,
         reflection_input: str | None = None,
+        latency: RequestLatency | None = None,
     ) -> AsyncIterator[str]:
         """Run the non-streaming model loop inside an established turn scope."""
         # Build context
+        if latency is not None:
+            latency.begin_context_build()
         context = self.get_context(user_input, conversation_history)
         messages = self.build_messages(user_input, conversation_history, context)
         if agent_evidence:
@@ -1579,12 +1818,27 @@ class Agent:
             if tools_override is not None
             else self._tools_for_turn(turn_context, delegation_decision)
         )
+        if latency is not None:
+            latency.mark("context_build_finished")
 
         # Agent loop: keep going while LLM wants to call tools
         max_iterations = self.config.agent_max_iterations
         for iteration in range(max_iterations):
             self.last_iteration_count = iteration + 1
+            if latency is not None:
+                latency.mark("provider_request_started")
             response = await self.llm.chat(messages, tools=turn_tools)
+            if latency is not None:
+                latency.mark("provider_first_token_received")
+
+            if not response.get("tool_calls"):
+                fallback_calls, cleaned_content = self._text_tool_calls_from_content(
+                    str(response.get("content") or ""), turn_tools,
+                )
+                if fallback_calls:
+                    response = dict(response)
+                    response["content"] = cleaned_content
+                    response["tool_calls"] = fallback_calls
 
             # Check for tool calls
             if response.get("tool_calls"):
@@ -1601,7 +1855,10 @@ class Agent:
                 })
 
                 # Execute tools
+                tool_started_at = time.monotonic()
                 tool_results = await self.process_tool_calls_async(response["tool_calls"])
+                if latency is not None:
+                    latency.add_tool_execution(tool_started_at)
                 messages.extend(self._tool_messages(tool_results))
                 turn_tools = self._finish_research_when_ready(messages, turn_tools)
 
@@ -1624,13 +1881,18 @@ class Agent:
                     assistant_text=content,
                 )
             if content:
+                if latency is not None:
+                    latency.mark("first_token_sent")
                 yield content
             return
 
         # If we exhaust all iterations, warn the user
         if not delegation_decision.should_delegate:
             self._ensure_ordinary_execution_record(turn_context)
-        yield "\n\n[Warning: Reached maximum tool iterations limit. Some steps may not have completed.]"
+        warning = "\n\n[Warning: Reached maximum tool iterations limit. Some steps may not have completed.]"
+        if latency is not None:
+            latency.mark("first_token_sent")
+        yield warning
 
     async def run_stream(
         self,
@@ -1642,47 +1904,55 @@ class Agent:
         confirmation_grants: Iterable[TurnActionGrant] = (),
     ) -> AsyncIterator[str]:
         """Run streaming-first under immutable current-turn authority."""
-        if self.reflection_service is not None:
-            self.reflection_service.llm = self.llm
-            self.reflection_service.reflector.llm = self.llm
-            await self.reflection_service.before_turn(self.session_id)
-        routing_input, reference_error = self._resolve_referential_delegation(
-            user_input, conversation_history
-        )
-        turn_context = self._new_turn_context(
-            routing_input,
-            request_id=request_id,
-            confirmation_grants=confirmation_grants,
-        )
-        with self.turn_scope(turn_context):
-            if reference_error is not None:
-                self._set_execution_record(turn_context, {
-                    "kind": "delegation_failure", "agent_count": 0,
-                    "status": "unresolved_reference", "reason": reference_error,
-                })
-                yield reference_error
-                return
-            decision, evidence, terminal = await self._prepare_delegation_turn(turn_context)
-            if terminal is not None:
-                self.last_messages = [
-                    {"role": "user", "content": user_input},
-                    {"role": "assistant", "content": terminal},
-                ]
-                yield terminal
-                return
-            tools_override = (
-                [] if decision.mode is DelegationMode.META or decision.should_delegate else None
+        effective_request_id, latency = self._new_request_latency(request_id)
+        try:
+            if self.reflection_service is not None:
+                self.reflection_service.llm = self.llm
+                self.reflection_service.reflector.llm = self.llm
+                await self.reflection_service.before_turn(self.session_id)
+            latency.mark("reflection_check_finished")
+            routing_input, reference_error = self._resolve_referential_delegation(
+                user_input, conversation_history
             )
-            async for chunk in self._run_stream_scoped(
-                user_input,
-                conversation_history,
-                turn_context,
-                delegation_decision=decision,
-                agent_evidence=evidence,
-                tools_override=tools_override,
-                reflection_input=reflection_input,
-            ):
-                yield chunk
+            turn_context = self._new_turn_context(
+                routing_input,
+                request_id=effective_request_id,
+                confirmation_grants=confirmation_grants,
+            )
+            with self.turn_scope(turn_context):
+                if reference_error is not None:
+                    self._set_execution_record(turn_context, {
+                        "kind": "delegation_failure", "agent_count": 0,
+                        "status": "unresolved_reference", "reason": reference_error,
+                    })
+                    latency.mark("first_token_sent")
+                    yield reference_error
+                    return
+                decision, evidence, terminal = await self._prepare_delegation_turn(turn_context)
+                if terminal is not None:
+                    self.last_messages = [
+                        {"role": "user", "content": user_input},
+                        {"role": "assistant", "content": terminal},
+                    ]
+                    latency.mark("first_token_sent")
+                    yield terminal
+                    return
+                tools_override = (
+                    [] if decision.mode is DelegationMode.META or decision.should_delegate else None
+                )
+                async for chunk in self._run_stream_scoped(
+                    user_input,
+                    conversation_history,
+                    turn_context,
+                    delegation_decision=decision,
+                    agent_evidence=evidence,
+                    tools_override=tools_override,
+                    reflection_input=reflection_input,
+                    latency=latency,
+                ):
+                    yield chunk
+        finally:
+            self._record_request_latency(latency)
 
     async def _run_stream_scoped(
         self,
@@ -1694,8 +1964,11 @@ class Agent:
         agent_evidence: str = "",
         tools_override: list[dict] | None = None,
         reflection_input: str | None = None,
+        latency: RequestLatency | None = None,
     ) -> AsyncIterator[str]:
         """Run the streaming model loop inside an established turn scope."""
+        if latency is not None:
+            latency.begin_context_build()
         context = self.get_context(user_input, conversation_history)
         messages = self.build_messages(user_input, conversation_history, context)
         if agent_evidence:
@@ -1708,55 +1981,189 @@ class Agent:
             if tools_override is not None
             else self._tools_for_turn(turn_context, delegation_decision)
         )
+        if latency is not None:
+            latency.mark("context_build_finished")
 
         max_iterations = self.config.agent_max_iterations
         for iteration in range(max_iterations):
             self.last_iteration_count = iteration + 1
             tool_calls: dict[int, dict] = {}
-            content_parts: list[str] = []
+            content = _ContentDeltaNormalizer()
             has_tool_calls = False
+            text_tool_names = {
+                str(schema.get("function", {}).get("name") or "").casefold()
+                for schema in turn_tools
+            }
+            text_markup_filter = _TextToolMarkupFilter(
+                text_tool_names | set(_TEXT_TOOL_ALIASES)
+            )
+            text_markup_seen = False
+            # The final execution guard may remove a line or append verified
+            # runtime truth.  Keep execution-sensitive turns buffered so a
+            # client never sees text that the guard would need to retract.
+            existing_execution_record = self._last_execution_record(turn_context)
+            guard_sensitive_turn = (
+                delegation_decision.should_delegate
+                # A record from this same request can still influence the
+                # final answer after tools/delegation have run.  A previous
+                # turn's ordinary record must not make every later chat reply
+                # wait for end-of-stream finalization.
+                or (
+                    existing_execution_record is not None
+                    and existing_execution_record.get("request_id") == turn_context.request_id
+                )
+                or bool(_EXECUTION_GUARD_SIGNAL_RE.search(turn_context.user_input))
+            )
+            allow_live_content = not guard_sensitive_turn
+            stream_committed = allow_live_content and not turn_tools
+            visible_content = ""
+            decision_buffer = ""
+            decision_started_at: float | None = None
 
-            async for chunk in self.llm.chat_stream(messages, tools=turn_tools):
-                chunk_type = chunk.get("type")
+            if latency is not None:
+                latency.mark("provider_request_started")
+            stream = self.llm.chat_stream(messages, tools=turn_tools).__aiter__()
+            next_chunk: asyncio.Future[Any] | None = asyncio.ensure_future(anext(stream))
+            try:
+                while next_chunk is not None:
+                    # A short, non-cancelling lookahead catches the common
+                    # content-then-tool-call preamble while still releasing a
+                    # small first delta when the provider pauses mid-answer.
+                    if (
+                        allow_live_content
+                        and not stream_committed
+                        and decision_buffer
+                        and not has_tool_calls
+                    ):
+                        elapsed = time.monotonic() - (decision_started_at or time.monotonic())
+                        remaining = max(0.0, _STREAM_TOOL_DECISION_GRACE_SECONDS - elapsed)
+                        if len(decision_buffer) >= _STREAM_TOOL_DECISION_BUFFER_CHARS:
+                            stream_committed = True
+                            if latency is not None:
+                                latency.mark("first_token_sent")
+                            visible_content += decision_buffer
+                            yield decision_buffer
+                            decision_buffer = ""
+                            continue
+                        done, _pending = await asyncio.wait({next_chunk}, timeout=remaining)
+                        if not done:
+                            stream_committed = True
+                            if latency is not None:
+                                latency.mark("first_token_sent")
+                            visible_content += decision_buffer
+                            yield decision_buffer
+                            decision_buffer = ""
+                            continue
 
-                if chunk_type == "content":
-                    text = chunk.get("text", "")
-                    if text:
-                        # Some proxies return accumulated text (full response)
-                        # instead of deltas. Detect and keep only the new part.
-                        so_far = "".join(content_parts)
-                        if text.startswith(so_far) and len(text) > len(so_far):
-                            content_parts.append(text[len(so_far):])
-                        elif so_far.startswith(text):
-                            # Already accumulated this — skip (duplicate)
-                            pass
-                        else:
-                            # Fresh chunk or non-accumulated token.
-                            content_parts.append(text)
+                    try:
+                        chunk = await next_chunk
+                    except StopAsyncIteration:
+                        next_chunk = None
+                        break
 
-                elif chunk_type == "tool_call":
+                    chunk_type = chunk.get("type")
+                    if chunk_type == "done":
+                        next_chunk = None
+                    else:
+                        next_chunk = asyncio.ensure_future(anext(stream))
+                    if latency is not None and chunk_type != "done":
+                        latency.mark("provider_first_token_received")
+
+                    if chunk_type == "content":
+                        delta = content.add(str(chunk.get("text") or ""))
+                        if not delta or has_tool_calls or text_markup_seen or not allow_live_content:
+                            continue
+                        visible_delta = text_markup_filter.add(delta)
+                        if text_markup_filter.completed_markup:
+                            # A text fallback is equivalent to a native tool
+                            # call: discard its preamble while we turn the
+                            # validated markup into a real call below.
+                            text_markup_seen = True
+                            decision_buffer = ""
+                            continue
+                        if not visible_delta:
+                            continue
+                        if stream_committed:
+                            if latency is not None:
+                                latency.mark("first_token_sent")
+                            visible_content += visible_delta
+                            yield visible_delta
+                            continue
+
+                        decision_buffer += visible_delta
+                        decision_started_at = decision_started_at or time.monotonic()
+                        if len(decision_buffer) >= _STREAM_TOOL_DECISION_BUFFER_CHARS:
+                            stream_committed = True
+                            if latency is not None:
+                                latency.mark("first_token_sent")
+                            visible_content += decision_buffer
+                            yield decision_buffer
+                            decision_buffer = ""
+
+                    elif chunk_type == "tool_call":
+                        has_tool_calls = True
+                        # Text in a tool turn is internal preamble.  It remains
+                        # in the assistant tool-call message below but is never
+                        # exposed to the caller while still in the decision
+                        # buffer.
+                        decision_buffer = ""
+                        index = int(chunk.get("index", 0))
+                        existing = tool_calls.setdefault(
+                            index,
+                            {"id": "", "name": "", "arguments": ""},
+                        )
+                        if chunk.get("id"):
+                            existing["id"] = chunk["id"]
+                        if chunk.get("name"):
+                            existing["name"] = chunk["name"]
+
+                    elif chunk_type == "tool_call_delta":
+                        has_tool_calls = True
+                        decision_buffer = ""
+                        index = int(chunk.get("index", 0))
+                        existing = tool_calls.setdefault(
+                            index,
+                            {"id": "", "name": "", "arguments": ""},
+                        )
+                        existing["arguments"] += chunk.get("arguments", "")
+
+                    elif chunk_type == "done":
+                        break
+            finally:
+                if next_chunk is not None and not next_chunk.done():
+                    next_chunk.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await next_chunk
+                closer = getattr(stream, "aclose", None)
+                if callable(closer):
+                    with suppress(asyncio.CancelledError, Exception):
+                        await closer()
+
+            trailing_markup_text = text_markup_filter.finish()
+            if trailing_markup_text and not has_tool_calls and not text_markup_seen and allow_live_content:
+                if stream_committed:
+                    if latency is not None:
+                        latency.mark("first_token_sent")
+                    visible_content += trailing_markup_text
+                    yield trailing_markup_text
+                else:
+                    decision_buffer += trailing_markup_text
+
+            if not has_tool_calls:
+                fallback_calls, cleaned_content = self._text_tool_calls_from_content(
+                    content.content, turn_tools,
+                )
+                if fallback_calls:
+                    content.content = cleaned_content
+                    text_markup_seen = True
                     has_tool_calls = True
-                    index = int(chunk.get("index", 0))
-                    existing = tool_calls.setdefault(
-                        index,
-                        {"id": "", "name": "", "arguments": ""},
-                    )
-                    if chunk.get("id"):
-                        existing["id"] = chunk["id"]
-                    if chunk.get("name"):
-                        existing["name"] = chunk["name"]
-
-                elif chunk_type == "tool_call_delta":
-                    has_tool_calls = True
-                    index = int(chunk.get("index", 0))
-                    existing = tool_calls.setdefault(
-                        index,
-                        {"id": "", "name": "", "arguments": ""},
-                    )
-                    existing["arguments"] += chunk.get("arguments", "")
-
-                elif chunk_type == "done":
-                    break
+                    for index, call in enumerate(fallback_calls):
+                        function = call["function"]
+                        tool_calls[index] = {
+                            "id": str(call.get("id") or ""),
+                            "name": str(function.get("name") or ""),
+                            "arguments": str(function.get("arguments") or ""),
+                        }
 
             if has_tool_calls:
                 formatted_calls = []
@@ -1773,7 +2180,7 @@ class Agent:
 
                 messages.append({
                     "role": "assistant",
-                    "content": "".join(content_parts),
+                    "content": content.content,
                     "tool_calls": formatted_calls,
                 })
                 progress: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
@@ -1781,6 +2188,7 @@ class Agent:
                 async def report_tool_progress(tool_name: str, detail: str) -> None:
                     await progress.put((tool_name, detail))
 
+                tool_started_at = time.monotonic()
                 tool_task = asyncio.create_task(
                     self.process_tool_calls_async(formatted_calls, report_tool_progress)
                 )
@@ -1821,6 +2229,8 @@ class Agent:
                         tool_task.cancel()
                         with suppress(asyncio.CancelledError):
                             await tool_task
+                    if latency is not None:
+                        latency.add_tool_execution(tool_started_at)
                 for tr in tool_results:
                     yield f"[tool:{tr['tool_name']}:{tr['content']}]"
                 messages.extend(self._tool_messages(tool_results))
@@ -1829,7 +2239,7 @@ class Agent:
                 continue
 
             # Save messages for conversation history before returning
-            final_content = "".join(content_parts)
+            final_content = content.content
             if not delegation_decision.should_delegate:
                 self._ensure_ordinary_execution_record(turn_context)
             final_content = self._guard_final_answer(
@@ -1845,15 +2255,24 @@ class Agent:
                     user_text=reflection_input if reflection_input is not None else user_input,
                     assistant_text=final_content,
                 )
-            if final_content:
+            if final_content and not visible_content:
+                if latency is not None:
+                    latency.mark("first_token_sent")
                 yield final_content
+            elif final_content.startswith(visible_content):
+                suffix = final_content[len(visible_content):]
+                if suffix:
+                    yield suffix
             return
 
         # If we exhaust all iterations, warn the user
         if not delegation_decision.should_delegate:
             self._ensure_ordinary_execution_record(turn_context)
         self.last_messages = messages
-        yield "[Warning: Reached maximum tool iterations limit. Some steps may not have completed.]"
+        warning = "[Warning: Reached maximum tool iterations limit. Some steps may not have completed.]"
+        if latency is not None:
+            latency.mark("first_token_sent")
+        yield warning
 
     async def close(self):
         """Clean up resources."""

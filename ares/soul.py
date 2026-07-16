@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ares.context_blend import truncate_to_tokens
+from ares.static_cache import MtimeFileCache
 
 SOUL_TEMPLATE = """# Ares - My AI Assistant
 
@@ -31,26 +32,24 @@ class SoulManager:
     def __init__(self, data_dir: Path, soul_path: str | Path = ""):
         self.data_dir = Path(data_dir).expanduser()
         self.soul_path = Path(soul_path).expanduser() if soul_path else self.data_dir / "soul.md"
+        self._cache = MtimeFileCache()
 
     def ensure_exists(self) -> None:
         """Create soul.md with a template if it does not exist."""
         if not self.soul_path.exists():
             self.soul_path.parent.mkdir(parents=True, exist_ok=True)
             self.soul_path.write_text(SOUL_TEMPLATE, encoding="utf-8")
+            self._cache.invalidate(self.soul_path)
 
     def read(self) -> str:
         """Read soul content, returning empty string when missing or unreadable."""
-        if not self.soul_path.exists():
-            return ""
-        try:
-            return self.soul_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        return self._cache.read_text(self.soul_path).strip()
 
     def write(self, content: str) -> None:
         """Write soul content to disk."""
         self.soul_path.parent.mkdir(parents=True, exist_ok=True)
         self.soul_path.write_text(content.rstrip() + "\n", encoding="utf-8")
+        self._cache.invalidate(self.soul_path)
 
     def get_context(self, token_budget: int = 200) -> str:
         """Return the soul as a context block."""

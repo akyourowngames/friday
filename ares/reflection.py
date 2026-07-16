@@ -188,10 +188,75 @@ class ReflectionStore:
         params: list[Any] = [scope] if scope is not None else []
         rows = self.conn.execute(
             f"""SELECT * FROM reflection_runs WHERE status='pending'{where}
-                ORDER BY created_at LIMIT ?""",
+                ORDER BY created_at, rowid LIMIT ?""",
             [*params, max(1, min(int(limit), 100))],
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def pending_scopes(self, *, limit: int = 100) -> list[str]:
+        """Return scopes that have durable work waiting to be resumed.
+
+        ``ReflectionService`` deliberately starts workers lazily because it is
+        also constructed by synchronous embedders.  This small query lets the
+        first asynchronous turn resume work left behind by an earlier process.
+        """
+        rows = self.conn.execute(
+            """SELECT scope, MIN(rowid) AS queue_order
+               FROM reflection_runs
+               WHERE status='pending'
+               GROUP BY scope
+               ORDER BY queue_order
+               LIMIT ?""",
+            (max(1, min(int(limit), 1_000)),),
+        ).fetchall()
+        return [str(row["scope"]) for row in rows]
+
+    def claim_next(self, scope: str) -> dict[str, Any] | None:
+        """Atomically claim the oldest runnable job in one session scope.
+
+        A later job must not leapfrog an older ``pending`` *or* ``running``
+        job.  The guard matters when two service instances share the durable
+        queue (for example while integrations are being restarted).  SQLite's
+        ``rowid`` provides a stable insertion order even when several rows have
+        the same second-resolution ``created_at`` timestamp.
+        """
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute(
+                """SELECT queued.rowid AS queue_order, queued.*
+                   FROM reflection_runs AS queued
+                   WHERE queued.scope=?
+                     AND queued.status='pending'
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM reflection_runs AS earlier
+                         WHERE earlier.scope=queued.scope
+                           AND earlier.rowid < queued.rowid
+                           AND earlier.status IN ('pending', 'running')
+                     )
+                   ORDER BY queued.rowid
+                   LIMIT 1""",
+                (scope,),
+            ).fetchone()
+            if row is None:
+                self.conn.commit()
+                return None
+            reflection_id = str(row["reflection_id"])
+            updated = self.conn.execute(
+                """UPDATE reflection_runs SET status='running', attempts=attempts+1,
+                   started_at=?, error=NULL WHERE reflection_id=? AND status='pending'""",
+                (utc_now(), reflection_id),
+            )
+            self.conn.commit()
+            if updated.rowcount != 1:
+                return None
+            job = dict(row)
+            job["status"] = "running"
+            job["attempts"] = int(job.get("attempts") or 0) + 1
+            return job
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def mark_running(self, reflection_id: str) -> dict[str, Any] | None:
         self.conn.execute(
@@ -657,10 +722,16 @@ class ReflectionService:
         self._scope_tasks: dict[str, asyncio.Task] = {}
         self._apply_lock = asyncio.Lock()
 
-    async def _process(self, reflection_id: str) -> None:
-        job = self.store.mark_running(reflection_id)
-        if job is None or job.get("status") != "running":
-            return
+    async def _process_job(self, job: dict[str, Any]) -> str:
+        """Run one already-claimed job and return its queue outcome.
+
+        Returning ``retry`` rather than immediately looping is intentional:
+        retryable failures keep their place at the head of the per-scope queue
+        and are resumed by the next lightweight worker kick.  That prevents a
+        failing provider from spinning in the background or allowing later
+        state mutations to overtake the failed turn.
+        """
+        reflection_id = str(job["reflection_id"])
         try:
             result = await self.reflector.extract(
                 user_text=job["user_text"],
@@ -679,35 +750,44 @@ class ReflectionService:
                     scope=job["scope"],
                 )
                 self.store.complete(reflection_id, result, outcomes)
+            return "completed"
         except (ValidationError, ValueError, json.JSONDecodeError, asyncio.TimeoutError) as exc:
             attempts = int((self.store.get(reflection_id) or {}).get("attempts", 1))
             maximum = int(getattr(self.config, "max_attempts", 3))
-            self.store.fail(reflection_id, str(exc), retry=attempts < maximum)
+            retry = attempts < maximum
+            self.store.fail(reflection_id, str(exc), retry=retry)
+            return "retry" if retry else "failed"
         except Exception as exc:
             attempts = int((self.store.get(reflection_id) or {}).get("attempts", 1))
             maximum = int(getattr(self.config, "max_attempts", 3))
-            self.store.fail(reflection_id, str(exc), retry=attempts < maximum)
+            retry = attempts < maximum
+            self.store.fail(reflection_id, str(exc), retry=retry)
+            return "retry" if retry else "failed"
 
-    def enqueue_turn(self, *, scope: str | None, user_text: str, assistant_text: str) -> str | None:
-        if not bool(getattr(self.config, "enabled", True)) or not user_text.strip():
-            return None
-        scope_key = str(scope or "global")
-        reflection_id = self.store.enqueue(scope_key, user_text, assistant_text)
-        previous = self._scope_tasks.get(scope_key)
+    async def _process(self, reflection_id: str) -> str:
+        """Process one explicit job for compatibility with older embedders."""
+        job = self.store.mark_running(reflection_id)
+        if job is None or job.get("status") != "running":
+            return "skipped"
+        return await self._process_job(job)
 
-        async def run_after_previous() -> None:
-            if previous is not None:
-                try:
-                    await previous
-                except Exception:
-                    pass
-            await self._process(reflection_id)
+    async def _run_scope_worker(self, scope_key: str) -> None:
+        """Drain one durable session queue without blocking conversation turns."""
+        while True:
+            job = self.store.claim_next(scope_key)
+            if job is None:
+                return
+            outcome = await self._process_job(job)
+            if outcome == "retry":
+                # The pending head deliberately blocks later jobs until a
+                # future kick retries it, preserving causal session ordering.
+                return
 
-        task = asyncio.create_task(run_after_previous(), name=f"ares-reflection-{reflection_id[:8]}")
+    def _track_scope_task(self, scope_key: str, task: asyncio.Task[None]) -> asyncio.Task[None]:
         self._tasks.add(task)
         self._scope_tasks[scope_key] = task
 
-        def done(completed: asyncio.Task) -> None:
+        def done(completed: asyncio.Task[None]) -> None:
             self._tasks.discard(completed)
             if self._scope_tasks.get(scope_key) is completed:
                 self._scope_tasks.pop(scope_key, None)
@@ -717,18 +797,67 @@ class ReflectionService:
                 pass
 
         task.add_done_callback(done)
+        return task
+
+    def _ensure_scope_worker(self, scope_key: str) -> asyncio.Task[None] | None:
+        """Ensure one background worker is responsible for this session queue."""
+        active = self._scope_tasks.get(scope_key)
+        if active is not None and not active.done():
+            return active
+        # This service is only driven from async request paths.  Retaining the
+        # existing ``create_task`` behavior keeps direct synchronous use of
+        # ``enqueue_turn`` explicitly unsupported instead of silently losing a
+        # persisted job in an event-loop-less caller.
+        task = asyncio.create_task(
+            self._run_scope_worker(scope_key), name=f"ares-reflection-scope-{scope_key[:32]}"
+        )
+        return self._track_scope_task(scope_key, task)
+
+    def _resume_pending_workers(self) -> None:
+        """Kick workers for rows recovered from a prior process or retry."""
+        for scope_key in self.store.pending_scopes():
+            self._ensure_scope_worker(scope_key)
+
+    def enqueue_turn(self, *, scope: str | None, user_text: str, assistant_text: str) -> str | None:
+        if not bool(getattr(self.config, "enabled", True)) or not user_text.strip():
+            return None
+        scope_key = str(scope or "global")
+        reflection_id = self.store.enqueue(scope_key, user_text, assistant_text)
+        self._ensure_scope_worker(scope_key)
         return reflection_id
 
-    async def before_turn(self, scope: str | None) -> None:
+    async def before_turn(
+        self,
+        scope: str | None,
+        *,
+        synchronize: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        """Kick durable reflection work without putting it on the chat path.
+
+        ``synchronize`` is an opt-in, bounded barrier for callers serving an
+        explicit memory/profile/goal inspection.  ``shield`` is essential:
+        timing out the foreground request must never cancel the persisted
+        reflection task that owns the queued state transition.
+        """
         scope_key = str(scope or "global")
-        active = self._scope_tasks.get(scope_key)
-        if active is not None:
-            try:
-                await active
-            except Exception:
-                pass
-        for job in self.store.pending(scope=scope_key, limit=3):
-            await self._process(str(job["reflection_id"]))
+        self._resume_pending_workers()
+        active = self._ensure_scope_worker(scope_key)
+        if not synchronize or active is None:
+            return
+        if timeout_seconds is None:
+            timeout_seconds = 0.25
+        timeout = max(0.0, min(float(timeout_seconds), 5.0))
+        if timeout <= 0:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(active), timeout=timeout)
+        except asyncio.TimeoutError:
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
 
     async def close(self) -> None:
         if self._tasks:
