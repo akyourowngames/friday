@@ -136,8 +136,13 @@ _VISION_MUTATION_RE = re.compile(
     re.IGNORECASE,
 )
 _VISION_OBSERVATION_RE = re.compile(
-    r"\b(?:look\s+at|observe|watch|monitor|compare|verify|read\s+(?:the\s+)?(?:error|text))\b"
-    r".{0,160}\b(?:desk|camera|webcam|screen|image|photo|object|cup|charger|components?|setup|download|error)\b|"
+    # A direct request to read/inspect a user's screen or camera is a local
+    # Vision operation, not a generic read-only request or desktop-control
+    # action.  Keep the visual target requirement so ordinary file/text reads
+    # retain their read-only classification.
+    r"\b(?:look(?:\s+at)?|observe|see|scan|analy[sz]e|describe|read|ocr|capture|inspect|"
+    r"watch|monitor|compare|verify|check)\b.{0,160}\b(?:desk|camera|webcam|screen|display|monitor|"
+    r"image|photo|picture|object|cup|charger|components?|setup|download|error|visible\s+text)\b|"
     r"\b(?:verify|check)\b.{0,160}\b(?:connected|components?|physical|setup)\b|"
     r"\bremember\s+where\b.{0,160}\b(?:placed|put|left|charger|object|cup|desk)\b",
     re.IGNORECASE,
@@ -414,12 +419,16 @@ def classify_turn_intent(text: str, *, has_confirmation_grants: bool = False) ->
         return TurnIntent.DELEGATION
     if is_browser_action_request(value) or is_desktop_action_request(value):
         return TurnIntent.BROWSER_INTERACTION
-    if _EXTERNAL_ACTION_RE.search(value):
-        return TurnIntent.EXTERNAL_ACTION
+    # Vision requests must take precedence over broad communication keywords
+    # such as the noun "text".  Otherwise "read visible text on my screen"
+    # is wrongly classified as an external SMS action and Vision tools are not
+    # offered to the model.
     if _VISION_MUTATION_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
     if _VISION_OBSERVATION_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
+    if _EXTERNAL_ACTION_RE.search(value):
+        return TurnIntent.EXTERNAL_ACTION
     if _LOCAL_MUTATION_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
     if _SPECIFIC_TASK_CONTINUE_RE.search(value):

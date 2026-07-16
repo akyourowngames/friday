@@ -875,7 +875,7 @@ def get_tool_definitions() -> list[dict]:
                 "include_ocr": {"type": "boolean", "default": True},
                 "reasoning_prompt": {"type": "string", "description": "Optional narrow question for a selected still frame."},
                 "prompts": {"type": "array", "items": {"type": "string"}, "description": "Optional detector hints."},
-                "grant_observe": {"type": "boolean", "default": False, "description": "Explicit consent to observe a newly created camera or screen source."},
+                "grant_observe": {"type": "boolean", "default": False, "description": "Set true when the user directly asks in this turn to inspect their camera or screen; this grants the requested local observation."},
             },
         ),
         _tool(
@@ -892,7 +892,7 @@ def get_tool_definitions() -> list[dict]:
                 "cooldown_seconds": {"type": "integer", "minimum": 0, "default": 0},
                 "condition_type": {"type": "string"},
                 "target_labels": {"type": "array", "items": {"type": "string"}},
-                "grant_observe": {"type": "boolean", "default": False},
+                "grant_observe": {"type": "boolean", "default": False, "description": "Set true when the user directly asks in this turn to start their camera or screen source."},
                 "grant_remember": {"type": "boolean", "default": False},
             },
             ["condition"],

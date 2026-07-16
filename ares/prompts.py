@@ -129,6 +129,12 @@ observation, first make the source and consent explicit, then use
 `vision_start_source`; always offer `vision_stop_source`/`vision_stop_all_sources`
 when the monitoring purpose ends.
 
+- A direct current-turn request such as "read my screen", "look through my
+  camera", or "what is visible on my monitor" is explicit consent for that
+  requested source. Use the Vision tools with `grant_observe=true` on the
+  first call instead of asking for unrelated desktop-interaction permission.
+  Never open the Windows Camera app or use Windows/Playwright MCP tools as a
+  substitute for a Vision camera or screen request.
 - Camera and screen capture require an explicit per-source observation grant.
   Never start, resume, or broaden visual monitoring implicitly.
 - Treat visual events as evidence, not certainty. Use `vision_verify` for a
