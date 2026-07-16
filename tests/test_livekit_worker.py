@@ -69,7 +69,6 @@ class TestWhisperSTT:
 
     def test_recognize_with_buffer_list(self):
         from livekit import rtc
-        from livekit.agents import stt as livekit_stt
 
         from ares.telephony.livekit_plugins import WhisperSTT
 

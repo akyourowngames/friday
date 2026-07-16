@@ -282,8 +282,8 @@ async def test_explicit_separate_researchers_run_real_native_plan_before_synthes
     answer = "".join([token async for token in agent.run_stream(request, [])])
 
     assert answer.startswith("Recommendation based on the verified run.")
-    assert "Agent status: 4 specialists" in answer
-    assert "run succeeded" in answer
+    assert "Agent status:" not in answer
+    assert "Verified native run" not in answer
     assert "Execution waves" not in answer
     assert "ma_test" not in answer
     assert "https://example.com/researcher_1" in answer
@@ -324,7 +324,8 @@ async def test_telegram_style_with_multiple_agents_uses_native_runtime(
     tasks, _kwargs = runtime.delegations[0]
     assert len(tasks) == 2
     assert all(task.agent == "researcher" for task in tasks)
-    assert "Agent status: 2 specialists" in answer
+    assert answer.startswith("Research summary from the specialist evidence.")
+    assert "Agent status:" not in answer
     assert "request_id" not in answer
     assert "Execution waves" not in answer
     await agent.close()
@@ -338,6 +339,124 @@ def test_execution_guard_removes_unverified_tool_count_claims() -> None:
     assert removed
     assert "tool calls" not in cleaned.casefold()
     assert cleaned == "Research timed out.\nPlease try again."
+
+
+@pytest.mark.asyncio
+async def test_researcher_stops_tools_and_returns_as_soon_as_evidence_exists(
+    tmp_path, fake_embedding_provider
+):
+    agent = _agent(tmp_path, fake_embedding_provider, enabled=False)
+    agent.delegation_depth = 1
+    agent.specialist_role = "researcher"
+    advertised: list[list[str]] = []
+
+    async def execute(name, arguments):
+        assert name == "web_search"
+        assert arguments == {"query": "corruption evidence"}
+        return (
+            '{"results": ['
+            '{"url": "https://example.com/source-1", "snippet": "evidence one"},'
+            '{"url": "https://example.com/source-2", "snippet": "evidence two"}'
+            ']}'
+        )
+
+    calls = 0
+
+    async def stream(messages, tools=None):
+        nonlocal calls
+        calls += 1
+        advertised.append([item["function"]["name"] for item in tools or []])
+        if calls == 1:
+            yield {"type": "tool_call", "index": 0, "id": "search", "name": "web_search"}
+            yield {
+                "type": "tool_call_delta", "index": 0,
+                "arguments": json.dumps({"query": "corruption evidence"}),
+            }
+        else:
+            assert tools == []
+            assert any(
+                "Stop calling tools now" in str(message.get("content") or "")
+                for message in messages
+            )
+            yield {"type": "content", "text": '{"summary":"enough evidence","claims":[],"disagreements":[],"caveats":[]}' }
+        yield {"type": "done"}
+
+    agent.tool_executor.execute_async = execute
+    agent.llm.chat_stream = stream
+    answer = "".join([
+        token async for token in agent.run_stream("research corruption", [])
+    ])
+
+    assert "web_search" in advertised[0]
+    assert advertised[1] == []
+    assert "enough evidence" in answer
+    assert calls == 2
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_all_timed_out_specialists_receive_natural_root_synthesis(
+    tmp_path, fake_embedding_provider
+):
+    runtime = _Runtime()
+
+    async def timed_out_delegate(tasks, **kwargs):
+        tasks = tuple(tasks)
+        runtime.delegations.append((tasks, kwargs))
+        children = tuple(
+            ChildRunManifest(
+                run_id=f"child_{task.task_id}", task_id=task.task_id, role=task.agent,
+                session_id=f"child:{task.task_id}", parent_session_id="conversation-7",
+                parent_run_id="ma_timeout", root_run_id="ma_timeout", status="timed_out",
+            )
+            for task in tasks
+        )
+        results = tuple(
+            AgentResult(
+                task.task_id, task.agent, AgentRunStatus.TIMED_OUT,
+                error="specialist exceeded its deadline", run_id=f"child_{task.task_id}",
+                root_run_id="ma_timeout", parent_run_id="ma_timeout",
+            )
+            for task in tasks
+        )
+        manifest = AgentExecutionManifest(
+            root_run_id="ma_timeout", session_id="conversation-7",
+            request_id=str(kwargs.get("request_id") or ""), child_runs=children,
+            execution_waves=(tuple(task.task_id for task in tasks),),
+            started_at="2026-07-15T00:00:00+00:00",
+            completed_at="2026-07-15T00:05:00+00:00", status="timed_out",
+            duration_seconds=300.0,
+        )
+        return AgentTeamResult(
+            results, root_run_id="ma_timeout", execution_waves=manifest.execution_waves,
+            manifest=manifest,
+        )
+
+    runtime.delegate = timed_out_delegate  # type: ignore[method-assign]
+    agent = _agent(tmp_path, fake_embedding_provider, runtime=runtime)
+
+    async def stream(messages, tools=None):
+        assert tools == []
+        evidence = "\n".join(str(message.get("content") or "") for message in messages)
+        assert '"status": "timed_out"' in evidence
+        yield {
+            "type": "content",
+            "text": "The research team hit its deadline before returning usable evidence. Please retry.",
+        }
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = stream
+    answer = "".join([
+        token async for token in agent.run_stream(
+            "launch multiple agents to research corruption", []
+        )
+    ])
+
+    assert answer.startswith("The research team hit its deadline")
+    assert "Verified native run" not in answer
+    assert "Execution waves" not in answer
+    assert "ma_timeout" not in answer
+    await agent.close()
 
 
 @pytest.mark.asyncio
@@ -442,9 +561,9 @@ async def test_agent_meta_question_uses_latest_scoped_manifest_and_no_browser(
         )
     ])
     assert captured == []  # meta truth is rendered directly, not delegated to a model
-    assert "Verified native run ma_latest: 2 agents (researcher, reviewer)" in answer
-    assert 'Execution waves: [["a", "b"]]' in answer
-    assert "root-owned native MultiAgentRuntime" in answer
+    assert answer == "Agent status: 2 specialists (researcher, reviewer); run succeeded."
+    assert "Execution waves" not in answer
+    assert "ma_latest" not in answer
     await agent.close()
 
 

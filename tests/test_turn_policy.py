@@ -36,6 +36,9 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent(
         "Research on corruption in the world with multiple agents"
     ) is TurnIntent.DELEGATION
+    assert classify_turn_intent(
+        "hey can you launch multiple agents to research on corruption"
+    ) is TurnIntent.DELEGATION
 
 
 def test_conversation_turn_hard_denies_stale_action_calls() -> None:

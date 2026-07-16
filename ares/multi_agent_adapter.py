@@ -22,7 +22,6 @@ from ares.multi_agent import (
     AgentProgressEvent,
     AgentSpec,
     AgentTask,
-    ContextMode,
     RetryableAgentError,
 )
 from ares.multi_agent_policy import (
@@ -102,6 +101,9 @@ class AresAgentAdapter:
             research_contract = """
 
 Research output contract (mandatory):
+- The timeout is only a maximum safety deadline, never a target. As soon as you
+  have usable source evidence, stop searching and return the final JSON.
+- Do not make extra tool calls merely to consume the remaining time or iteration budget.
 - Return one JSON object and no prose outside it.
 - Include `summary`, `claims`, `disagreements`, and `caveats`.
 - Every claim must contain: claim, source_urls, evidence, confidence (0..1), caveats,
@@ -238,6 +240,7 @@ Assignment:
             root_run_id=root_run_id,
             child_run_id=run_id,
             request_id=request_id,
+            specialist_role=spec.name,
         )
         # Agent integration may be supplied by an older embedder.  Pass every
         # hardening argument when supported, while retaining compatibility for

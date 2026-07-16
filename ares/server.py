@@ -2437,7 +2437,7 @@ class AresServer:
         except asyncio.TimeoutError:
             await self._send_error(websocket, f"Terminal command timed out after {timeout}s")
         finally:
-            output = self._terminal_output_buffer.pop(cmd_id, "")
+            self._terminal_output_buffer.pop(cmd_id, "")
             self._terminal_command_events.pop(cmd_id, None)
 
     async def _terminal_exec_via_websocket(self, command: str, wait: bool = True, timeout: int = 30) -> str:

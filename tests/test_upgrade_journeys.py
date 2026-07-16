@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import http.server
 import json
-import os
 import sys
 import threading
 from pathlib import Path

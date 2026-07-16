@@ -1,7 +1,5 @@
 """Tests for ares.code_execution module."""
 
-import sys
-import pytest
 from ares.tools.code_execution import run_code
 
 

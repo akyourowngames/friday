@@ -27,7 +27,6 @@ from ares.multi_agent import (
     AgentTask,
     AgentTeamResult,
     ChildRunManifest,
-    ContextMode,
     MultiAgentOrchestrator,
     default_agent_specs,
     mutable_metadata,
@@ -94,7 +93,13 @@ class MultiAgentRuntime:
             if override is not None and not override.enabled:
                 continue
             values: dict[str, Any] = {
-                "timeout_seconds": min(config.default_timeout_seconds, config.max_timeout_seconds),
+                # Research and build roles intentionally need more time than
+                # lightweight planning. The shared default is a floor; the
+                # configured maximum remains the administrator's hard ceiling.
+                "timeout_seconds": min(
+                    max(config.default_timeout_seconds, spec.timeout_seconds),
+                    config.max_timeout_seconds,
+                ),
                 "retry_limit": config.max_retries_per_task,
                 "retry_backoff_seconds": config.retry_backoff_seconds,
                 "fallback_models": tuple(config.fallback_models_by_role.get(spec.name) or ()),

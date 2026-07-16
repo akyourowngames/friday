@@ -1,6 +1,5 @@
 """Ares — A personal AI assistant that lives in your terminal."""
 
-import os
 from pathlib import Path
 
 __version__ = "0.1.0"

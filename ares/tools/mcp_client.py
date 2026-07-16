@@ -693,7 +693,6 @@ class MCPClientManager:
             server_name == "windows" and mcp_tool.casefold() == "snapshot"
         )
         max_retries = 1 if server_name == "playwright" or can_retry_windows_snapshot else 0
-        last_error = None
 
         for attempt in range(max_retries + 1):
             try:

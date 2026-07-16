@@ -496,7 +496,21 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
 
 
 def _intent_allows(effect: ToolEffect, intent: TurnIntent) -> bool:
-    return True
+    if intent is TurnIntent.CONVERSATION:
+        return False
+    if intent is TurnIntent.CONFIRMATION_RESPONSE:
+        return False  # an exact grant is required and checked first
+    if effect is ToolEffect.READ_ONLY:
+        return True
+    if effect is ToolEffect.DELEGATION:
+        return intent is TurnIntent.DELEGATION
+    if effect in {ToolEffect.WORKFLOW_MUTATION, ToolEffect.LOCAL_MUTATION}:
+        return intent is TurnIntent.LOCAL_MUTATION
+    if effect is ToolEffect.BROWSER_INTERACTION:
+        return intent is TurnIntent.BROWSER_INTERACTION
+    if effect is ToolEffect.EXTERNAL_ACTION:
+        return intent is TurnIntent.EXTERNAL_ACTION
+    return False
 
 
 def authorize_turn_tool(

@@ -153,8 +153,7 @@ _PLURAL_ROLE_REQUEST_RE = re.compile(
     re.I,
 )
 _MULTIPLE_AGENT_REQUEST_RE = re.compile(
-    r"\b(?:with|using)\s+(?:multiple|several)\s+"
-    r"(?:agents?|researchers?|specialists?)\b",
+    r"\b(?:multiple|several)\s+(?:agents?|researchers?|specialists?)\b",
     re.I,
 )
 _DELEGATION_FILLER = frozenset({

@@ -73,7 +73,6 @@ class SarvamTranscriber:
         return asyncio.run(self._transcribe_samples_async(samples, sample_rate))
 
     async def _transcribe_samples_async(self, samples: np.ndarray, sample_rate: int) -> str:
-        import httpx
         import soundfile as sf
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:

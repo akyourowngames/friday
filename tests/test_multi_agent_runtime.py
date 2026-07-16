@@ -192,6 +192,18 @@ def test_role_timeout_override_is_capped_by_global_maximum(tmp_path: Path) -> No
     runtime.store.close()  # type: ignore[union-attr]
 
 
+def test_researcher_uses_role_timeout_and_stable_native_fetch_tools(tmp_path: Path) -> None:
+    runtime = MultiAgentRuntime(FakeRoot(tmp_path, default_timeout_seconds=120))
+    researcher = next(item for item in runtime.list_agents() if item["name"] == "researcher")
+    spec = runtime.registry.get("researcher")
+
+    assert researcher["timeout_seconds"] == 300
+    assert spec is not None
+    assert {"web_search", "fetch_url"}.issubset(spec.allowed_tools)
+    assert "mcp__fetch__*" not in spec.allowed_tools
+    runtime.store.close()  # type: ignore[union-attr]
+
+
 @pytest.mark.asyncio
 async def test_runtime_max_tasks_depth_and_cancellation(tmp_path: Path) -> None:
     runtime = MultiAgentRuntime(FakeRoot(tmp_path, max_tasks_per_run=1, max_depth=1))

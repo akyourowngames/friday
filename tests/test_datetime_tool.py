@@ -1,8 +1,7 @@
 """Tests for the get_current_datetime tool."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 from ares.tools.datetime_tool import get_current_datetime_result
 

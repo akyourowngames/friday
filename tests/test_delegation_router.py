@@ -76,6 +76,21 @@ def test_with_multiple_agents_defaults_to_two_real_specialists() -> None:
     assert all("corruption" in task.prompt.casefold() for task in decision.plan)
 
 
+def test_launch_multiple_agents_defaults_to_two_real_specialists() -> None:
+    decision = DelegationRouter().route(
+        build_turn_execution_context(
+            "hey can you launch multiple agents to research on corruption",
+            request_id="req-cli-corruption",
+        ),
+        availability(),
+    )
+
+    assert decision.mode is DelegationMode.EXPLICIT
+    assert decision.should_delegate
+    assert len(decision.plan) == 2
+    assert all(task.agent == "researcher" for task in decision.plan)
+
+
 @pytest.mark.parametrize(
     "message",
     (

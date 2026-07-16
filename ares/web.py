@@ -1,5 +1,7 @@
 """Backward-compatibility shim — moved to ares.tools.web."""
 
+# ruff: noqa: F401
+
 from ares.tools.web import *  # noqa: F401,F403
 from ares.tools.web import (
     fetch_url_tool,
