@@ -1,10 +1,13 @@
 """Tests for streaming-first tool detection."""
 
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from ares.agent import Agent
+from ares.latency import LATENCY_EVENTS, LATENCY_METRICS
 from ares.llm import LLMClient
 from ares.memory import MemoryStore
 from ares.models import AppConfig
@@ -42,6 +45,20 @@ class FakeHttpClient:
 
     def stream(self, *_args, **_kwargs):
         return FakeStreamResponse(self.lines)
+
+
+class FakeReflectionService:
+    def __init__(self):
+        self.llm = None
+        self.reflector = SimpleNamespace(llm=None)
+        self.before_turn_scopes = []
+        self.enqueued = []
+
+    async def before_turn(self, scope):
+        self.before_turn_scopes.append(scope)
+
+    def enqueue_turn(self, **kwargs):
+        self.enqueued.append(kwargs)
 
 
 @pytest.mark.asyncio
@@ -91,6 +108,121 @@ async def test_agent_run_stream_no_tools_uses_streaming_only(tmp_path, fake_embe
     tokens = [token async for token in agent.run_stream("Hi", [])]
 
     assert "".join(tokens) == "Hello!"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_stream_emits_before_provider_finishes_and_records_latency(
+    tmp_path, fake_embedding_provider
+):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    agent = Agent(
+        memory_store=mem_store,
+        api_key="test-key",
+        session_id="timing-session",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
+    first_visible = asyncio.Event()
+    release_provider = asyncio.Event()
+    provider_finished = asyncio.Event()
+    received: list[str] = []
+
+    async def fake_chat_stream(_messages, tools=None):
+        yield {"type": "content", "text": "Hello "}
+        await release_provider.wait()
+        yield {"type": "content", "text": "world!"}
+        provider_finished.set()
+        yield {"type": "done"}
+
+    async def consume():
+        async for token in agent.run_stream("Say hello", [], request_id="stream-timing-1"):
+            received.append(token)
+            first_visible.set()
+
+    agent.llm.chat_stream = fake_chat_stream
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(first_visible.wait(), timeout=0.5)
+
+    # The first provider delta is held only for the small tool-decision grace;
+    # a paused provider must not make callers wait for stream completion.
+    assert received == ["Hello "]
+    assert not provider_finished.is_set()
+
+    await asyncio.sleep(0.01)
+    release_provider.set()
+    await task
+
+    assert "".join(received) == "Hello world!"
+    record = agent.recent_latency_metrics[-1]
+    assert record["request_id"] == "stream-timing-1"
+    assert record["session_id"] == "timing-session"
+    assert set(record["events"]) == set(LATENCY_EVENTS)
+    assert set(record["metrics"]) == set(LATENCY_METRICS)
+    assert all(value >= 0 for value in record["events"].values())
+    assert all(value >= 0 for value in record["metrics"].values())
+    assert record["events"]["provider_first_token_received"] <= record["events"]["first_token_sent"]
+    assert record["events"]["first_token_sent"] < record["events"]["response_finished"]
+
+
+@pytest.mark.asyncio
+async def test_agent_run_stream_normalizes_proxy_snapshots_and_preserves_final_state(
+    tmp_path, fake_embedding_provider
+):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    agent = Agent(
+        memory_store=mem_store,
+        api_key="test-key",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
+    reflection = FakeReflectionService()
+    agent.reflection_service = reflection
+    agent._tools_for_turn = lambda *_args, **_kwargs: []
+
+    async def fake_chat_stream(_messages, tools=None):
+        assert tools == []
+        yield {"type": "content", "text": "Hel"}
+        yield {"type": "content", "text": "Hello"}
+        yield {"type": "content", "text": "Hello!"}
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = fake_chat_stream
+    tokens = [token async for token in agent.run_stream("Say hello", [])]
+
+    assert tokens == ["Hel", "lo", "!"]
+    assert "".join(tokens) == "Hello!"
+    assert agent.last_messages[-1] == {"role": "assistant", "content": "Hello!"}
+    assert reflection.enqueued == [{
+        "scope": None,
+        "user_text": "Say hello",
+        "assistant_text": "Hello!",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_agent_run_stream_buffers_guard_sensitive_turns_without_duplicate_final_output(
+    tmp_path, fake_embedding_provider, monkeypatch
+):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    agent = Agent(
+        memory_store=mem_store,
+        api_key="test-key",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
+    agent._tools_for_turn = lambda *_args, **_kwargs: []
+    monkeypatch.setattr(agent, "_last_execution_record", lambda _context: {"kind": "ordinary"})
+    monkeypatch.setattr(agent, "_guard_final_answer", lambda *_args: "Verified final answer.")
+
+    async def fake_chat_stream(_messages, tools=None):
+        yield {"type": "content", "text": "Raw "}
+        yield {"type": "content", "text": "model answer."}
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = fake_chat_stream
+    tokens = [token async for token in agent.run_stream("Say hello", [])]
+
+    assert tokens == ["Verified final answer."]
+    assert agent.last_messages[-1] == {
+        "role": "assistant", "content": "Verified final answer.",
+    }
 
 
 @pytest.mark.asyncio
