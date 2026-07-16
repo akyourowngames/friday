@@ -30,6 +30,7 @@ class DelegationFailureReason(str, Enum):
     PROVIDER_FAILURE = "provider_failure"
     TIMEOUT = "timeout"
     AUTHORIZATION_FAILURE = "authorization_failure"
+    MISSING_TASK = "missing_task"
 
 
 class DelegationTaskLimitError(ValueError):
@@ -48,6 +49,7 @@ _FAILURE_MESSAGES = {
     DelegationFailureReason.PROVIDER_FAILURE: "The model provider failed during native delegation; the run did not complete successfully.",
     DelegationFailureReason.TIMEOUT: "Native multi-agent execution timed out; unfinished agents did not report success.",
     DelegationFailureReason.AUTHORIZATION_FAILURE: "Native delegation was not authorized for this request, so no agents ran.",
+    DelegationFailureReason.MISSING_TASK: "Tell me what you want the agents to do; no agents were launched.",
 }
 
 
@@ -145,6 +147,30 @@ _AUTO_REVIEW_RE = re.compile(
     re.I,
 )
 _SYNTHESIS_RE = re.compile(r"\b(?:synthesi[sz]e|synthesi[sz]er|combine\s+the\s+findings)\b", re.I)
+_PLURAL_ROLE_REQUEST_RE = re.compile(
+    r"\b(?:launch|run|ask|have|use)\s+(?:the\s+)?"
+    r"(?:agents|researchers|specialists|planners|analysts|builders|reviewers|synthesi[sz]ers)\b",
+    re.I,
+)
+_MULTIPLE_AGENT_REQUEST_RE = re.compile(
+    r"\b(?:multiple|several)\s+(?:agents?|researchers?|specialists?)\b",
+    re.I,
+)
+_DELEGATION_FILLER = frozenset({
+    "a", "agent", "agents", "and", "ask", "can", "do", "for", "have", "hey", "in",
+    "launch", "lauchn", "mode", "multi", "no", "ok", "okay", "okiee", "oh", "on", "please",
+    "researcher", "researchers", "run", "specialist", "specialists", "the", "to", "use", "you",
+    "fluff", "multiple", "several", "parallel", "planner", "planners", "analyst", "analysts",
+    "builder", "builders", "reviewer", "reviewers", "synthesizer", "synthesizers",
+})
+
+
+def _has_substantive_assignment(text: str) -> bool:
+    """Distinguish a task from delegation-control chatter."""
+    normalized = re.sub(r"multi[-\s]?agent(?:\s+mode)?", " ", text.casefold())
+    words = re.findall(r"[a-z0-9]+", normalized)
+    meaningful = [word for word in words if word not in _DELEGATION_FILLER and not word.isdigit()]
+    return len(meaningful) >= 2
 
 
 def _requested_roles(text: str) -> tuple[str, ...]:
@@ -226,8 +252,16 @@ class DelegationRouter:
             )
 
         mode = DelegationMode.EXPLICIT if explicit else DelegationMode.AUTO
+        if explicit and not _has_substantive_assignment(text):
+            return self._failure(
+                mode, DelegationFailureReason.MISSING_TASK, False, _requested_roles(text)
+            )
         roles = _requested_roles(text)
         requested_count = _requested_count(text)
+        if requested_count is None and (
+            _PLURAL_ROLE_REQUEST_RE.search(text) or _MULTIPLE_AGENT_REQUEST_RE.search(text)
+        ):
+            requested_count = 2
         parallel = bool(
             requested_count and requested_count > 1
             or re.search(r"\b(?:parallel|multiple|separate|independent|several)\b", text, re.I)

@@ -1,5 +1,7 @@
 """Backward-compatibility shim — moved to ares.tools.renders."""
 
+# ruff: noqa: F401
+
 from ares.tools.renders import *  # noqa: F401,F403
 from ares.tools.renders import (
     get_renderer,

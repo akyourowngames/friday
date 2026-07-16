@@ -41,7 +41,6 @@ from ares.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.config import _ensure_mcp_defaults, load_config, save_config
-from ares.prompts import WELCOME_MESSAGE, FIRST_RUN_MESSAGE
 from ares.llm import FREE_MODELS
 from ares.multi_agent_display import ACTIVE_STATUSES, elapsed_label, one_line, summarize_runs
 from ares.skills import SkillManager

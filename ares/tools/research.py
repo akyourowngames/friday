@@ -95,7 +95,6 @@ class ResearchWorkspace:
         limit = _bounded_bytes(max_bytes)
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
         current_url = requested_url
-        response_headers: Any = {}
         content_type = "application/octet-stream"
         final_url = current_url
         temp_path: Path | None = None
@@ -119,7 +118,6 @@ class ResearchWorkspace:
                         declared = response.headers.get("content-length")
                         if declared and int(declared) > limit:
                             raise ValueError(f"Remote file is larger than the {limit // (1024 * 1024)} MB download limit.")
-                        response_headers = response.headers
                         content_type = str(response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0].strip().lower()
                         final_url = str(response.url)
                         proposed = _safe_filename(filename, "") if filename else _filename_from_response(final_url, response.headers)

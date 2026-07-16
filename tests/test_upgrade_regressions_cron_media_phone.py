@@ -21,11 +21,11 @@ from ares.tools.image_edit import convert_image, crop_image, resize_image
 def test_cron_revisions_leases_and_tracked_manual_lifecycle(tmp_path):
     store = CronStore(tmp_path / "ares")
     job = store.create_job("Audit", "do work", "* * * * *")
-    updated = store.update_job(job["id"], prompt="updated", expected_revision=job["revision"])
+    store.update_job(job["id"], prompt="updated", expected_revision=job["revision"])
     with pytest.raises(CronConflictError):
         store.update_job(job["id"], prompt="stale", expected_revision=job["revision"])
 
-    claimed = store.claim_job(job["id"], lease_seconds=1)
+    store.claim_job(job["id"], lease_seconds=1)
     store.update_job(job["id"], lease_expires_at="2000-01-01T00:00:00Z")
     recovered = store.get_job(job["id"])
     assert recovered["state"] == "failed"

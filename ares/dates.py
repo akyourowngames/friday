@@ -1,5 +1,7 @@
 """Backward-compatibility shim — moved to ares.tools.dates."""
 
+# ruff: noqa: F401
+
 from ares.tools.dates import (
     local_timezone_name,
     now_local,

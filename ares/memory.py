@@ -11,7 +11,6 @@ import sqlite_vec
 from ares.config import get_db_path, load_config
 from ares.embeddings import (
     DEFAULT_EMBEDDING_MODEL,
-    EMBEDDING_DIMS,
     EmbeddingProvider,
 )
 from ares.sqlite_utils import connect_sqlite

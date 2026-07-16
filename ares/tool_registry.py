@@ -206,13 +206,7 @@ class RootToolRegistry:
         *,
         delegation_decision: Any | None = None,
     ) -> list[dict[str, Any]]:
-        """Return schemas appropriate for this turn, preserving registry order.
-
-        Explicit and automatic delegation decisions deliberately receive no
-        workflow schemas.  Confirmation responses receive only the exact tools
-        named by their immutable grants.  Runtime authorization remains
-        mandatory even for a schema returned here.
-        """
+        """Return the narrow schema set appropriate for the current turn."""
         intent = self._intent_value(context)
         mode = self._decision_mode(delegation_decision)
         should_delegate = bool(getattr(delegation_decision, "should_delegate", False))
@@ -226,18 +220,13 @@ class RootToolRegistry:
 
         explicit_delegation = intent == "delegation" or mode == "explicit" or should_delegate
         agent_meta = mode == "meta" or bool(targets & {"agent", "agents", "agent_runs"})
-
         if explicit_delegation:
-            allowed_names = set(DELEGATION_TOOL_NAMES) | set(CORE_TOOL_NAMES) | grant_names
-            return self._schemas_named(allowed_names)
-
+            return self._schemas_named(
+                set(DELEGATION_TOOL_NAMES) | set(CORE_TOOL_NAMES) | grant_names
+            )
         if agent_meta:
             return self._schemas_named(set(AGENT_INTROSPECTION_TOOL_NAMES) | grant_names)
-
-        if intent == "conversation":
-            # Greetings, thanks, and casual acknowledgements do not need tools.
-            return self._schemas_named(grant_names)
-        if intent == "confirmation_response":
+        if intent in {"conversation", "confirmation_response"}:
             return self._schemas_named(grant_names)
 
         if "prior_task" in targets and intent == "local_mutation":
@@ -300,10 +289,7 @@ class RootToolRegistry:
         selected: list[dict[str, Any]] = []
         for tool in self._tools.values():
             if tool.name in allowed_names or tool.category in allowed_categories:
-                if (
-                    tool.category is ToolCategory.CORE_CONVERSATION
-                    and tool.name not in allowed_names
-                ):
+                if tool.category is ToolCategory.CORE_CONVERSATION and tool.name not in allowed_names:
                     continue
                 if (
                     intent == "browser_interaction"

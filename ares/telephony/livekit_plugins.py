@@ -10,7 +10,6 @@ from typing import Any
 
 import numpy as np
 from livekit import rtc
-from livekit.agents import llm as livekit_llm
 from livekit.agents import stt as livekit_stt
 from livekit.agents import tts as livekit_tts
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS

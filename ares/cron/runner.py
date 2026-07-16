@@ -7,7 +7,6 @@ import re
 import traceback
 import uuid
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any

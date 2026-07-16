@@ -47,6 +47,9 @@ from ares.turn_policy import (
 _SESSION_UNSET = object()
 _TURN_UNSET = object()
 ToolProgressCallback = Callable[[str, str], Awaitable[None]]
+_RESEARCH_EVIDENCE_TOOLS = frozenset({
+    "web_search", "fetch_url", "extract_document", "read_file", "search_files",
+})
 
 
 class Agent:
@@ -82,6 +85,7 @@ class Agent:
         root_run_id: str = "",
         child_run_id: str = "",
         request_id: str = "",
+        specialist_role: str = "",
     ):
         self.memory_store = memory_store
         self.conversation_store = conversation_store
@@ -127,6 +131,7 @@ class Agent:
         self.root_run_id = str(root_run_id or "")
         self.child_run_id = str(child_run_id or "")
         self.request_id = str(request_id or "")
+        self.specialist_role = str(specialist_role or "").strip().casefold()
         self.is_cron_session = is_cron_session
         self.is_voice_session = is_voice_session
         self.refresh_tools()
@@ -214,6 +219,41 @@ class Agent:
 
             self.multi_agent_runtime = MultiAgentRuntime(self)
             self.refresh_tools()
+
+    def _research_evidence_ready(self) -> bool:
+        """Return true once a researcher has usable evidence to summarize.
+
+        The specialist deadline is a safety ceiling, not a target duration.
+        Once a read-only research tool returns meaningful source material, the
+        next model turn is forced to synthesize instead of spending the rest of
+        its budget on redundant searches.
+        """
+        if self.specialist_role != "researcher":
+            return False
+        for record in self.tool_execution_records:
+            if str(record.get("tool") or "") not in _RESEARCH_EVIDENCE_TOOLS:
+                continue
+            result = str(record.get("result") or "").strip()
+            if not result or result.casefold().startswith("error:"):
+                continue
+            if re.search(r"https?://", result, re.IGNORECASE) or len(result) >= 160:
+                return True
+        return False
+
+    def _finish_research_when_ready(
+        self, messages: list[dict], turn_tools: list[dict]
+    ) -> list[dict]:
+        if not turn_tools or not self._research_evidence_ready():
+            return turn_tools
+        messages.append({
+            "role": "system",
+            "content": (
+                "You have usable source evidence. Stop calling tools now and return the "
+                "requested final research JSON immediately. Use only the evidence already "
+                "collected, preserve source URLs and uncertainty, and do not wait for the deadline."
+            ),
+        })
+        return []
 
     def set_session_id(self, session_id: str | None) -> None:
         """Update local provenance scope when a long-lived surface switches chats."""
@@ -918,6 +958,8 @@ class Agent:
                                 owner_run_id=self.root_run_id or self.child_run_id,
                                 reason="timeout",
                             )
+                            if not hasattr(self, "unresponsive_tool_records"):
+                                self.unresponsive_tool_records = []
                             self.unresponsive_tool_records.append(record)
                         return tool_name.startswith("mcp__"), (
                             f"Error: {tool_name} timed out after {timeout_seconds:g}s; "
@@ -959,8 +1001,12 @@ class Agent:
                                 owner_run_id=self.root_run_id or self.child_run_id,
                                 reason="cancelled_with_unresponsive_tool",
                             )
+                            if not hasattr(self, "unresponsive_tool_records"):
+                                self.unresponsive_tool_records = []
                             self.unresponsive_tool_records.append(record)
                         raise
+            if not hasattr(self, "tool_execution_records"):
+                self.tool_execution_records = []
             self.tool_execution_records.append({"tool": tool_name, "result": str(result)[:50_000]})
             return index, external, str(result)
         except asyncio.CancelledError:
@@ -1220,7 +1266,7 @@ class Agent:
                 run = runtime.get_latest_run(session_id=context.session_id)
                 if run is not None:
                     record = {"kind": "native", "payload": run}
-            return decision, "", self._render_execution_record(record)
+            return decision, "", self._render_execution_summary(record)
 
         if not decision.should_delegate:
             if decision.mode is DelegationMode.EXPLICIT:
@@ -1255,8 +1301,6 @@ class Agent:
             "kind": "native", "agent_count": int(payload.get("agent_count") or len(team.results)),
             "status": team.status, "payload": payload,
         })
-        if decision.mode is DelegationMode.EXPLICIT and not any(result.ok for result in team.results):
-            return decision, "", self._render_execution_record(self._last_execution_record(context))
         return decision, self._bounded_agent_evidence(payload), None
 
     @staticmethod
@@ -1278,6 +1322,7 @@ class Agent:
         count = r"(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten)"
         claim = re.compile(
             rf"(?:\b{count}\s+(?:native\s+)?(?:agents?|researchers?|specialists?)\b|"
+            rf"\b{count}\s+(?:ordinary\s+)?tool\s+calls?\b|"
             r"\b(?:agent|researcher|builder|reviewer|specialist)s?\b.*"
             r"\b(?:ran|launched|spawned|used|wave|parallel|manifest|run\s+id)\b)",
             re.IGNORECASE,
@@ -1306,6 +1351,15 @@ class Agent:
             waves = record.get("execution_waves") or []
             details = f" Tools: {', '.join(tools)}." if tools else ""
             wave_text = f" Execution waves: {json.dumps(waves, ensure_ascii=False)}." if waves else ""
+            inspection_tools = {
+                "list_agents", "get_agent_run", "list_agent_runs", "get_latest_agent_run"
+            }
+            if tools and set(tools).issubset(inspection_tools):
+                return (
+                    "No new native agents were launched for this follow-up. "
+                    f"The root inspected the existing run with {count} session-scoped tool "
+                    f"call{'s' if count != 1 else ''}.{details}{wave_text}"
+                )
             return (
                 f"0 native agents ran for request {record.get('request_id') or 'unknown'}. "
                 f"The root executed {count} ordinary tool call{'s' if count != 1 else ''}; ordinary parallel tool calls are not agents."
@@ -1348,6 +1402,39 @@ class Agent:
             "They were launched by the root-owned native MultiAgentRuntime; ordinary parallel tool calls were not counted as agents."
         )
 
+    def _render_execution_summary(self, record: dict[str, Any] | None) -> str:
+        """Render runtime truth without leaking the internal audit manifest into chat."""
+        if not record:
+            return "Agent status: no agent run was recorded for that request."
+        kind = str(record.get("kind") or "")
+        if kind == "ordinary":
+            tools = [str(item) for item in record.get("tools") or []]
+            inspection_tools = {
+                "list_agents", "get_agent_run", "list_agent_runs", "get_latest_agent_run"
+            }
+            if tools and set(tools).issubset(inspection_tools):
+                return "Agent status: I inspected the existing run; I did not launch a new team for this follow-up."
+            return "Agent status: this request used regular tools, not specialist agents."
+        if kind == "delegation_failure":
+            reason = str(record.get("reason") or "the run could not be started")
+            return f"Agent status: no specialist completed the request — {reason}"
+
+        payload = self._native_record_payload(record)
+        manifest = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else payload
+        children = manifest.get("child_runs") or payload.get("children") or payload.get("results") or []
+        count = int(manifest.get("agent_count") or len(children))
+        status = str(manifest.get("status") or payload.get("status") or "unknown").replace("_", " ")
+        roles = [
+            str(item.get("role") or item.get("agent_role") or item.get("agent") or "specialist")
+            for item in children if isinstance(item, dict)
+        ]
+        role_text = ", ".join(roles)
+        role_suffix = f" ({role_text})" if role_text else ""
+        return (
+            f"Agent status: {count} specialist{'s' if count != 1 else ''}{role_suffix}; "
+            f"run {status}."
+        )
+
     def _guard_final_answer(
         self,
         context: TurnExecutionContext,
@@ -1360,13 +1447,14 @@ class Agent:
             payload = self._native_record_payload(record)
             evidence_text = json.dumps(payload, ensure_ascii=False, default=str)
             urls = tuple(dict.fromkeys(re.findall(r"https?://[^\s\"'<>\]]+", evidence_text)))
-            footer = self._render_execution_record(record)
+            footer = self._render_execution_summary(record) if removed or not cleaned else ""
             missing = [url.rstrip(".,;)") for url in urls if url.rstrip(".,;)") not in cleaned]
             if missing:
-                footer += "\n\nVerified sources:\n" + "\n".join(f"- {url}" for url in missing[:50])
+                sources = "Verified sources:\n" + "\n".join(f"- {url}" for url in missing[:50])
+                footer = "\n\n".join(part for part in (footer, sources) if part)
             return "\n\n".join(part for part in (cleaned, footer) if part).strip()
         if removed:
-            truth = self._render_execution_record(record) if record else "0 native agents ran for this request."
+            truth = self._render_execution_summary(record)
             return "\n\n".join(part for part in (cleaned, truth) if part).strip()
         return cleaned or str(content or "")
 
@@ -1474,6 +1562,7 @@ class Agent:
                 # Execute tools
                 tool_results = await self.process_tool_calls_async(response["tool_calls"])
                 messages.extend(self._tool_messages(tool_results))
+                turn_tools = self._finish_research_when_ready(messages, turn_tools)
 
                 # Let LLM process tool results and continue
                 continue
@@ -1694,6 +1783,7 @@ class Agent:
                 for tr in tool_results:
                     yield f"[tool:{tr['tool_name']}:{tr['content']}]"
                 messages.extend(self._tool_messages(tool_results))
+                turn_tools = self._finish_research_when_ready(messages, turn_tools)
 
                 continue
 

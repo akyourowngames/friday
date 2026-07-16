@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from ares.commitments import CommitmentStore
     from ares.conversations import ConversationStore
 
-from ares.config import CONFIG_PATH, load_config, save_config
+from ares.config import load_config, save_config
 from ares.tools.dates import now_local, now_local_iso
 from ares.actions import ActionLedger
 from ares.memory import MemoryStore

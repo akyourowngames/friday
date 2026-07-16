@@ -127,12 +127,12 @@ class TestConvertImage:
 
     def test_jpeg_to_png(self, test_jpg, tmp_path):
         output = str(tmp_path / "converted.png")
-        result = convert_image(test_jpg, format="png", output=output)
+        convert_image(test_jpg, format="png", output=output)
         assert os.path.exists(output)
 
     def test_rgba_to_jpeg(self, test_rgba, tmp_path):
         output = str(tmp_path / "converted.jpg")
-        result = convert_image(test_rgba, format="jpeg", output=output)
+        convert_image(test_rgba, format="jpeg", output=output)
         assert os.path.exists(output)
 
     def test_convert_no_output_overwrites(self, test_png):
@@ -145,7 +145,7 @@ class TestConvertImage:
 
     def test_convert_quality_parameter(self, test_jpg, tmp_path):
         output = str(tmp_path / "low_quality.jpg")
-        result = convert_image(test_jpg, format="jpeg", output=output, quality=10)
+        convert_image(test_jpg, format="jpeg", output=output, quality=10)
         assert os.path.exists(output)
         assert os.path.getsize(output) < os.path.getsize(test_jpg)
 
@@ -160,7 +160,7 @@ class TestCropImage:
 
     def test_crop_to_output(self, test_jpg, tmp_path):
         output = str(tmp_path / "cropped.jpg")
-        result = crop_image(test_jpg, left=0, top=0, right=100, bottom=100, output=output)
+        crop_image(test_jpg, left=0, top=0, right=100, bottom=100, output=output)
         assert os.path.exists(output)
 
     def test_crop_file_not_found(self):

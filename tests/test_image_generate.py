@@ -2,7 +2,6 @@
 
 import os
 import io
-import pytest
 from unittest.mock import patch, MagicMock
 from PIL import Image
 from ares.tools.image_generate import generate_image, IMAGES_DIR

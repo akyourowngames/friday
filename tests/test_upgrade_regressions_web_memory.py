@@ -4,9 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
-from pathlib import Path
 
 import httpx
 import pytest

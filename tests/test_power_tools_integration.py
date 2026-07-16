@@ -1,6 +1,5 @@
 """Integration tests for power tools through ToolExecutor."""
 
-import os
 import pytest
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.memory import MemoryStore

@@ -91,6 +91,11 @@ _EXPLICIT_DELEGATION_PATTERNS = (
     re.compile(r"\buse\s+(?:multiple\s+|several\s+|\d+\s+|two\s+|three\s+|four\s+)?agents?\b", re.I),
     re.compile(r"\buse\s+(?:the\s+)?multi[-\s]?agent(?:\s+mode)?\b", re.I),
     re.compile(r"\bwith\s+multi[-\s]?agent\b", re.I),
+    re.compile(
+        r"\bwith\s+(?:multiple|several|two|three|four|five|\d+)\s+"
+        r"(?:agents?|researchers?|specialists?)\b",
+        re.I,
+    ),
     re.compile(r"\bseparate\s+(?:researchers?|agents?|specialists?)\b", re.I),
     re.compile(r"\b(?:run|do)\s+.*\bin\s+parallel\s+with\s+agents?\b", re.I),
     re.compile(r"\bsupervisor\s+and\s+specialists?\b", re.I),
@@ -98,6 +103,11 @@ _EXPLICIT_DELEGATION_PATTERNS = (
     re.compile(
         r"\b(?:launch|run|ask|have)\s+(?:two|three|four|five|\d+|multiple|several)\s+"
         r"(?:agents?|researchers?|specialists?)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:launch|run|ask|have)\s+(?:the\s+)?"
+        r"(?:agents?|researchers?|specialists?|planners?|analysts?|builders?|reviewers?|synthesi[sz]ers?)\b",
         re.I,
     ),
     re.compile(r"\bmulti[-\s]?agent(?:\s+mode)?\b", re.I),
@@ -494,9 +504,7 @@ def _intent_allows(effect: ToolEffect, intent: TurnIntent) -> bool:
         return True
     if effect is ToolEffect.DELEGATION:
         return intent is TurnIntent.DELEGATION
-    if effect is ToolEffect.WORKFLOW_MUTATION:
-        return intent is TurnIntent.LOCAL_MUTATION
-    if effect is ToolEffect.LOCAL_MUTATION:
+    if effect in {ToolEffect.WORKFLOW_MUTATION, ToolEffect.LOCAL_MUTATION}:
         return intent is TurnIntent.LOCAL_MUTATION
     if effect is ToolEffect.BROWSER_INTERACTION:
         return intent is TurnIntent.BROWSER_INTERACTION
@@ -581,28 +589,6 @@ def authorize_turn_tool(
             return TurnAuthorizationDecision(
                 False,
                 "ambiguous continue/resume must resolve a specific prior task before acting",
-                effect,
-            )
-
-    if context.intent is TurnIntent.LOCAL_MUTATION and effect in {
-        ToolEffect.LOCAL_MUTATION, ToolEffect.WORKFLOW_MUTATION
-    }:
-        category = categorize_tool_name(tool_name)
-        targets = set(context.explicit_targets)
-        category_targets = {
-            ToolCategory.RECALL: {"recall"},
-            ToolCategory.FILES: {"filesystem", "code", "research"},
-            ToolCategory.CODE_EXECUTION: {"code"},
-            ToolCategory.WORKFLOWS: {"workflow", "prior_task"},
-            ToolCategory.GOALS: {"goals"},
-            ToolCategory.WATCHERS: {"watchers"},
-            ToolCategory.RESEARCH: {"research", "filesystem"},
-        }
-        required_targets = category_targets.get(category)
-        if required_targets is not None and not (targets & required_targets):
-            return TurnAuthorizationDecision(
-                False,
-                f"current turn does not target the {category.value} tool category",
                 effect,
             )
 

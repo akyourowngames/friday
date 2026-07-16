@@ -768,7 +768,7 @@ class MultiAgentOrchestrator:
 
 READ_ONLY_RESEARCH_TOOLS = (
     "web_search", "fetch_url", "download_online_file", "extract_document", "read_file", "search_files",
-    "list_directory", "search_memory", "search_actions", "list_skills", "load_skill", "mcp__fetch__*",
+    "list_directory", "search_memory", "search_actions", "list_skills", "load_skill",
 )
 READ_ONLY_CODE_TOOLS = (
     "read_file", "search_files", "list_directory", "get_file_info", "glob_pattern",
@@ -784,7 +784,7 @@ CODE_MUTATION_TOOLS = READ_ONLY_CODE_TOOLS + (
 def default_agent_specs() -> tuple[AgentSpec, ...]:
     return (
         AgentSpec("planner", "Decomposes complex work into bounded tasks and success criteria.", "Identify dependencies and success criteria. Do not mutate anything.", READ_ONLY_CODE_TOOLS),
-        AgentSpec("researcher", "Collects evidence from the web, documentation, and read-only MCP sources.", "Prefer primary sources and preserve source URLs.", READ_ONLY_RESEARCH_TOOLS, timeout_seconds=180),
+        AgentSpec("researcher", "Collects evidence from the web, documentation, and read-only sources.", "Prefer primary sources and preserve source URLs.", READ_ONLY_RESEARCH_TOOLS, timeout_seconds=300),
         AgentSpec("analyst", "Inspects repository structure, integration points, risks, and tests.", "Remain read-only. State assumptions and affected components.", READ_ONLY_CODE_TOOLS),
         AgentSpec(
             "builder", "Implements approved scoped work and can run configured project checks.",
