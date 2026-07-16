@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 import logging
 import re
 import sqlite3
+import weakref
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import sqlite_vec
 
@@ -90,7 +93,63 @@ class MemoryStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = connect_sqlite(self.db_path)
         self.vector_enabled = False
+        # Optional consumers can react to a deleted generic fact without
+        # coupling this store to their own persistence or retention rules.
+        # Bound methods are kept weakly; see add_deletion_observer().
+        self._deletion_observers: dict[int, Callable[[], Any]] = {}
+        self._next_deletion_observer_id = 0
         self._init_db()
+
+    def add_deletion_observer(self, observer: Callable[[int], Any]) -> Callable[[], None]:
+        """Register a post-commit deletion callback and return its remover.
+
+        Bound-method callbacks are weakly held so feature services cannot be
+        retained by a long-lived MemoryStore.  A returned remover is available
+        for deterministic shutdown and for callables that cannot be weakly
+        referenced.
+        """
+
+        if not callable(observer):
+            raise TypeError("deletion observer must be callable")
+        try:
+            if getattr(observer, "__self__", None) is not None:
+                reference: Callable[[], Any] = weakref.WeakMethod(observer)  # type: ignore[arg-type]
+            else:
+                # Plain functions and callable objects are conventionally
+                # retained by event registries. Their returned unsubscribe
+                # callback keeps that lifetime explicit and predictable.
+                reference = lambda: observer
+        except TypeError:
+            # A few built-in callable objects cannot be weak-referenced. They
+            # remain explicitly unregisterable through the returned callback.
+            reference = lambda: observer
+
+        observer_id = self._next_deletion_observer_id
+        self._next_deletion_observer_id += 1
+        self._deletion_observers[observer_id] = reference
+
+        def unsubscribe() -> None:
+            self._deletion_observers.pop(observer_id, None)
+
+        return unsubscribe
+
+    register_deletion_observer = add_deletion_observer
+
+    def _notify_deleted(self, fact_ids: tuple[int, ...]) -> None:
+        """Run observers after commit without changing public delete results."""
+
+        for fact_id in fact_ids:
+            for observer_id, reference in tuple(self._deletion_observers.items()):
+                observer = reference()
+                if observer is None:
+                    self._deletion_observers.pop(observer_id, None)
+                    continue
+                try:
+                    observer(int(fact_id))
+                except Exception:
+                    # The generic fact is already gone. An optional cleanup
+                    # must not make a normal memory delete appear to fail.
+                    logger.exception("memory deletion observer failed for fact %s", fact_id)
 
     def _init_db(self):
         """Initialize database tables if they don't exist."""
@@ -497,6 +556,7 @@ class MemoryStore:
         self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fact_id,))
         self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fact_id,))
         self.conn.commit()
+        self._notify_deleted((int(fact_id),))
         return True
 
     def list_all(self) -> list[dict]:
@@ -529,6 +589,7 @@ class MemoryStore:
             self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fid,))
             self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fid,))
         self.conn.commit()
+        self._notify_deleted(tuple(int(fact_id) for fact_id in existing))
         return max(0, int(cursor.rowcount))
 
     def find_similar_to(self, fact_id: int, limit: int = 5) -> list[dict]:
@@ -580,6 +641,7 @@ class MemoryStore:
 
     def close(self):
         """Close the database connection."""
+        self._deletion_observers.clear()
         self.conn.close()
 
 

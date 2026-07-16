@@ -15,7 +15,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 136
+        assert len(tools) == 155
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -121,6 +121,21 @@ class TestToolDefinitions:
             "delete_cron_job",
             "run_cron_job_now",
             "get_cron_logs",
+            "vision_observe",
+            "vision_watch",
+            "vision_compare",
+            "vision_verify",
+            "vision_remember",
+            "vision_list_watches",
+            "vision_cancel_watch",
+            "vision_start_source",
+            "vision_stop_source",
+            "vision_stop_all_sources",
+            "vision_list_sources",
+            "vision_list_events",
+            "vision_delete_event",
+            "vision_erase_recent_events",
+            "vision_delete_memory_frame",
             "get_watcher_capabilities",
             "create_watcher",
             "list_watchers",
@@ -157,6 +172,10 @@ class TestToolDefinitions:
             "acknowledge_goal_signal",
             "snooze_goal_signal",
             "delete_goal",
+            "list_follow_ups",
+            "snooze_follow_up",
+            "dismiss_follow_up",
+            "resolve_follow_up",
             "get_current_datetime",
         }
 

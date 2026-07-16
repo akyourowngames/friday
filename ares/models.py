@@ -292,6 +292,29 @@ class WatcherConfig(BaseModel):
     defaults: WatcherDefaultsConfig = Field(default_factory=WatcherDefaultsConfig)
 
 
+class VisionConfig(BaseModel):
+    """Local-first visual observation controls.
+
+    Consent is still tracked per source by the vision service.  These defaults
+    make a new installation conservative: camera and screen capture remain
+    unavailable until the user explicitly grants observation permission.
+    """
+
+    enabled: bool = True
+    camera_enabled: bool = False
+    screen_enabled: bool = False
+    detection_interval_frames: int = Field(default=5, ge=1, le=120)
+    motion_threshold: float = Field(default=0.025, ge=0.0, le=1.0)
+    max_frame_width: int = Field(default=1280, ge=160, le=7680)
+    default_watch_interval_seconds: float = Field(default=3.0, ge=0.25, le=3600.0)
+    event_cooldown_seconds: float = Field(default=5.0, ge=0.0, le=3600.0)
+    snapshot_history: int = Field(default=2, ge=2, le=100)
+    verification_confidence_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    retain_event_frames: bool = False
+    frame_retention_minutes: int = Field(default=0, ge=0, le=43_200)
+    detector_model: str = "yolo26n.pt"
+
+
 class ReflectionConfig(BaseModel):
     """Background conversation-to-state extraction controls."""
 
@@ -510,6 +533,7 @@ class AppConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)

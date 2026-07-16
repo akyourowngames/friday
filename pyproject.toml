@@ -43,6 +43,14 @@ telephony = [
     "edge-tts>=7.0",
     "soundfile>=0.12",
 ]
+vision = [
+    "opencv-python-headless>=4.10",
+    "ultralytics>=8.3",
+    "supervision>=0.25",
+    "paddleocr>=2.9",
+    "paddlepaddle>=3.0",
+    "mss>=9.0",
+]
 # Compatibility extra retained for existing install commands. Watchers are now
 # part of the normal Ares runtime rather than an independent optional feature.
 watcher = []

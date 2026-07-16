@@ -127,6 +127,21 @@ _EXTERNAL_ACTION_RE = re.compile(
     r"share|deploy|merge|push|submit)\b",
     re.IGNORECASE,
 )
+_VISION_MUTATION_RE = re.compile(
+    r"\b(?:stop\s+watching|stop\s+all\s+(?:cameras?|screens?|visual\s+sources?)|"
+    r"cancel\s+(?:the\s+)?(?:visual\s+)?watch|"
+    r"forget\s+what\s+you\s+saw|erase\s+(?:recent\s+)?(?:visual\s+)?events?|"
+    r"delete\s+(?:the\s+)?(?:saved\s+)?frame)\b|"
+    r"\b(?:start|stop|watch|monitor)\b.{0,120}\b(?:vision|camera|webcam|screen|visual|object|cup|charger|download)\b",
+    re.IGNORECASE,
+)
+_VISION_OBSERVATION_RE = re.compile(
+    r"\b(?:look\s+at|observe|watch|monitor|compare|verify|read\s+(?:the\s+)?(?:error|text))\b"
+    r".{0,160}\b(?:desk|camera|webcam|screen|image|photo|object|cup|charger|components?|setup|download|error)\b|"
+    r"\b(?:verify|check)\b.{0,160}\b(?:connected|components?|physical|setup)\b|"
+    r"\bremember\s+where\b.{0,160}\b(?:placed|put|left|charger|object|cup|desk)\b",
+    re.IGNORECASE,
+)
 _READ_ONLY_RE = re.compile(
     r"\b(?:what|why|how|who|when|where|explain|compare|research|investigate|analy[sz]e|"
     r"read|find|search|list|show|summarize|review|check|inspect|look\s+up|status)\b",
@@ -360,6 +375,13 @@ def _extract_targets(text: str) -> tuple[str, ...]:
         targets.append("goals")
     if re.search(r"\b(?:watcher|monitor)\b", lowered):
         targets.append("watchers")
+    if re.search(
+        r"\b(?:vision|camera|webcam|screen(?:\s+share|shot)?|visual|photo|image|object\s+watch|look\s+at)\b",
+        lowered,
+    ) or _VISION_OBSERVATION_RE.search(lowered):
+        targets.append("vision")
+    if _VISION_MUTATION_RE.search(lowered):
+        targets.append("vision")
     if re.search(r"\b(?:research|report|download|extract\s+document)\b", lowered):
         targets.append("research")
     if re.search(r"\b(?:config|configuration|settings)\b", lowered):
@@ -394,6 +416,10 @@ def classify_turn_intent(text: str, *, has_confirmation_grants: bool = False) ->
         return TurnIntent.BROWSER_INTERACTION
     if _EXTERNAL_ACTION_RE.search(value):
         return TurnIntent.EXTERNAL_ACTION
+    if _VISION_MUTATION_RE.search(value):
+        return TurnIntent.LOCAL_MUTATION
+    if _VISION_OBSERVATION_RE.search(value):
+        return TurnIntent.LOCAL_MUTATION
     if _LOCAL_MUTATION_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
     if _SPECIFIC_TASK_CONTINUE_RE.search(value):
@@ -434,6 +460,10 @@ _READ_ONLY_FILE_TOOLS = frozenset({
     "image_info",
 })
 _READ_ONLY_WORKFLOW_TOOLS = frozenset({"list_tasks", "get_task_status"})
+_READ_ONLY_VISION_TOOLS = frozenset({
+    "vision_compare", "vision_list_watches",
+    "vision_list_events", "vision_list_sources",
+})
 _MUTATING_RECALL_PREFIXES = (
     "store_", "update_memory", "delete_memory", "remember_person", "update_person", "forget_person",
 )
@@ -476,6 +506,8 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
         return ToolEffect.READ_ONLY
     if category is ToolCategory.RECALL:
         return ToolEffect.LOCAL_MUTATION if lowered.startswith(_MUTATING_RECALL_PREFIXES) else ToolEffect.READ_ONLY
+    if category is ToolCategory.VISION:
+        return ToolEffect.READ_ONLY if name in _READ_ONLY_VISION_TOOLS else ToolEffect.LOCAL_MUTATION
     if category in {ToolCategory.GOALS, ToolCategory.WATCHERS}:
         return ToolEffect.READ_ONLY if lowered.startswith(_READ_VERBS) else ToolEffect.LOCAL_MUTATION
     if category is ToolCategory.MCP:

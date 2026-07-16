@@ -26,6 +26,7 @@ class ToolCategory(str, Enum):
     COMMUNICATION = "communication"
     GOALS = "goals"
     WATCHERS = "watchers"
+    VISION = "vision"
     PHONE = "phone"
     TELEPHONY = "telephony"
     MCP = "mcp"
@@ -73,6 +74,10 @@ COMMUNICATION_TOOL_NAMES = frozenset({
     "send_email", "telegram_send_file", "telegram_send_message",
 })
 CORE_TOOL_NAMES = frozenset({"get_current_datetime"})
+VISION_READ_TOOL_NAMES = frozenset({
+    "vision_compare", "vision_list_watches",
+    "vision_list_events", "vision_list_sources",
+})
 
 
 def schema_tool_name(schema: Mapping[str, Any]) -> str:
@@ -108,6 +113,8 @@ def categorize_tool_name(name: str) -> ToolCategory:
         return ToolCategory.PHONE
     if "watcher" in lowered or lowered.startswith(("create_monitor", "list_monitor", "update_monitor")):
         return ToolCategory.WATCHERS
+    if lowered.startswith("vision_"):
+        return ToolCategory.VISION
     if "goal" in lowered or "follow_up" in lowered:
         return ToolCategory.GOALS
     if (
@@ -136,6 +143,8 @@ def is_harmless_read_tool(name: str) -> bool:
     if normalized in {"list_tasks", "get_task_status", "web_search", "fetch_url", "extract_document"}:
         return True
     if normalized in CORE_TOOL_NAMES:
+        return True
+    if normalized in VISION_READ_TOOL_NAMES:
         return True
     read_verbs = ("get", "list", "read", "search", "find", "fetch", "inspect", "snapshot", "status", "show")
     if category in {ToolCategory.GOALS, ToolCategory.WATCHERS, ToolCategory.PHONE, ToolCategory.TELEPHONY}:
@@ -272,6 +281,8 @@ class RootToolRegistry:
                 allowed_categories.add(ToolCategory.GOALS)
             if "watchers" in targets:
                 allowed_categories.add(ToolCategory.WATCHERS)
+            if "vision" in targets:
+                allowed_categories.add(ToolCategory.VISION)
             if "research" in targets:
                 allowed_categories.add(ToolCategory.RESEARCH)
             if "config" in targets:
@@ -326,6 +337,7 @@ __all__ = [
     "RootToolRegistry",
     "RegisteredTool",
     "ToolCategory",
+    "VISION_READ_TOOL_NAMES",
     "WORKFLOW_TOOL_NAMES",
     "categorize_tool_name",
     "is_harmless_read_tool",

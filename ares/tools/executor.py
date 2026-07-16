@@ -106,6 +106,7 @@ class ToolExecutor:
         follow_up_store: FollowUpStore | None = None,
         session_store: SessionStore | None = None,
         telephony_manager: TelephonyManager | None = None,
+        vision_service: Any | None = None,
     ):
         self.memory = memory_store
         self.conversations = conversation_store
@@ -135,6 +136,28 @@ class ToolExecutor:
         )
         self.action_ledger = action_ledger or (
             ActionLedger(db_path=db_path, connection=shared_connection) if db_path is not None else None
+        )
+        # Vision has its own small metadata-only database.  It deliberately
+        # does not share the memory connection: frame/event retention has a
+        # separate lifecycle and must remain safe even when memory is erased.
+        from ares.tools.vision_tools import VisionToolHandlers
+        from ares.vision.service import VisionService
+
+        vision_path = (
+            Path(db_path).with_name("vision.db")
+            if db_path is not None
+            else (session_data_dir or data_root or Path("~/.ares/data").expanduser()) / "vision.db"
+        )
+        self._owns_vision_service = vision_service is None
+        self.vision_service = vision_service or VisionService(
+            database_path=vision_path,
+            memory_store=memory_store,
+            config=getattr(config, "vision", None),
+            action_ledger=self.action_ledger,
+        )
+        self.vision_tools = VisionToolHandlers(
+            self.vision_service,
+            session_id_provider=lambda: self.session_id,
         )
         self.task_store = task_store or (TaskStore(data_root) if data_root is not None else None)
         self.task_tools = TaskToolHandlers(self.task_store, lambda: self.session_id) if self.task_store is not None else None
@@ -195,9 +218,15 @@ class ToolExecutor:
         # Set by the local Telegram channel at runtime. Keeping the bridge
         # unattached by default prevents a web/CLI process from sending files.
         self.telegram_channel: Any | None = None
+        self._closed = False
 
-    def close(self) -> None:
-        """Clean up persistent sessions."""
+    async def shutdown(self) -> None:
+        """Clean up sources before closing the stores they depend on."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_vision_service and self.vision_service is not None:
+            await self.vision_service.shutdown()
         self.repl.close()
         self.watcher_tools.close()
         if self._owns_people_store and self.people_store is not None:
@@ -208,6 +237,17 @@ class ToolExecutor:
             self.goal_store.close()
         if self._owns_telephony_manager and self.telephony is not None:
             self.telephony.close()
+
+    def close(self) -> None:
+        """Compatibility shutdown for synchronous callers."""
+        if self._closed:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.shutdown())
+            return
+        loop.create_task(self.shutdown(), name="ares-tool-executor-shutdown")
 
     def set_session_id(self, session_id: str | None) -> None:
         """Attach local provenance records to the current agent session."""
@@ -335,6 +375,21 @@ class ToolExecutor:
             "get_watcher_overview": self.watcher_tools.overview,
             "delete_watcher": self.watcher_tools.delete,
             "run_watcher_now": self._watcher_async_required,
+            "vision_observe": self._vision_async_required,
+            "vision_watch": self._vision_async_required,
+            "vision_compare": self._vision_async_required,
+            "vision_verify": self._vision_async_required,
+            "vision_remember": self._vision_async_required,
+            "vision_list_watches": self._vision_async_required,
+            "vision_cancel_watch": self._vision_async_required,
+            "vision_start_source": self._vision_async_required,
+            "vision_stop_source": self._vision_async_required,
+            "vision_stop_all_sources": self._vision_async_required,
+            "vision_list_sources": self._vision_async_required,
+            "vision_list_events": self._vision_async_required,
+            "vision_delete_event": self._vision_async_required,
+            "vision_erase_recent_events": self._vision_async_required,
+            "vision_delete_memory_frame": self._vision_async_required,
             "create_task": self._create_task,
             "list_tasks": self._list_tasks,
             "get_task_status": self._get_task_status,
@@ -394,6 +449,8 @@ class ToolExecutor:
 
     async def execute_async(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool, allowing local tools to use async integrations."""
+        if tool_name.startswith("vision_"):
+            return await self.vision_tools.dispatch(tool_name, arguments)
         if tool_name == "run_watcher_now":
             return await self.watcher_tools.run_now(arguments)
         if tool_name == "search_skill_marketplace":
@@ -609,6 +666,10 @@ class ToolExecutor:
     def _delete_memory(self, args: dict) -> str:
         fact_id = int(args["fact_id"])
         if self.memory.delete(fact_id):
+            # Visual memory links own any explicitly retained event artifact.
+            # Removing the ordinary memory must clean those up as well.
+            with suppress(Exception):
+                self.vision_service.forget_memory_link(fact_id)
             return f"Forgot memory #{fact_id}."
         return f"Memory #{fact_id} was not found."
 
@@ -1175,6 +1236,10 @@ class ToolExecutor:
     @staticmethod
     def _watcher_async_required(_args: dict) -> str:
         return "Running a watcher immediately requires the async Ares runtime; start Ares with --all."
+
+    @staticmethod
+    def _vision_async_required(_args: dict) -> str:
+        return "Vision observation requires the async Ares runtime."
 
     def _marketplace_config(self) -> AppConfig:
         if self.config is None:
