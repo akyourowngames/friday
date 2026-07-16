@@ -169,6 +169,37 @@ async def test_agent_run_stream_emits_before_provider_finishes_and_records_laten
 
 
 @pytest.mark.asyncio
+async def test_agent_flushes_deferred_memory_access_stats_after_stream_completion(
+    tmp_path, fake_embedding_provider
+):
+    """Deferred retrieval writes are persisted after, not during, a response."""
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    fact_id = mem_store.store("The deferred latency counter is persisted after streaming.")
+    config = AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False)
+    config.reflection.enabled = False
+    agent = Agent(memory_store=mem_store, api_key="test-key", config=config)
+    agent._tools_for_turn = lambda *_args, **_kwargs: []
+
+    async def fake_chat_stream(_messages, tools=None):
+        assert tools == []
+        yield {"type": "content", "text": "Done."}
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = fake_chat_stream
+    assert mem_store.get(fact_id)["access_count"] == 0
+
+    tokens = [
+        token async for token in agent.run_stream(
+            "What do you remember about the deferred latency counter?", []
+        )
+    ]
+
+    assert "".join(tokens) == "Done."
+    assert mem_store.get(fact_id)["access_count"] == 1
+    assert mem_store.flush_access_stats() == 0
+
+
+@pytest.mark.asyncio
 async def test_prior_execution_record_does_not_disable_normal_follow_up_streaming(
     tmp_path, fake_embedding_provider,
 ):

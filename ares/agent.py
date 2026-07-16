@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -63,6 +64,7 @@ _EXECUTION_GUARD_SIGNAL_RE = re.compile(
     r"parallel|execution\s+waves?|run\s+id)\b",
     re.IGNORECASE,
 )
+logger = logging.getLogger(__name__)
 
 
 class _ContentDeltaNormalizer:
@@ -394,8 +396,20 @@ class Agent:
         return effective_request_id, RequestLatency(effective_request_id, session_id)
 
     def _record_request_latency(self, latency: RequestLatency) -> None:
-        """Keep a small in-memory diagnostics tail for local inspection and tests."""
+        """Finish diagnostics, then persist deferred retrieval metadata off TTFT."""
         self.recent_latency_metrics.append(latency.finish())
+        flush_access_stats = getattr(self.memory_store, "flush_access_stats", None)
+        if callable(flush_access_stats):
+            try:
+                # Context retrieval intentionally queues these writes.  This
+                # runs after the caller has consumed the response, so it never
+                # adds a SQLite commit to the visible first-token path.
+                flush_access_stats()
+            except Exception:
+                # ``MemoryStore`` retains the batch for a later retry.  A
+                # bookkeeping failure must not turn a completed chat into an
+                # error while its response generator is unwinding.
+                logger.debug("Deferred memory access-stat flush failed", exc_info=True)
 
     @staticmethod
     def _resolve_referential_delegation(
