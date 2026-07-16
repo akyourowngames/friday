@@ -153,6 +153,38 @@ def export_data(
     """Export local Ares data to JSON."""
     output_path = Path(path).expanduser() if path else default_export_path()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = build_export_payload(
+        memory_store=memory_store,
+        conversation_store=conversation_store,
+        people_store=people_store,
+        action_ledger=action_ledger,
+        goal_store=goal_store,
+        commitment_store=commitment_store,
+        config=config,
+        profile=profile,
+    )
+    _atomic_json_write(output_path, payload)
+    return output_path
+
+
+def build_export_payload(
+    *,
+    memory_store: MemoryStore,
+    conversation_store: ConversationStore | None = None,
+    people_store: PeopleStore | None = None,
+    action_ledger: ActionLedger | None = None,
+    goal_store: GoalStore | None = None,
+    commitment_store: CommitmentStore | None = None,
+    config: AppConfig | None = None,
+    profile: str = "full",
+) -> dict[str, Any]:
+    """Build the legacy export payload without writing it to disk.
+
+    Advanced export planning can use this same projection to preview redaction,
+    incremental sections, checksums, and verification while the public
+    ``export_data`` function retains its long-standing return type and write
+    behavior.
+    """
     app_config = config or load_config()
     normalized_profile = str(profile or "full").casefold()
     if normalized_profile not in EXPORT_PROFILES:
@@ -178,7 +210,13 @@ def export_data(
     if conversation_store is not None and flags["conversations"]:
         payload["conversations"] = conversation_store.list_conversations()
         payload["conversation_messages"] = conversation_store.list_messages()
+    return payload
 
+
+def write_export_payload(path: str | Path, payload: dict[str, Any]) -> Path:
+    """Atomically persist a JSON payload prepared by an export plan."""
+    output_path = Path(path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_json_write(output_path, payload)
     return output_path
 

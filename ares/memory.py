@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from collections import OrderedDict
+import json
 import logging
 import re
 import sqlite3
@@ -38,6 +39,34 @@ _TRIVIAL_MEMORY_QUERY_RE = re.compile(
     r")\s*[!.?,]*\s*$",
     re.IGNORECASE,
 )
+
+
+class MemoryConflictError(ValueError):
+    """Raised when a memory revision or merge target changed concurrently."""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def calculate_importance(content: str, category: str) -> float:
+    """Calculate a bounded durable-memory importance score."""
+    score = {
+        "preference": 0.72,
+        "fact": 0.62,
+        "relationship": 0.72,
+        "project": 0.76,
+        "plan": 0.5,
+        "belief": 0.58,
+        "habit": 0.65,
+        "note": 0.45,
+    }.get(str(category or "note").casefold(), 0.5)
+    text = str(content or "").casefold()
+    if any(marker in text for marker in ("always", "never", "important", "remember", "deadline")):
+        score += 0.1
+    if any(marker in text for marker in ("maybe", "might", "temporary", "for now")):
+        score -= 0.12
+    return round(max(0.0, min(score, 1.0)), 3)
 
 
 def _get_default_provider() -> EmbeddingProvider:
@@ -165,6 +194,46 @@ class MemoryStore:
         _ensure_column(self.conn, "facts_meta", "session_id", "TEXT DEFAULT NULL")
         _ensure_column(self.conn, "facts_meta", "source_conversation_id", "TEXT DEFAULT NULL")
         _ensure_column(self.conn, "facts_meta", "source_reflection_id", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "source_message_id", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(self.conn, "facts_meta", "valid_from", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "expires_at", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "outdated_at", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "project", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "revision", "INTEGER NOT NULL DEFAULT 1")
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_revisions (
+                   revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   fact_id INTEGER NOT NULL,
+                   revision INTEGER NOT NULL,
+                   snapshot_json TEXT NOT NULL,
+                   change_summary TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   UNIQUE(fact_id, revision)
+               )"""
+        )
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_links (
+                   fact_id INTEGER NOT NULL,
+                   entity_type TEXT NOT NULL,
+                   entity_id TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(fact_id, entity_type, entity_id)
+               )"""
+        )
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_relations (
+                   source_fact_id INTEGER NOT NULL,
+                   target_fact_id INTEGER NOT NULL,
+                   relation TEXT NOT NULL,
+                   confidence REAL NOT NULL DEFAULT 1.0,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(source_fact_id, target_fact_id, relation)
+               )"""
+        )
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_validity ON facts_meta(outdated_at, expires_at, valid_from)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_project ON facts_meta(project)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_links_entity ON memory_links(entity_type, entity_id)")
 
         # Reflected facts are durable user memories, not conversation-local
         # scratch state. Migrate PR #28 rows once while retaining their source
@@ -249,6 +318,19 @@ class MemoryStore:
                 )
             raise
         return len(pending)
+    def _delete_fts_entry(self, fact_id: int, fact_text: str) -> None:
+        """Remove an external-content FTS5 row without corrupting its index."""
+        self.conn.execute(
+            "INSERT INTO facts_fts(facts_fts, rowid, fact_text) VALUES ('delete', ?, ?)",
+            (int(fact_id), str(fact_text)),
+        )
+
+    def _replace_fts_entry(self, fact_id: int, old_text: str, new_text: str) -> None:
+        self._delete_fts_entry(fact_id, old_text)
+        self.conn.execute(
+            "INSERT INTO facts_fts (rowid, fact_text) VALUES (?, ?)",
+            (int(fact_id), str(new_text)),
+        )
 
     def store(
         self,
@@ -260,20 +342,30 @@ class MemoryStore:
         session_id: str | None = None,
         source_conversation_id: str | None = None,
         source_reflection_id: str | None = None,
+        source_message_id: str | None = None,
+        tags: list[str] | tuple[str, ...] | None = None,
+        valid_from: str | None = None,
+        expires_at: str | None = None,
+        supersedes_memory_id: int | None = None,
+        project: str | None = None,
+        links: dict[str, list[str] | tuple[str, ...] | str] | None = None,
     ) -> int:
         """Store a new fact. Returns the fact_id."""
         # Insert metadata
         cursor = self.conn.execute(
             """INSERT INTO facts_meta
                (fact_text, category, confidence, importance, source, session_id,
-                source_conversation_id, source_reflection_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_conversation_id, source_reflection_id, source_message_id,
+                tags_json, valid_from, expires_at, project)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fact_text, category, confidence, importance, source, session_id,
-                source_conversation_id, source_reflection_id,
+                source_conversation_id, source_reflection_id, source_message_id,
+                json.dumps(self._normalize_tags(tags), ensure_ascii=False),
+                valid_from, expires_at, project,
             ),
         )
-        fact_id = cursor.lastrowid
+        fact_id = int(cursor.lastrowid)
 
         # Insert embedding when vector search is available.
         if self.vector_enabled:
@@ -289,8 +381,50 @@ class MemoryStore:
             (fact_id, fact_text),
         )
 
+        self._replace_links(fact_id, links or {})
+        if supersedes_memory_id is not None:
+            previous = self.get(int(supersedes_memory_id))
+            if previous is None:
+                self.conn.rollback()
+                raise ValueError(f"Memory #{supersedes_memory_id} was not found.")
+            self.conn.execute(
+                "UPDATE facts_meta SET superseded_by = ?, outdated_at = COALESCE(outdated_at, ?), updated_at = datetime('now') WHERE fact_id = ?",
+                (fact_id, utc_now(), int(supersedes_memory_id)),
+            )
+            self._add_relation(fact_id, int(supersedes_memory_id), "supersedes", 1.0)
+
         self.conn.commit()
         return fact_id
+
+    @staticmethod
+    def _normalize_tags(tags: list[str] | tuple[str, ...] | None) -> list[str]:
+        normalized: list[str] = []
+        for value in tags or ():
+            tag = re.sub(r"\s+", "-", str(value or "").strip().casefold())[:80]
+            if tag and tag not in normalized:
+                normalized.append(tag)
+        return normalized[:50]
+
+    def _replace_links(self, fact_id: int, links: dict[str, object]) -> None:
+        self.conn.execute("DELETE FROM memory_links WHERE fact_id = ?", (int(fact_id),))
+        for entity_type, raw_values in links.items():
+            kind = str(entity_type or "").strip().casefold()
+            if kind not in {"person", "goal", "action", "file", "project"}:
+                raise ValueError(f"Unsupported memory link type: {entity_type}")
+            values = raw_values if isinstance(raw_values, (list, tuple, set)) else [raw_values]
+            for raw in values:
+                entity_id = str(raw or "").strip()
+                if entity_id:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO memory_links (fact_id, entity_type, entity_id, created_at) VALUES (?, ?, ?, ?)",
+                        (int(fact_id), kind, entity_id[:500], utc_now()),
+                    )
+
+    def _add_relation(self, source_id: int, target_id: int, relation: str, confidence: float) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO memory_relations (source_fact_id, target_fact_id, relation, confidence, created_at) VALUES (?, ?, ?, ?, ?)",
+            (int(source_id), int(target_id), str(relation), float(confidence), utc_now()),
+        )
 
     def suggest_merge(
         self,
@@ -335,7 +469,47 @@ class MemoryStore:
         row = self.conn.execute(
             "SELECT * FROM facts_meta WHERE fact_id = ?", (fact_id,)
         ).fetchone()
-        return dict(row) if row else None
+        return self._row_to_memory(row) if row else None
+
+    def _row_to_memory(self, row: sqlite3.Row | dict) -> dict:
+        memory = dict(row)
+        try:
+            tags = json.loads(memory.get("tags_json") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            tags = []
+        memory["tags"] = tags if isinstance(tags, list) else []
+        memory.pop("tags_json", None)
+        memory["links"] = self.links_for(int(memory["fact_id"]))
+        memory["related_memories"] = self.relations_for(int(memory["fact_id"]))
+        memory["may_be_outdated"] = self._is_outdated(memory)
+        return memory
+
+    @staticmethod
+    def _is_outdated(memory: dict) -> bool:
+        if memory.get("outdated_at") or memory.get("superseded_by"):
+            return True
+        expires = _parse_db_datetime(memory.get("expires_at"))
+        return bool(expires and expires <= datetime.now(timezone.utc))
+
+    def links_for(self, fact_id: int) -> dict[str, list[str]]:
+        rows = self.conn.execute(
+            "SELECT entity_type, entity_id FROM memory_links WHERE fact_id = ? ORDER BY entity_type, entity_id",
+            (int(fact_id),),
+        ).fetchall()
+        links: dict[str, list[str]] = {}
+        for row in rows:
+            links.setdefault(str(row["entity_type"]), []).append(str(row["entity_id"]))
+        return links
+
+    def relations_for(self, fact_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT source_fact_id, target_fact_id, relation, confidence, created_at
+               FROM memory_relations
+               WHERE source_fact_id = ? OR target_fact_id = ?
+               ORDER BY created_at DESC""",
+            (int(fact_id), int(fact_id)),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def update(
         self,
@@ -349,13 +523,33 @@ class MemoryStore:
         session_id: str | None | object = _UNSET,
         source_conversation_id: str | None | object = _UNSET,
         source_reflection_id: str | None | object = _UNSET,
+        source_message_id: str | None | object = _UNSET,
+        tags: list[str] | tuple[str, ...] | object = _UNSET,
+        valid_from: str | None | object = _UNSET,
+        expires_at: str | None | object = _UNSET,
+        project: str | None | object = _UNSET,
+        links: dict[str, object] | object = _UNSET,
+        append: bool = False,
+        mark_outdated: bool | None = None,
+        expected_revision: int | None = None,
+        change_summary: str = "",
     ) -> bool:
         """Update a memory and refresh search indexes when text changes."""
         existing = self.get(fact_id)
         if not existing:
             return False
 
-        new_text = fact_text if fact_text is not None else existing["fact_text"]
+        current_revision = int(existing.get("revision") or 1)
+        if expected_revision is not None and current_revision != int(expected_revision):
+            raise MemoryConflictError(
+                f"Memory #{fact_id} changed since revision {expected_revision}; current revision is {current_revision}."
+            )
+
+        if append and fact_text:
+            addition = str(fact_text).strip()
+            new_text = f"{existing['fact_text'].rstrip()}\n{addition}" if addition else existing["fact_text"]
+        else:
+            new_text = fact_text if fact_text is not None else existing["fact_text"]
         updates = {
             "fact_text": new_text,
             "category": category if category is not None else existing["category"],
@@ -371,12 +565,33 @@ class MemoryStore:
                 existing.get("source_reflection_id")
                 if source_reflection_id is _UNSET else source_reflection_id
             ),
+            "source_message_id": existing.get("source_message_id") if source_message_id is _UNSET else source_message_id,
+            "tags": existing.get("tags", []) if tags is _UNSET else self._normalize_tags(tags),
+            "valid_from": existing.get("valid_from") if valid_from is _UNSET else valid_from,
+            "expires_at": existing.get("expires_at") if expires_at is _UNSET else expires_at,
+            "project": existing.get("project") if project is _UNSET else project,
+            "outdated_at": (
+                existing.get("outdated_at") if mark_outdated is None
+                else (utc_now() if mark_outdated else None)
+            ),
         }
+        self.conn.execute(
+            """INSERT OR IGNORE INTO memory_revisions
+               (fact_id, revision, snapshot_json, change_summary, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                int(fact_id), current_revision,
+                json.dumps(existing, ensure_ascii=False, sort_keys=True, default=str),
+                str(change_summary or ("append" if append else "update"))[:500], utc_now(),
+            ),
+        )
         self.conn.execute(
             """UPDATE facts_meta
                SET fact_text = ?, category = ?, confidence = ?, importance = ?,
                    source = ?, session_id = ?, source_conversation_id = ?,
-                   source_reflection_id = ?, updated_at = datetime('now')
+                   source_reflection_id = ?, source_message_id = ?, tags_json = ?,
+                   valid_from = ?, expires_at = ?, project = ?, outdated_at = ?,
+                   revision = revision + 1, updated_at = datetime('now')
                WHERE fact_id = ?""",
             (
                 updates["fact_text"],
@@ -387,9 +602,18 @@ class MemoryStore:
                 updates["session_id"],
                 updates["source_conversation_id"],
                 updates["source_reflection_id"],
+                updates["source_message_id"],
+                json.dumps(updates["tags"], ensure_ascii=False),
+                updates["valid_from"],
+                updates["expires_at"],
+                updates["project"],
+                updates["outdated_at"],
                 fact_id,
             ),
         )
+
+        if links is not _UNSET:
+            self._replace_links(fact_id, links)
 
         if new_text != existing["fact_text"]:
             if self.vector_enabled:
@@ -399,14 +623,37 @@ class MemoryStore:
                     "INSERT INTO user_facts (rowid, embedding) VALUES (?, ?)",
                     (fact_id, embedding),
                 )
-            self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fact_id,))
-            self.conn.execute(
-                "INSERT INTO facts_fts (rowid, fact_text) VALUES (?, ?)",
-                (fact_id, new_text),
-            )
+            self._replace_fts_entry(fact_id, existing["fact_text"], new_text)
 
         self.conn.commit()
         return True
+
+    def revision_history(self, fact_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT revision, snapshot_json, change_summary, created_at FROM memory_revisions WHERE fact_id = ? ORDER BY revision DESC",
+            (int(fact_id),),
+        ).fetchall()
+        history: list[dict] = []
+        for row in rows:
+            try:
+                snapshot = json.loads(row["snapshot_json"])
+            except (TypeError, json.JSONDecodeError):
+                snapshot = {}
+            history.append({
+                "revision": int(row["revision"]),
+                "snapshot": snapshot,
+                "change_summary": row["change_summary"],
+                "created_at": row["created_at"],
+            })
+        current = self.get(int(fact_id))
+        if current:
+            history.insert(0, {
+                "revision": int(current.get("revision") or 1),
+                "snapshot": current,
+                "change_summary": "current",
+                "created_at": current.get("updated_at"),
+            })
+        return history
 
     def _rank_score(self, base_score: float, meta: sqlite3.Row) -> float:
         """Blend retrieval score with importance, confidence, age, and use."""
@@ -569,7 +816,7 @@ class MemoryStore:
 
         enriched = []
         for meta in meta_rows:
-            entry = dict(meta)
+            entry = self._row_to_memory(meta)
             # Boost score: both sources > vector-only > fts-only
             src = results[meta["fact_id"]]["source"]
             if src == "both":
@@ -590,18 +837,186 @@ class MemoryStore:
         self._queue_access_stats([int(entry["fact_id"]) for entry in selected])
         return selected
 
+    def search_advanced(
+        self,
+        query: str = "",
+        *,
+        mode: str = "relevant",
+        limit: int = 12,
+        memory_id: int | None = None,
+        task: str = "",
+        filters: dict[str, object] | None = None,
+    ) -> list[dict]:
+        """Search durable facts using temporal, relationship, and task modes."""
+        selected_mode = str(mode or "relevant").strip().casefold()
+        allowed = {"relevant", "timeline", "related", "contradictions", "changes", "task_context"}
+        if selected_mode not in allowed:
+            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+        bounded = max(1, min(int(limit), 100))
+        criteria = dict(filters or {})
+
+        if selected_mode == "changes":
+            if memory_id is None:
+                raise ValueError("memory_id is required for changes mode")
+            return [{
+                "fact_id": int(memory_id),
+                "match_reason": "revision history for the requested memory",
+                "history": self.revision_history(int(memory_id)),
+            }]
+
+        if selected_mode in {"related", "contradictions"}:
+            if memory_id is None:
+                raise ValueError(f"memory_id is required for {selected_mode} mode")
+            target = self.get(int(memory_id))
+            if target is None:
+                return []
+            candidate_ids: set[int] = set()
+            for relation in target.get("related_memories", []):
+                if selected_mode == "contradictions" and relation.get("relation") != "contradiction":
+                    continue
+                other = int(relation["target_fact_id"] if int(relation["source_fact_id"]) == int(memory_id) else relation["source_fact_id"])
+                candidate_ids.add(other)
+            if selected_mode == "related":
+                for kind, values in target.get("links", {}).items():
+                    for entity_id in values:
+                        rows = self.conn.execute(
+                            "SELECT fact_id FROM memory_links WHERE entity_type = ? AND entity_id = ? AND fact_id != ?",
+                            (kind, entity_id, int(memory_id)),
+                        ).fetchall()
+                        candidate_ids.update(int(row["fact_id"]) for row in rows)
+            records = [self.get(candidate_id) for candidate_id in candidate_ids]
+            output = [record for record in records if record]
+            for record in output:
+                record["match_reason"] = (
+                    "stored contradiction relation" if selected_mode == "contradictions"
+                    else "shared entity link or stored memory relation"
+                )
+            return self._filter_memories(output, criteria)[:bounded]
+
+        search_text = str(task or query).strip() if selected_mode == "task_context" else str(query or "").strip()
+        if search_text:
+            records = self.search(search_text, limit=max(bounded * 4, 40))
+        else:
+            records = self.list_all()
+        records = self._filter_memories(records, criteria)
+        if selected_mode == "timeline":
+            records.sort(key=lambda item: (str(item.get("valid_from") or item.get("created_at") or ""), int(item["fact_id"])))
+        for record in records:
+            created = _parse_db_datetime(record.get("created_at"))
+            record["age_days"] = max((datetime.now(timezone.utc) - created).days, 0) if created else None
+            if selected_mode == "timeline":
+                reason = "chronological durable-memory timeline"
+            elif selected_mode == "task_context":
+                reason = f"semantic or keyword match for task: {search_text}"
+            else:
+                reason = f"semantic or keyword match for query: {search_text}" if search_text else "recent durable memory"
+            record["match_reason"] = reason
+            record["source_age"] = {"source": record.get("source"), "age_days": record["age_days"]}
+        return records[:bounded]
+
+    @staticmethod
+    def _filter_memories(records: list[dict], filters: dict[str, object]) -> list[dict]:
+        tags = {str(value).casefold() for value in (filters.get("tags") or [])}
+        categories = filters.get("category") or filters.get("categories") or []
+        if isinstance(categories, str):
+            categories = [categories]
+        category_set = {str(value).casefold() for value in categories}
+        minimum_confidence = float(filters.get("min_confidence", 0.0) or 0.0)
+        minimum_importance = float(filters.get("min_importance", 0.0) or 0.0)
+        source = str(filters.get("source") or "").casefold()
+        project = str(filters.get("project") or "").casefold()
+        date_from = _parse_db_datetime(str(filters.get("date_from") or ""))
+        date_to = _parse_db_datetime(str(filters.get("date_to") or ""))
+        link_filters = {
+            kind: str(filters.get(kind) or "")
+            for kind in ("person", "goal", "action", "file")
+            if filters.get(kind) not in (None, "")
+        }
+        include_outdated = bool(filters.get("include_outdated", False))
+        output: list[dict] = []
+        for record in records:
+            if not include_outdated and record.get("may_be_outdated"):
+                continue
+            if category_set and str(record.get("category") or "").casefold() not in category_set:
+                continue
+            record_tags = {str(value).casefold() for value in record.get("tags", [])}
+            if tags and not tags.issubset(record_tags):
+                continue
+            if float(record.get("confidence") or 0.0) < minimum_confidence:
+                continue
+            if float(record.get("importance") or 0.0) < minimum_importance:
+                continue
+            if source and str(record.get("source") or "").casefold() != source:
+                continue
+            if project and str(record.get("project") or "").casefold() != project:
+                continue
+            created = _parse_db_datetime(record.get("created_at"))
+            if date_from and (created is None or created < date_from):
+                continue
+            if date_to and (created is None or created > date_to):
+                continue
+            links = record.get("links", {})
+            if any(value not in {str(item) for item in links.get(kind, [])} for kind, value in link_filters.items()):
+                continue
+            output.append(record)
+        return output
+
+    def merge_memories(
+        self,
+        target_id: int,
+        source_ids: list[int],
+        *,
+        expected_revision: int | None = None,
+    ) -> dict:
+        """Merge source memories into a target while preserving provenance."""
+        target = self.get(int(target_id))
+        if target is None:
+            raise ValueError(f"Memory #{target_id} was not found.")
+        sources = [self.get(int(source_id)) for source_id in source_ids if int(source_id) != int(target_id)]
+        if any(source is None for source in sources):
+            raise ValueError("One or more source memories were not found.")
+        source_records = [source for source in sources if source]
+        lines = [str(target["fact_text"]).strip()]
+        for source in source_records:
+            text = str(source["fact_text"]).strip()
+            if text and _normalize_memory_text(text) not in {_normalize_memory_text(line) for line in lines}:
+                lines.append(text)
+        tags = self._normalize_tags([*target.get("tags", []), *(tag for item in source_records for tag in item.get("tags", []))])
+        links: dict[str, list[str]] = {kind: list(values) for kind, values in target.get("links", {}).items()}
+        for source in source_records:
+            for kind, values in source.get("links", {}).items():
+                links.setdefault(kind, [])
+                links[kind] = list(dict.fromkeys([*links[kind], *values]))
+        self.update(
+            int(target_id), fact_text="\n".join(lines), tags=tags, links=links,
+            expected_revision=expected_revision, change_summary=f"merged memories {source_ids}",
+        )
+        for source in source_records:
+            source_id = int(source["fact_id"])
+            self.update(source_id, mark_outdated=True, change_summary=f"merged into memory {target_id}")
+            self.conn.execute("UPDATE facts_meta SET superseded_by = ? WHERE fact_id = ?", (int(target_id), source_id))
+            self._add_relation(int(target_id), source_id, "merged_from", 1.0)
+        self.conn.commit()
+        return self.get(int(target_id)) or {}
+
     def delete(self, fact_id: int) -> bool:
         """Delete a fact by ID. Returns True if deleted, False if not found."""
         existing = self.conn.execute(
-            "SELECT fact_id FROM facts_meta WHERE fact_id = ?", (fact_id,)
+            "SELECT fact_id, fact_text FROM facts_meta WHERE fact_id = ?", (fact_id,)
         ).fetchone()
         if not existing:
             return False
 
+        self._delete_fts_entry(fact_id, existing["fact_text"])
         self.conn.execute("DELETE FROM facts_meta WHERE fact_id = ?", (fact_id,))
         self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fact_id,))
-        self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fact_id,))
         self._pending_access_counts.pop(int(fact_id), None)
+        self.conn.execute("DELETE FROM memory_links WHERE fact_id = ?", (fact_id,))
+        self.conn.execute("DELETE FROM memory_revisions WHERE fact_id = ?", (fact_id,))
+        self.conn.execute(
+            "DELETE FROM memory_relations WHERE source_fact_id = ? OR target_fact_id = ?",
+            (fact_id, fact_id),
+        )
         self.conn.commit()
         return True
 
@@ -610,7 +1025,7 @@ class MemoryStore:
         rows = self.conn.execute(
             "SELECT * FROM facts_meta ORDER BY created_at DESC"
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [self._row_to_memory(r) for r in rows]
 
     def bulk_delete(self, fact_ids: list[int]) -> int:
         """Delete multiple facts by ID. Returns count deleted."""
@@ -618,23 +1033,31 @@ class MemoryStore:
             return 0
         unique_ids = list(dict.fromkeys(int(fact_id) for fact_id in fact_ids))
         placeholders = ",".join("?" * len(unique_ids))
-        existing = [
-            row["fact_id"]
+        existing_rows = [
+            row
             for row in self.conn.execute(
-                f"SELECT fact_id FROM facts_meta WHERE fact_id IN ({placeholders})", unique_ids
+                f"SELECT fact_id, fact_text FROM facts_meta WHERE fact_id IN ({placeholders})", unique_ids
             ).fetchall()
         ]
-        if not existing:
+        if not existing_rows:
             return 0
+        existing = [int(row["fact_id"]) for row in existing_rows]
         existing_placeholders = ",".join("?" * len(existing))
+        for row in existing_rows:
+            self._delete_fts_entry(int(row["fact_id"]), str(row["fact_text"]))
         cursor = self.conn.execute(
             f"DELETE FROM facts_meta WHERE fact_id IN ({existing_placeholders})",
             existing,
         )
         for fid in existing:
             self.conn.execute("DELETE FROM user_facts WHERE rowid = ?", (fid,))
-            self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fid,))
             self._pending_access_counts.pop(int(fid), None)
+        self.conn.execute(f"DELETE FROM memory_links WHERE fact_id IN ({existing_placeholders})", existing)
+        self.conn.execute(f"DELETE FROM memory_revisions WHERE fact_id IN ({existing_placeholders})", existing)
+        self.conn.execute(
+            f"DELETE FROM memory_relations WHERE source_fact_id IN ({existing_placeholders}) OR target_fact_id IN ({existing_placeholders})",
+            [*existing, *existing],
+        )
         self.conn.commit()
         return max(0, int(cursor.rowcount))
 
@@ -678,7 +1101,7 @@ class MemoryStore:
             "SELECT * FROM facts_meta ORDER BY created_at DESC, fact_id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [self._row_to_memory(r) for r in rows]
 
     def count(self) -> int:
         """Return the total number of stored memories."""
