@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import zipfile
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -41,6 +42,12 @@ from ares.skills import SkillManager
 from ares.mcp_registry import MCPRegistryClient
 from ares.skill_registry import SafeSkillInstaller, SkillRegistryClient, SkillValidationError
 from ares.tools.research import ResearchWorkspace, json_result
+from ares.tools.research_upgrades import (
+    ResearchUpgradeStore,
+    advanced_extract,
+    advanced_fetch,
+    create_advanced_report,
+)
 from ares.tools.web import fetch_url, fetch_url_tool, payload_to_json, web_search_payload
 from ares.tools.filesystem_write import write_file as _write_file_impl
 from ares.tools.filesystem_write import edit_file as _edit_file_impl
@@ -201,7 +208,9 @@ class ToolExecutor:
         )
         if self.goal_tools is not None:
             self.goal_tools.watcher_db_provider = lambda: self.watcher_tools.db
-        self.research = ResearchWorkspace(session_data_dir or data_root or Path("~/.ares/data").expanduser())
+        research_data_dir = session_data_dir or data_root or Path("~/.ares/data").expanduser()
+        self.research = ResearchWorkspace(research_data_dir)
+        self.research_upgrades = ResearchUpgradeStore(research_data_dir)
         self.runtime_upgrades = RuntimeUpgradeManager(
             self.repl,
             (session_data_dir or data_root or Path("~/.ares/data").expanduser()) / "runtime",
@@ -212,6 +221,7 @@ class ToolExecutor:
 
     def close(self) -> None:
         """Clean up persistent sessions."""
+        self.research_upgrades.close()
         self.runtime_upgrades.close()
         self.repl.close()
         self.watcher_tools.close()
@@ -1576,8 +1586,69 @@ class ToolExecutor:
             return web_search_payload(**legacy)
 
     def _web_search(self, args: dict) -> str:
+        if self._advanced_web_search_requested(args):
+            structured = wants_structured(args)
+            advanced_args = dict(args)
+            mode = str(advanced_args.get("search_mode") or "quick").casefold()
+            if mode == "web":
+                advanced_args["search_mode"] = "quick"
+            try:
+                state = self.research_upgrades.search(
+                    advanced_args,
+                    lambda request, fetch_top: self._research_search_payload(
+                        request, fetch_top=fetch_top,
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                return error_result(str(exc), code="research_validation") if structured else json_result({
+                    "ok": False, "error": str(exc),
+                })
+            if not structured:
+                return json_result(state)
+            retrieval_errors = [
+                {"code": "retrieval_error", "message": message}
+                for message in state.get("errors", [])
+            ]
+            return structured_result(
+                f"Research session {state['research_id']} contains "
+                f"{len(state.get('sources', []))} source(s) and {len(state.get('claims', []))} claim(s).",
+                status="partial" if retrieval_errors else "completed",
+                data=state,
+                warnings=[state["uncertainty"]] if state.get("uncertainty") else [],
+                errors=retrieval_errors,
+                next_actions=[{
+                    "tool": "web_search",
+                    "arguments": {"research_id": state["research_id"], "follow_up": "...", "response_format": "structured"},
+                    "description": "Continue this research graph with a focused follow-up.",
+                }],
+                provenance={"providers": state.get("providers", []), "research_id": state["research_id"]},
+                metrics={
+                    "source_count": len(state.get("sources", [])),
+                    "claim_count": len(state.get("claims", [])),
+                    "conflict_count": len(state.get("conflicts", [])),
+                    "subquery_count": len(state.get("subqueries", [])),
+                },
+            )
         payload = self._research_search_payload(args, fetch_top=int(args.get("fetch_top", 3)))
+        if wants_structured(args):
+            return structured_result(
+                f"Found {len(payload.get('results', []))} web result(s).",
+                status="partial" if payload.get("errors") else "completed",
+                data=payload,
+                errors=[{"code": "retrieval_error", "message": str(item)} for item in payload.get("errors", [])],
+                provenance={"provider": payload.get("provider")},
+                metrics={"result_count": len(payload.get("results", [])), "fetched_count": len(payload.get("fetched", []))},
+            )
         return payload_to_json(payload)
+
+    @staticmethod
+    def _advanced_web_search_requested(args: dict[str, Any]) -> bool:
+        mode = str(args.get("search_mode") or "web").casefold()
+        return (
+            mode in {"quick", "deep", "fact-check", "compare", "primary", "recommend", "latest"}
+            or bool(args.get("research_id") or args.get("follow_up"))
+            or str(args.get("response_format") or "legacy").casefold() == "structured"
+        )
 
     @staticmethod
     def _web_timeout_error(operation: str, timeout: float) -> TimeoutError:
@@ -1622,6 +1693,8 @@ class ToolExecutor:
             }
 
     async def _web_search_async(self, args: dict) -> str:
+        if self._advanced_web_search_requested(args):
+            return await self._run_blocking_web_search(args)
         fetcher = str(args.get("fetcher", "auto") or "auto").lower()
         if fetcher not in {"auto", "mcp", "local"}:
             fetcher = "auto"
@@ -1716,6 +1789,31 @@ class ToolExecutor:
         }, ""
 
     def _fetch_url(self, args: dict) -> str:
+        advanced_keys = {
+            "selector", "heading", "anchor", "pattern", "extract",
+            "follow_same_domain", "max_follow_pages", "snapshot", "compare",
+        }
+        if any(key in args for key in advanced_keys) or wants_structured(args):
+            structured = wants_structured(args)
+            try:
+                payload = advanced_fetch(args, self.research_upgrades)
+            except (OSError, TypeError, ValueError, re.error) as exc:
+                return error_result(str(exc), code="fetch_validation") if structured else json_result({
+                    "ok": False, "error": str(exc),
+                })
+            if not structured:
+                return json_result(payload)
+            fetch_error = str(payload.get("error") or "")
+            return structured_result(
+                f"Fetched {payload.get('final_url') or payload.get('url') or args.get('url')}",
+                ok=not bool(fetch_error),
+                status="partial" if fetch_error else "completed",
+                data=payload,
+                warnings=["The page changed since its previous snapshot."] if payload.get("snapshot", {}).get("changed") else [],
+                errors=[{"code": "fetch_error", "message": fetch_error}] if fetch_error else [],
+                provenance={"url": payload.get("url"), "final_url": payload.get("final_url")},
+                metrics={"characters": len(str(payload.get("content") or ""))},
+            )
         return fetch_url_tool(args)
 
     def _download_online_file(self, args: dict) -> str:
@@ -1726,6 +1824,36 @@ class ToolExecutor:
         ))
 
     def _extract_document(self, args: dict) -> str:
+        advanced_keys = {"documents", "paths", "urls", "mode", "pages", "sheet", "range", "ocr", "tables", "entities"}
+        if any(key in args for key in advanced_keys) or wants_structured(args):
+            structured = wants_structured(args)
+            try:
+                payload = advanced_extract(self.research, args)
+            except (OSError, TypeError, ValueError, zipfile.BadZipFile) as exc:
+                return error_result(str(exc), code="document_validation") if structured else json_result({
+                    "ok": False, "error": str(exc),
+                })
+            if not structured:
+                return json_result(payload)
+            documents = payload.get("documents", [])
+            warnings = [
+                str(document.get("ocr", {}).get("warning"))
+                for document in documents if document.get("ocr", {}).get("warning")
+            ]
+            return structured_result(
+                f"Extracted {len(documents)} document(s) in {payload.get('mode')} mode.",
+                status="partial" if warnings else "completed",
+                data=payload,
+                artifacts=[{
+                    "path": document.get("path"), "name": document.get("name"), "kind": document.get("kind"),
+                } for document in documents],
+                warnings=warnings,
+                metrics={
+                    "document_count": len(documents),
+                    "comparison_count": len(payload.get("comparison", [])),
+                    "character_count": sum(len(str(document.get("content") or "")) for document in documents),
+                },
+            )
         return json_result(self.research.extract_document(
             path=str(args.get("path") or ""),
             url=str(args.get("url") or ""),
@@ -1735,6 +1863,32 @@ class ToolExecutor:
         ))
 
     def _create_research_report(self, args: dict) -> str:
+        if any(key in args for key in ("style", "research_id")) or wants_structured(args):
+            structured = wants_structured(args)
+            try:
+                payload = create_advanced_report(
+                    self.research,
+                    self.research_upgrades,
+                    args,
+                    lambda request, fetch_top: self._research_search_payload(
+                        request, fetch_top=fetch_top,
+                    ),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                return error_result(str(exc), code="research_report_error") if structured else json_result({
+                    "ok": False, "error": str(exc),
+                })
+            if not structured:
+                return json_result(payload)
+            state = payload.pop("state", {})
+            return structured_result(
+                f"Created {payload.get('style')} research report with {payload.get('sources')} source(s).",
+                data={**payload, "research": state},
+                artifacts=[{"path": payload.get("path"), "name": payload.get("name"), "kind": payload.get("kind")}],
+                warnings=[state.get("uncertainty")] if state.get("uncertainty") else [],
+                provenance={"research_id": payload.get("research_id"), "providers": state.get("providers", [])},
+                metrics={"source_count": payload.get("sources", 0), "claim_count": payload.get("claims", 0)},
+            )
         return json_result(self.research.create_report(
             str(args["query"]),
             title=str(args.get("title") or ""),
