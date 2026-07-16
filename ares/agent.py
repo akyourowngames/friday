@@ -1787,9 +1787,17 @@ class Agent:
             # The final execution guard may remove a line or append verified
             # runtime truth.  Keep execution-sensitive turns buffered so a
             # client never sees text that the guard would need to retract.
+            existing_execution_record = self._last_execution_record(turn_context)
             guard_sensitive_turn = (
                 delegation_decision.should_delegate
-                or self._last_execution_record(turn_context) is not None
+                # A record from this same request can still influence the
+                # final answer after tools/delegation have run.  A previous
+                # turn's ordinary record must not make every later chat reply
+                # wait for end-of-stream finalization.
+                or (
+                    existing_execution_record is not None
+                    and existing_execution_record.get("request_id") == turn_context.request_id
+                )
                 or bool(_EXECUTION_GUARD_SIGNAL_RE.search(turn_context.user_input))
             )
             allow_live_content = not guard_sensitive_turn

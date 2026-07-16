@@ -169,6 +169,48 @@ async def test_agent_run_stream_emits_before_provider_finishes_and_records_laten
 
 
 @pytest.mark.asyncio
+async def test_prior_execution_record_does_not_disable_normal_follow_up_streaming(
+    tmp_path, fake_embedding_provider,
+):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    agent = Agent(
+        memory_store=mem_store,
+        api_key="test-key",
+        config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
+    )
+    # A previous ordinary tool turn is retained for audit/follow-up safety,
+    # but it is not evidence about this new request.
+    agent._execution_records[agent._execution_session_key(None)] = {
+        "request_id": "previous-turn",
+        "kind": "ordinary",
+    }
+    agent._tools_for_turn = lambda *_args, **_kwargs: [{"type": "function"}]
+    first_visible = asyncio.Event()
+    release_provider = asyncio.Event()
+    received: list[str] = []
+
+    async def fake_chat_stream(_messages, tools=None):
+        assert tools
+        yield {"type": "content", "text": "Fresh "}
+        await release_provider.wait()
+        yield {"type": "content", "text": "answer."}
+        yield {"type": "done"}
+
+    async def consume():
+        async for token in agent.run_stream("Give a normal follow-up", []):
+            received.append(token)
+            first_visible.set()
+
+    agent.llm.chat_stream = fake_chat_stream
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(first_visible.wait(), timeout=0.5)
+    assert received == ["Fresh "]
+    release_provider.set()
+    await task
+    assert "".join(received) == "Fresh answer."
+
+
+@pytest.mark.asyncio
 async def test_agent_starts_next_chat_while_reflection_is_running(
     tmp_path, fake_embedding_provider,
 ):
@@ -276,7 +318,11 @@ async def test_agent_run_stream_buffers_guard_sensitive_turns_without_duplicate_
         config=AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False),
     )
     agent._tools_for_turn = lambda *_args, **_kwargs: []
-    monkeypatch.setattr(agent, "_last_execution_record", lambda _context: {"kind": "ordinary"})
+    monkeypatch.setattr(
+        agent,
+        "_last_execution_record",
+        lambda context: {"kind": "ordinary", "request_id": context.request_id},
+    )
     monkeypatch.setattr(agent, "_guard_final_answer", lambda *_args: "Verified final answer.")
 
     async def fake_chat_stream(_messages, tools=None):
