@@ -161,6 +161,74 @@ async def test_agent_run_stream_emits_before_provider_finishes_and_records_laten
     assert all(value >= 0 for value in record["metrics"].values())
     assert record["events"]["provider_first_token_received"] <= record["events"]["first_token_sent"]
     assert record["events"]["first_token_sent"] < record["events"]["response_finished"]
+    assert (
+        record["events"]["first_token_sent"]
+        - record["events"]["provider_first_token_received"]
+        < 250
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_starts_next_chat_while_reflection_is_running(
+    tmp_path, fake_embedding_provider,
+):
+    """A slow prior reflection must not delay the next foreground provider call."""
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    config = AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False)
+    config.multi_agent.enabled = False
+    agent = Agent(
+        memory_store=mem_store,
+        api_key="test-key",
+        session_id="reflection-stream-session",
+        config=config,
+    )
+    assert agent.reflection_service is not None
+    reflection_started = asyncio.Event()
+    release_reflection = asyncio.Event()
+    response_started = asyncio.Event()
+
+    class SlowReflectionAndChatLLM:
+        async def chat(self, _messages, tools=None):
+            assert tools == []
+            reflection_started.set()
+            await release_reflection.wait()
+            return {"content": "{}"}
+
+        async def chat_stream(self, _messages, tools=None):
+            response_started.set()
+            yield {"type": "content", "text": "Foreground reply."}
+            yield {"type": "done"}
+
+        async def close(self):
+            return None
+
+    llm = SlowReflectionAndChatLLM()
+    agent.llm = llm
+    agent.reflection_service.llm = llm
+    agent.reflection_service.reflector.llm = llm
+    agent._tools_for_turn = lambda *_args, **_kwargs: []
+    reflection_id = agent.reflection_service.enqueue_turn(
+        scope="reflection-stream-session",
+        user_text="Remember my dark theme preference.",
+        assistant_text="I will remember it.",
+    )
+    assert reflection_id is not None
+
+    try:
+        await asyncio.wait_for(reflection_started.wait(), timeout=0.5)
+        task = asyncio.create_task(
+            anext(agent.run_stream("Say hello", [], request_id="foreground-during-reflection"))
+        )
+        await asyncio.wait_for(response_started.wait(), timeout=0.5)
+        # The provider is already running while the preceding reflection model
+        # call remains deliberately blocked.
+        assert agent.reflection_service.store.get(reflection_id)["status"] == "running"
+        assert not release_reflection.is_set()
+        assert await task == "Foreground reply."
+    finally:
+        release_reflection.set()
+        await agent.close()
+        mem_store.close()
 
 
 @pytest.mark.asyncio
