@@ -41,7 +41,7 @@ from ares.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.config import _ensure_mcp_defaults, load_config, save_config
-from ares.llm import FREE_MODELS
+from ares.llm import FREE_MODELS, MODEL_REGISTRY, PROVIDER_BASE_URLS
 from ares.multi_agent_display import ACTIVE_STATUSES, elapsed_label, one_line, summarize_runs
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager, redact_mcp_text
@@ -523,13 +523,42 @@ class AresCLI(MarketplaceCommandMixin):
             )
         self.console.print(table)
 
-    def _show_model_list(self) -> None:
+    def _show_model_list(self, provider: str | None = None) -> None:
         table = Table(title="Models", border_style="bright_cyan", box=CLI_BOX)
         table.add_column("Model", style="cyan")
+        table.add_column("Provider", style="dim")
         table.add_column("Status", no_wrap=True)
-        for model in FREE_MODELS:
-            status = "[green]current[/green]" if model == self.config.model else "available"
-            table.add_row(model, status)
+        rows = []
+        for group_key, group in MODEL_REGISTRY.items():
+            for m in group["models"]:
+                if provider and m["provider"].lower() != provider.lower():
+                    continue
+                status = "[green]current[/green]" if m["id"] == self.config.model else "available"
+                rows.append((m["id"], m["provider"], status))
+        for model_id, model_provider, status in rows:
+            table.add_row(model_id, model_provider, status)
+        if not rows:
+            self.console.print("[dim]No models available for this provider.[/dim]")
+            return
+        self.console.print(table)
+
+    def _show_provider_list(self) -> None:
+        table = Table(title="Providers", border_style="bright_cyan", box=CLI_BOX)
+        table.add_column("Provider", style="cyan")
+        table.add_column("Base URL", style="dim")
+        table.add_column("Status", no_wrap=True)
+        providers = [
+            ("opencode", "https://opencode.ai/zen/v1"),
+            ("nvidia", "https://integrate.api.nvidia.com/v1"),
+            ("openai", "https://api.openai.com/v1"),
+            ("anthropic", "https://api.anthropic.com/v1"),
+            ("gemini", "https://generativelanguage.googleapis.com/v1beta"),
+            ("xai", "https://api.x.ai/v1"),
+            ("deepseek", "https://api.deepseek.com/v1"),
+        ]
+        for name, url in providers:
+            status = "[green]current[/green]" if name == getattr(self.config, "provider", "opencode") else "available"
+            table.add_row(name, url, status)
         self.console.print(table)
 
     @staticmethod
@@ -1538,6 +1567,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/goals [search|show|due|signals]", "Track goals, evidence, proactive watcher signals, and hierarchy")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
+            table.add_row("/provider [PROVIDER]", f"Show or switch provider: {getattr(self.config, 'provider', 'opencode')}")
             table.add_row("/clear", "Clear terminal screen")
             table.add_row("/export", "Export data to JSON")
             table.add_row("/import PATH [--config]", "Import data from an Ares JSON export")
@@ -1788,6 +1818,24 @@ class AresCLI(MarketplaceCommandMixin):
                 save_config(self.config)
                 self.agent.set_model(arg)
                 self.console.print(f"[green]Model switched to {arg}.[/green]")
+
+        elif command == "/provider":
+            if not arg or arg == "list":
+                self._show_provider_list()
+            else:
+                provider = arg.lower()
+                valid = ["opencode", "nvidia", "openai", "anthropic", "gemini", "xai", "deepseek", "zhipu", "moonshot", "minimax", "qwen"]
+                if provider not in valid:
+                    self.console.print(f"[red]Unknown provider: {provider}. Valid: {', '.join(valid)}[/red]")
+                    return
+                self.config.provider = provider
+                self.config.api_base_url = PROVIDER_BASE_URLS.get(provider, self.config.api_base_url)
+                save_config(self.config)
+                if hasattr(self.agent, "llm") and self.agent.llm is not None:
+                    self.agent.llm.provider = provider
+                    self.agent.llm.base_url = self.config.api_base_url.rstrip("/")
+                self.console.print(f"[green]Provider switched to {provider}.[/green]")
+                self._show_model_list(provider)
 
         elif command == "/clear":
             self.console.clear()

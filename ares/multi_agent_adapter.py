@@ -233,6 +233,7 @@ Assignment:
             base_url=config.api_base_url,
             model=selected_model,
             config=config,
+            provider=getattr(config, "provider", None) or "opencode",
         )
         child_kwargs: dict[str, Any] = dict(
             memory_store=self.root_agent.memory_store,

@@ -21,7 +21,7 @@ from ares.followups import FollowUpStore
 from ares.memory import MemoryStore
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
-from ares.llm import LLMClient
+from ares.llm import LLMClient, resolve_provider_base_url
 from ares.latency import RequestLatency
 from ares.models import AppConfig
 from ares.delegation_router import (
@@ -281,9 +281,11 @@ class Agent:
         if api_key or config:
             kwargs["api_key"] = api_key or (config.api_key if config else "")
         if base_url or config:
-            kwargs["base_url"] = base_url or (config.api_base_url if config else "")
+            kwargs["base_url"] = base_url or (getattr(config, "api_base_url", "") if config else "")
         if model or config:
             kwargs["model"] = model or (config.model if config else "")
+        if config:
+            kwargs["provider"] = getattr(config, "provider", None) or "opencode"
         self.llm = llm_client or LLMClient(**kwargs)
         if config is not None:
             self.llm.config = config
@@ -782,6 +784,11 @@ class Agent:
         if getattr(self.tool_executor, "telephony", None) is not None:
             self.tool_executor.telephony.apply_config(config)
         self.set_model(config.model)
+        provider = getattr(config, "provider", None) or "opencode"
+        if hasattr(self.llm, "provider"):
+            self.llm.provider = provider
+        if hasattr(self.llm, "base_url"):
+            self.llm.base_url = resolve_provider_base_url(provider, getattr(config, "api_base_url", None)).rstrip("/")
 
         data_dir = Path(config.data_dir).expanduser()
         profile_path = Path(config.profile_path).expanduser() if config.profile_path else data_dir / "profile.md"

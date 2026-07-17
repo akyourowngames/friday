@@ -486,6 +486,7 @@ class AppConfig(BaseModel):
     # Every Ares surface reads this shared file, so completing setup once
     # never triggers another first-run flow.
     onboarding_completed: bool = False
+    provider: str = "opencode"
     model: str = "deepseek-v4-flash-free"
     api_key: str = ""
     api_base_url: str = "https://opencode.ai/zen/v1"

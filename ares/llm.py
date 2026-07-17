@@ -1,4 +1,4 @@
-"""LLM API client for OpenCode Zen (OpenAI-compatible)."""
+"""LLM API client for OpenCode Zen, NVIDIA, OpenAI, Anthropic, and other OpenAI-compatible APIs."""
 
 import asyncio
 import json
@@ -8,7 +8,7 @@ import httpx
 
 from ares.config import load_config
 
-# All available models from OpenCode Zen, grouped by provider
+# All available models grouped by provider
 MODEL_REGISTRY = {
     "free": {
         "label": "Free Models",
@@ -67,6 +67,19 @@ MODEL_REGISTRY = {
             {"id": "gemini-3-flash", "label": "Gemini 3 Flash", "provider": "Google"},
         ],
     },
+    "nvidia": {
+        "label": "NVIDIA",
+        "models": [
+            {"id": "meta/llama-3.1-405b-instruct", "label": "Llama 3.1 405B", "provider": "NVIDIA"},
+            {"id": "meta/llama-3.1-70b-instruct", "label": "Llama 3.1 70B", "provider": "NVIDIA"},
+            {"id": "meta/llama-3.1-8b-instruct", "label": "Llama 3.1 8B", "provider": "NVIDIA"},
+            {"id": "meta/llama-3.3-70b-instruct", "label": "Llama 3.3 70B", "provider": "NVIDIA"},
+            {"id": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash", "provider": "NVIDIA"},
+            {"id": "deepseek-ai/deepseek-v4-pro", "label": "DeepSeek V4 Pro", "provider": "NVIDIA"},
+            {"id": "qwen/qwen3-72b-instruct", "label": "Qwen3 72B", "provider": "NVIDIA"},
+            {"id": "qwen/qwen3-8b", "label": "Qwen3 8B", "provider": "NVIDIA"},
+        ],
+    },
     "other": {
         "label": "Other Models",
         "models": [
@@ -88,16 +101,39 @@ MODEL_REGISTRY = {
 # Flat list of free model IDs for fallback
 FREE_MODELS = [m["id"] for m in MODEL_REGISTRY["free"]["models"]]
 
+PROVIDER_BASE_URLS = {
+    "opencode": "https://opencode.ai/zen/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta",
+    "xai": "https://api.x.ai/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "minimax": "https://api.minimax.chat/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+}
+
+
+def resolve_provider_base_url(provider: str | None, base_url: str | None = None) -> str:
+    """Resolve the base URL for a provider."""
+    if base_url:
+        return base_url.rstrip("/")
+    provider = (provider or "opencode").lower()
+    return PROVIDER_BASE_URLS.get(provider, "https://opencode.ai/zen/v1")
+
 
 class LLMClient:
     """Async client for calling OpenCode Zen or any OpenAI-compatible API."""
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None,
-                 model: str | None = None, config: Any | None = None):
+                 model: str | None = None, config: Any | None = None, provider: str | None = None):
         config = config or load_config()
         self.config = config
         self.api_key = api_key or config.api_key
-        self.base_url = (base_url or config.api_base_url).rstrip("/")
+        self.provider = provider or getattr(config, "provider", None) or "opencode"
+        self.base_url = resolve_provider_base_url(self.provider, base_url or getattr(config, "api_base_url", None)).rstrip("/")
         self.model = model or config.model
         self._client = httpx.AsyncClient(timeout=60.0)
 
