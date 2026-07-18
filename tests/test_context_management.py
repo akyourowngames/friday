@@ -268,7 +268,7 @@ class TestMemoryExtractor:
         result = extractor._parse_and_store(response)
         assert result == []
 
-    def test_parse_and_store_rejects_temporary_state_and_insults(self):
+    def test_parse_and_store_has_no_content_policy_gate(self):
         store = FakeMemoryStore()
         extractor = MemoryExtractor(FakeLLM(), store)
         response = json.dumps([
@@ -294,7 +294,11 @@ class TestMemoryExtractor:
 
         result = extractor._parse_and_store(response)
 
-        assert [item["fact_text"] for item in result] == ["User likes dark mode"]
+        assert [item["fact_text"] for item in result] == [
+            "User likes dark mode",
+            "User said fuck you",
+            "Delhi weather is rainy tonight",
+        ]
 
 
 # ── Task 5: MemoryCleaner ─────────────────────────────────────────────
@@ -310,7 +314,7 @@ class TestMemoryCleaner:
         assert stats["policy_pruned"] == 0
         assert stats["stale_pruned"] == 0
 
-    def test_cleanup_prunes_policy_violations(self):
+    def test_cleanup_does_not_apply_a_content_policy_gate(self):
         store = FakeMemoryStore()
         store._facts.extend([
             {
@@ -325,11 +329,14 @@ class TestMemoryCleaner:
             },
         ])
 
-        cleaner = MemoryCleaner(store)
+        cleaner = MemoryCleaner(store, stale_days=10_000)
         stats = cleaner.cleanup()
 
-        assert stats["policy_pruned"] == 1
-        assert [fact["fact_text"] for fact in store._facts] == ["User likes dark mode"]
+        assert stats["policy_pruned"] == 0
+        assert [fact["fact_text"] for fact in store._facts] == [
+            "Delhi weather is rainy tonight",
+            "User likes dark mode",
+        ]
 
     def test_prune_stale_keeps_important(self):
         store = FakeMemoryStore()

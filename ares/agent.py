@@ -19,6 +19,7 @@ from ares.autonomy import AutonomousWorkflowRunner
 from ares.browser_control import BrowserTaskController
 from ares.followups import FollowUpStore
 from ares.memory import MemoryStore
+from ares.memory_retrieval import BuiltInMemoryProvider, MemoryRecallService
 from ares.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.llm import (
@@ -354,7 +355,24 @@ class Agent:
                 profile_manager=self.profile_manager,
                 config=getattr(self.config, "reflection", self.config),
                 llm_client=self.llm,
+                memory_config=getattr(self.config, "memory", None),
             )
+        self.memory_recall_service: MemoryRecallService | None = None
+        self.memory_provider: BuiltInMemoryProvider | None = None
+        memory_config = getattr(self.config, "memory", None)
+        if (
+            delegation_depth == 0
+            and not self.is_cron_session
+            and bool(getattr(memory_config, "enabled", True))
+        ):
+            retrieval_config = getattr(memory_config, "retrieval", memory_config)
+            self.memory_store.retrieval_config = retrieval_config
+            self.memory_recall_service = MemoryRecallService(
+                self.memory_store,
+                self.llm,
+                retrieval_config,
+            )
+            self.memory_provider = BuiltInMemoryProvider(self.memory_recall_service)
         skill_dirs = list(self.config.skill_dirs or [])
         self.skill_manager = skill_manager or SkillManager(skill_dirs=skill_dirs or None)
         if self._owns_tool_executor:
@@ -729,6 +747,9 @@ class Agent:
         self,
         user_input: str,
         conversation_history: list[dict] | None = None,
+        *,
+        memory_query: str | None = None,
+        memories_override: list[dict[str, Any]] | object = _SESSION_UNSET,
     ) -> str:
         """Build every durable user-context layer through one retrieval path."""
         if getattr(self, "context_mode", ContextMode.FULL) is ContextMode.BOUNDED_SPECIALIST:
@@ -746,7 +767,11 @@ class Agent:
                 self.profile_manager.get_context(token_budget=400),
             ]
             return "\n\n".join(section for section in personal_context if section)
-        return build_user_context(
+        context_kwargs: dict[str, Any] = {}
+        if memories_override is not _SESSION_UNSET:
+            context_kwargs["memories_override"] = memories_override
+            context_kwargs["memory_query"] = memory_query
+        durable_context = build_user_context(
             user_input,
             config=self.config,
             soul_manager=self.soul_manager,
@@ -763,7 +788,79 @@ class Agent:
             commitment_store=self.commitment_store,
             follow_up_store=self.follow_up_store,
             conversation_history=conversation_history,
+            **context_kwargs,
         )
+        procedural_context = self._procedural_learning_context(user_input)
+        return "\n\n".join(
+            section for section in (durable_context, procedural_context) if section
+        )
+
+    def _procedural_learning_context(self, user_input: str) -> str:
+        """Render automatically learned Hermes-style procedures for this turn."""
+        service = self.reflection_service
+        if service is None:
+            return ""
+        try:
+            learnings = service.self_improvement_store.search(user_input, limit=4)
+        except Exception:
+            return ""
+        if not learnings:
+            return ""
+        lines = ["<ares_learned_procedures>"]
+        for learning in learnings:
+            title = str(learning.get("title") or "Learned procedure")
+            summary = str(learning.get("summary") or "")[:600]
+            for source, replacement in (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;")):
+                title = title.replace(source, replacement)
+                summary = summary.replace(source, replacement)
+            lines.append(f"- {title}: {summary}")
+        lines.append("</ares_learned_procedures>")
+        return "\n".join(lines)
+
+    async def get_context_async(
+        self,
+        user_input: str,
+        conversation_history: list[dict] | None = None,
+    ) -> str:
+        """Build context with optional fail-open V3 rewrite and relevance judging."""
+
+        if self.memory_recall_service is None:
+            return self.get_context(user_input, conversation_history)
+        if getattr(self, "context_mode", ContextMode.FULL) is ContextMode.BOUNDED_SPECIALIST:
+            return ""
+        active_turn = self.turn_context
+        if active_turn is not None and active_turn.intent is TurnIntent.CONVERSATION:
+            return self.get_context(user_input, conversation_history)
+        search_scope = "session" if self.session_id else "all"
+        try:
+            recall = await self.memory_recall_service.prepare(
+                user_input,
+                list(conversation_history or []),
+                limit=int(getattr(self.config, "max_memory_retrieval", 5)),
+                scope=search_scope,
+                session_id=self.session_id,
+                recent_sessions=int(getattr(self.config, "memory_session_scope", 3)),
+            )
+        except Exception:
+            # Memory enhancement is optional. A failure removes active memory
+            # from this turn and must never prevent the main response.
+            return self.get_context(
+                user_input,
+                conversation_history,
+                memory_query=user_input,
+                memories_override=[],
+            )
+        return self.get_context(
+            user_input,
+            conversation_history,
+            memory_query=recall.retrieval_query,
+            memories_override=recall.memories,
+        )
+
+    def explain_last_memory_retrieval(self) -> dict[str, Any]:
+        if self.memory_recall_service is None:
+            return {}
+        return self.memory_recall_service.explain_last_retrieval()
 
     def set_model(self, model: str) -> None:
         """Switch the underlying chat model."""
@@ -823,6 +920,21 @@ class Agent:
             self.reflection_service.config = reflection_config
             self.reflection_service.reflector.config = reflection_config
             self.reflection_service.applier.config = reflection_config
+            self.reflection_service.memory_config = getattr(config, "memory", None)
+            self.reflection_service.lifecycle_store.config = getattr(config, "memory", None)
+            self.reflection_service.promotion_service.config = getattr(
+                getattr(config, "memory", None), "promotion", None
+            )
+            self.reflection_service.self_improvement_store.config = getattr(
+                getattr(config, "memory", None), "self_improvement", None
+            )
+        memory_config = getattr(config, "memory", None)
+        retrieval_config = getattr(memory_config, "retrieval", memory_config)
+        self.memory_store.retrieval_config = retrieval_config
+        if self.memory_recall_service is not None:
+            self.memory_recall_service.config = retrieval_config
+            self.memory_recall_service.rewriter.config = retrieval_config
+            self.memory_recall_service.judge.config = retrieval_config
 
         skill_dirs = list(config.skill_dirs or [])
         configured_skill_dirs = [Path(path).expanduser() for path in skill_dirs]
@@ -1814,7 +1926,7 @@ class Agent:
         # Build context
         if latency is not None:
             latency.begin_context_build()
-        context = self.get_context(user_input, conversation_history)
+        context = await self.get_context_async(user_input, conversation_history)
         messages = self.build_messages(user_input, conversation_history, context)
         if agent_evidence:
             messages.insert(-1, {
@@ -1977,7 +2089,7 @@ class Agent:
         """Run the streaming model loop inside an established turn scope."""
         if latency is not None:
             latency.begin_context_build()
-        context = self.get_context(user_input, conversation_history)
+        context = await self.get_context_async(user_input, conversation_history)
         messages = self.build_messages(user_input, conversation_history, context)
         if agent_evidence:
             messages.insert(-1, {
@@ -2288,6 +2400,8 @@ class Agent:
             await self.reflection_service.close()
         if self.multi_agent_runtime is not None and self.delegation_depth == 0:
             await self.multi_agent_runtime.close()
+        if self.memory_provider is not None:
+            await self.memory_provider.shutdown()
         if self._owns_tool_executor:
             await self.tool_executor.shutdown()
         await self.llm.close()

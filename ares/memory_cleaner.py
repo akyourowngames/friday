@@ -1,4 +1,4 @@
-"""Memory cleanup: deduplication, merging, and stale memory pruning."""
+"""Memory cleanup through merge and archival rather than silent deletion."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from ares.memory_policy import memory_rejection_reason
 
 
 class MemoryCleaner:
-    """Cleans up memory store: dedup, merge, and prune stale facts."""
+    """Merge duplicates and archive ordinary stale/policy-invalid facts."""
 
     DEDUP_SIMILARITY_THRESHOLD = 0.3
     STALE_DAYS = 90
@@ -27,6 +27,8 @@ class MemoryCleaner:
             "duplicates_merged": 0,
             "policy_pruned": 0,
             "stale_pruned": 0,
+            "policy_archived": 0,
+            "stale_archived": 0,
             "total_before": 0,
             "total_after": 0,
         }
@@ -35,15 +37,17 @@ class MemoryCleaner:
         stats["total_before"] = len(all_memories)
 
         stats["policy_pruned"] = self._prune_policy_violations(all_memories)
+        stats["policy_archived"] = stats["policy_pruned"]
         all_memories = self.memory_store.list_all()
         stats["duplicates_merged"] = self._dedup_similar(all_memories)
         stats["stale_pruned"] = self._prune_stale()
+        stats["stale_archived"] = stats["stale_pruned"]
 
         stats["total_after"] = len(self.memory_store.list_all())
         return stats
 
     def _prune_policy_violations(self, memories: list[dict]) -> int:
-        """Remove memories that now violate deterministic memory policy."""
+        """Archive memories that now violate deterministic memory policy."""
         pruned = 0
         for mem in memories:
             reason = memory_rejection_reason(
@@ -52,7 +56,12 @@ class MemoryCleaner:
                 confidence=float(mem.get("confidence", 1.0) or 1.0),
             )
             if reason:
-                self.memory_store.delete(mem["fact_id"])
+                archive = getattr(self.memory_store, "archive", None)
+                if callable(archive):
+                    archive(mem["fact_id"], reason=f"memory policy: {reason}")
+                else:
+                    # Compatibility stores predating V3 only expose delete.
+                    self.memory_store.delete(mem["fact_id"])
                 pruned += 1
         return pruned
 
@@ -72,16 +81,25 @@ class MemoryCleaner:
             best = max(similar, key=lambda m: m.get("importance", 0.5))
             others = [m for m in similar if m["fact_id"] != best["fact_id"]]
 
-            merged_text = best["fact_text"]
-            for other in others:
-                if other["fact_id"] not in seen:
+            merge_memories = getattr(self.memory_store, "merge_memories", None)
+            active_others = [other for other in others if other["fact_id"] not in seen]
+            if active_others and callable(merge_memories):
+                merge_memories(best["fact_id"], [other["fact_id"] for other in active_others])
+                merged += len(active_others)
+                seen.update(other["fact_id"] for other in active_others)
+            else:
+                merged_text = best["fact_text"]
+                for other in active_others:
                     merged_text += f" Also: {other['fact_text']}"
-                    self.memory_store.delete(other["fact_id"])
+                    archive = getattr(self.memory_store, "archive", None)
+                    if callable(archive):
+                        archive(other["fact_id"], reason=f"merged into memory {best['fact_id']}")
+                    else:
+                        self.memory_store.delete(other["fact_id"])
                     seen.add(other["fact_id"])
                     merged += 1
-
-            if merged_text != best["fact_text"]:
-                self.memory_store.update(best["fact_id"], fact_text=merged_text)
+                if merged_text != best["fact_text"]:
+                    self.memory_store.update(best["fact_id"], fact_text=merged_text)
             seen.add(best["fact_id"])
 
         return merged
@@ -96,7 +114,7 @@ class MemoryCleaner:
         return similar
 
     def _prune_stale(self) -> int:
-        """Remove old, low-importance, rarely-accessed memories."""
+        """Archive old, low-importance, rarely-accessed memories."""
         pruned = 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.STALE_DAYS)
 
@@ -120,7 +138,11 @@ class MemoryCleaner:
             except (ValueError, TypeError):
                 continue
 
-            self.memory_store.delete(mem["fact_id"])
+            archive = getattr(self.memory_store, "archive", None)
+            if callable(archive):
+                archive(mem["fact_id"], reason="stale low-confidence lifecycle cleanup")
+            else:
+                self.memory_store.delete(mem["fact_id"])
             pruned += 1
 
         return pruned

@@ -332,8 +332,15 @@ class LLMClient:
     def _retry_delay(attempt: int) -> float:
         return min(4.0, 0.5 * (2 ** attempt))
 
-    async def chat(self, messages: list[dict], tools: list[dict] | None = None,
-                   tool_choice: str = "auto") -> dict:
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        tool_choice: str = "auto",
+        *,
+        max_tokens: int | None = None,
+        temperature: float = 0.3,
+    ) -> dict:
         """Send a chat completion request. Returns the full response dict."""
         if self.provider == "copilot":
             return await self._copilot().chat(messages, tools)
@@ -341,8 +348,10 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.3,
+            "temperature": max(0.0, min(float(temperature), 2.0)),
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max(1, int(max_tokens))
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice

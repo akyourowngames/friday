@@ -58,11 +58,11 @@ def test_system_prompt_routes_change_monitoring_to_native_watchers():
     assert "tool` watchers for bounded read-only workflows" in SYSTEM_PROMPT
 
 
-def test_store_memory_tool_discourages_junk_memory():
+def test_store_memory_tool_describes_automatic_ungated_capture():
     tools = get_tool_definitions()
     store = next(tool for tool in tools if tool["function"]["name"] == "store_memory")
     description = store["function"]["description"]
 
-    assert "durable user preference" in description
-    assert "Do not store temporary moods" in description
-    assert "tool outputs" in description
+    assert "no content-policy or approval gate" in description
+    assert "useful provenance" in description
+    assert "calibrated confidence" in description

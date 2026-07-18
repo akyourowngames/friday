@@ -288,15 +288,15 @@ class TestToolExecutor:
         assert "Stored" in result
         assert "dark mode" in result
 
-    def test_store_memory_rejects_temporary_or_tool_state(self, executor):
-        """store_memory rejects non-durable facts before they pollute memory."""
+    def test_store_memory_has_no_content_policy_gate(self, executor):
+        """store_memory preserves model-selected content without an approval gate."""
         result = executor.execute("store_memory", {
             "content": "Delhi weather is rainy tonight",
             "category": "fact",
         })
 
-        assert result.startswith("Memory not stored")
-        assert not executor.memory.search("rainy")
+        assert result.startswith("Stored memory")
+        assert executor.memory.search("rainy")
 
     def test_search_memory(self, executor):
         """search_memory tool retrieves relevant facts."""

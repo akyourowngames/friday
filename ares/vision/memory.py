@@ -21,8 +21,9 @@ class VisionMemory:
     def __init__(self, memory_store: MemoryStore, store: VisionStore) -> None:
         self.memory_store = memory_store
         self.store = store
+        add_observer = getattr(memory_store, "add_deletion_observer", None)
         self._remove_deletion_observer: Callable[[], None] | None = (
-            memory_store.add_deletion_observer(self._on_memory_deleted)
+            add_observer(self._on_memory_deleted) if callable(add_observer) else None
         )
 
     def close(self) -> None:

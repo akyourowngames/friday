@@ -2,10 +2,13 @@
 
 from datetime import datetime, timezone
 from collections import OrderedDict
+import hashlib
 import json
 import logging
+import math
 import re
 import sqlite3
+import time
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -130,6 +133,7 @@ class MemoryStore:
         query_embedding_cache_size: int = _DEFAULT_QUERY_EMBEDDING_CACHE_SIZE,
     ):
         config = load_config()
+        self.retrieval_config = getattr(getattr(config, "memory", None), "retrieval", None)
         self.db_path = db_path or get_db_path()
         self.embedding_provider = embedding_provider or EmbeddingProvider(
             model_name=embedding_model or config.embedding_model,
@@ -152,6 +156,7 @@ class MemoryStore:
         # and commit them later in one batch instead of making every retrieval
         # wait for a SQLite write.
         self._pending_access_counts: dict[int, int] = {}
+        self._pending_candidate_feedback: dict[tuple[int, str], float] = {}
         self._init_db()
 
     def add_deletion_observer(self, observer: Callable[[int], Any]) -> Callable[[], None]:
@@ -262,6 +267,8 @@ class MemoryStore:
         _ensure_column(self.conn, "facts_meta", "outdated_at", "TEXT DEFAULT NULL")
         _ensure_column(self.conn, "facts_meta", "project", "TEXT DEFAULT NULL")
         _ensure_column(self.conn, "facts_meta", "revision", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(self.conn, "facts_meta", "archived_at", "TEXT DEFAULT NULL")
+        _ensure_column(self.conn, "facts_meta", "source_candidate_id", "INTEGER DEFAULT NULL")
         self.conn.execute(
             """CREATE TABLE IF NOT EXISTS memory_revisions (
                    revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,6 +301,8 @@ class MemoryStore:
         )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_validity ON facts_meta(outdated_at, expires_at, valid_from)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_project ON facts_meta(project)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_archive ON facts_meta(archived_at, outdated_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_candidate_source ON facts_meta(source_candidate_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_links_entity ON memory_links(entity_type, entity_id)")
 
         # Reflected facts are durable user memories, not conversation-local
@@ -350,6 +359,22 @@ class MemoryStore:
                 self._pending_access_counts.get(normalized_id, 0) + 1
             )
 
+    def _queue_candidate_feedback(self, memories: list[dict], query: str) -> None:
+        """Defer query-diversity feedback to the normal batched write path."""
+
+        query_key = hashlib.sha256(
+            _normalize_memory_text(query).encode("utf-8")
+        ).hexdigest()
+        for memory in memories:
+            candidate_id = memory.get("source_candidate_id")
+            if candidate_id is None:
+                continue
+            key = (int(candidate_id), query_key)
+            self._pending_candidate_feedback[key] = max(
+                self._pending_candidate_feedback.get(key, 0.0),
+                float(memory.get("_relevance") or 0.0),
+            )
+
     def flush_access_stats(self) -> int:
         """Persist queued memory access counters in one SQLite transaction.
 
@@ -357,11 +382,13 @@ class MemoryStore:
         after a streamed response, from a periodic maintenance path, or during
         shutdown.  Failed writes are returned to the queue for a later retry.
         """
-        if not self._pending_access_counts:
+        if not self._pending_access_counts and not self._pending_candidate_feedback:
             return 0
 
         pending = self._pending_access_counts
+        feedback = self._pending_candidate_feedback
         self._pending_access_counts = {}
+        self._pending_candidate_feedback = {}
         try:
             self.conn.executemany(
                 """UPDATE facts_meta
@@ -370,12 +397,47 @@ class MemoryStore:
                    WHERE fact_id = ?""",
                 [(count, fact_id) for fact_id, count in pending.items()],
             )
+            query_table = self.conn.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name='memory_candidate_queries'"""
+            ).fetchone()
+            if query_table is not None and feedback:
+                now = utc_now()
+                self.conn.executemany(
+                    """INSERT INTO memory_candidate_queries
+                       (candidate_id, query_key, relevance, created_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(candidate_id, query_key) DO UPDATE SET
+                         relevance=MAX(relevance, excluded.relevance)""",
+                    [
+                        (candidate_id, query_key, relevance, now)
+                        for (candidate_id, query_key), relevance in feedback.items()
+                    ],
+                )
+                for candidate_id in {key[0] for key in feedback}:
+                    self.conn.execute(
+                        """UPDATE memory_candidates
+                           SET unique_query_count=(
+                                   SELECT COUNT(*) FROM memory_candidate_queries
+                                   WHERE candidate_id=?
+                               ),
+                               average_relevance=COALESCE((
+                                   SELECT AVG(relevance) FROM memory_candidate_queries
+                                   WHERE candidate_id=?
+                               ), 0.0)
+                           WHERE candidate_id=?""",
+                        (candidate_id, candidate_id, candidate_id),
+                    )
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             for fact_id, count in pending.items():
                 self._pending_access_counts[fact_id] = (
                     self._pending_access_counts.get(fact_id, 0) + count
+                )
+            for key, relevance in feedback.items():
+                self._pending_candidate_feedback[key] = max(
+                    self._pending_candidate_feedback.get(key, 0.0), relevance
                 )
             raise
         return len(pending)
@@ -410,6 +472,7 @@ class MemoryStore:
         supersedes_memory_id: int | None = None,
         project: str | None = None,
         links: dict[str, list[str] | tuple[str, ...] | str] | None = None,
+        source_candidate_id: int | None = None,
     ) -> int:
         """Store a new fact. Returns the fact_id."""
         # Insert metadata
@@ -417,13 +480,13 @@ class MemoryStore:
             """INSERT INTO facts_meta
                (fact_text, category, confidence, importance, source, session_id,
                 source_conversation_id, source_reflection_id, source_message_id,
-                tags_json, valid_from, expires_at, project)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tags_json, valid_from, expires_at, project, source_candidate_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fact_text, category, confidence, importance, source, session_id,
                 source_conversation_id, source_reflection_id, source_message_id,
                 json.dumps(self._normalize_tags(tags), ensure_ascii=False),
-                valid_from, expires_at, project,
+                valid_from, expires_at, project, source_candidate_id,
             ),
         )
         fact_id = int(cursor.lastrowid)
@@ -547,7 +610,7 @@ class MemoryStore:
 
     @staticmethod
     def _is_outdated(memory: dict) -> bool:
-        if memory.get("outdated_at") or memory.get("superseded_by"):
+        if memory.get("archived_at") or memory.get("outdated_at") or memory.get("superseded_by"):
             return True
         expires = _parse_db_datetime(memory.get("expires_at"))
         return bool(expires and expires <= datetime.now(timezone.utc))
@@ -736,6 +799,95 @@ class MemoryStore:
         confidence_boost = confidence * 0.02
         return base_score + age_term - importance_boost - confidence_boost - access_boost
 
+    @staticmethod
+    def _temporal_decay(meta: sqlite3.Row, enabled: bool) -> float:
+        """Return category-aware retention without aging evergreen facts."""
+
+        if not enabled:
+            return 1.0
+        category = str(meta["category"] or "note").casefold()
+        half_life_days: dict[str, float | None] = {
+            "identity": None,
+            "fact": None,
+            "preference": 3_650.0,
+            "relationship": 3_650.0,
+            "habit": 1_460.0,
+            "belief": 730.0,
+            "project": 365.0,
+            "plan": 60.0,
+            "note": 45.0,
+            "observation": 21.0,
+        }
+        half_life = half_life_days.get(category, 180.0)
+        if half_life is None:
+            return 1.0
+        created = _parse_db_datetime(meta["updated_at"] or meta["created_at"])
+        if created is None:
+            return 1.0
+        age_days = max(
+            (datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds() / 86_400,
+            0.0,
+        )
+        return max(0.05, min(1.0, 0.5 ** (age_days / half_life)))
+
+    @staticmethod
+    def _metadata_relevance(meta: sqlite3.Row, query_tokens: set[str]) -> float:
+        importance = max(0.0, min(float(meta["importance"] or 0.5), 1.0))
+        raw_confidence = meta["confidence"]
+        confidence = 1.0 if raw_confidence is None else max(0.0, min(float(raw_confidence), 1.0))
+        fact_tokens = {token.casefold() for token in _WORD_RE.findall(str(meta["fact_text"] or ""))}
+        exact = 1.0 if query_tokens and query_tokens.issubset(fact_tokens) else 0.0
+        access = min(math.log1p(max(0, int(meta["access_count"] or 0))) / math.log(21), 1.0)
+        project = str(meta["project"] or "").casefold()
+        project_match = 1.0 if project and project in " ".join(sorted(query_tokens)) else 0.0
+        return min(
+            1.0,
+            0.40 * importance
+            + 0.30 * confidence
+            + 0.15 * exact
+            + 0.05 * access
+            + 0.10 * project_match,
+        )
+
+    @staticmethod
+    def _mmr_select(
+        candidates: list[dict],
+        *,
+        limit: int,
+        lambda_value: float,
+    ) -> list[dict]:
+        if len(candidates) <= 1 or limit <= 1:
+            return candidates[:limit]
+        remaining = list(candidates)
+        selected: list[dict] = []
+        weight = max(0.0, min(float(lambda_value), 1.0))
+        while remaining and len(selected) < limit:
+            best = None
+            best_score = float("-inf")
+            for candidate in remaining:
+                diversity_penalty = max(
+                    (
+                        _token_overlap(
+                            _normalize_memory_text(candidate.get("fact_text", "")),
+                            _normalize_memory_text(item.get("fact_text", "")),
+                        )
+                        for item in selected
+                    ),
+                    default=0.0,
+                )
+                mmr_score = weight * float(candidate.get("_relevance") or 0.0) - (
+                    1.0 - weight
+                ) * diversity_penalty
+                if mmr_score > best_score:
+                    best = candidate
+                    best_score = mmr_score
+            if best is None:
+                break
+            best["_mmr_score"] = round(best_score, 6)
+            selected.append(best)
+            remaining.remove(best)
+        return selected
+
     def search(
         self,
         query: str,
@@ -745,35 +897,56 @@ class MemoryStore:
         recent_sessions: int = 3,
         *,
         semantic: bool | None = None,
+        retrieval_config: Any | None = None,
+        include_outdated: bool = False,
     ) -> list[dict]:
-        """Hybrid search: vector similarity + FTS5 keyword match, merged.
+        """Memory V3 retrieval: normalized fusion, decay, metadata, and MMR."""
 
-        Args:
-            query: Search text.
-            limit: Max results.
-            scope: "session" to search current + recent N, "all" for everything.
-            session_id: Current session ID (required when scope="session").
-            recent_sessions: Number of recent sessions to include (default 3).
-            semantic: Force semantic retrieval on/off.  ``None`` keeps hybrid
-                retrieval except for standalone greetings and confirmations.
-        """
-        query_text = str(query)
-        results: dict[int, dict[str, object]] = {}
+        started = time.monotonic()
+        query_text = " ".join(str(query or "").split()).strip()
         bounded_limit = max(1, min(int(limit), 100))
+        config = retrieval_config or self.retrieval_config
+        max_candidates = max(
+            bounded_limit,
+            min(int(getattr(config, "max_candidates", 40)), 200),
+        )
+        vector_weight = max(0.0, float(getattr(config, "vector_weight", 0.55)))
+        keyword_weight = max(0.0, float(getattr(config, "keyword_weight", 0.30)))
+        metadata_weight = max(0.0, float(getattr(config, "metadata_weight", 0.15)))
+        weight_total = vector_weight + keyword_weight + metadata_weight
+        if weight_total <= 0:
+            vector_weight, keyword_weight, metadata_weight, weight_total = 0.55, 0.30, 0.15, 1.0
+        vector_weight /= weight_total
+        keyword_weight /= weight_total
+        metadata_weight /= weight_total
         use_semantic = (
             self._should_use_semantic_search(query_text)
             if semantic is None
             else bool(semantic)
         )
-        diagnostics: dict[str, object] = {
+        results: dict[int, dict[str, Any]] = {}
+        diagnostics: dict[str, Any] = {
             "query": query_text,
             "scope": scope,
             "vector": "disabled",
             "fts": "not-run",
             "mode": "degraded",
+            "fusion_weights": {
+                "vector": round(vector_weight, 4),
+                "keyword": round(keyword_weight, 4),
+                "metadata": round(metadata_weight, 4),
+            },
+            "max_candidates": max_candidates,
         }
+        if not query_text:
+            self.last_search_diagnostics = {**diagnostics, "fallback": "empty-query", "elapsed_ms": 0.0}
+            return []
 
-        # Build session filter for scoped search
+        lifecycle_filter = "AND m.archived_at IS NULL"
+        if not include_outdated:
+            lifecycle_filter += """ AND m.outdated_at IS NULL
+                AND (m.expires_at IS NULL OR datetime(m.expires_at) > datetime('now'))
+                AND (m.valid_from IS NULL OR datetime(m.valid_from) <= datetime('now'))"""
         session_filter = ""
         session_params: list[object] = []
         if scope == "session" and session_id:
@@ -781,64 +954,61 @@ class MemoryStore:
                 OR m.session_id IN (
                     SELECT DISTINCT session_id FROM facts_meta
                     WHERE session_id IS NOT NULL
-                    ORDER BY created_at DESC
-                    LIMIT ?
+                    ORDER BY created_at DESC LIMIT ?
                 ))"""
             session_params = [session_id, recent_sessions]
 
-        # 1. Vector search (semantic)
+        vector_rows: list[sqlite3.Row] = []
         if self.vector_enabled and use_semantic:
             try:
-                query_vec = self._embed_query(query_text)
-                # Pull a larger bounded candidate window when a vec0 join is
-                # unavailable, then apply the scope before accepting entries.
-                candidate_limit = max(bounded_limit * 20, 100)
-                vec_rows = self.conn.execute(
-                    """
-                    SELECT rowid, distance FROM user_facts
-                    WHERE embedding MATCH ? ORDER BY distance LIMIT ?
-                    """,
-                    (query_vec, candidate_limit),
+                vector_rows = self.conn.execute(
+                    """SELECT rowid, distance FROM user_facts
+                       WHERE embedding MATCH ? ORDER BY distance LIMIT ?""",
+                    (self._embed_query(query_text), max(max_candidates * 4, 100)),
                 ).fetchall()
-                if session_filter and vec_rows:
-                    meta_rows = self.conn.execute(
-                        f"SELECT fact_id FROM facts_meta AS m WHERE fact_id IN ({','.join('?' for _ in vec_rows)}) {session_filter}",
-                        [row["rowid"] for row in vec_rows] + session_params,
+                if vector_rows:
+                    ids = [int(row["rowid"]) for row in vector_rows]
+                    placeholders = ",".join("?" for _ in ids)
+                    valid_rows = self.conn.execute(
+                        f"""SELECT fact_id FROM facts_meta AS m
+                            WHERE fact_id IN ({placeholders}) {lifecycle_filter} {session_filter}""",
+                        [*ids, *session_params],
                     ).fetchall()
-                    valid_ids = {row["fact_id"] for row in meta_rows}
-                    vec_rows = [row for row in vec_rows if row["rowid"] in valid_ids]
-                for row in vec_rows:
-                    results[row["rowid"]] = {"distance": row["distance"], "source": "vector"}
-                diagnostics["vector"] = "ok" if vec_rows else "no-results"
+                    valid_ids = {int(row["fact_id"]) for row in valid_rows}
+                    vector_rows = [row for row in vector_rows if int(row["rowid"]) in valid_ids][:max_candidates]
+                for rank, row in enumerate(vector_rows, start=1):
+                    results[int(row["rowid"])] = {
+                        "vector_rank": rank,
+                        "vector_score": 1.0 / rank,
+                        "distance": float(row["distance"]),
+                        "source": "vector",
+                    }
+                diagnostics["vector"] = "ok" if vector_rows else "no-results"
             except Exception as exc:
                 diagnostics["vector"] = f"failed: {type(exc).__name__}"
-                logger.debug("Vector memory search failed; falling back to FTS only: %s", exc)
+                logger.debug("Vector memory search failed; using FTS: %s", exc)
         elif self.vector_enabled:
-            diagnostics["vector"] = (
-                "skipped-trivial" if semantic is None else "skipped-by-request"
-            )
+            diagnostics["vector"] = "skipped-trivial" if semantic is None else "skipped-by-request"
 
-        # 2. FTS5 keyword search
-        candidate_limit = max(bounded_limit * 4, 50)
-        structured_error = None
-        fts_rows = []
+        fts_rows: list[sqlite3.Row] = []
+        structured_error: Exception | None = None
         queries: list[tuple[str, str]] = [(query_text, "structured")]
         literal_terms = re.findall(r"[\w]+", query_text, flags=re.UNICODE)
         if literal_terms:
-            literal_query = " AND ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in literal_terms)
+            literal_query = " AND ".join(
+                f'"{term.replace(chr(34), chr(34) * 2)}"' for term in literal_terms
+            )
             if literal_query != query_text:
                 queries.append((literal_query, "literal"))
         for fts_query, mode in queries:
             try:
                 fts_rows = self.conn.execute(
-                    f"""
-                    SELECT facts_fts.rowid AS rowid, facts_fts.rank AS rank
-                    FROM facts_fts
-                    JOIN facts_meta AS m ON m.fact_id = facts_fts.rowid
-                    WHERE facts_fts MATCH ? {session_filter}
-                    ORDER BY facts_fts.rank LIMIT ?
-                    """,
-                    [fts_query] + session_params + [candidate_limit],
+                    f"""SELECT facts_fts.rowid AS rowid, facts_fts.rank AS rank
+                        FROM facts_fts
+                        JOIN facts_meta AS m ON m.fact_id=facts_fts.rowid
+                        WHERE facts_fts MATCH ? {lifecycle_filter} {session_filter}
+                        ORDER BY facts_fts.rank LIMIT ?""",
+                    [fts_query, *session_params, max_candidates],
                 ).fetchall()
                 diagnostics["fts"] = mode if fts_rows else f"{mode}: no-results"
                 if fts_rows or mode == "literal":
@@ -847,56 +1017,98 @@ class MemoryStore:
                 structured_error = exc
                 diagnostics["fts"] = f"{mode} failed: {type(exc).__name__}"
                 logger.debug("FTS memory %s query failed: %s", mode, exc)
-                continue
-        for row in fts_rows:
-            rid = row["rowid"]
-            if rid in results:
-                results[rid]["fts_rank"] = row["rank"]
-                results[rid]["source"] = "both"
-            else:
-                results[rid] = {"fts_rank": row["rank"], "source": "fts"}
-        if fts_rows:
-            diagnostics["mode"] = "hybrid" if any(value.get("source") == "both" for value in results.values()) else "fts"
-        elif results:
+        for rank, row in enumerate(fts_rows, start=1):
+            fact_id = int(row["rowid"])
+            result = results.setdefault(fact_id, {"source": "fts"})
+            result["keyword_rank"] = rank
+            result["keyword_score"] = 1.0 / rank
+            result["fts_rank"] = float(row["rank"])
+            if result.get("source") == "vector":
+                result["source"] = "both"
+
+        if vector_rows and fts_rows:
+            diagnostics["mode"] = "hybrid"
+        elif vector_rows:
             diagnostics["mode"] = "vector"
-        elif structured_error:
+        elif fts_rows:
+            diagnostics["mode"] = "fts"
+        elif structured_error is not None:
             diagnostics["mode"] = "degraded"
-
-        self.last_search_diagnostics = diagnostics
-
+        diagnostics["candidate_counts"] = {
+            "vector": len(vector_rows),
+            "fts": len(fts_rows),
+            "fused": len(results),
+        }
         if not results:
+            diagnostics["selected_ids"] = []
+            diagnostics["elapsed_ms"] = round((time.monotonic() - started) * 1_000, 3)
+            self.last_search_diagnostics = diagnostics
             return []
 
-        # 3. Merge and fetch metadata
-        row_ids = list(results.keys())
-        placeholders = ",".join("?" * len(row_ids))
+        row_ids = list(results)
+        placeholders = ",".join("?" for _ in row_ids)
         meta_rows = self.conn.execute(
-            f"SELECT * FROM facts_meta WHERE fact_id IN ({placeholders})",
+            f"""SELECT * FROM facts_meta AS m WHERE fact_id IN ({placeholders})
+                {lifecycle_filter}""",
             row_ids,
         ).fetchall()
-
-        enriched = []
+        query_tokens = {token.casefold() for token in _WORD_RE.findall(query_text)}
+        decay_enabled = bool(getattr(config, "temporal_decay_enabled", True))
+        enriched: list[dict] = []
+        decay_effects: list[dict[str, Any]] = []
         for meta in meta_rows:
+            channels = results[int(meta["fact_id"])]
+            vector_score = float(channels.get("vector_score") or 0.0)
+            keyword_score = float(channels.get("keyword_score") or 0.0)
+            metadata_score = self._metadata_relevance(meta, query_tokens)
+            fused = (
+                vector_weight * vector_score
+                + keyword_weight * keyword_score
+                + metadata_weight * metadata_score
+            )
+            decay = self._temporal_decay(meta, decay_enabled)
+            relevance = max(0.0, min(fused * decay, 1.0))
             entry = self._row_to_memory(meta)
-            # Boost score: both sources > vector-only > fts-only
-            src = results[meta["fact_id"]]["source"]
-            if src == "both":
-                base_score = 0
-            elif "distance" in results[meta["fact_id"]]:
-                base_score = results[meta["fact_id"]]["distance"]
-            else:
-                base_score = 0.5
-            entry["_score"] = self._rank_score(base_score, meta)
+            entry.update({
+                "_source": channels.get("source"),
+                "_vector_rank": channels.get("vector_rank"),
+                "_keyword_rank": channels.get("keyword_rank"),
+                "_metadata_score": round(metadata_score, 6),
+                "_temporal_decay": round(decay, 6),
+                "_relevance": round(relevance, 6),
+                # Compatibility: callers historically treated lower _score as better.
+                "_score": round(1.0 - relevance, 6),
+            })
+            decay_effects.append({"fact_id": int(meta["fact_id"]), "factor": round(decay, 6)})
             enriched.append(entry)
-
-        # Sort by score (lower distance = more similar)
-        enriched.sort(key=lambda x: x["_score"])
-
-        selected = enriched[:bounded_limit]
-        # Defer this write until after the response's first-token path.  The
-        # explicit flush method batches repeated searches into one commit.
+        enriched.sort(key=lambda item: (-float(item["_relevance"]), int(item["fact_id"])))
+        candidate_pool = enriched[:max_candidates]
+        if bool(getattr(config, "mmr_enabled", True)) and len(candidate_pool) > 2:
+            selected = self._mmr_select(
+                candidate_pool,
+                limit=bounded_limit,
+                lambda_value=float(getattr(config, "mmr_lambda", 0.70)),
+            )
+            diagnostics["mmr"] = {
+                "enabled": True,
+                "lambda": float(getattr(config, "mmr_lambda", 0.70)),
+                "selected_ids": [int(item["fact_id"]) for item in selected],
+            }
+        else:
+            selected = candidate_pool[:bounded_limit]
+            diagnostics["mmr"] = {"enabled": False, "selected_ids": [int(item["fact_id"]) for item in selected]}
+        diagnostics["temporal_decay_effects"] = decay_effects
+        diagnostics["selected_ids"] = [int(item["fact_id"]) for item in selected]
+        diagnostics["elapsed_ms"] = round((time.monotonic() - started) * 1_000, 3)
+        self.last_search_diagnostics = diagnostics
         self._queue_access_stats([int(entry["fact_id"]) for entry in selected])
+        self._queue_candidate_feedback(selected, query_text)
         return selected
+
+    def explain_last_retrieval(self) -> dict[str, Any]:
+        """Return safe retrieval diagnostics without private memory content."""
+
+        return dict(getattr(self, "last_search_diagnostics", {}) or {})
 
     def search_advanced(
         self,
@@ -956,7 +1168,11 @@ class MemoryStore:
 
         search_text = str(task or query).strip() if selected_mode == "task_context" else str(query or "").strip()
         if search_text:
-            records = self.search(search_text, limit=max(bounded * 4, 40))
+            records = self.search(
+                search_text,
+                limit=max(bounded * 4, 40),
+                include_outdated=bool(criteria.get("include_outdated", False)),
+            )
         else:
             records = self.list_all()
         records = self._filter_memories(records, criteria)
@@ -1082,10 +1298,66 @@ class MemoryStore:
         self._notify_deleted((int(fact_id),))
         return True
 
-    def list_all(self) -> list[dict]:
-        """Return all stored memories."""
+    def archive(self, fact_id: int, *, reason: str = "lifecycle_cleanup") -> bool:
+        """Soft-delete an ordinary memory while preserving provenance."""
+
+        existing = self.get(int(fact_id))
+        if existing is None:
+            return False
+        if existing.get("archived_at"):
+            return True
+        self.conn.execute(
+            """INSERT OR IGNORE INTO memory_revisions
+               (fact_id, revision, snapshot_json, change_summary, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                int(fact_id),
+                int(existing.get("revision") or 1),
+                json.dumps(existing, ensure_ascii=False, sort_keys=True, default=str),
+                f"archived: {str(reason or 'lifecycle_cleanup')[:400]}",
+                utc_now(),
+            ),
+        )
+        self.conn.execute(
+            """UPDATE facts_meta SET archived_at=?, updated_at=datetime('now'),
+               revision=revision+1 WHERE fact_id=?""",
+            (utc_now(), int(fact_id)),
+        )
+        self.conn.commit()
+        self._pending_access_counts.pop(int(fact_id), None)
+        return True
+
+    def restore(self, fact_id: int) -> bool:
+        """Restore an archived memory to normal retrieval."""
+
+        existing = self.get(int(fact_id))
+        if existing is None or not existing.get("archived_at"):
+            return False
+        self.conn.execute(
+            """INSERT OR IGNORE INTO memory_revisions
+               (fact_id, revision, snapshot_json, change_summary, created_at)
+               VALUES (?, ?, ?, 'restored from archive', ?)""",
+            (
+                int(fact_id),
+                int(existing.get("revision") or 1),
+                json.dumps(existing, ensure_ascii=False, sort_keys=True, default=str),
+                utc_now(),
+            ),
+        )
+        self.conn.execute(
+            """UPDATE facts_meta SET archived_at=NULL, updated_at=datetime('now'),
+               revision=revision+1 WHERE fact_id=?""",
+            (int(fact_id),),
+        )
+        self.conn.commit()
+        return True
+
+    def list_all(self, *, include_archived: bool = False) -> list[dict]:
+        """Return stored memories, excluding archived rows by default."""
+
+        where = "" if include_archived else "WHERE archived_at IS NULL"
         rows = self.conn.execute(
-            "SELECT * FROM facts_meta ORDER BY created_at DESC"
+            f"SELECT * FROM facts_meta {where} ORDER BY created_at DESC"
         ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
@@ -1153,22 +1425,27 @@ class MemoryStore:
                 session_id=memory.get("session_id"),
                 source_conversation_id=memory.get("source_conversation_id"),
                 source_reflection_id=memory.get("source_reflection_id"),
+                source_candidate_id=memory.get("source_candidate_id"),
             )
             existing.add((text, category))
             imported += 1
         return imported
 
-    def get_recent(self, limit: int = 10) -> list[dict]:
-        """Return the most recently created memories."""
+    def get_recent(self, limit: int = 10, *, include_archived: bool = False) -> list[dict]:
+        """Return recently created active memories unless explicitly requested."""
+
+        where = "" if include_archived else "WHERE archived_at IS NULL"
         rows = self.conn.execute(
-            "SELECT * FROM facts_meta ORDER BY created_at DESC, fact_id DESC LIMIT ?",
+            f"SELECT * FROM facts_meta {where} ORDER BY created_at DESC, fact_id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
-    def count(self) -> int:
-        """Return the total number of stored memories."""
-        row = self.conn.execute("SELECT COUNT(*) FROM facts_meta").fetchone()
+    def count(self, *, include_archived: bool = False) -> int:
+        """Return the active durable-memory count by default."""
+
+        where = "" if include_archived else "WHERE archived_at IS NULL"
+        row = self.conn.execute(f"SELECT COUNT(*) FROM facts_meta {where}").fetchone()
         return int(row[0]) if row else 0
 
     def recall_context(

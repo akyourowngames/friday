@@ -554,7 +554,7 @@ def test_memory_edit_and_forget_commands():
     assert 12 not in app.memory_store.memories
 
 
-def test_memory_clean_command_prunes_policy_violations():
+def test_memory_clean_command_reports_archival_without_policy_gate():
     app = make_cli()
     app.memory_store.memories[13] = {
         "fact_id": 13,
@@ -571,9 +571,9 @@ def test_memory_clean_command_prunes_policy_violations():
 
     output = app.console_file.getvalue()
     assert "Memory cleaned" in output
-    assert "Policy pruned" in output
-    assert "1" in output
-    assert 13 not in app.memory_store.memories
+    assert "Stale archived" in output
+    assert "Policy pruned" not in output
+    assert 13 in app.memory_store.memories
 
 
 def test_model_list_command_renders_table():

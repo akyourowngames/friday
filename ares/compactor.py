@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from typing import Any
+from typing import Any, Callable
 
 from ares.context_blend import TokenEstimator, get_model_budgets
 
@@ -33,7 +33,12 @@ class ContextCompactor:
         limit = int(window * threshold)
         return tokens > limit
 
-    def compact(self, history: list[dict]) -> list[dict]:
+    def compact(
+        self,
+        history: list[dict],
+        *,
+        before_compaction: Callable[[list[dict]], Any] | None = None,
+    ) -> list[dict]:
         """Execute the four-phase compression algorithm."""
         if len(history) < 4:
             return history
@@ -43,6 +48,14 @@ class ContextCompactor:
 
         if not middle:
             return history
+
+        if before_compaction is not None:
+            try:
+                before_compaction(middle)
+            except Exception:
+                # Compaction is a continuity mechanism; a failed background
+                # checkpoint must never prevent the active turn from fitting.
+                pass
 
         summary = self._phase3_summarize(middle)
         return self._phase4_assemble(head, summary, tail)

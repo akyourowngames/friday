@@ -1838,7 +1838,10 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_column("Description", ratio=4)
             table.add_row("/help", "Show available commands")
             table.add_row("/menu", "Open the keyboard-driven command center")
-            table.add_row("/memory [search|edit|delete|clean]", "Review, manage, and clean memories")
+            table.add_row(
+                "/memory [search|edit|archive|restore|learning|explain|clean]",
+                "Review automatic memory, procedural learning, and retrieval diagnostics",
+            )
             table.add_row("/goals [search|show|due|signals]", "Track goals, evidence, proactive watcher signals, and hierarchy")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
@@ -1878,11 +1881,34 @@ class AresCLI(MarketplaceCommandMixin):
                 table = Table(title="Memory Cleanup", border_style="bright_green", box=CLI_BOX)
                 table.add_column("Metric", style="cyan")
                 table.add_column("Count", justify="right")
-                table.add_row("Policy pruned", str(stats.get("policy_pruned", 0)))
                 table.add_row("Duplicates merged", str(stats.get("duplicates_merged", 0)))
-                table.add_row("Stale pruned", str(stats.get("stale_pruned", 0)))
+                table.add_row("Stale archived", str(stats.get("stale_archived", 0)))
                 table.add_row("Remaining", str(stats.get("total_after", 0)))
                 self.console.print("[green]Memory cleaned.[/green]")
+                self.console.print(table)
+            elif arg == "explain":
+                diagnostics = self.agent.explain_last_memory_retrieval()
+                self.console.print_json(
+                    json.dumps(diagnostics or {"status": "no retrieval recorded"})
+                )
+            elif arg == "learning":
+                service = getattr(self.agent, "reflection_service", None)
+                learnings = (
+                    service.self_improvement_store.list(status="active", limit=20)
+                    if service is not None else []
+                )
+                table = Table(title="Active Procedural Learning", box=CLI_BOX)
+                table.add_column("ID", justify="right", style="cyan")
+                table.add_column("Kind")
+                table.add_column("Learning")
+                table.add_column("Uses", justify="right")
+                for learning in learnings:
+                    table.add_row(
+                        str(learning["improvement_id"]),
+                        str(learning["kind"]),
+                        f"{learning['title']}: {learning['summary']}",
+                        str(learning["occurrence_count"]),
+                    )
                 self.console.print(table)
             elif arg.startswith("edit "):
                 edit_parts = arg.split(maxsplit=2)
@@ -1894,6 +1920,18 @@ class AresCLI(MarketplaceCommandMixin):
                         self.console.print(f"[green]Updated memory #{fact_id}.[/green]")
                     else:
                         self.console.print(f"[red]Memory #{fact_id} was not found.[/red]")
+            elif arg.startswith("archive "):
+                fact_id = int(arg.split(maxsplit=1)[1])
+                if self.memory_store.archive(fact_id, reason="cli"):
+                    self.console.print(f"[yellow]Archived memory #{fact_id}.[/yellow]")
+                else:
+                    self.console.print(f"[red]Memory #{fact_id} was not found or was already archived.[/red]")
+            elif arg.startswith("restore "):
+                fact_id = int(arg.split(maxsplit=1)[1])
+                if self.memory_store.restore(fact_id):
+                    self.console.print(f"[green]Restored memory #{fact_id}.[/green]")
+                else:
+                    self.console.print(f"[red]Memory #{fact_id} was not found or is not archived.[/red]")
             elif arg.startswith("delete "):
                 fact_id = int(arg.split(maxsplit=1)[1])
                 if self.memory_store.delete(fact_id):
@@ -1901,7 +1939,10 @@ class AresCLI(MarketplaceCommandMixin):
                 else:
                     self.console.print(f"[red]Memory #{fact_id} was not found.[/red]")
             else:
-                self.console.print("[red]Usage: /memory [search QUERY|edit ID NEW_TEXT|delete ID|clean][/red]")
+                self.console.print(
+                    "[red]Usage: /memory [search QUERY|edit ID NEW_TEXT|archive ID|restore ID|"
+                    "delete ID|learning|explain|clean][/red]"
+                )
 
         elif command == "/forget":
             if not arg:

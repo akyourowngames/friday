@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sqlite3
@@ -15,7 +16,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ares.followups import FollowUpStore, future_utc
 from ares.llm import LLMClient
-from ares.memory_policy import memory_rejection_reason
+from ares.memory_lifecycle import (
+    MemoryLifecycleStore,
+    MemoryPromotionService,
+    explicit_memory_content,
+    explicit_memory_request,
+)
+from ares.self_improvement import SelfImprovementStore
 
 
 def utc_now() -> str:
@@ -125,6 +132,18 @@ class FollowUpResolution(BaseModel):
     evidence: str
 
 
+class SkillLearning(BaseModel):
+    """One reusable, user-grounded procedural learning from a completed turn."""
+
+    title: str
+    kind: Literal["workflow", "style", "pitfall", "technique"] = "workflow"
+    summary: str
+    rationale: str = ""
+    existing_skill: str | None = None
+    confidence: float = Field(default=0.85, ge=0.0, le=1.0)
+    evidence: str
+
+
 class ReflectionResult(BaseModel):
     new_memories: list[NewMemory] = Field(default_factory=list)
     updated_memories: list[MemoryUpdate] = Field(default_factory=list)
@@ -135,6 +154,7 @@ class ReflectionResult(BaseModel):
     commitments: list[CommitmentChange] = Field(default_factory=list)
     follow_up_opportunities: list[FollowUpOpportunity] = Field(default_factory=list)
     follow_up_resolutions: list[FollowUpResolution] = Field(default_factory=list)
+    skill_learnings: list[SkillLearning] = Field(default_factory=list)
 
 
 class ReflectionStore:
@@ -148,6 +168,8 @@ class ReflectionStore:
                 scope TEXT NOT NULL,
                 user_text TEXT NOT NULL,
                 assistant_text TEXT NOT NULL,
+                job_type TEXT NOT NULL DEFAULT 'turn',
+                compaction_checkpoint TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 attempts INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
@@ -158,24 +180,135 @@ class ReflectionStore:
                 error TEXT
             )"""
         )
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(reflection_runs)").fetchall()
+        }
+        if "job_type" not in columns:
+            self.conn.execute(
+                "ALTER TABLE reflection_runs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'turn'"
+            )
+        if "compaction_checkpoint" not in columns:
+            self.conn.execute(
+                "ALTER TABLE reflection_runs ADD COLUMN compaction_checkpoint TEXT"
+            )
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_compaction_checkpoints (
+                checkpoint TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                reflection_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                error TEXT
+            )"""
+        )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reflection_pending ON reflection_runs(status, created_at)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reflection_checkpoint "
+            "ON reflection_runs(compaction_checkpoint)"
         )
         # A process may have stopped after claiming but before finishing.
         self.conn.execute("UPDATE reflection_runs SET status='pending' WHERE status='running'")
         self.conn.commit()
 
-    def enqueue(self, scope: str, user_text: str, assistant_text: str) -> str:
+    def enqueue(
+        self,
+        scope: str,
+        user_text: str,
+        assistant_text: str,
+        *,
+        job_type: str = "turn",
+        compaction_checkpoint: str | None = None,
+    ) -> str:
         reflection_id = uuid4().hex
         self.conn.execute(
             """INSERT INTO reflection_runs
-               (reflection_id, scope, user_text, assistant_text, status, attempts,
+               (reflection_id, scope, user_text, assistant_text, job_type,
+                compaction_checkpoint, status, attempts,
                 created_at, started_at, completed_at, extracted_json, outcomes_json, error)
-               VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, NULL, NULL)""",
-            (reflection_id, scope, user_text, assistant_text, utc_now()),
+               VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, NULL, NULL)""",
+            (
+                reflection_id,
+                scope,
+                user_text,
+                assistant_text,
+                str(job_type or "turn"),
+                compaction_checkpoint,
+                utc_now(),
+            ),
         )
         self.conn.commit()
         return reflection_id
+
+    def enqueue_compaction(
+        self,
+        scope: str,
+        user_text: str,
+        assistant_text: str,
+        checkpoint: str,
+    ) -> str | None:
+        """Durably enqueue a pre-compaction capture exactly once."""
+        existing = self.conn.execute(
+            "SELECT status FROM memory_compaction_checkpoints WHERE checkpoint=?",
+            (checkpoint,),
+        ).fetchone()
+        if existing is not None:
+            return None
+        reflection_id = uuid4().hex
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute(
+                """INSERT INTO memory_compaction_checkpoints
+                   (checkpoint, scope, reflection_id, status, created_at)
+                   VALUES (?, ?, ?, 'pending', ?)""",
+                (checkpoint, scope, reflection_id, utc_now()),
+            )
+            self.conn.execute(
+                """INSERT INTO reflection_runs
+                   (reflection_id, scope, user_text, assistant_text, job_type,
+                    compaction_checkpoint, status, attempts, created_at)
+                   VALUES (?, ?, ?, ?, 'compaction', ?, 'pending', 0, ?)""",
+                (
+                    reflection_id,
+                    scope,
+                    user_text,
+                    assistant_text,
+                    checkpoint,
+                    utc_now(),
+                ),
+            )
+            self.conn.commit()
+            return reflection_id
+        except sqlite3.IntegrityError:
+            self.conn.rollback()
+            return None
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def finish_compaction(
+        self,
+        checkpoint: str | None,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        if not checkpoint:
+            return
+        self.conn.execute(
+            """UPDATE memory_compaction_checkpoints
+               SET status=?, completed_at=?, error=? WHERE checkpoint=?""",
+            (
+                status,
+                utc_now() if status in {"completed", "failed"} else None,
+                (str(error)[:2_000] if error else None),
+                checkpoint,
+            ),
+        )
+        self.conn.commit()
 
     def get(self, reflection_id: str) -> dict[str, Any] | None:
         row = self.conn.execute(
@@ -375,13 +508,17 @@ class ConversationReflector:
             "profile": profile_text[:4_000],
         }
         prompt = (
-            "You are Ares' conservative conversation reflection process. Return ONLY one JSON object matching "
+            "You are Ares' background conversation reflection process. Return ONLY one JSON object matching "
             "this schema: new_memories, updated_memories, new_goals, goal_progress, completed_goals, "
-            "profile_updates, commitments, follow_up_opportunities, follow_up_resolutions; every value is an array.\n\n"
-            "Only the USER text is evidence. Every proposed mutation must contain an exact short excerpt from "
-            "the user text in its evidence field and a calibrated confidence from 0 to 1. Assistant text can "
-            "help interpret the turn but is never evidence. Do not extract temporary requests, tool state, moods, "
-            "guesses, or facts about the world. Update an existing record by ID instead of duplicating it. Mark a "
+            "profile_updates, commitments, follow_up_opportunities, follow_up_resolutions, skill_learnings; "
+            "every value is an array.\n\n"
+            "All confidence and importance values must be JSON numbers from 0 to 1, never labels. "
+            "Memory category must be preference, fact, belief, habit, relationship, or note. "
+            "Skill kind must be workflow, style, pitfall, or technique. "
+            "Goal priority must be low, normal, or high. Omit unknown optional fields.\n\n"
+            "Use the completed user/assistant turn as evidence. Every proposed mutation should contain a short "
+            "supporting excerpt in its evidence field and a calibrated confidence from 0 to 1. Capture whatever "
+            "would help Ares act better in a future turn. Update an existing record by ID instead of duplicating it. Mark a "
             "goal completed only when the user explicitly says that outcome is finished. Create a goal only for a "
             "clear durable outcome; include 2-5 milestones and one small specific next_action. A commitment is an "
             "explicit promise or obligation, not every request. A follow-up opportunity is a concrete future "
@@ -389,12 +526,23 @@ class ConversationReflector:
             "the user explicitly completes, dismisses, or cancels it. For every follow_up_opportunity, eligible_at "
             "must be a timezone-aware ISO-8601 timestamp with an explicit UTC offset; interpret relative phrases "
             f"using the current local datetime {current_local_datetime} in timezone {timezone_name}. "
-            "Never return a naive timestamp. If nothing durable changed, return empty arrays.\n\n"
+            "Never return a naive timestamp. A skill_learning is only for a reusable workflow/style correction, "
+            "pitfall, or non-trivial technique that would improve a future task of the same class. Prefer updating "
+            "an existing named skill, never turn a one-off task or temporary environment failure into a skill, and "
+            "ground it in a concrete turn excerpt. Skill learnings become active automatically but remain in the "
+            "procedural-learning store rather than editing executable skill files. "
+            "If nothing durable changed, return empty arrays.\n\n"
             f"CURRENT STATE:\n{json.dumps(state, ensure_ascii=False)}\n\n"
             f"USER:\n{user_text[:8_000]}\n\nASSISTANT:\n{assistant_text[:8_000]}\n"
         )
+        chat_kwargs = (
+            {"max_tokens": 1_500, "temperature": 0.1}
+            if isinstance(self.llm, LLMClient) else {}
+        )
         response = await asyncio.wait_for(
-            self.llm.chat([{"role": "user", "content": prompt}], tools=[]),
+            self.llm.chat(
+                [{"role": "user", "content": prompt}], tools=[], **chat_kwargs
+            ),
             timeout=float(getattr(self.config, "timeout_seconds", 45)),
         )
         return self._parse_json(str(response.get("content") or "{}"))
@@ -412,6 +560,9 @@ class ReflectionApplier:
         follow_up_store: FollowUpStore,
         profile_manager: Any,
         config: Any,
+        lifecycle_store: MemoryLifecycleStore,
+        promotion_service: MemoryPromotionService,
+        self_improvement_store: SelfImprovementStore,
     ) -> None:
         self.memory_store = memory_store
         self.goal_store = goal_store
@@ -419,6 +570,9 @@ class ReflectionApplier:
         self.follow_up_store = follow_up_store
         self.profile_manager = profile_manager
         self.config = config
+        self.lifecycle_store = lifecycle_store
+        self.promotion_service = promotion_service
+        self.self_improvement_store = self_improvement_store
 
     def apply(
         self,
@@ -428,59 +582,42 @@ class ReflectionApplier:
         reflection_id: str,
         scope: str,
     ) -> list[dict[str, Any]]:
-        threshold = float(getattr(self.config, "min_confidence", 0.75))
-        completion_threshold = float(getattr(self.config, "completion_min_confidence", 0.90))
         outcomes: list[dict[str, Any]] = []
 
         def record(kind: str, action: str, **details: Any) -> None:
             outcomes.append({"kind": kind, "action": action, **details})
 
-        def allowed(kind: str, confidence: float, evidence: str, minimum: float = threshold) -> bool:
-            # Guardrails removed: all reflection items are accepted regardless of confidence/evidence.
-            return True
-
         for item in result.new_memories:
-            if not allowed("new_memory", item.confidence, item.evidence):
-                continue
-            rejection = memory_rejection_reason(
-                item.fact_text, category=item.category, confidence=item.confidence,
-            )
-            if rejection:
-                record("new_memory", "skipped", reason=rejection)
-                continue
-            suggestions = self.memory_store.suggest_merge(item.fact_text, category=item.category)
-            if any(candidate.get("kind") == "duplicate" for candidate in suggestions):
-                record("new_memory", "skipped", reason="duplicate")
-                continue
-            if any(candidate.get("kind") == "possible_conflict" for candidate in suggestions):
-                record("new_memory", "skipped", reason="possible_conflict_requires_id")
-                continue
             try:
-                fact_id = self.memory_store.store(
+                staged = self.lifecycle_store.stage_observation(
                     item.fact_text,
                     category=item.category,
                     confidence=item.confidence,
                     importance=item.importance,
-                    source="conversation_reflection",
+                    evidence=item.evidence,
+                    evidence_grounded=_supported_evidence(item.evidence, user_text),
                     source_conversation_id=scope,
                     source_reflection_id=reflection_id,
+                    explicit_user_request=explicit_memory_request(user_text),
                 )
-                record("new_memory", "created", fact_id=fact_id)
+                candidate = staged.get("candidate") or {}
+                decision = self.promotion_service.evaluate(int(candidate["candidate_id"]))
+                record(
+                    "new_memory",
+                    decision.get("action", "candidate"),
+                    observation_id=(staged.get("observation") or {}).get("observation_id"),
+                    candidate_id=candidate.get("candidate_id"),
+                    fact_id=decision.get("fact_id"),
+                    reinforced=bool(staged.get("reinforced")),
+                    idempotent=bool(staged.get("idempotent")),
+                )
             except Exception as exc:
                 record("new_memory", "error", error=str(exc)[:500])
 
         for item in result.updated_memories:
-            if not allowed("updated_memory", item.confidence, item.evidence):
-                continue
             existing = self.memory_store.get(item.fact_id)
             if existing is None:
                 record("updated_memory", "skipped", reason="not_found", fact_id=item.fact_id)
-                continue
-            new_text = item.fact_text or existing.get("fact_text", "")
-            category = item.category or existing.get("category", "note")
-            rejection = memory_rejection_reason(new_text, category=category, confidence=item.confidence)
-            if rejection:
-                record("updated_memory", "skipped", reason=rejection, fact_id=item.fact_id)
                 continue
             try:
                 self.memory_store.update(
@@ -499,8 +636,6 @@ class ReflectionApplier:
                 record("updated_memory", "error", fact_id=item.fact_id, error=str(exc)[:500])
 
         for item in result.new_goals:
-            if not allowed("new_goal", item.confidence, item.evidence):
-                continue
             duplicate = next(
                 (
                     goal for goal in self.goal_store.search(item.title, limit=10)
@@ -531,8 +666,6 @@ class ReflectionApplier:
                 record("new_goal", "error", error=str(exc)[:500])
 
         for item in result.goal_progress:
-            if not allowed("goal_progress", item.confidence, item.evidence):
-                continue
             goal = self.goal_store.get(item.goal_id)
             if goal is None:
                 record("goal_progress", "skipped", reason="not_found", goal_id=item.goal_id)
@@ -555,10 +688,6 @@ class ReflectionApplier:
                 record("goal_progress", "error", goal_id=item.goal_id, error=str(exc)[:500])
 
         for item in result.completed_goals:
-            if not allowed(
-                "completed_goal", item.confidence, item.evidence, minimum=completion_threshold,
-            ):
-                continue
             goal = self.goal_store.get(item.goal_id)
             if goal is None:
                 record("completed_goal", "skipped", reason="not_found", goal_id=item.goal_id)
@@ -574,8 +703,7 @@ class ReflectionApplier:
 
         profile_candidates: list[ProfileUpdate] = []
         for item in result.profile_updates:
-            if allowed("profile_update", item.confidence, item.evidence):
-                profile_candidates.append(item)
+            profile_candidates.append(item)
         try:
             applied_profile = self.profile_manager.apply_updates(profile_candidates)
             for item in applied_profile:
@@ -584,8 +712,6 @@ class ReflectionApplier:
             record("profile_update", "error", error=str(exc)[:500])
 
         for item in result.commitments:
-            if not allowed("commitment", item.confidence, item.evidence):
-                continue
             try:
                 if item.commitment_id is not None:
                     existing = self.commitment_store.get(item.commitment_id)
@@ -617,8 +743,6 @@ class ReflectionApplier:
                 record("commitment", "error", error=str(exc)[:500])
 
         for item in result.follow_up_opportunities:
-            if not allowed("follow_up", item.confidence, item.evidence):
-                continue
             try:
                 created = self.follow_up_store.create(
                     item.description,
@@ -638,8 +762,6 @@ class ReflectionApplier:
                 record("follow_up", "error", error=str(exc)[:500])
 
         for item in result.follow_up_resolutions:
-            if not allowed("follow_up_resolution", item.confidence, item.evidence):
-                continue
             try:
                 resolved = self.follow_up_store.resolve(
                     item.follow_up_id,
@@ -661,6 +783,31 @@ class ReflectionApplier:
                     "follow_up_resolution", "error",
                     follow_up_id=item.follow_up_id, error=str(exc)[:500],
                 )
+
+        for item in result.skill_learnings:
+            try:
+                staged = self.self_improvement_store.stage(
+                    title=item.title,
+                    kind=item.kind,
+                    summary=item.summary,
+                    rationale=item.rationale,
+                    evidence=item.evidence,
+                    evidence_grounded=_supported_evidence(item.evidence, user_text),
+                    confidence=item.confidence,
+                    existing_skill=item.existing_skill,
+                    source_conversation_id=scope,
+                    source_reflection_id=reflection_id,
+                )
+                if staged is None:
+                    record("skill_learning", "skipped", reason="self_improvement_disabled")
+                else:
+                    record(
+                        "skill_learning",
+                        "learned",
+                        improvement_id=staged.get("improvement_id"),
+                    )
+            except Exception as exc:
+                record("skill_learning", "error", error=str(exc)[:500])
         return outcomes
 
 
@@ -677,9 +824,20 @@ class ReflectionService:
         config: Any,
         llm_client: Any | None = None,
         follow_up_store: FollowUpStore | None = None,
+        memory_config: Any | None = None,
     ) -> None:
         self.config = config
+        self.memory_config = memory_config
         self.store = ReflectionStore(memory_store.conn)
+        self.lifecycle_store = MemoryLifecycleStore(memory_store, memory_config)
+        self.promotion_service = MemoryPromotionService(
+            self.lifecycle_store,
+            getattr(memory_config, "promotion", None),
+        )
+        self.self_improvement_store = SelfImprovementStore(
+            memory_store.conn,
+            getattr(memory_config, "self_improvement", None),
+        )
         timezone_name = str(
             getattr(config, "local_timezone", "")
             or getattr(config, "timezone", "")
@@ -708,6 +866,9 @@ class ReflectionService:
             follow_up_store=self.follow_up_store,
             profile_manager=profile_manager,
             config=config,
+            lifecycle_store=self.lifecycle_store,
+            promotion_service=self.promotion_service,
+            self_improvement_store=self.self_improvement_store,
         )
         self.memory_store = memory_store
         self.goal_store = goal_store
@@ -716,6 +877,48 @@ class ReflectionService:
         self._tasks: set[asyncio.Task] = set()
         self._scope_tasks: dict[str, asyncio.Task] = {}
         self._apply_lock = asyncio.Lock()
+
+    def _augment_automatic_learning(
+        self,
+        result: ReflectionResult,
+        *,
+        user_text: str,
+    ) -> ReflectionResult:
+        """Honor explicit memory and reusable correction signals deterministically."""
+
+        capture = getattr(self.memory_config, "capture", None)
+        if (
+            bool(getattr(capture, "explicit_remember_fast_path", True))
+            and explicit_memory_request(user_text)
+        ):
+            content = explicit_memory_content(user_text)
+            known = {_normalized(item.fact_text) for item in result.new_memories}
+            if content and _normalized(content) not in known:
+                result.new_memories.append(NewMemory(
+                    fact_text=content,
+                    category="note",
+                    importance=0.9,
+                    confidence=1.0,
+                    evidence=content,
+                ))
+
+        correction_signal = re.search(
+            r"\b(?:always|never|from now on|do not|don['’]t|"
+            r"when (?:you|we|working|handling|doing))\b",
+            user_text,
+            re.IGNORECASE,
+        )
+        if correction_signal and not result.skill_learnings:
+            summary = " ".join(user_text.split()).strip()[:1_000]
+            result.skill_learnings.append(SkillLearning(
+                title="Direct user workflow correction",
+                kind="workflow",
+                summary=summary,
+                rationale="The user gave a reusable instruction that should improve future work.",
+                confidence=1.0,
+                evidence=summary,
+            ))
+        return result
 
     async def _process_job(self, job: dict[str, Any]) -> str:
         """Run one already-claimed job and return its queue outcome.
@@ -744,6 +947,9 @@ class ReflectionService:
                 open_followups=self.follow_up_store.list_open(limit=12),
                 profile_text=self.profile_manager.read(),
             )
+            result = self._augment_automatic_learning(
+                result, user_text=str(job["user_text"])
+            )
             async with self._apply_lock:
                 outcomes = self.applier.apply(
                     result,
@@ -752,18 +958,31 @@ class ReflectionService:
                     scope=job["scope"],
                 )
                 self.store.complete(reflection_id, result, outcomes)
+                self.store.finish_compaction(
+                    job.get("compaction_checkpoint"), status="completed"
+                )
             return "completed"
         except (ValidationError, ValueError, json.JSONDecodeError, asyncio.TimeoutError) as exc:
             attempts = int((self.store.get(reflection_id) or {}).get("attempts", 1))
             maximum = int(getattr(self.config, "max_attempts", 3))
             retry = attempts < maximum
             self.store.fail(reflection_id, str(exc), retry=retry)
+            self.store.finish_compaction(
+                job.get("compaction_checkpoint"),
+                status="pending" if retry else "failed",
+                error=str(exc),
+            )
             return "retry" if retry else "failed"
         except Exception as exc:
             attempts = int((self.store.get(reflection_id) or {}).get("attempts", 1))
             maximum = int(getattr(self.config, "max_attempts", 3))
             retry = attempts < maximum
             self.store.fail(reflection_id, str(exc), retry=retry)
+            self.store.finish_compaction(
+                job.get("compaction_checkpoint"),
+                status="pending" if retry else "failed",
+                error=str(exc),
+            )
             return "retry" if retry else "failed"
 
     async def _process(self, reflection_id: str) -> str:
@@ -826,6 +1045,44 @@ class ReflectionService:
         scope_key = str(scope or "global")
         reflection_id = self.store.enqueue(scope_key, user_text, assistant_text)
         self._ensure_scope_worker(scope_key)
+        return reflection_id
+
+    def enqueue_compaction(self, *, scope: str | None, messages: list[dict[str, Any]]) -> str | None:
+        """Checkpoint durable memory capture before lossy context compaction.
+
+        The checkpoint hash makes repeated compaction attempts idempotent. The
+        work remains asynchronous and uses the same per-scope FIFO as ordinary
+        post-turn reflection, so it never races earlier state mutations.
+        """
+        if not bool(getattr(self.config, "enabled", True)) or not messages:
+            return None
+        user_parts: list[str] = []
+        assistant_parts: list[str] = []
+        checkpoint_parts: list[str] = []
+        for message in messages:
+            role = str(message.get("role") or "")
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            normalized = " ".join(content.split())
+            checkpoint_parts.append(f"{role}:{normalized}")
+            if role == "user":
+                user_parts.append(content)
+            elif role == "assistant":
+                assistant_parts.append(content)
+        if not user_parts:
+            return None
+        scope_key = str(scope or "global")
+        digest_source = f"{scope_key}\n" + "\n".join(checkpoint_parts)
+        checkpoint = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
+        reflection_id = self.store.enqueue_compaction(
+            scope_key,
+            "\n\n".join(user_parts),
+            "\n\n".join(assistant_parts),
+            checkpoint,
+        )
+        if reflection_id is not None:
+            self._ensure_scope_worker(scope_key)
         return reflection_id
 
     async def before_turn(

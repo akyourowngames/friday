@@ -315,6 +315,61 @@ class VisionConfig(BaseModel):
     detector_model: str = "yolo26n.pt"
 
 
+class MemoryCaptureConfig(BaseModel):
+    """Automatic durable-memory capture policy.
+
+    The legacy session-end extractor remains importable for compatibility, but
+    durable reflection is the only automatic writer by default.
+    """
+
+    legacy_extractor_enabled: bool = False
+    explicit_remember_fast_path: bool = True
+
+
+class MemoryRetrievalConfig(BaseModel):
+    """Bounded hybrid retrieval and active-recall controls."""
+
+    query_rewrite_enabled: bool = True
+    active_judge_enabled: bool = True
+    vector_weight: float = Field(default=0.55, ge=0.0, le=1.0)
+    keyword_weight: float = Field(default=0.30, ge=0.0, le=1.0)
+    metadata_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    mmr_enabled: bool = True
+    mmr_lambda: float = Field(default=0.70, ge=0.0, le=1.0)
+    temporal_decay_enabled: bool = True
+    max_candidates: int = Field(default=40, ge=5, le=200)
+    max_injected: int = Field(default=5, ge=1, le=10)
+    timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
+
+
+class MemoryPromotionConfig(BaseModel):
+    """Automatic observation-to-durable promotion scoring controls."""
+
+    enabled: bool = True
+    min_occurrences: int = Field(default=2, ge=1, le=20)
+    min_unique_sessions: int = Field(default=2, ge=1, le=20)
+    reference_score: float = Field(default=0.72, ge=0.0, le=1.0)
+
+
+class MemorySelfImprovementConfig(BaseModel):
+    """Hermes-inspired automatic procedural-learning controls."""
+
+    enabled: bool = True
+    max_active: int = Field(default=100, ge=1, le=1_000)
+
+
+class MemoryConfig(BaseModel):
+    """Ares Memory V3 configuration."""
+
+    enabled: bool = True
+    capture: MemoryCaptureConfig = Field(default_factory=MemoryCaptureConfig)
+    retrieval: MemoryRetrievalConfig = Field(default_factory=MemoryRetrievalConfig)
+    promotion: MemoryPromotionConfig = Field(default_factory=MemoryPromotionConfig)
+    self_improvement: MemorySelfImprovementConfig = Field(
+        default_factory=MemorySelfImprovementConfig
+    )
+
+
 class ReflectionConfig(BaseModel):
     """Background conversation-to-state extraction controls."""
 
@@ -542,6 +597,7 @@ class AppConfig(BaseModel):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)

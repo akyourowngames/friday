@@ -44,6 +44,9 @@ from ares.tools.mcp_upgrades import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MCP_RECONNECT_INTERVAL_SECONDS = 10.0
+MAX_MCP_RECONNECT_BACKOFF_SECONDS = 120.0
+
 _SENSITIVE_MCP_QUERY_KEYS = {
     "access_token", "api_key", "apikey", "auth", "id_token", "key",
     "password", "refresh_token", "secret", "token",
@@ -379,6 +382,7 @@ class MCPClientManager:
         self,
         server_configs: list[dict[str, Any] | MCPServerConfig] | dict[str, Any],
         data_dir: str = "~/.ares/data",
+        reconnect_interval_seconds: float = DEFAULT_MCP_RECONNECT_INTERVAL_SECONDS,
     ):
         configs = [
             self._coerce_config(name, value)
@@ -393,6 +397,10 @@ class MCPClientManager:
         self.schema_cache: dict[str, list[dict[str, Any]]] = {}
         self.server_errors: dict[str, str] = {}
         self._reconnect_locks: dict[str, asyncio.Lock] = {}
+        self._reconnect_interval_seconds = max(0.1, float(reconnect_interval_seconds))
+        self._reconnect_failures: dict[str, int] = {}
+        self._next_reconnect_at: dict[str, float] = {}
+        self._reconnect_monitor_task: asyncio.Task[None] | None = None
         # This cache is used only by an explicit, read-only call policy. It
         # stays in memory so neither MCP output nor request details persist.
         self._response_cache = MCPResponseCache()
@@ -474,8 +482,15 @@ class MCPClientManager:
             *(connect_one(name, config) for name, config in self.servers.items()),
             return_exceptions=True,
         )
+        self._start_reconnect_monitor()
 
     async def close(self) -> None:
+        monitor = self._reconnect_monitor_task
+        self._reconnect_monitor_task = None
+        if monitor is not None and monitor is not asyncio.current_task():
+            monitor.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await monitor
         for stack in list(self._exit_stacks.values()):
             with suppress(Exception):
                 await stack.aclose()
@@ -487,6 +502,58 @@ class MCPClientManager:
         self._http_clients.clear()
         self.tool_definitions.clear()
         self._response_cache.clear()
+
+    def _start_reconnect_monitor(self) -> None:
+        """Keep configured integrations alive for the lifetime of this manager."""
+        current = self._reconnect_monitor_task
+        if not self.servers or (current is not None and not current.done()):
+            return
+        self._reconnect_monitor_task = asyncio.create_task(
+            self._reconnect_monitor(), name="ares-mcp-auto-reconnect"
+        )
+
+    async def _reconnect_monitor(self) -> None:
+        """Retry disconnected servers in the background with bounded backoff."""
+        try:
+            while True:
+                await asyncio.sleep(self._reconnect_interval_seconds)
+                await self.maintain_connections_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("MCP auto-reconnect loop failed; restarting on the next manager start")
+
+    async def maintain_connections_once(self) -> dict[str, Any]:
+        """Reconnect every configured server that currently has no live session.
+
+        This is safe to call before any user turn as well as from the background
+        monitor. It never replays an MCP tool request; it only rebuilds missing
+        transports and refreshes their schemas.
+        """
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+
+        async def reconnect_one(name: str) -> None:
+            if name in self.sessions or now < self._next_reconnect_at.get(name, 0.0):
+                return
+            report = await self.reconnect_server(name, force=False)
+            if report.get("ready"):
+                self._reconnect_failures.pop(name, None)
+                self._next_reconnect_at.pop(name, None)
+                return
+            failures = self._reconnect_failures.get(name, 0) + 1
+            self._reconnect_failures[name] = failures
+            delay = min(
+                MAX_MCP_RECONNECT_BACKOFF_SECONDS,
+                self._reconnect_interval_seconds * (2 ** min(failures - 1, 6)),
+            )
+            self._next_reconnect_at[name] = loop.time() + delay
+
+        await asyncio.gather(
+            *(reconnect_one(name) for name in sorted(self.servers)),
+            return_exceptions=True,
+        )
+        return self.readiness_report()
 
     async def close_server(self, name: str) -> None:
         """Close one MCP server session and keep all other servers connected."""
@@ -507,23 +574,29 @@ class MCPClientManager:
         # small in-memory cache is conservative and avoids stale projections.
         self._response_cache.clear()
 
-    async def reconnect_server(self, name: str) -> dict[str, Any]:
+    async def reconnect_server(self, name: str, *, force: bool = True) -> dict[str, Any]:
         """Reconnect one configured MCP server and refresh its cached schemas."""
         config = self.servers.get(name)
         if config is None:
             return {"name": name, "ready": False, "error": f"MCP server '{name}' is not configured."}
-        await self.close_server(name)
-        try:
-            await asyncio.wait_for(
-                self._connect_server(name, config),
-                timeout=self._connection_timeout(config),
-            )
-            self.server_errors.pop(name, None)
-            return self.readiness_report()["servers"][name]
-        except BaseException as exc:
-            _uncancel_task()
-            self.server_errors[name] = str(exc) or exc.__class__.__name__
-            return self.readiness_report()["servers"][name]
+        lock = self._reconnect_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            if not force and name in self.sessions and not self.server_errors.get(name):
+                return self.readiness_report()["servers"][name]
+            await self.close_server(name)
+            try:
+                await asyncio.wait_for(
+                    self._connect_server(name, config),
+                    timeout=self._connection_timeout(config),
+                )
+                self.server_errors.pop(name, None)
+                self._reconnect_failures.pop(name, None)
+                self._next_reconnect_at.pop(name, None)
+                return self.readiness_report()["servers"][name]
+            except BaseException as exc:
+                _uncancel_task()
+                self.server_errors[name] = str(exc) or exc.__class__.__name__
+                return self.readiness_report()["servers"][name]
 
     def readiness_report(self) -> dict[str, Any]:
         """Return a per-server readiness report for diagnostics and startup UI."""
@@ -975,6 +1048,10 @@ class MCPClientManager:
                 await self._recover_windows_server(
                     f"Snapshot timed out after {timeout:g}s"
                 )
+            else:
+                await self._mark_transport_disconnected(
+                    server_name, f"Tool call timed out after {timeout:g}s."
+                )
             return (
                 f"Error: MCP tool '{mcp_tool}' on '{server_name}' timed out after {timeout:g}s.",
                 True,
@@ -985,6 +1062,9 @@ class MCPClientManager:
             logger.warning(
                 "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
             )
+            await self._mark_transport_disconnected(
+                server_name, f"Tool call was cancelled: {exc or 'cancelled'}"
+            )
             return (
                 f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. "
                 "Check the MCP server logs or increase timeout_seconds.",
@@ -994,12 +1074,22 @@ class MCPClientManager:
         except Exception as exc:
             if can_recover_windows_snapshot:
                 await self._recover_windows_server(str(exc) or exc.__class__.__name__)
+            else:
+                await self._mark_transport_disconnected(
+                    server_name, str(exc) or exc.__class__.__name__
+                )
             return (
                 f"Error calling MCP tool '{mcp_tool}' on '{server_name}': "
                 f"{redact_mcp_text(exc)}",
                 True,
                 None,
             )
+
+    async def _mark_transport_disconnected(self, server_name: str, reason: str) -> None:
+        """Evict a failed transport so reconnect logic does not trust a dead session."""
+        self.server_errors[server_name] = redact_mcp_text(reason)
+        self._next_reconnect_at[server_name] = 0.0
+        await self.close_server(server_name)
 
     async def _call_paginated_tool(
         self,

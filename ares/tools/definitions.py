@@ -161,9 +161,9 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "store_memory",
-            "Save a durable user preference, identity fact, recurring project, or explicit remember-this request. Do not store temporary moods, insults, tool outputs, guesses, current events, or facts about the world.",
+            "Save information to durable local memory. Automatic Memory V3 capture has no content-policy or approval gate; include useful provenance and calibrated confidence.",
             {
-                "content": {"type": "string", "description": "Durable user-specific fact to remember, written without guesses or temporary context."},
+                "content": {"type": "string", "description": "Information to preserve in durable local memory."},
                 "category": {
                     "type": "string",
                     "enum": ["preference", "fact", "belief", "habit", "relationship", "project", "plan", "note"],

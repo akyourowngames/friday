@@ -34,6 +34,7 @@ _PERSON_RELATION_RE = re.compile(
     re.IGNORECASE,
 )
 _GREETING_WORDS = frozenset({"hello", "hey", "hi", "okay", "ok", "thanks", "thank"})
+_MEMORIES_UNSET = object()
 
 
 def _conversation_id_from_scope(session_id: str | None) -> int | None:
@@ -99,6 +100,8 @@ def build_user_context(
     commitment_store: Any | None = None,
     follow_up_store: Any | None = None,
     conversation_history: list[dict] | None = None,
+    memory_query: str | None = None,
+    memories_override: list[dict[str, Any]] | object = _MEMORIES_UNSET,
 ) -> str:
     """Retrieve and render all durable user context for one response.
 
@@ -123,18 +126,21 @@ def build_user_context(
     # have session_id=NULL, so MemoryStore's session scope still makes them
     # globally retrievable without leaking old temporary rows into every chat.
     search_scope = "session" if session_id else "all"
-    memories = memory_store.search(
-        user_input,
-        limit=max_retrieval,
-        scope=search_scope,
-        session_id=session_id,
-        recent_sessions=getattr(config, "memory_session_scope", 3),
-    )
+    if memories_override is _MEMORIES_UNSET:
+        memories = memory_store.search(
+            memory_query or user_input,
+            limit=max_retrieval,
+            scope=search_scope,
+            session_id=session_id,
+            recent_sessions=getattr(config, "memory_session_scope", 3),
+        )
+    else:
+        memories = list(memories_override)
 
     # FIX: For continuation requests, also search for recent context
     _CONTINUATION_RE = re.compile(r"\b(?:continue|resume|go\s+on|keep\s+going|next)\b", re.I)
     is_continuation = bool(_CONTINUATION_RE.search(user_input))
-    if is_continuation and conversation_history:
+    if is_continuation and conversation_history and memories_override is _MEMORIES_UNSET:
         # Add recent conversation context to memories
         recent_context = []
         for msg in conversation_history[-6:]:  # Last 3 turns
@@ -299,7 +305,7 @@ def build_user_context(
 
     # FIX: Build memory recall context for "do you remember" style queries
     memory_recall_context = ""
-    if memory_store is not None and deep_context:
+    if memory_store is not None and deep_context and memories_override is _MEMORIES_UNSET:
         try:
             memory_recall_context = memory_store.recall_context(
                 user_input,

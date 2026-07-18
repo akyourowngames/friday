@@ -198,6 +198,7 @@ class AresServer:
             config=self.config,
             llm_client=self.agent.llm,
             memory_store=self.memory_store,
+            reflection_service=getattr(self.agent, "reflection_service", None),
         )
         data_dir = self.config.data_dir
         self.profile_manager = ProfileManager(
@@ -763,7 +764,9 @@ class AresServer:
         event_context = {"session_id": session_id, "request_id": request_id}
         history = self._conversation_history(session_id)
         history = self._sanitize_history(history)
-        history = self.context_manager.before_send(history)
+        history = self.context_manager.before_send(
+            history, scope=f"conversation-{session_id}"
+        )
 
         # Persist the turn before asking the model.  This makes a newly sent
         # message visible in the sidebar immediately, and keeps it safe if a
@@ -2616,6 +2619,8 @@ class AresServer:
         """Reconcile config changes with live services, not a process restart."""
         self.config = latest
         self.context_manager.config = latest
+        self.context_manager.compactor.config = latest
+        self.context_manager.truncator.max_chars = latest.tool_output_max_chars
         data_dir = latest.data_dir
         self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=latest.profile_path)
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=latest.soul_path)
