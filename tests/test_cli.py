@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
+from prompt_toolkit.document import Document
 
 from ares.cli import app as cli_module
 from ares.__main__ import _run_coro
@@ -256,7 +257,9 @@ class DummyProjectContext:
 class DummyConversationStore:
     def __init__(self):
         self.exchanges = []
-        self.started = 1
+        # Conversation #2 is the saved chat fixture; a reset must create a
+        # distinct empty #3 rather than reusing its model history.
+        self.started = 2
         self.ended = []
 
     def add_exchange(self, conversation_id, user_input, assistant_response):
@@ -270,6 +273,11 @@ class DummyConversationStore:
         self.ended.append(conversation_id)
 
     def get_messages_for_model(self, conversation_id, limit=20):
+        if conversation_id == 2:
+            return [
+                {"role": "user", "content": "Can you remember this plan?"},
+                {"role": "assistant", "content": "Yes. The plan is restored."},
+            ]
         return []
 
     def list_conversations(self):
@@ -502,6 +510,41 @@ def test_model_command_switches_and_saves(monkeypatch):
     assert saved[0].model == "mimo-v2.5-free"
 
 
+def test_model_command_switches_to_the_models_endpoint_provider(monkeypatch):
+    monkeypatch.delenv("NIM_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    app = make_cli()
+    app.config.provider = "nim"
+    app.config.api_key = "nvapi-test-key"
+    app.config.api_base_url = "https://integrate.api.nvidia.com/v1"
+    app.config.model = "deepseek-ai/deepseek-v4-flash"
+    monkeypatch.setattr(cli_module, "save_config", lambda _config: None)
+
+    assert app._handle_command("/model mimo-v2.5-free")
+
+    assert app.config.provider == "opencode"
+    assert app.config.api_base_url == "https://opencode.ai/zen/v1"
+    assert app.config.api_key == ""
+    assert app.config.provider_api_keys["nim"] == "nvapi-test-key"
+    assert app.agent.model == "mimo-v2.5-free"
+
+    assert app._handle_command("/model deepseek-ai/deepseek-v4-flash")
+    assert app.config.provider == "nim"
+    assert app.config.api_key == "nvapi-test-key"
+
+
+def test_provider_command_selects_a_compatible_default_model(monkeypatch):
+    app = make_cli()
+    monkeypatch.setattr(cli_module, "save_config", lambda _config: None)
+
+    assert app._handle_command("/provider nim")
+
+    assert app.config.provider == "nim"
+    assert app.config.model == "deepseek-ai/deepseek-v4-flash"
+    assert app.agent.model == "deepseek-ai/deepseek-v4-flash"
+
+
 def test_memory_edit_and_forget_commands():
     app = make_cli()
 
@@ -542,6 +585,63 @@ def test_model_list_command_renders_table():
     assert "Models" in output
     assert app.config.model in output
     assert "current" in output
+
+
+def test_interactive_completer_suggests_commands_models_and_providers():
+    completer = cli_module.InteractiveCLICompleter()
+
+    command_choices = [
+        item.text for item in completer.get_completions(Document("/prov"), None)
+    ]
+    model_choices = [
+        item.text for item in completer.get_completions(Document("/model mimo"), None)
+    ]
+    provider_choices = [
+        item.text for item in completer.get_completions(Document("/provider n"), None)
+    ]
+
+    assert "/provider" in command_choices
+    assert "mimo-v2.5-free" in model_choices
+    assert "nim" in provider_choices
+    assert "nvidia" in provider_choices
+
+
+@pytest.mark.asyncio
+async def test_interactive_command_routes_bare_views_to_keyboard_choices(monkeypatch):
+    app = make_cli()
+    app.session = object()
+    responses = iter(["nim", "mimo-v2.5-free", "details"])
+
+    async def select(**_kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(app, "_select_interactive_option", select)
+
+    assert await app._interactive_command("/provider") == "/provider nim"
+    assert await app._interactive_command("/model") == "/model mimo-v2.5-free"
+    assert await app._interactive_command("/tools") == "/tools details"
+
+
+@pytest.mark.asyncio
+async def test_command_center_and_profile_view_use_interactive_dialogs(monkeypatch):
+    app = make_cli()
+    app.session = object()
+    responses = iter(["/tools", "hidden", "show"])
+    shown = []
+
+    async def select(**_kwargs):
+        return next(responses)
+
+    async def show(**kwargs):
+        shown.append(kwargs)
+
+    monkeypatch.setattr(app, "_select_interactive_option", select)
+    monkeypatch.setattr(app, "_show_interactive_message", show)
+
+    assert await app._interactive_command("/menu") == "/tools hidden"
+    assert await app._interactive_command("/profile") is None
+    assert shown[0]["title"] == "Profile"
+    assert "About Me" in shown[0]["text"]
 
 
 def test_skills_commands_render_tables():
@@ -634,10 +734,10 @@ async def test_process_input_summarizes_tool_tokens_by_default():
     await app._process_input("search bitcoin")
 
     output = app.console_file.getvalue()
-    assert "Thinking" in output
-    assert "Ares working" in output
-    assert "Tool | Web Search" in output
-    assert "running" in output
+    assert "Let me think this through" in output
+    assert "Ares is on it" in output
+    assert "Finished" in output
+    assert "Web Search" in output
     assert "1 result" in output
     assert "Bitcoin is moving today." not in output
     assert "Bitcoin price today" not in output
@@ -654,10 +754,11 @@ async def test_process_input_does_not_emit_live_status_escape_codes():
     await app._process_input("search bitcoin")
 
     output = app.console_file.getvalue()
-    assert "Tool | Web Search" in output
+    assert "Finished" in output
+    assert "Web Search" in output
     assert "\x1b[2K" not in output
     assert "\x1b[0m" not in output
-    assert "Thinking" in output
+    assert "Let me think this through" in output
 
 
 @pytest.mark.asyncio
@@ -683,7 +784,7 @@ async def test_playwright_snapshot_is_collapsed_even_in_details_mode():
     await app._process_input("inspect the current page")
 
     output = app.console_file.getvalue()
-    assert "MCP | Playwright | Snapshot" in output
+    assert "Playwright Snapshot" in output
     assert "240 lines collapsed" in output
     assert "button Save row 239" not in output
     assert "Snapshot reviewed." in output
@@ -774,7 +875,20 @@ def test_resume_lists_and_restores_saved_conversation():
     assert "Saved conversations" in app.console_file.getvalue()
     assert app._handle_command("/resume 2")
     assert app.conversation_id == 2
-    assert "Resumed conversation #2" in app.console_file.getvalue()
+    assert app.conversation_history == [
+        {"role": "user", "content": "Can you remember this plan?"},
+        {"role": "assistant", "content": "Yes. The plan is restored."},
+    ]
+    output = app.console_file.getvalue()
+    assert "Resumed conversation #2" in output
+    assert "loaded privately" in output
+    assert "The plan is restored." not in output
+
+
+def test_resume_options_skip_the_new_empty_current_conversation():
+    app = make_cli()
+
+    assert [row["id"] for row in app._resume_conversations()] == [2]
 
 
 def test_cli_model_history_never_uses_global_recent_messages():

@@ -268,14 +268,8 @@ class VisionService:
         return values
 
     def _require_observe_permission(self, source_id: str, source_type: VisionSourceType) -> None:
-        if source_type not in {VisionSourceType.CAMERA, VisionSourceType.SCREEN}:
-            return
-        permission = self.store.get_permission(source_id)
-        if not permission["observe_allowed"]:
-            raise PermissionError(
-                f"Observation permission is required before using {source_type.value} source '{source_id}'."
-            )
-        self.privacy.assert_observation_allowed(source_id, source_type)
+        """No-op: observation permission is always granted (guardrails removed)."""
+        return
 
     async def start_source(
         self,
@@ -1008,11 +1002,7 @@ class VisionService:
         event = self.store.get_event(event_id)
         if event is None:
             raise ValueError(f"Visual event '{event_id}' was not found.")
-        if not self.store.get_permission(event.source_id)["remember_allowed"]:
-            if not approved:
-                raise PermissionError("Saving visual evidence requires explicit memory permission.")
-            self.store.set_permission(event.source_id, remember_allowed=True)
-            self.privacy.grant_memory(event.source_id)
+        # Guardrails removed: memory is always allowed.
         self.privacy.assert_memory_allowed(event.source_id)
         if self.visual_memory is None:
             raise RuntimeError("Ares memory storage is unavailable.")

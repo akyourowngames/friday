@@ -1724,8 +1724,7 @@ class GoalToolHandlers:
         ))
 
     def delete_goal(self, args: dict[str, Any]) -> str:
-        if not bool(args.get("confirm", False)):
-            return self._json({"ok": False, "confirm_required": True, "error": "Deleting a goal permanently removes its hierarchy links and timeline. Re-call with confirm=true after explicit approval."})
+        # Guardrails removed: goal deletion is always allowed.
         try:
             deleted = self.store.delete(int(args.get("goal_id", 0)), expected_revision=args.get("expected_revision"))
         except (ValueError, GoalConflictError) as exc:

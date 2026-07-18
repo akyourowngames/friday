@@ -10,7 +10,7 @@
 
 **Remember what matters. Search every saved session. Take action with tools. Keep control local.**
 
-[Quick start](#-quick-start) · [Vision](#-local-vision-v1) · [Watchers](#-proactive-watchers) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
+[Quick start](#-quick-start) · [Personality](#-personality-and-profile) · [Vision](#-local-vision-v1) · [Watchers](#-proactive-watchers) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
 
 </div>
 
@@ -30,6 +30,9 @@ Ares is a terminal-first AI assistant with a separate Next.js power workspace, a
 
 ### Latest upgrades
 
+- **Keyboard-driven terminal UI:** type slash for command suggestions, use ↑/↓ to select a completion, and open **/menu** for arrow-key screens for models, providers, tools, profile, personality, and saved chats.
+- **Reliable conversation restore:** **/resume** excludes blank startup rows and restores the selected chat into the active model context without replaying its transcript in the terminal.
+- **Provider-aware model switching:** OpenCode Zen, NVIDIA NIM, and GitHub Copilot models select their matching endpoint and credentials automatically, avoiding cross-provider 404s after a model change.
 - **Local Vision V1:** inspect user-supplied images or, with explicit per-source consent, observe local camera and screen sources. Vision can detect objects, read text, compare snapshots, verify visual conditions, and run bounded watches with conservative local retention.
 - **Faster foreground responses:** ordinary chat streams through a short tool-call decision buffer; durable reflection, memory statistics, and reusable context work move off the first-token path when safe.
 - **More capable existing tools:** legacy calls remain compatible while opt-in structured responses add previews, plans, provenance, verification, undo metadata, safer batch operations, and protected exports. See the [existing-tool upgrades guide](docs/existing-tool-upgrades-guide.md).
@@ -49,6 +52,14 @@ cd friday
 pip install -e ".[dev]"
 python -m ares
 ```
+
+### Keyboard-driven terminal
+
+In an interactive terminal, type slash to open command suggestions. Use **↑/↓** to choose a suggestion and **Enter** to apply it. **/menu** opens the command center; the bare forms of **/model**, **/provider**, **/tools**, **/profile**, **/soul**, and **/resume** open arrow-key screens instead of only printing tables.
+
+**/resume** lists only chats containing saved user or assistant messages, never the empty row created for a new launch. Selecting a chat restores its bounded history into the next model request without reprinting that chat in the terminal. Use **/resume latest** or **/resume ID** when scripting.
+
+Model selection is provider-aware: choosing an OpenCode Zen or NVIDIA NIM model switches to its matching endpoint before the request is made. **/provider opencode**, **/provider nim** (or the **nvidia** alias), and **/provider copilot** also select a compatible default model. Provider-specific keys remain isolated in the local configuration.
 
 ### Voice mode
 
@@ -420,6 +431,8 @@ Manage connections without editing code:
 
 See [MCP configuration and diagnostics](docs/mcp.md) for `stdio`, SSE, and Streamable HTTP server examples, browser modes, and OAuth token storage.
 
+For the optional GitHub Copilot SDK provider and user-authorized OAuth setup, see [GitHub Copilot](docs/copilot.md).
+
 ---
 
 ## 💬 Voice, phone, and Telegram
@@ -534,10 +547,13 @@ Useful remote supervisor commands:
 | Command | Purpose |
 |---|---|
 | `/help` | Show available controls. |
+| `/menu` | Open the arrow-key command center in an interactive terminal. |
 | `/memory search QUERY` | Search durable facts and recall sources. |
 | `/goals [search|show|due|signals]` | Inspect active goals, hierarchy, progress evidence, deadlines, and pending watcher signals. |
 | `/context` | Inspect active local context. |
-| `/model` | List or change the configured model. |
+| `/model [MODEL]` | Choose a model interactively or switch directly; Ares aligns the provider and endpoint. |
+| `/provider [NAME]` | Choose an endpoint interactively or switch provider directly. |
+| `/resume ID` or `/resume latest` | Restore a saved chat into the active context without replaying its transcript. |
 | `/skills` | Discover, inspect, create, install, or manage skills. |
 | `/mcp status` | Inspect MCP readiness and safe diagnostics. |
 | `/browser status` | Inspect the effective Playwright browser connection mode. |
@@ -549,6 +565,16 @@ Useful remote supervisor commands:
 | `/export [PATH]` | Export local Ares data. |
 | `/import PATH [--config]` | Import a previous local export. |
 | `/soul show` · `/profile show` | Inspect assistant personality and user-profile context. |
+
+---
+
+## ✨ Personality and profile
+
+Ares keeps its personality in `~/.ares/data/soul.md` and user preferences in `~/.ares/data/profile.md`. These are local, user-owned Markdown files: edit them with `/soul edit` and `/profile edit`, or open the files in any editor.
+
+The soul is injected into every user-facing turn, including casual messages such as “hey” or “how are you.” Casual turns keep this fast by loading only the soul and profile; they do not trigger semantic-memory retrieval. This lets Ares keep a consistent voice without making ordinary conversation slower.
+
+The default soul is warm, grounded, and naturally expressive while remaining honest about being an AI. Adjust it freely—for example, request more humor, more directness, fewer status updates, or a more formal tone. Use `/context` to inspect the context Ares is using for the current turn.
 
 ---
 

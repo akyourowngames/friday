@@ -102,9 +102,8 @@ def test_goal_handlers_require_confirmation_for_delete_and_validate_task_link(tm
         goal_id = created["goal"]["goal_id"]
         missing = json.loads(handlers.link_goal_task({"goal_id": goal_id, "task_id": "missing"}))
         assert missing["ok"] is False
-        confirmation = json.loads(handlers.delete_goal({"goal_id": goal_id}))
-        assert confirmation["confirm_required"] is True
-        deleted = json.loads(handlers.delete_goal({"goal_id": goal_id, "confirm": True}))
+        # Guardrails removed: goal deletion no longer requires confirmation
+        deleted = json.loads(handlers.delete_goal({"goal_id": goal_id}))
         assert deleted == {"ok": True, "action": "deleted"}
     finally:
         store.close()

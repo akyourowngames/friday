@@ -234,6 +234,31 @@ class ConversationStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_resumable_conversations(self, limit: int = 50) -> list[dict]:
+        """Return only conversations that can be restored into chat context.
+
+        A CLI startup creates an empty active row before the user sends a
+        message. Listing that row first made the resume picker appear to
+        restore a conversation while actually selecting the brand-new blank
+        chat. Joining against the direct chat messages also hides abandoned
+        empty rows left behind by older launches.
+        """
+        bounded = max(1, min(int(limit), 200))
+        rows = self.conn.execute(
+            """
+            SELECT c.*, COUNT(m.id) AS message_count
+            FROM conversations AS c
+            JOIN conversation_messages AS m ON m.conversation_id = c.id
+            WHERE m.role IN ('user', 'assistant')
+            GROUP BY c.id
+            HAVING COUNT(m.id) > 0
+            ORDER BY c.id DESC
+            LIMIT ?
+            """,
+            (bounded,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_recent_summaries(self, limit: int = 5) -> list[str]:
         """Return recent non-empty session summaries."""
         rows = self.conn.execute(

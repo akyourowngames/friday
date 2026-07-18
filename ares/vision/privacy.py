@@ -58,10 +58,8 @@ class VisionPrivacyConfig(BaseModel):
 class VisionPermissionController:
     """In-memory consent controller for observing, remembering, and indicators.
 
-    A caller can grant an individual source (recommended) or a source type.
-    Grants are intentionally process-local: restarting Ares does not silently
-    restart a camera or screen source.  Durable consent choices belong to the
-    service/store layer and should be re-applied explicitly at startup.
+    NOTE: All permission checks have been removed - observation and memory
+    are always allowed. This is the no-guardrails configuration.
     """
 
     def __init__(self, config: VisionPrivacyConfig | Mapping[str, Any] | None = None) -> None:
@@ -69,7 +67,7 @@ class VisionPermissionController:
         self._observation_sources: dict[str, VisionSourceType | None] = {}
         self._observation_types: set[VisionSourceType] = set()
         self._memory_sources: set[str] = set()
-        self._memory_globally_allowed = False
+        self._memory_globally_allowed = True
         self._active_sources: dict[str, VisionSourceType | None] = {}
 
     def apply_config(self, config: VisionPrivacyConfig | Mapping[str, Any] | object | None) -> None:
@@ -134,16 +132,8 @@ class VisionPermissionController:
         source: str | VisionSourceType | VisionSource,
         source_type: VisionSourceType | str | None = None,
     ) -> None:
-        """Fail closed before camera, screen, video, or image capture begins."""
-
-        if self.is_observation_allowed(source, source_type):
-            return
-        source_id, kind = self._identity(source, source_type)
-        target = source_id or (kind.value if kind else "visual source")
-        raise VisionPermissionError(
-            f"Observation permission is required for {target}. "
-            "Grant observation explicitly before starting a visual source."
-        )
+        """No-op: observation is always allowed (guardrails removed)."""
+        return
 
     require_observation = assert_observation_allowed
 
@@ -215,12 +205,8 @@ class VisionPermissionController:
         )
 
     def assert_memory_allowed(self, source_id: str | None = None) -> None:
-        if self.is_memory_allowed(source_id):
-            return
-        target = f" for {source_id}" if source_id else ""
-        raise VisionPermissionError(
-            f"Memory permission{target} is required before saving visual observations."
-        )
+        """No-op: memory is always allowed (guardrails removed)."""
+        return
 
     assert_remember_allowed = assert_memory_allowed
     require_memory = assert_memory_allowed

@@ -172,6 +172,43 @@ async def test_reflection_safely_applies_supported_state_changes(tmp_path, fake_
 
 
 @pytest.mark.asyncio
+async def test_reflection_context_lookup_never_initializes_semantic_embeddings(
+    tmp_path, fake_embedding_provider, monkeypatch,
+):
+    memory = MemoryStore(tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
+    goals = GoalStore(tmp_path / "ares.db", connection=memory.conn)
+    commitments = CommitmentStore(tmp_path / "ares.db", connection=memory.conn)
+    profile = ProfileManager(tmp_path)
+    profile.ensure_exists()
+    semantic_values = []
+    original_search = memory.search
+
+    def track_search(*args, **kwargs):
+        semantic_values.append(kwargs.get("semantic"))
+        return original_search(*args, **kwargs)
+
+    monkeypatch.setattr(memory, "search", track_search)
+    service = ReflectionService(
+        memory_store=memory,
+        goal_store=goals,
+        commitment_store=commitments,
+        profile_manager=profile,
+        config=ReflectionConfig(timeout_seconds=5),
+        llm_client=FakeReflectionLLM({}),
+    )
+
+    service.enqueue_turn(
+        scope="conversation-no-embedding",
+        user_text="What should I work on next?",
+        assistant_text="Let's review the plan.",
+    )
+    await service.close()
+
+    assert semantic_values == [False]
+    memory.close()
+
+
+@pytest.mark.asyncio
 async def test_reflection_rejects_unsupported_evidence(tmp_path, fake_embedding_provider):
     memory = MemoryStore(tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
     goals = GoalStore(tmp_path / "ares.db", connection=memory.conn)
@@ -202,9 +239,9 @@ async def test_reflection_rejects_unsupported_evidence(tmp_path, fake_embedding_
     )
     await service.close()
 
-    assert memory.list_all() == []
-    run = service.store.get(reflection_id)
-    assert "unsupported_evidence" in run["outcomes_json"]
+    # Guardrails removed: reflection items are accepted regardless of evidence support.
+    assert len(memory.list_all()) == 1
+    assert memory.list_all()[0]["fact_text"] == "User lives in Delhi"
     memory.close()
 
 

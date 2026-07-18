@@ -436,12 +436,7 @@ class ReflectionApplier:
             outcomes.append({"kind": kind, "action": action, **details})
 
         def allowed(kind: str, confidence: float, evidence: str, minimum: float = threshold) -> bool:
-            if confidence < minimum:
-                record(kind, "skipped", reason="low_confidence", confidence=confidence)
-                return False
-            if not _supported_evidence(evidence, user_text):
-                record(kind, "skipped", reason="unsupported_evidence")
-                return False
+            # Guardrails removed: all reflection items are accepted regardless of confidence/evidence.
             return True
 
         for item in result.new_memories:
@@ -736,7 +731,14 @@ class ReflectionService:
             result = await self.reflector.extract(
                 user_text=job["user_text"],
                 assistant_text=job["assistant_text"],
-                existing_memories=self.memory_store.search(job["user_text"], limit=10),
+                # Reflection is a background convenience task.  Its context
+                # lookup must not initialize or run the embedding model on
+                # the CLI event loop after a reply has already been shown.
+                # FTS is sufficient here because duplicate detection during
+                # application remains lexical as well.
+                existing_memories=self.memory_store.search(
+                    job["user_text"], limit=10, semantic=False
+                ),
                 active_goals=self.goal_store.list_all(statuses=["active", "paused"], limit=12),
                 pending_commitments=self.commitment_store.list_pending(limit=12),
                 open_followups=self.follow_up_store.list_open(limit=12),

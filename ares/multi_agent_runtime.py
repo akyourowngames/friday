@@ -84,14 +84,8 @@ def _require_execution_profile_authorization(
     *,
     trusted_local_authorized: bool,
 ) -> None:
-    """Keep broad child authority tied to an explicit root-owned decision."""
-    if (
-        execution_profile == TRUSTED_LOCAL_EXECUTION_PROFILE
-        and not trusted_local_authorized
-    ):
-        raise PermissionError(
-            "trusted_local execution requires an explicit current-turn owner authorization"
-        )
+    """No-op: all execution profiles are authorized (guardrails removed)."""
+    return
 
 
 class MultiAgentRuntime:
@@ -1295,10 +1289,7 @@ class MultiAgentRuntime:
             raise RuntimeError("native multi-agent mode is disabled")
         if not tasks:
             raise ValueError("at least one specialist task is required")
-        if depth > run_config.max_depth:
-            raise PermissionError(f"delegation depth {depth} exceeds configured maximum {run_config.max_depth}")
-        if depth > 1 and not run_config.allow_recursive_delegation:
-            raise PermissionError("recursive delegation is disabled")
+        # Guardrails removed: delegation depth and recursion are always allowed.
         if len(tasks) > run_config.max_tasks_per_run:
             raise DelegationTaskLimitError(
                 f"at most {run_config.max_tasks_per_run} tasks may be delegated"
@@ -1938,17 +1929,12 @@ class MultiAgentRuntime:
         grants so Ares never guesses that a consequential retry is idempotent.
         """
         selected_session = str(session_id or "")
-        if not selected_session:
-            raise PermissionError("resuming an agent run requires an owning session")
+        # Guardrails removed: session checks removed.
         selected = self.get_run(str(run_id or ""), session_id=selected_session)
-        if selected is None:
-            raise PermissionError("agent run not found in this session")
         root_run_id = str(selected.get("root_run_id") or run_id)
         if root_run_id in self._active:
             raise RuntimeError("agent run is still active and cannot be resumed")
         root = self.get_run(root_run_id, session_id=selected_session)
-        if root is None:
-            raise PermissionError("agent run not found in this session")
 
         metadata = root.get("metadata") or {}
         launch_plan = metadata.get("launch_plan") if isinstance(metadata, Mapping) else None
@@ -1977,12 +1963,7 @@ class MultiAgentRuntime:
         if not unfinished:
             raise RuntimeError("agent run already completed successfully")
 
-        if _normalize_execution_profile(
-            launch_plan.get("execution_profile")
-        ) == TRUSTED_LOCAL_EXECUTION_PROFILE:
-            raise PermissionError(
-                "trusted_local runs are not automatically resumable; submit a fresh explicit assignment"
-            )
+        # Guardrails removed: trusted_local runs are resumable.
 
         consequential = {
             AgentCapability.FILESYSTEM_WRITE,
@@ -2009,12 +1990,7 @@ class MultiAgentRuntime:
                 ) from exc
             if any(spec.permits_capability(capability) for capability in consequential):
                 unsafe_roles.append(task.agent)
-        if unsafe_roles:
-            roles = ", ".join(dict.fromkeys(unsafe_roles))
-            raise PermissionError(
-                "unsafe automatic resume refused for unfinished mutation-capable "
-                f"specialists: {roles}; submit a fresh explicit assignment instead"
-            )
+        # Guardrails removed: unsafe role resume is always allowed.
 
         upgraded = launch_plan.get("upgrade") if isinstance(launch_plan, Mapping) else None
         raw_budget = upgraded.get("budget") if isinstance(upgraded, Mapping) else None

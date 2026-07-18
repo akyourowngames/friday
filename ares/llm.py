@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from typing import Any, AsyncIterator
 
 import httpx
@@ -96,32 +97,135 @@ MODEL_REGISTRY = {
             {"id": "qwen3.5-plus", "label": "Qwen 3.5 Plus", "provider": "Qwen"},
         ],
     },
+    "copilot": {
+        "label": "GitHub Copilot",
+        "models": [
+            {"id": "auto", "label": "Automatic selection", "provider": "GitHub Copilot"},
+        ],
+    },
 }
 
 # Flat list of free model IDs for fallback
 FREE_MODELS = [m["id"] for m in MODEL_REGISTRY["free"]["models"]]
 
+# Zen is an API gateway: model families such as Claude and DeepSeek still use
+# the OpenCode endpoint. NVIDIA NIM is the only separately routed catalogue.
+_MODEL_BACKENDS = {
+    group_key: "nim" if group_key == "nvidia" else "copilot" if group_key == "copilot" else "opencode"
+    for group_key in MODEL_REGISTRY
+}
+
 PROVIDER_BASE_URLS = {
     "opencode": "https://opencode.ai/zen/v1",
-    "nvidia": "https://integrate.api.nvidia.com/v1",
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta",
-    "xai": "https://api.x.ai/v1",
-    "deepseek": "https://api.deepseek.com/v1",
-    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-    "moonshot": "https://api.moonshot.cn/v1",
-    "minimax": "https://api.minimax.chat/v1",
-    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "nim": "https://integrate.api.nvidia.com/v1",
+    "copilot": "",
 }
+
+PROVIDER_ALIASES = {"nvidia": "nim"}
+SUPPORTED_PROVIDERS = tuple(PROVIDER_BASE_URLS)
+
+
+def normalize_provider(provider: str | None) -> str:
+    """Return the canonical transport-provider name."""
+    name = str(provider or "opencode").strip().lower()
+    return PROVIDER_ALIASES.get(name, name)
+
+
+def provider_for_model(model: str | None) -> str | None:
+    """Return the endpoint provider for a registered model, if known."""
+    for group_key, group in MODEL_REGISTRY.items():
+        if any(item["id"] == model for item in group["models"]):
+            return _MODEL_BACKENDS[group_key]
+    return None
+
+
+def models_for_provider(provider: str | None) -> list[dict[str, str]]:
+    """Return registered models served by one transport provider."""
+    target = normalize_provider(provider)
+    return [
+        model
+        for group_key, group in MODEL_REGISTRY.items()
+        if _MODEL_BACKENDS[group_key] == target
+        for model in group["models"]
+    ]
+
+
+def default_model_for_provider(provider: str | None) -> str:
+    """Return a known-working default for a transport provider."""
+    target = normalize_provider(provider)
+    if target == "nim":
+        return "deepseek-ai/deepseek-v4-flash"
+    if target == "copilot":
+        return "auto"
+    models = models_for_provider(target)
+    if not models:
+        raise ValueError(f"Unsupported provider: {provider}")
+    return models[0]["id"]
+
+
+def _normalized_url(url: str) -> str:
+    return str(url or "").strip().rstrip("/").lower()
 
 
 def resolve_provider_base_url(provider: str | None, base_url: str | None = None) -> str:
-    """Resolve the base URL for a provider."""
+    """Resolve the base URL without retaining another provider's default."""
+    normalized_provider = normalize_provider(provider)
+    expected = PROVIDER_BASE_URLS.get(normalized_provider)
+    if expected is None:
+        raise ValueError(f"Unsupported provider: {provider}")
     if base_url:
-        return base_url.rstrip("/")
-    provider = (provider or "opencode").lower()
-    return PROVIDER_BASE_URLS.get(provider, "https://opencode.ai/zen/v1")
+        candidate = str(base_url).rstrip("/")
+        known_defaults = {_normalized_url(url) for url in PROVIDER_BASE_URLS.values()}
+        if _normalized_url(candidate) not in known_defaults or _normalized_url(candidate) == _normalized_url(expected):
+            return candidate
+    return expected
+
+
+def configured_provider_api_key(
+    config: Any, provider: str | None, *, include_legacy_active_key: bool = True
+) -> str:
+    """Select a provider-scoped key without sending one provider's key to another."""
+    normalized_provider = normalize_provider(provider)
+    environment_names = {
+        "opencode": ("OPENCODE_API_KEY",),
+        "nim": ("NIM_API_KEY", "NVIDIA_API_KEY"),
+        "copilot": ("COPILOT_GITHUB_TOKEN",),
+    }
+    for name in environment_names.get(normalized_provider, ()):
+        if os.environ.get(name):
+            return os.environ[name]
+    configured = getattr(config, "provider_api_keys", {}) or {}
+    if normalized_provider == "copilot":
+        return str(getattr(config, "copilot_github_token", "") or "")
+    if configured.get(normalized_provider):
+        return str(configured[normalized_provider])
+    active_provider = normalize_provider(getattr(config, "provider", None))
+    if include_legacy_active_key and active_provider == normalized_provider:
+        return str(getattr(config, "api_key", "") or "")
+    return ""
+
+
+def activate_provider_config(config: Any, provider: str) -> str:
+    """Switch a config to a provider while retaining keys per provider."""
+    target = normalize_provider(provider)
+    if target not in PROVIDER_BASE_URLS:
+        raise ValueError(f"Unsupported provider: {provider}")
+    previous = normalize_provider(getattr(config, "provider", None))
+    keys = dict(getattr(config, "provider_api_keys", {}) or {})
+    active_key = str(getattr(config, "api_key", "") or "")
+    if active_key:
+        keys[previous] = active_key
+    config.provider_api_keys = keys
+    config.provider = target
+    config.api_key = "" if target == "copilot" else configured_provider_api_key(
+        config, target, include_legacy_active_key=False
+    )
+    config.api_base_url = (
+        str(getattr(config, "api_base_url", "") or "").rstrip("/")
+        if previous == target
+        else PROVIDER_BASE_URLS[target]
+    )
+    return target
 
 
 class LLMClient:
@@ -131,11 +235,30 @@ class LLMClient:
                  model: str | None = None, config: Any | None = None, provider: str | None = None):
         config = config or load_config()
         self.config = config
-        self.api_key = api_key or config.api_key
-        self.provider = provider or getattr(config, "provider", None) or "opencode"
-        self.base_url = resolve_provider_base_url(self.provider, base_url or getattr(config, "api_base_url", None)).rstrip("/")
         self.model = model or config.model
+        configured_provider = normalize_provider(provider or getattr(config, "provider", None))
+        # Repair legacy state such as a free Zen model persisted alongside the
+        # former ``nvidia`` provider before the very first request is made.
+        self.provider = "copilot" if configured_provider == "copilot" else provider_for_model(self.model) or configured_provider
+        self.api_key = (
+            api_key
+            if api_key is not None
+            else configured_provider_api_key(config, self.provider)
+        )
+        configured_base_url = base_url if base_url is not None else getattr(config, "api_base_url", None)
+        self.base_url = resolve_provider_base_url(self.provider, configured_base_url).rstrip("/")
         self._client = httpx.AsyncClient(timeout=60.0)
+        self._copilot_client = None
+
+    def _copilot(self):
+        from ares.copilot import CopilotLLMClient
+
+        token = configured_provider_api_key(self.config, "copilot")
+        if self._copilot_client is None or self._copilot_client.token != token:
+            self._copilot_client = CopilotLLMClient(token=token, model=self.model)
+        else:
+            self._copilot_client.model = self.model
+        return self._copilot_client
 
     @staticmethod
     def _sanitize_tool_call_ids(messages: list[dict]) -> list[dict]:
@@ -212,6 +335,8 @@ class LLMClient:
     async def chat(self, messages: list[dict], tools: list[dict] | None = None,
                    tool_choice: str = "auto") -> dict:
         """Send a chat completion request. Returns the full response dict."""
+        if self.provider == "copilot":
+            return await self._copilot().chat(messages, tools)
         messages = self._sanitize_tool_call_ids(messages)
         payload: dict[str, Any] = {
             "model": self.model,
@@ -250,6 +375,10 @@ class LLMClient:
 
     async def chat_stream(self, messages: list[dict], tools: list[dict] | None = None) -> AsyncIterator[dict]:
         """Stream a chat completion and yield structured content/tool chunks."""
+        if self.provider == "copilot":
+            async for chunk in self._copilot().chat_stream(messages, tools):
+                yield chunk
+            return
         messages = self._sanitize_tool_call_ids(messages)
         payload: dict[str, Any] = {
             "model": self.model,
@@ -326,3 +455,5 @@ class LLMClient:
     async def close(self):
         """Close the HTTP client."""
         await self._client.aclose()
+        if self._copilot_client is not None:
+            await self._copilot_client.close()

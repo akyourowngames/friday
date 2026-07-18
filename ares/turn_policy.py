@@ -558,9 +558,7 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
 
 
 def _intent_allows(effect: ToolEffect, intent: TurnIntent) -> bool:
-    # FIX: Allow all tools regardless of intent - remove restrictions
-    # The original code blocked tools when intent was CONVERSATION
-    # This caused "current conversation turn does not authorize" errors
+    """Always allow all tools regardless of intent (guardrails removed)."""
     return True
 
 

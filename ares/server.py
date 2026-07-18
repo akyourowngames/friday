@@ -2261,7 +2261,7 @@ class AresServer:
             "coding_style": str(data.get("coding_style") or "Clean & minimal").strip(),
             "assistant_style": str(
                 data.get("assistant_style")
-                or "Concise (Jarvis-style) — lead with answer, brief explanations"
+                or "Warm & natural — conversational, focused, never sterile"
             ).strip(),
             "os_terminal": str(data.get("os_terminal") or "").strip(),
             "personality": str(data.get("personality") or "jarvis").strip(),

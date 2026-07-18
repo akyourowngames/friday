@@ -175,8 +175,9 @@ async def test_greeting_exposes_no_tools_and_stale_action_cannot_execute(
     await agent.close()
 
 
-def test_greeting_skips_expensive_memory_context(tmp_path, fake_embedding_provider, monkeypatch):
+def test_greeting_keeps_soul_but_skips_expensive_memory_context(tmp_path, fake_embedding_provider, monkeypatch):
     agent = _agent(tmp_path, fake_embedding_provider, enabled=False)
+    agent.soul_manager.write("## Personality\nBe warmly curious.")
 
     def forbidden_context(**_kwargs):
         raise AssertionError("a greeting must not retrieve semantic memory")
@@ -184,7 +185,9 @@ def test_greeting_skips_expensive_memory_context(tmp_path, fake_embedding_provid
     monkeypatch.setattr("ares.agent.build_user_context", forbidden_context)
     context = build_turn_execution_context("hi", request_id="req-greeting")
     with agent.turn_scope(context):
-        assert agent.get_context("hi", []) == ""
+        rendered = agent.get_context("hi", [])
+    assert "Ares Personality" in rendered
+    assert "Be warmly curious." in rendered
     asyncio.run(agent.close())
 
 

@@ -5,6 +5,7 @@ from contextlib import nullcontext, suppress
 from difflib import SequenceMatcher
 import inspect
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -17,6 +18,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.filters import has_completions
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import CompleteStyle, message_dialog, radiolist_dialog
+from prompt_toolkit.styles import Style
 
 from rich import box
 from rich.console import Console
@@ -41,7 +47,16 @@ from ares.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.config import _ensure_mcp_defaults, load_config, save_config
-from ares.llm import FREE_MODELS, MODEL_REGISTRY, PROVIDER_BASE_URLS
+from ares.llm import (
+    MODEL_REGISTRY,
+    PROVIDER_BASE_URLS,
+    SUPPORTED_PROVIDERS,
+    activate_provider_config,
+    configured_provider_api_key,
+    default_model_for_provider,
+    normalize_provider,
+    provider_for_model,
+)
 from ares.multi_agent_display import ACTIVE_STATUSES, elapsed_label, one_line, summarize_runs
 from ares.skills import SkillManager
 from ares.tools.mcp_client import MCPClientManager, redact_mcp_text
@@ -57,6 +72,79 @@ from .runtime import clear_current_task_cancellation, history_path, supports_uni
 # Compatibility exports for integrations that imported CLI internals before the
 # package split. New code should use ``ares.cli.runtime`` directly.
 _history_path = history_path
+
+INTERACTIVE_DIALOG_STYLE = Style.from_dict({
+    "dialog": "bg:ansiblack",
+    "dialog.body": "bg:ansiblack fg:ansiwhite",
+    "dialog shadow": "bg:ansiblack",
+    "frame.label": "fg:ansicyan bold",
+    "radio-list": "bg:ansiblack fg:ansiwhite",
+    "radio": "fg:ansicyan",
+    "radio-selected": "fg:ansibrightcyan bold",
+    "radio-checked": "fg:ansigreen bold",
+    "button": "bg:ansicyan fg:ansiblack bold",
+    "button.focused": "bg:ansigreen fg:ansiblack bold",
+})
+
+
+class InteractiveCLICompleter(Completer):
+    """Contextual slash-command completion with selectable model/provider rows."""
+
+    def get_completions(self, document, complete_event):
+        before_cursor = document.text_before_cursor
+        model_match = re.fullmatch(r"/model\s+(.*)", before_cursor, re.IGNORECASE)
+        if model_match:
+            prefix = model_match.group(1)
+            for group_key, group in MODEL_REGISTRY.items():
+                endpoint = "NVIDIA NIM" if group_key == "nvidia" else (
+                    "GitHub Copilot" if group_key == "copilot" else "OpenCode Zen"
+                )
+                for item in group["models"]:
+                    model_id = item["id"]
+                    if model_id.casefold().startswith(prefix.casefold()):
+                        yield Completion(
+                            model_id,
+                            start_position=-len(prefix),
+                            display_meta=endpoint,
+                        )
+            return
+
+        provider_match = re.fullmatch(r"/provider\s+(.*)", before_cursor, re.IGNORECASE)
+        if provider_match:
+            prefix = provider_match.group(1)
+            options = [*PROVIDER_BASE_URLS, "nvidia"]
+            for provider in options:
+                if provider.casefold().startswith(prefix.casefold()):
+                    detail = "alias for nim" if provider == "nvidia" else (
+                        PROVIDER_BASE_URLS[provider] or "GitHub Copilot SDK"
+                    )
+                    yield Completion(
+                        provider,
+                        start_position=-len(prefix),
+                        display_meta=detail,
+                    )
+            return
+
+        if not before_cursor.startswith("/"):
+            return
+        for command in COMPLETER.words:
+            if command.casefold().startswith(before_cursor.casefold()):
+                yield Completion(command, start_position=-len(before_cursor))
+
+
+def _interactive_completion_bindings() -> KeyBindings:
+    """Let Up/Down choose a visible completion without losing history keys."""
+    bindings = KeyBindings()
+
+    @bindings.add("down", filter=has_completions)
+    def select_next(event) -> None:
+        event.current_buffer.complete_next()
+
+    @bindings.add("up", filter=has_completions)
+    def select_previous(event) -> None:
+        event.current_buffer.complete_previous()
+
+    return bindings
 
 
 def _clear_current_task_cancellation() -> None:
@@ -181,6 +269,10 @@ class AresCLI(MarketplaceCommandMixin):
         }
         self.tool_output_mode = "summary"
         self.config = load_config()
+        configured_model_provider = provider_for_model(self.config.model)
+        if configured_model_provider and configured_model_provider != normalize_provider(self.config.provider):
+            activate_provider_config(self.config, configured_model_provider)
+            save_config(self.config)
         self.memory_store = MemoryStore()
         data_dir = Path(self.config.data_dir).expanduser()
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
@@ -221,9 +313,6 @@ class AresCLI(MarketplaceCommandMixin):
         self.agent = Agent(
             memory_store=self.memory_store,
             conversation_store=self.conversation_store,
-            api_key=self.config.api_key,
-            base_url=self.config.api_base_url,
-            model=self.config.model,
             config=self.config,
             mcp_manager=self.mcp_manager,
             session_store=self.session_store,
@@ -271,20 +360,44 @@ class AresCLI(MarketplaceCommandMixin):
         return list(rows or [])
 
     def _resume_conversations(self, limit: int = 10) -> list[dict]:
-        listing = getattr(self.conversation_store, "list_conversations", None)
+        bounded = max(1, min(int(limit), 50))
+        listing = getattr(self.conversation_store, "list_resumable_conversations", None)
+        if not callable(listing):
+            listing = getattr(self.conversation_store, "list_conversations", None)
         if not callable(listing):
             return []
-        return list(listing() or [])[:max(1, min(int(limit), 50))]
+        try:
+            rows = list(listing(limit=bounded) or [])
+        except TypeError:
+            rows = list(listing() or [])
+
+        # The current CLI session is created before the prompt appears. It is
+        # not a saved chat to restore, and selecting it used to make /resume
+        # look broken because its history is empty.
+        return [
+            row
+            for row in rows
+            if str(row.get("id") or "") != str(self.conversation_id)
+        ][:bounded]
 
     def _resume_conversation(self, conversation_id: int) -> bool:
-        available = {int(row.get("id")) for row in self._resume_conversations(50) if row.get("id") is not None}
-        if conversation_id not in available:
+        if conversation_id != self.conversation_id:
+            available = {
+                int(row.get("id"))
+                for row in self._resume_conversations(50)
+                if row.get("id") is not None
+            }
+            if conversation_id not in available:
+                return False
+
+        restored_history = self._conversation_history_for_model(conversation_id)
+        if conversation_id != self.conversation_id and not restored_history:
             return False
         if conversation_id != self.conversation_id:
             with suppress(Exception):
                 self.conversation_store.end_conversation(self.conversation_id)
             self.conversation_id = conversation_id
-        self.conversation_history = self._conversation_history_for_model(conversation_id)
+        self.conversation_history = restored_history
         self.session_manager = SessionManager()
         set_session_id = getattr(self.agent, "set_session_id", None)
         if callable(set_session_id):
@@ -301,8 +414,11 @@ class AresCLI(MarketplaceCommandMixin):
         return PromptSession(
             history=FileHistory(history_path()),
             auto_suggest=AutoSuggestFromHistory(),
-            completer=COMPLETER,
+            completer=InteractiveCLICompleter(),
             complete_while_typing=True,
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            reserve_space_for_menu=8,
+            key_bindings=_interactive_completion_bindings(),
             style=STYLE,
         )
 
@@ -449,6 +565,156 @@ class AresCLI(MarketplaceCommandMixin):
             return await self.session.prompt_async(self.icons["prompt"])
         return await asyncio.to_thread(input, self.icons["prompt"])
 
+    async def _select_interactive_option(
+        self,
+        *,
+        title: str,
+        text: str,
+        values: list[tuple[str, str]],
+        default: str | None = None,
+    ) -> str | None:
+        """Show an arrow-key radio selector when this is an interactive TTY."""
+        if self.session is None or not values:
+            return None
+        choice_values = [(value, label) for value, label in values]
+        selected_default = default if any(value == default for value, _ in choice_values) else choice_values[0][0]
+        try:
+            return await radiolist_dialog(
+                title=title,
+                text=text,
+                values=choice_values,
+                default=selected_default,
+                style=INTERACTIVE_DIALOG_STYLE,
+            ).run_async()
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    async def _show_interactive_message(self, *, title: str, text: str) -> None:
+        """Render read-only CLI information in a dismissible terminal dialog."""
+        if self.session is None:
+            return
+        try:
+            await message_dialog(
+                title=title,
+                text=text,
+                style=INTERACTIVE_DIALOG_STYLE,
+            ).run_async()
+        except (KeyboardInterrupt, EOFError):
+            return
+
+    def _interactive_model_choices(self) -> list[tuple[str, str]]:
+        choices = []
+        for group_key, group in MODEL_REGISTRY.items():
+            endpoint = "NVIDIA NIM" if group_key == "nvidia" else (
+                "GitHub Copilot" if group_key == "copilot" else "OpenCode Zen"
+            )
+            for item in group["models"]:
+                choices.append((item["id"], f"{item['id']}  —  {endpoint}"))
+        return choices
+
+    def _interactive_provider_choices(self) -> list[tuple[str, str]]:
+        current = normalize_provider(self.config.provider)
+        choices = []
+        for provider, base_url in PROVIDER_BASE_URLS.items():
+            suffix = "  (current)" if provider == current else ""
+            detail = base_url or "GitHub Copilot SDK / OAuth"
+            choices.append((provider, f"{provider}  —  {detail}{suffix}"))
+        return choices
+
+    async def _interactive_command(self, command_line: str) -> str | None:
+        """Turn bare slash views into keyboard-driven terminal screens.
+
+        Explicit command arguments keep their script-friendly behaviour.  The
+        menus activate only for an interactive terminal and are cancelled with
+        Escape or the dialog's Cancel button.
+        """
+        if self.session is None:
+            return command_line
+        parts = command_line.strip().split(maxsplit=1)
+        command = parts[0].lower() if parts else ""
+        argument = parts[1].strip() if len(parts) > 1 else ""
+
+        if command == "/menu":
+            destination = await self._select_interactive_option(
+                title="Ares Command Center",
+                text="Use ↑/↓ then Enter. Escape cancels.",
+                values=[
+                    ("/provider", "Provider & endpoint"),
+                    ("/model", "Model"),
+                    ("/profile", "Profile"),
+                    ("/soul", "Ares personality"),
+                    ("/tools", "Tool activity detail"),
+                    ("/resume", "Resume a saved conversation"),
+                ],
+            )
+            return await self._interactive_command(destination) if destination else None
+
+        if command == "/provider" and not argument:
+            selected = await self._select_interactive_option(
+                title="Choose provider",
+                text="The matching endpoint and a compatible model will be applied.",
+                values=self._interactive_provider_choices(),
+                default=normalize_provider(self.config.provider),
+            )
+            return f"/provider {selected}" if selected else None
+
+        if command == "/model" and not argument:
+            selected = await self._select_interactive_option(
+                title="Choose model",
+                text="Select a model. Ares switches to its matching provider when needed.",
+                values=self._interactive_model_choices(),
+                default=self.config.model,
+            )
+            return f"/model {selected}" if selected else None
+
+        if command == "/tools" and not argument:
+            selected = await self._select_interactive_option(
+                title="Tool activity",
+                text="Choose how much live tool activity Ares shows.",
+                values=[
+                    ("summary", "Summary  —  compact progress and completion"),
+                    ("details", "Details  —  render tool results where safe"),
+                    ("hidden", "Hidden  —  only show final errors"),
+                ],
+                default=getattr(self, "tool_output_mode", "summary"),
+            )
+            return f"/tools {selected}" if selected else None
+
+        if command in {"/profile", "/soul"} and not argument:
+            label = "Profile" if command == "/profile" else "Ares personality"
+            action = await self._select_interactive_option(
+                title=label,
+                text="Choose an action.",
+                values=[("show", f"View {label.lower()}"), ("edit", "Open editor")],
+                default="show",
+            )
+            if action == "show":
+                manager = self.profile_manager if command == "/profile" else self.soul_manager
+                content = manager.read().strip() or f"No {label.lower()} has been created yet."
+                await self._show_interactive_message(title=label, text=content[:12_000])
+                return None
+            return f"{command} edit" if action else None
+
+        if command == "/resume" and not argument:
+            conversations = self._resume_conversations(50)
+            if not conversations:
+                await self._show_interactive_message(
+                    title="Saved conversations", text="No saved conversations are available."
+                )
+                return None
+            values = [
+                (str(row["id"]), f"#{row['id']}  —  {one_line(row.get('summary') or 'Untitled', 70)}")
+                for row in conversations
+            ]
+            selected = await self._select_interactive_option(
+                title="Resume conversation",
+                text="Select a saved conversation to restore.",
+                values=values,
+            )
+            return f"/resume {selected}" if selected else None
+
+        return command_line
+
     def _show_banner(self):
         """Display the welcome banner."""
         memory_count = len(self.memory_store.list_all())
@@ -489,7 +755,11 @@ class AresCLI(MarketplaceCommandMixin):
             ("  /  ", "dim"),
             ("open Notepad and write a note", "cyan"),
         ))
-        overview.add_row(Text.assemble(("Commands  ", "dim"), ("/help", "cyan"), ("    Activity detail  ", "dim"), ("/tools", "cyan")))
+        overview.add_row(Text.assemble(
+            ("Commands  ", "dim"), ("/help", "cyan"),
+            ("    Type / for suggestions; use ", "dim"), ("↑ ↓", "cyan"),
+            (" to choose", "dim"),
+        ))
 
         self.console.print()
         self.console.print(Panel(
@@ -526,17 +796,19 @@ class AresCLI(MarketplaceCommandMixin):
     def _show_model_list(self, provider: str | None = None) -> None:
         table = Table(title="Models", border_style="bright_cyan", box=CLI_BOX)
         table.add_column("Model", style="cyan")
-        table.add_column("Provider", style="dim")
+        table.add_column("Endpoint", style="dim")
         table.add_column("Status", no_wrap=True)
         rows = []
         for group_key, group in MODEL_REGISTRY.items():
             for m in group["models"]:
-                if provider and m["provider"].lower() != provider.lower():
+                backend = provider_for_model(m["id"])
+                if provider and backend != normalize_provider(provider):
                     continue
                 status = "[green]current[/green]" if m["id"] == self.config.model else "available"
-                rows.append((m["id"], m["provider"], status))
-        for model_id, model_provider, status in rows:
-            table.add_row(model_id, model_provider, status)
+                endpoint = "NVIDIA NIM" if backend == "nim" else "GitHub Copilot" if backend == "copilot" else "OpenCode Zen"
+                rows.append((m["id"], endpoint, status))
+        for model_id, endpoint, status in rows:
+            table.add_row(model_id, endpoint, status)
         if not rows:
             self.console.print("[dim]No models available for this provider.[/dim]")
             return
@@ -547,19 +819,23 @@ class AresCLI(MarketplaceCommandMixin):
         table.add_column("Provider", style="cyan")
         table.add_column("Base URL", style="dim")
         table.add_column("Status", no_wrap=True)
-        providers = [
-            ("opencode", "https://opencode.ai/zen/v1"),
-            ("nvidia", "https://integrate.api.nvidia.com/v1"),
-            ("openai", "https://api.openai.com/v1"),
-            ("anthropic", "https://api.anthropic.com/v1"),
-            ("gemini", "https://generativelanguage.googleapis.com/v1beta"),
-            ("xai", "https://api.x.ai/v1"),
-            ("deepseek", "https://api.deepseek.com/v1"),
-        ]
+        providers = [(name, url or "GitHub Copilot SDK (OAuth)") for name, url in PROVIDER_BASE_URLS.items()]
+        current_provider = normalize_provider(getattr(self.config, "provider", "opencode"))
         for name, url in providers:
-            status = "[green]current[/green]" if name == getattr(self.config, "provider", "opencode") else "available"
+            status = "[green]current[/green]" if name == current_provider else "available"
             table.add_row(name, url, status)
         self.console.print(table)
+
+    def _activate_provider(self, provider: str) -> str:
+        """Apply a provider switch to config and the existing LLM client."""
+        active = activate_provider_config(self.config, provider)
+        llm = getattr(self.agent, "llm", None)
+        if llm is not None:
+            llm.provider = active
+            llm.base_url = self.config.api_base_url.rstrip("/")
+            llm.api_key = configured_provider_api_key(self.config, active)
+            llm.config = self.config
+        return active
 
     @staticmethod
     def _mcp_target(server: dict) -> str:
@@ -760,15 +1036,14 @@ class AresCLI(MarketplaceCommandMixin):
         return " ".join(part for part in clean.split("_") if part).title() or "Tool"
 
     def _activity_label(self, tool_name: str) -> str:
-        """Identify local tools and MCP calls without exposing protocol noise."""
+        """Identify activity without exposing protocol noise or sounding mechanical."""
         if tool_name.startswith("mcp__"):
             parts = tool_name.split("__", 2)
             if len(parts) == 3:
-                server = self._pretty_activity_name(parts[1])
                 action = self._pretty_activity_name(parts[2])
-                separator = self._activity_separator()
-                return f"MCP{separator}{server}{separator}{action}"
-        return f"Tool{self._activity_separator()}{self._pretty_activity_name(self._tool_label(tool_name))}"
+                server = self._pretty_activity_name(parts[1])
+                return f"{server} {action}".strip()
+        return self._pretty_activity_name(self._tool_label(tool_name))
 
     def _activity_separator(self) -> str:
         """Use plain ASCII separators in legacy Windows command prompts."""
@@ -1006,9 +1281,9 @@ class AresCLI(MarketplaceCommandMixin):
         if step is not None:
             label = f"[{step:02d}] {label}"
         if live_status is not None:
-            live_status.update(self._working_text(label))
+            live_status.update(self._working_text(f"Checking {label}"))
         else:
-            self.console.print(self._activity_line("start", label, "running"))
+            self.console.print(self._activity_line("start", f"Checking {label}", "on it"))
 
     def _print_tool_done(self, event: dict[str, str]) -> None:
         """Show a compact tool completion line."""
@@ -1020,8 +1295,7 @@ class AresCLI(MarketplaceCommandMixin):
             label = f"[{step:02d}] {label}"
         detail = event.get("detail", "completed")
         failed = event.get("state") == "failed"
-        kind = "MCP step" if str(event.get("tool", "")).startswith("mcp__") else "Tool step"
-        state = "failed" if failed else "completed"
+        state = "Couldn’t finish" if failed else "Done"
         body = Table.grid(expand=True, padding=(0, 1))
         body.add_column(no_wrap=True)
         body.add_column(ratio=1)
@@ -1031,7 +1305,7 @@ class AresCLI(MarketplaceCommandMixin):
         )
         self.console.print(Panel(
             body,
-            title=f"[bold]{kind}[/bold] [dim]{label}[/dim]",
+            title=f"[bold]{'Problem' if failed else 'Finished'}[/bold] [dim]{label}[/dim]",
             border_style="red" if failed else "bright_cyan",
             box=self._ui_box(),
             padding=(0, 1),
@@ -1050,7 +1324,7 @@ class AresCLI(MarketplaceCommandMixin):
         """Start a stable per-turn activity area for legacy terminals."""
         self.console.print(Panel(
             self._working_text(label),
-            title="[bold bright_cyan]Ares working[/bold bright_cyan]",
+            title="[bold bright_cyan]Ares is on it[/bold bright_cyan]",
             border_style="bright_cyan",
             box=self._ui_box(),
             padding=(0, 1),
@@ -1563,11 +1837,13 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_column("Command", style="cyan", no_wrap=True)
             table.add_column("Description", ratio=4)
             table.add_row("/help", "Show available commands")
+            table.add_row("/menu", "Open the keyboard-driven command center")
             table.add_row("/memory [search|edit|delete|clean]", "Review, manage, and clean memories")
             table.add_row("/goals [search|show|due|signals]", "Track goals, evidence, proactive watcher signals, and hierarchy")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
             table.add_row("/provider [PROVIDER]", f"Show or switch provider: {getattr(self.config, 'provider', 'opencode')}")
+            table.add_row("/copilot [login|token|status]", "Connect GitHub Copilot with an OAuth token")
             table.add_row("/clear", "Clear terminal screen")
             table.add_row("/export", "Export data to JSON")
             table.add_row("/import PATH [--config]", "Import data from an Ares JSON export")
@@ -1814,28 +2090,85 @@ class AresCLI(MarketplaceCommandMixin):
             if not arg or arg == "list":
                 self._show_model_list()
             else:
+                selected_provider = provider_for_model(arg)
+                switched_provider = False
+                if selected_provider and selected_provider != normalize_provider(self.config.provider):
+                    self._activate_provider(selected_provider)
+                    switched_provider = True
                 self.config.model = arg
                 save_config(self.config)
                 self.agent.set_model(arg)
-                self.console.print(f"[green]Model switched to {arg}.[/green]")
+                provider_note = (
+                    f" Provider switched to {selected_provider}."
+                    if switched_provider
+                    else ""
+                )
+                self.console.print(f"[green]Model switched to {arg}.{provider_note}[/green]")
 
         elif command == "/provider":
             if not arg or arg == "list":
                 self._show_provider_list()
             else:
-                provider = arg.lower()
-                valid = ["opencode", "nvidia", "openai", "anthropic", "gemini", "xai", "deepseek", "zhipu", "moonshot", "minimax", "qwen"]
-                if provider not in valid:
-                    self.console.print(f"[red]Unknown provider: {provider}. Valid: {', '.join(valid)}[/red]")
+                provider = normalize_provider(arg)
+                if provider not in SUPPORTED_PROVIDERS:
+                    valid = ", ".join((*SUPPORTED_PROVIDERS, "nvidia (alias for nim)"))
+                    self.console.print(f"[red]Unknown provider: {arg}. Valid: {valid}[/red]")
                     return
-                self.config.provider = provider
-                self.config.api_base_url = PROVIDER_BASE_URLS.get(provider, self.config.api_base_url)
+                self._activate_provider(provider)
+                replacement_model = None
+                if provider_for_model(self.config.model) != provider:
+                    replacement_model = default_model_for_provider(provider)
+                    self.config.model = replacement_model
+                    self.agent.set_model(replacement_model)
                 save_config(self.config)
-                if hasattr(self.agent, "llm") and self.agent.llm is not None:
-                    self.agent.llm.provider = provider
-                    self.agent.llm.base_url = self.config.api_base_url.rstrip("/")
-                self.console.print(f"[green]Provider switched to {provider}.[/green]")
+                model_note = f" Model set to {replacement_model}." if replacement_model else ""
+                self.console.print(f"[green]Provider switched to {provider}.{model_note}[/green]")
                 self._show_model_list(provider)
+
+        elif command == "/copilot":
+            pieces = arg.split(maxsplit=1)
+            action = pieces[0].lower() if pieces else "status"
+            value = pieces[1].strip() if len(pieces) > 1 else ""
+            if action == "status":
+                state = "[green]connected[/green]" if self.config.copilot_github_token else "[yellow]not connected[/yellow]"
+                self.console.print(
+                    f"GitHub Copilot: {state}. Provider: {self.config.provider}. Model: {self.config.model}."
+                )
+            elif action == "token" and value:
+                self.config.copilot_github_token = value
+                self._activate_provider("copilot")
+                self.config.model = "auto"
+                self.agent.set_model("auto")
+                save_config(self.config)
+                self.console.print("[green]Copilot token saved. Ares will use automatic model selection.[/green]")
+            elif action == "login":
+                client_id = value or self.config.copilot_oauth_client_id
+                if not client_id:
+                    self.console.print("[red]Usage: /copilot login GITHUB_OAUTH_CLIENT_ID[/red]")
+                else:
+                    from ares.copilot_oauth import authorize_github_device_flow
+                    self.console.print("Requesting a GitHub device code…")
+                    try:
+                        token = authorize_github_device_flow(
+                            client_id=client_id,
+                            on_device_code=lambda device: self.console.print(
+                                "Open this link and enter the code shown below:\n"
+                                f"[link={device.verification_uri}]{device.verification_uri}[/link]\n"
+                                f"[bold cyan]Code: {device.user_code}[/bold cyan]"
+                            ),
+                        )
+                    except Exception as exc:
+                        self.console.print(f"[red]Copilot authorization failed: {exc}[/red]")
+                    else:
+                        self.config.copilot_oauth_client_id = client_id
+                        self.config.copilot_github_token = token.access_token
+                        self._activate_provider("copilot")
+                        self.config.model = "auto"
+                        self.agent.set_model("auto")
+                        save_config(self.config)
+                        self.console.print("[green]GitHub Copilot connected. Ares will use automatic model selection.[/green]")
+            else:
+                self.console.print("[red]Usage: /copilot [status|login CLIENT_ID|token TOKEN][/red]")
 
         elif command == "/clear":
             self.console.clear()
@@ -2005,7 +2338,8 @@ class AresCLI(MarketplaceCommandMixin):
                     self.console.print("[red]Conversation not found. Use /resume to choose a saved chat.[/red]")
                 else:
                     self.console.print(
-                        f"[green]Resumed conversation #{target} with {len(self.conversation_history)} messages in context.[/green]"
+                        f"[green]Resumed conversation #{target}. "
+                        f"{len(self.conversation_history)} messages loaded privately; continue below.[/green]"
                     )
 
         elif command == "/soul":
@@ -2269,7 +2603,7 @@ class AresCLI(MarketplaceCommandMixin):
             and bool(getattr(self.console, "is_terminal", False))
             and bool(getattr(self, "unicode_output", False))
         )
-        thinking_label = f"Thinking{self._activity_separator()}{self.config.model}"
+        thinking_label = f"Let me think this through{self._activity_separator()}{self.config.model}"
         status_context = (
             self.console.status(self._working_text(thinking_label), spinner="dots")
             if live_enabled
@@ -2392,6 +2726,10 @@ class AresCLI(MarketplaceCommandMixin):
                 while True:
                     try:
                         user_input = await self._prompt()
+                        if user_input.strip().startswith("/"):
+                            user_input = await self._interactive_command(user_input.strip())
+                            if user_input is None:
+                                continue
                         self._sync_shared_state()
                         await self._refresh_mcp_manager_if_needed()
 

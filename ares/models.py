@@ -487,9 +487,13 @@ class AppConfig(BaseModel):
     # never triggers another first-run flow.
     onboarding_completed: bool = False
     provider: str = "opencode"
+    provider_api_keys: dict[str, str] = Field(default_factory=dict)
     model: str = "deepseek-v4-flash-free"
     api_key: str = ""
     api_base_url: str = "https://opencode.ai/zen/v1"
+    copilot_github_token: str = ""
+    copilot_oauth_client_id: str = ""
+    copilot_oauth_callback_url: str = "http://127.0.0.1:8765/copilot/oauth/callback"
     max_context_messages: int = 20
     max_memory_retrieval: int = 5
     data_dir: str = "~/.ares/data"

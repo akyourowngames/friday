@@ -61,6 +61,20 @@ def test_get_messages_for_model_filters_roles_metadata_and_bounds_content(tmp_pa
     store.close()
 
 
+def test_resumable_conversations_exclude_empty_rows(tmp_path):
+    store = ConversationStore(db_path=tmp_path / "conversations.db")
+    empty_id = store.start_conversation()
+    saved_id = store.start_conversation()
+    store.add_exchange(saved_id, "Save this turn", "It was saved.")
+
+    resumable = store.list_resumable_conversations()
+
+    assert [row["id"] for row in resumable] == [saved_id]
+    assert resumable[0]["message_count"] == 2
+    assert empty_id not in [row["id"] for row in resumable]
+    store.close()
+
+
 def test_summarize_ended_without_summary(tmp_path):
     store = ConversationStore(db_path=tmp_path / "conversations.db")
     conversation_id = store.start_conversation()

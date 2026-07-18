@@ -59,6 +59,9 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
 ]
+copilot = [
+    "github-copilot-sdk>=1.0.7,<2.0",
+]
 
 [project.scripts]
 ares = "ares.__main__:main"
