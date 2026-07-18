@@ -1,4 +1,4 @@
-"""Automatic Hermes-style procedural learning for Ares."""
+"""Hermes-style reviewed procedural learning for Ares."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-IMPROVEMENT_STATES = frozenset({"active", "archived"})
+IMPROVEMENT_STATES = frozenset({"pending_approval", "active", "rejected", "archived"})
 IMPROVEMENT_KINDS = frozenset({"workflow", "style", "pitfall", "technique"})
 
 
@@ -25,9 +25,9 @@ def _key(value: str) -> str:
 class SelfImprovementStore:
     """Persist and retrieve procedural lessons learned after completed turns.
 
-    Lessons become active immediately. They remain separate from executable
-    skill files, which keeps automatic learning reversible and avoids turning
-    a model-generated review into an unbounded code/file mutation path.
+    Outcome-aware reflection proposes lessons, but only approved lessons are
+    retrieved into future turns. Records stay separate from executable skill
+    files, making review, rejection, archival, and audit straightforward.
     """
 
     def __init__(self, connection: sqlite3.Connection, config: Any | None = None) -> None:
@@ -65,10 +65,11 @@ class SelfImprovementStore:
             "CREATE INDEX IF NOT EXISTS idx_self_improvement_key "
             "ON self_improvement_candidates(canonical_key, kind)"
         )
-        # Upgrade databases created by the earlier review-queue prototype.
+        # ``approved`` was the transient state used by an earlier prototype;
+        # approved lessons are usable and therefore migrate to ``active``.
         self.conn.execute(
             """UPDATE self_improvement_candidates SET status='active', updated_at=?
-               WHERE status IN ('pending_approval', 'approved')""",
+               WHERE status='approved'""",
             (utc_now(),),
         )
         self.conn.commit()
@@ -100,7 +101,7 @@ class SelfImprovementStore:
         source_conversation_id: str | None,
         source_reflection_id: str | None,
     ) -> dict[str, Any] | None:
-        """Learn or reinforce one reusable procedure immediately."""
+        """Stage or reinforce one reusable procedure for Hermes review."""
 
         if not bool(getattr(self.config, "enabled", True)):
             return None
@@ -129,17 +130,23 @@ class SelfImprovementStore:
         }
         row = self.conn.execute(
             """SELECT * FROM self_improvement_candidates
-               WHERE canonical_key=? AND kind=? AND status='active'
-               ORDER BY improvement_id DESC LIMIT 1""",
+               WHERE canonical_key=? AND kind=? AND status IN ('active', 'pending_approval')
+               ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
+                        improvement_id DESC LIMIT 1""",
             (canonical, kind),
         ).fetchone()
         if row is None:
+            initial_status = (
+                "pending_approval"
+                if bool(getattr(self.config, "approval_required", True))
+                else "active"
+            )
             cursor = self.conn.execute(
                 """INSERT INTO self_improvement_candidates
                    (canonical_key, title, kind, summary, rationale, evidence_json,
                     confidence, existing_skill, status, source_conversation_id,
                     source_reflection_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     canonical,
                     title,
@@ -149,6 +156,7 @@ class SelfImprovementStore:
                     json.dumps([evidence_record], ensure_ascii=False),
                     confidence,
                     existing_skill,
+                    initial_status,
                     source_conversation_id,
                     source_reflection_id,
                     now,
@@ -183,6 +191,31 @@ class SelfImprovementStore:
                 )
         self.conn.commit()
         self._trim_active()
+        return self.get(improvement_id)
+
+    def approve(self, improvement_id: int) -> dict[str, Any] | None:
+        """Activate one reviewed proposal without rewriting executable files."""
+        now = utc_now()
+        self.conn.execute(
+            """UPDATE self_improvement_candidates
+               SET status='active', reviewed_at=?, updated_at=?
+               WHERE improvement_id=? AND status='pending_approval'""",
+            (now, now, int(improvement_id)),
+        )
+        self.conn.commit()
+        self._trim_active()
+        return self.get(improvement_id)
+
+    def reject(self, improvement_id: int) -> dict[str, Any] | None:
+        """Reject one proposed procedure while retaining its audit evidence."""
+        now = utc_now()
+        self.conn.execute(
+            """UPDATE self_improvement_candidates
+               SET status='rejected', reviewed_at=?, updated_at=?
+               WHERE improvement_id=? AND status='pending_approval'""",
+            (now, now, int(improvement_id)),
+        )
+        self.conn.commit()
         return self.get(improvement_id)
 
     def get(self, improvement_id: int) -> dict[str, Any] | None:

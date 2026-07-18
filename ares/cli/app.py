@@ -1842,6 +1842,7 @@ class AresCLI(MarketplaceCommandMixin):
                 "/memory [search|edit|archive|restore|learning|explain|clean]",
                 "Review automatic memory, procedural learning, and retrieval diagnostics",
             )
+            table.add_row("/latency", "Show the latest message timing, model, and schema count")
             table.add_row("/goals [search|show|due|signals]", "Track goals, evidence, proactive watcher signals, and hierarchy")
             table.add_row("/forget ID", "Delete a memory by ID")
             table.add_row("/model [MODEL]", f"Show or switch model: {self.config.model}")
@@ -1891,13 +1892,19 @@ class AresCLI(MarketplaceCommandMixin):
                 self.console.print_json(
                     json.dumps(diagnostics or {"status": "no retrieval recorded"})
                 )
-            elif arg == "learning":
+            elif arg in {"learning", "learning pending", "learning active"}:
                 service = getattr(self.agent, "reflection_service", None)
+                requested_status = "pending_approval" if arg == "learning pending" else "active"
                 learnings = (
-                    service.self_improvement_store.list(status="active", limit=20)
+                    service.self_improvement_store.list(status=requested_status, limit=20)
                     if service is not None else []
                 )
-                table = Table(title="Active Procedural Learning", box=CLI_BOX)
+                title = (
+                    "Pending Hermes Learning Review"
+                    if requested_status == "pending_approval"
+                    else "Approved Procedural Learning"
+                )
+                table = Table(title=title, box=CLI_BOX)
                 table.add_column("ID", justify="right", style="cyan")
                 table.add_column("Kind")
                 table.add_column("Learning")
@@ -1910,6 +1917,36 @@ class AresCLI(MarketplaceCommandMixin):
                         str(learning["occurrence_count"]),
                     )
                 self.console.print(table)
+                if requested_status == "pending_approval" and learnings:
+                    self.console.print(
+                        "[dim]Review with /memory learning approve ID or reject ID.[/dim]"
+                    )
+            elif arg.startswith("learning approve ") or arg.startswith("learning reject "):
+                service = getattr(self.agent, "reflection_service", None)
+                if service is None:
+                    self.console.print("[red]Procedural learning is unavailable.[/red]")
+                else:
+                    action, raw_id = arg.removeprefix("learning ").split(maxsplit=1)
+                    improvement_id = int(raw_id)
+                    store = service.self_improvement_store
+                    before = store.get(improvement_id)
+                    if before is None:
+                        self.console.print(f"[red]Learning #{improvement_id} was not found.[/red]")
+                    elif before.get("status") != "pending_approval":
+                        self.console.print(
+                            f"[yellow]Learning #{improvement_id} is {before.get('status')}.[/yellow]"
+                        )
+                    else:
+                        updated = (
+                            store.approve(improvement_id)
+                            if action == "approve"
+                            else store.reject(improvement_id)
+                        )
+                        verb = "Approved" if action == "approve" else "Rejected"
+                        color = "green" if action == "approve" else "yellow"
+                        self.console.print(
+                            f"[{color}]{verb} learning #{updated['improvement_id']}.[/{color}]"
+                        )
             elif arg.startswith("edit "):
                 edit_parts = arg.split(maxsplit=2)
                 if len(edit_parts) < 3:
@@ -1941,8 +1978,23 @@ class AresCLI(MarketplaceCommandMixin):
             else:
                 self.console.print(
                     "[red]Usage: /memory [search QUERY|edit ID NEW_TEXT|archive ID|restore ID|"
-                    "delete ID|learning|explain|clean][/red]"
+                    "delete ID|learning [pending|active|approve ID|reject ID]|explain|clean][/red]"
                 )
+
+        elif command == "/latency":
+            records = list(getattr(self.agent, "recent_latency_metrics", ()) or ())
+            if not records:
+                self.console.print("[yellow]No completed message timing is available yet.[/yellow]")
+            else:
+                latest = records[-1]
+                table = Table(title="Latest Message Latency", box=CLI_BOX)
+                table.add_column("Metric", style="cyan")
+                table.add_column("Value", justify="right")
+                table.add_row("Model", str(latest.get("model") or "unknown"))
+                table.add_row("Tool schemas", str(latest.get("tool_schema_count", 0)))
+                for name, value in (latest.get("metrics") or {}).items():
+                    table.add_row(str(name), f"{float(value):.1f} ms")
+                self.console.print(table)
 
         elif command == "/forget":
             if not arg:

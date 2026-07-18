@@ -49,6 +49,8 @@ class RequestLatency:
     _events: dict[str, float] = field(default_factory=dict)
     _context_started: float | None = None
     _tool_execution_seconds: float = 0.0
+    model: str = ""
+    tool_schema_count: int = 0
 
     def __post_init__(self) -> None:
         self._events["request_received"] = self.request_received
@@ -103,6 +105,8 @@ class RequestLatency:
         return {
             "request_id": self.request_id,
             "session_id": self.session_id,
+            "model": self.model,
+            "tool_schema_count": max(0, int(self.tool_schema_count)),
             "events": events,
             "metrics": metrics,
         }

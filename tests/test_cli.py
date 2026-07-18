@@ -554,6 +554,61 @@ def test_memory_edit_and_forget_commands():
     assert 12 not in app.memory_store.memories
 
 
+def test_memory_learning_approval_workflow_commands():
+    app = make_cli()
+
+    class LearningStore:
+        def __init__(self):
+            self.row = {
+                "improvement_id": 9,
+                "kind": "workflow",
+                "title": "Verify the real outcome",
+                "summary": "Read the actual tool result before reporting success.",
+                "occurrence_count": 1,
+                "status": "pending_approval",
+            }
+
+        def list(self, *, status, limit=20):
+            return [dict(self.row)] if self.row["status"] == status else []
+
+        def get(self, improvement_id):
+            return dict(self.row) if improvement_id == 9 else None
+
+        def approve(self, improvement_id):
+            assert improvement_id == 9
+            self.row["status"] = "active"
+            return dict(self.row)
+
+        def reject(self, improvement_id):
+            assert improvement_id == 9
+            self.row["status"] = "rejected"
+            return dict(self.row)
+
+    store = LearningStore()
+    app.agent.reflection_service = SimpleNamespace(self_improvement_store=store)
+
+    assert app._handle_command("/memory learning pending")
+    assert "Pending Hermes Learning Review" in app.console_file.getvalue()
+    assert app._handle_command("/memory learning approve 9")
+    assert store.row["status"] == "active"
+    assert "Approved learning #9" in app.console_file.getvalue()
+
+
+def test_latency_command_reports_model_schemas_and_ttft():
+    app = make_cli()
+    app.agent.recent_latency_metrics = [{
+        "model": "deepseek-v4-flash-free",
+        "tool_schema_count": 0,
+        "metrics": {"ares_ttft_ms": 1234.5, "context_build_ms": 8.0},
+    }]
+
+    assert app._handle_command("/latency")
+    output = app.console_file.getvalue()
+    assert "deepseek-v4-flash-free" in output
+    assert "Tool schemas" in output
+    assert "1234.5 ms" in output
+
+
 def test_memory_clean_command_reports_archival_without_policy_gate():
     app = make_cli()
     app.memory_store.memories[13] = {

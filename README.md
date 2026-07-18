@@ -279,10 +279,15 @@ The current recall system is deliberately broader than a single “memory facts�
 `search_memory` reads session JSONL files directly on every lookup rather than depending on a stale side index. It also searches a small neighboring-turn window. That means a question such as “What was Rohit’s Instagram ID?” can recover a name in one historical turn and the ID in the next, then return the exact local source ID that produced the answer.
 
 Memory V3 adds one automatic post-turn reflection path, provenance-preserving
-observations, immediate durable promotion, Hermes-inspired procedural learning,
-pre-compaction checkpoints, normalized hybrid ranking, time decay, MMR, and an
-active relevance judge. Capture has no content-policy or approval gate;
-revisions and archive/restore keep automatic learning observable and reversible.
+observations, immediate durable factual promotion, outcome-aware Hermes reviews,
+reviewed procedural learning, pre-compaction checkpoints, normalized hybrid ranking,
+time decay, and MMR. Foreground recall performs zero extra model calls, embedding
+startup warms after reply delivery, and an incoming message preempts/requeues a slow
+background review. Ordinary messages also send only intent-relevant tool schemas
+(`hey` sends none), instead of the full tool catalog, and tool-free conversation can
+use a configurable fast model while substantive work keeps the selected primary model.
+New procedures require explicit approval before prompt injection;
+revisions and archive/restore keep learning observable and reversible.
 See [the Memory V3 architecture and operating guide](docs/ares-memory-v3.md).
 
 ```text
@@ -300,9 +305,9 @@ search_memory("Rohit Instagram")
 ### Continuity upgrades
 
 - **Full local recall:** facts, people, conversations, sessions, and actions in one tool result.
-- **Automatic self-improvement:** reusable turn learnings become active local procedures without editing executable skill files.
+- **Reviewed self-improvement:** real tool outcomes produce Hermes proposals; only approved learnings become active local procedures.
 - **Compaction-safe capture:** each lossy compaction segment receives one durable, restart-safe reflection checkpoint.
-- **Explainable ranking:** query rewrite, vector/keyword/metadata fusion, decay, MMR, judge selection, fallbacks, and timings are inspectable.
+- **Explainable ranking:** local query expansion, warm vector/keyword/metadata fusion, decay, MMR, warm-up state, fallbacks, and timings are inspectable.
 - **Session resilience:** malformed historical JSONL lines are skipped without discarding the rest of a session.
 - **Context continuity:** “continue,” “that session,” and person references can pull relevant archived turns into context.
 - **Structured people:** names, aliases, relationship notes, contact fields, and important dates are stored and retrieved as one local record.
@@ -559,7 +564,8 @@ Useful remote supervisor commands:
 | `/help` | Show available controls. |
 | `/menu` | Open the arrow-key command center in an interactive terminal. |
 | `/memory search QUERY` | Search durable facts and recall sources. |
-| `/memory learning` · `/memory explain` | Inspect automatic procedural learning or the last retrieval decision. |
+| `/memory learning [pending\|active\|approve ID\|reject ID]` · `/memory explain` | Review Hermes learning proposals or inspect the last low-latency retrieval decision. |
+| `/latency` | Show the latest message model, tool-schema count, context time, provider TTFT, and total latency. |
 | `/memory archive ID` · `/memory restore ID` | Reversibly remove or restore a durable fact. |
 | `/goals [search|show|due|signals]` | Inspect active goals, hierarchy, progress evidence, deadlines, and pending watcher signals. |
 | `/context` | Inspect active local context. |

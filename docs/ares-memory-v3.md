@@ -14,13 +14,14 @@ flowchart LR
     R --> O["Memory observation + provenance"]
     O --> P["Automatic promotion"]
     P --> M["Durable facts"]
-    R --> L["Active procedural learning"]
-    Q["Next user message"] --> W["Bounded query rewrite"]
-    W --> H["Hybrid FTS + vector + metadata fusion"]
+    R --> V["Outcome-aware review of real tool results"]
+    V --> L["Pending Hermes learning proposal"]
+    L --> A["User approve or reject"]
+    A -->|approved| X
+    Q["Next user message"] --> W["Local zero-model query expansion"]
+    W --> H["Warm hybrid or cold FTS retrieval"]
     H --> D["Decay + MMR"]
-    D --> J["Active-memory relevance judge"]
-    J --> X["Fenced turn context"]
-    L --> X
+    D --> X["Fenced turn context"]
     M --> H
 ```
 
@@ -39,16 +40,20 @@ Every completed root conversation turn can produce:
   reflection applier;
 - reusable workflow, style, pitfall, and technique learnings.
 
-There is no memory content-policy gate and no approval queue. An observation is
-promoted automatically, and a procedural learning becomes active immediately.
-The score is retained as an explanation, not a write barrier. This follows the
-requested operating mode while preserving revision history, provenance,
-archive/restore, and promotion events for diagnosis and correction.
+Durable factual observations still promote automatically. Procedural changes
+use the Hermes review workflow: reflection stages a `pending_approval` proposal,
+and only an explicit approval makes it active. Rejection retains the evidence
+for audit without injecting the procedure into later turns.
 
 Procedural learnings do not rewrite executable skill files. They live in the
-SQLite `self_improvement_candidates` table with `active` or `archived` state and
-are retrieved into `<ares_learned_procedures>` when relevant. Repeated lessons
-reinforce one record instead of creating an approval backlog.
+SQLite `self_improvement_candidates` table with `pending_approval`, `active`,
+`rejected`, or `archived` state. Only active records are retrieved into
+`<ares_learned_procedures>`. Repeated evidence reinforces the same proposal.
+
+Each reflection receives a bounded `ACTUAL_OUTCOMES` payload assembled from
+real tool results and the turn execution record. Its auditable outcome review
+labels the run `succeeded`, `partially_succeeded`, `failed`, or `unknown` and
+derives learning from observed results rather than assistant claims.
 
 ## Pre-compaction checkpoint
 
@@ -65,25 +70,39 @@ and let post-processing fail open.
 
 ## Retrieval V3
 
-Normal root-agent turns use a single asynchronous recall pipeline:
+Normal root-agent turns use a local fast recall pipeline:
 
-1. Rewrite referential messages such as “continue that project” into a concise
-   retrieval query. The rewrite is cached, capped at 240 characters, bounded by
-   a timeout, and falls back to the original text.
-2. Retrieve bounded vector and FTS candidates and normalize each ranking before
+1. Expand conversational terms and referential messages such as “continue that
+   project” into a permissive local FTS query. This performs zero model calls.
+2. Retrieve bounded FTS candidates immediately. After the first completed reply,
+   the embedding model warms in a background thread; later turns can use vector
+   and FTS candidates without paying model-startup time in the foreground.
+3. Normalize each ranking before
    weighted fusion. Metadata relevance contributes alongside semantic and
    keyword relevance.
-3. Apply category-aware time decay. Identity and durable facts decay slowly;
+4. Apply category-aware time decay. Identity and durable facts decay slowly;
    ordinary notes decay faster.
-4. Apply maximal marginal relevance to reduce near-duplicate context.
-5. Ask the active-memory judge to select only supplied fact IDs. A timeout,
-   malformed response, or unknown ID yields no injected memory and never blocks
-   the main response.
-6. Fence selected text inside `<ares_memory_context>` before model injection.
+5. Select the bounded top-ranked facts locally and fence them inside
+   `<ares_memory_context>` before model injection.
+
+The legacy model rewrite and active-memory judge remain available only through
+`foreground_model_calls_enabled=true`; the low-latency default is false.
 
 The last retrieval exposes the original/rewritten query, candidate count,
-selected IDs, ranking mode, component scores, judge result, fallback reason,
-and timings. Use `/memory explain` to inspect it.
+selected IDs, ranking mode, component scores, local selection result, embedding
+warm-up state, foreground model-call count, fallback reason, and timings. Use
+`/memory explain` to inspect it.
+
+Background reflection follows foreground priority. Starting a new message
+cancels and durably requeues any in-flight review; it resumes after reply
+delivery and a short idle delay. A slow review therefore cannot occupy the
+provider ahead of the user's next message.
+
+Root tool schemas are also selected per current-turn intent. A casual message
+such as “hey” sends zero tool schemas instead of the complete local/MCP catalog;
+an action request receives only its relevant categories. This is request-size
+routing, not an execution authorization boundary, and substantially reduces
+provider prompt parsing on ordinary messages.
 
 ## Schema additions and migration
 
@@ -99,8 +118,9 @@ creates these local tables when absent:
 - `self_improvement_candidates`
 
 Migrations are additive and run through `CREATE TABLE IF NOT EXISTS` and
-idempotent column checks. Existing fact IDs and content remain intact. Old
-review-queue procedural records are converted to `active` during migration.
+idempotent column checks. Existing fact IDs and content remain intact. Legacy
+`approved` procedural records migrate to `active`; existing pending proposals
+remain pending.
 
 Cleanup now prefers archival over deletion. `archive()` and `restore()` take
 revision snapshots and preserve FTS/vector data so a decision can be reversed.
@@ -110,6 +130,9 @@ removal is actually intended.
 ## Configuration
 
 ```yaml
+model: big-pickle
+fast_conversation_enabled: true
+fast_conversation_model: deepseek-v4-flash-free
 memory:
   enabled: true
   capture:
@@ -118,6 +141,8 @@ memory:
   retrieval:
     query_rewrite_enabled: true
     active_judge_enabled: true
+    foreground_model_calls_enabled: false
+    background_embedding_warmup: true
     vector_weight: 0.55
     keyword_weight: 0.30
     metadata_weight: 0.15
@@ -134,8 +159,22 @@ memory:
     reference_score: 0.72
   self_improvement:
     enabled: true
+    approval_required: true
     max_active: 100
+reflection:
+  model: deepseek-v4-flash-free
+  idle_delay_seconds: 0.35
 ```
+
+The conversation fast model applies only to tool-free `conversation` turns. Code, files,
+research, external actions, goals, and delegated work continue using the
+user-selected primary `model`. The fast lane is skipped automatically when its
+provider does not match the active provider, and can be disabled without a
+migration. If the fast model is unavailable before output starts, the request
+falls back to the primary model automatically.
+
+Outcome reflection independently uses `reflection.model`. It is tool-free,
+background-only, provider-compatible, and has the same primary-model fallback.
 
 ## Operations
 
@@ -143,8 +182,14 @@ memory:
 |---|---|
 | `/memory` | Recent non-archived durable facts |
 | `/memory search QUERY` | Hybrid local search |
-| `/memory learning` | Active automatic procedural learnings |
+| `/memory learning` | Approved procedural learnings |
+| `/memory learning pending` | Hermes proposals awaiting review |
+| `/memory learning approve ID` | Activate one reviewed proposal |
+| `/memory learning reject ID` | Reject one proposal but retain its evidence |
+| `list_learning_reviews` | Let any Ares chat surface inspect proposals and evidence |
+| `review_learning` | Approve/reject a named proposal after an explicit user decision |
 | `/memory explain` | Last retrieval diagnostics |
+| `/latency` | Latest end-to-end, context, provider TTFT, model, and schema-count timing |
 | `/memory archive ID` | Reversibly remove a fact from retrieval |
 | `/memory restore ID` | Restore an archived fact |
 | `/memory clean` | Merge duplicates and archive stale low-value facts |
@@ -152,9 +197,19 @@ memory:
 
 ## Verification
 
+Measured on the configured local runtime during implementation (provider time
+will vary):
+
+- 100 cold/local recall runs: 0 model calls, 0.55 ms median, 1.02 ms p95;
+- ordinary schema payload: 158 tools / 108,649 JSON bytes before, 0 tools for
+  “hey” after;
+- real tool-free provider turn with `big-pickle`: 6.50 s visible TTFT before;
+- the same Ares path through `deepseek-v4-flash-free`: 2.56 s visible TTFT
+  after, with the primary model unchanged for substantive work.
+
 `tests/test_memory_v3.py` uses production `MemoryStore`, hash embeddings, real
 SQLite files, real lifecycle/reflection stores, restart-safe queues, and an
-explicit pre-V3 schema. It covers automatic low-confidence/unfenced capture,
-immediate procedural learning, end-to-end reflection, idempotent compaction,
-and archive/restore after migration. The broader memory, reflection, context,
+explicit pre-V3 schema. It covers automatic factual capture, reviewed
+procedural learning, real-outcome reflection, zero-model foreground recall,
+idempotent compaction, and archive/restore after migration. The broader memory, reflection, context,
 agent, server, CLI, and full test suites remain regression coverage.

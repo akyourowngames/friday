@@ -331,6 +331,8 @@ class MemoryRetrievalConfig(BaseModel):
 
     query_rewrite_enabled: bool = True
     active_judge_enabled: bool = True
+    foreground_model_calls_enabled: bool = False
+    background_embedding_warmup: bool = True
     vector_weight: float = Field(default=0.55, ge=0.0, le=1.0)
     keyword_weight: float = Field(default=0.30, ge=0.0, le=1.0)
     metadata_weight: float = Field(default=0.15, ge=0.0, le=1.0)
@@ -352,9 +354,10 @@ class MemoryPromotionConfig(BaseModel):
 
 
 class MemorySelfImprovementConfig(BaseModel):
-    """Hermes-inspired automatic procedural-learning controls."""
+    """Hermes-inspired reviewed procedural-learning controls."""
 
     enabled: bool = True
+    approval_required: bool = True
     max_active: int = Field(default=100, ge=1, le=1_000)
 
 
@@ -374,10 +377,12 @@ class ReflectionConfig(BaseModel):
     """Background conversation-to-state extraction controls."""
 
     enabled: bool = True
+    model: str = "deepseek-v4-flash-free"
     min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     completion_min_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     max_attempts: int = Field(default=3, ge=1, le=10)
+    idle_delay_seconds: float = Field(default=0.35, ge=0.0, le=10.0)
     follow_up_delay_hours: int = Field(default=24, ge=0, le=8_760)
     follow_up_cooldown_hours: int = Field(default=72, ge=1, le=8_760)
     local_timezone: str = Field(
@@ -544,6 +549,8 @@ class AppConfig(BaseModel):
     provider: str = "opencode"
     provider_api_keys: dict[str, str] = Field(default_factory=dict)
     model: str = "deepseek-v4-flash-free"
+    fast_conversation_enabled: bool = True
+    fast_conversation_model: str = "deepseek-v4-flash-free"
     api_key: str = ""
     api_base_url: str = "https://opencode.ai/zen/v1"
     copilot_github_token: str = ""

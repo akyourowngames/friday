@@ -25,12 +25,42 @@ def test_casual_turns_are_conversation_only(text: str) -> None:
     assert classify_turn_intent(text) is TurnIntent.CONVERSATION
 
 
+def test_casual_turns_send_no_tool_schemas_to_provider() -> None:
+    registry = RootToolRegistry(get_tool_definitions())
+    schemas = registry.select_for_turn(build_turn_execution_context("hey"))
+
+    assert schemas == []
+
+
+def test_hermes_review_turn_exposes_only_review_tools() -> None:
+    registry = RootToolRegistry(get_tool_definitions())
+    names = {
+        schema["function"]["name"]
+        for schema in registry.select_for_turn(
+            build_turn_execution_context("Show pending Hermes review proposals")
+        )
+    }
+
+    assert names == {"list_learning_reviews", "review_learning", "search_memory"}
+
+    follow_up_names = {
+        schema["function"]["name"]
+        for schema in registry.select_for_turn(
+            build_turn_execution_context("approve #9")
+        )
+    }
+    assert follow_up_names == names
+
+
 def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() -> None:
     assert classify_turn_intent("Remember blue as my favorite color") is TurnIntent.LOCAL_MUTATION
     assert classify_turn_intent("How many agents did you use for the parallel search?") is TurnIntent.READ_ONLY
     assert classify_turn_intent("Use separate researchers to compare these") is TurnIntent.DELEGATION
     assert classify_turn_intent("Search this website by clicking the search box") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("Open Notepad and type a note") is TurnIntent.BROWSER_INTERACTION
+    assert classify_turn_intent("yeah new browser sessionn") is TurnIntent.BROWSER_INTERACTION
+    assert classify_turn_intent("restart playwright") is TurnIntent.BROWSER_INTERACTION
+    assert classify_turn_intent("start a new browser session") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("Explain how web search works") is TurnIntent.READ_ONLY
     assert classify_turn_intent(
         "ok launch researchers to research how much corruption is there in world"
@@ -41,6 +71,68 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent(
         "hey can you launch multiple agents to research on corruption"
     ) is TurnIntent.DELEGATION
+
+
+def test_new_browser_session_exposes_playwright_tools_instead_of_zero_tools() -> None:
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "test browser tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in (
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_snapshot",
+        )
+    ]
+    context = build_turn_execution_context("yeah new browser sessionn")
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(schemas).select_for_turn(context)
+    }
+
+    assert context.intent is TurnIntent.BROWSER_INTERACTION
+    assert names == {
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+    }
+
+
+def test_new_browser_session_does_not_send_the_full_playwright_schema_catalog() -> None:
+    tool_names = [
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_tabs",
+        "mcp__playwright__browser_close",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_type",
+        "mcp__playwright__browser_fill_form",
+        "mcp__playwright__browser_take_screenshot",
+    ]
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "test browser tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in tool_names
+    ]
+    context = build_turn_execution_context("start a new browser session")
+    selected = RootToolRegistry(schemas).select_for_turn(context)
+    names = {item["function"]["name"] for item in selected}
+
+    assert names == {
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_tabs",
+        "mcp__playwright__browser_close",
+    }
 
 
 @pytest.mark.parametrize(

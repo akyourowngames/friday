@@ -122,3 +122,27 @@ def test_stale_reference_gets_only_one_automatic_recovery():
 
     assert controller.should_recover_stale_ref("chat-a", CLICK_TOOL, arguments, error)
     assert not controller.should_recover_stale_ref("chat-a", CLICK_TOOL, arguments, error)
+
+
+def test_failed_click_is_not_misreported_as_closed_browser():
+    controller = BrowserTaskController()
+    error = "Error: locator resolved to the wrong element"
+
+    result = controller.after_call("chat-a", CLICK_TOOL, {"ref": "e12"}, error)
+
+    assert controller.failure_kind(error) == "action_failed"
+    assert "does not prove that the browser closed or crashed" in result
+
+
+def test_stale_reference_and_actual_browser_close_are_distinct_states():
+    controller = BrowserTaskController()
+    stale = "Error: reference e12 is stale and not found"
+    closed = "Error: Target page, context or browser has been closed"
+
+    stale_result = controller.after_call("chat-a", CLICK_TOOL, {"ref": "e12"}, stale)
+    closed_result = controller.after_call("chat-a", CLICK_TOOL, {"ref": "e13"}, closed)
+
+    assert controller.failure_kind(stale) == "stale_reference"
+    assert "not evidence that the browser closed or crashed" in stale_result
+    assert controller.failure_kind(closed) == "browser_closed"
+    assert "explicitly reported" in closed_result

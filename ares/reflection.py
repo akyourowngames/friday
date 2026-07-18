@@ -1,4 +1,4 @@
-"""Durable, evidence-gated reflection after normal conversation turns."""
+"""Durable, outcome-aware reflection after normal conversation turns."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, ValidationError
 
 from ares.followups import FollowUpStore, future_utc
-from ares.llm import LLMClient
+from ares.llm import LLMClient, normalize_provider, provider_for_model
 from ares.memory_lifecycle import (
     MemoryLifecycleStore,
     MemoryPromotionService,
@@ -144,6 +144,15 @@ class SkillLearning(BaseModel):
     evidence: str
 
 
+class OutcomeReview(BaseModel):
+    """Audit of what actually happened, separate from what was promised."""
+
+    status: Literal["succeeded", "partially_succeeded", "failed", "unknown"] = "unknown"
+    summary: str
+    evidence: str = ""
+    reusable_lesson: str = ""
+
+
 class ReflectionResult(BaseModel):
     new_memories: list[NewMemory] = Field(default_factory=list)
     updated_memories: list[MemoryUpdate] = Field(default_factory=list)
@@ -154,6 +163,7 @@ class ReflectionResult(BaseModel):
     commitments: list[CommitmentChange] = Field(default_factory=list)
     follow_up_opportunities: list[FollowUpOpportunity] = Field(default_factory=list)
     follow_up_resolutions: list[FollowUpResolution] = Field(default_factory=list)
+    outcome_reviews: list[OutcomeReview] = Field(default_factory=list)
     skill_learnings: list[SkillLearning] = Field(default_factory=list)
 
 
@@ -168,6 +178,7 @@ class ReflectionStore:
                 scope TEXT NOT NULL,
                 user_text TEXT NOT NULL,
                 assistant_text TEXT NOT NULL,
+                outcome_summary TEXT NOT NULL DEFAULT '',
                 job_type TEXT NOT NULL DEFAULT 'turn',
                 compaction_checkpoint TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -191,6 +202,10 @@ class ReflectionStore:
         if "compaction_checkpoint" not in columns:
             self.conn.execute(
                 "ALTER TABLE reflection_runs ADD COLUMN compaction_checkpoint TEXT"
+            )
+        if "outcome_summary" not in columns:
+            self.conn.execute(
+                "ALTER TABLE reflection_runs ADD COLUMN outcome_summary TEXT NOT NULL DEFAULT ''"
             )
         self.conn.execute(
             """CREATE TABLE IF NOT EXISTS memory_compaction_checkpoints (
@@ -220,21 +235,23 @@ class ReflectionStore:
         user_text: str,
         assistant_text: str,
         *,
+        outcome_summary: str = "",
         job_type: str = "turn",
         compaction_checkpoint: str | None = None,
     ) -> str:
         reflection_id = uuid4().hex
         self.conn.execute(
             """INSERT INTO reflection_runs
-               (reflection_id, scope, user_text, assistant_text, job_type,
+               (reflection_id, scope, user_text, assistant_text, outcome_summary, job_type,
                 compaction_checkpoint, status, attempts,
                 created_at, started_at, completed_at, extracted_json, outcomes_json, error)
-               VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, NULL, NULL)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, NULL, NULL)""",
             (
                 reflection_id,
                 scope,
                 user_text,
                 assistant_text,
+                str(outcome_summary or "")[:12_000],
                 str(job_type or "turn"),
                 compaction_checkpoint,
                 utc_now(),
@@ -426,6 +443,18 @@ class ReflectionStore:
         )
         self.conn.commit()
 
+    def requeue_preempted(self, reflection_id: str) -> None:
+        """Return a cancelled background review to the durable FIFO head."""
+        self.conn.execute(
+            """UPDATE reflection_runs
+               SET status='pending', started_at=NULL,
+                   attempts=MAX(attempts - 1, 0),
+                   error='preempted by foreground turn'
+               WHERE reflection_id=? AND status='running'""",
+            (str(reflection_id),),
+        )
+        self.conn.commit()
+
 
 def _normalized(value: str) -> str:
     return " ".join(str(value or "").casefold().split())
@@ -467,6 +496,7 @@ class ConversationReflector:
         pending_commitments: list[dict[str, Any]],
         open_followups: list[dict[str, Any]],
         profile_text: str,
+        outcome_summary: str = "",
     ) -> ReflectionResult:
         timezone_name, local_timezone = _reflection_timezone(self.config)
         current_local_datetime = datetime.now(local_timezone).isoformat(timespec="seconds")
@@ -510,7 +540,8 @@ class ConversationReflector:
         prompt = (
             "You are Ares' background conversation reflection process. Return ONLY one JSON object matching "
             "this schema: new_memories, updated_memories, new_goals, goal_progress, completed_goals, "
-            "profile_updates, commitments, follow_up_opportunities, follow_up_resolutions, skill_learnings; "
+            "profile_updates, commitments, follow_up_opportunities, follow_up_resolutions, "
+            "outcome_reviews, skill_learnings; "
             "every value is an array.\n\n"
             "All confidence and importance values must be JSON numbers from 0 to 1, never labels. "
             "Memory category must be preference, fact, belief, habit, relationship, or note. "
@@ -529,16 +560,33 @@ class ConversationReflector:
             "Never return a naive timestamp. A skill_learning is only for a reusable workflow/style correction, "
             "pitfall, or non-trivial technique that would improve a future task of the same class. Prefer updating "
             "an existing named skill, never turn a one-off task or temporary environment failure into a skill, and "
-            "ground it in a concrete turn excerpt. Skill learnings become active automatically but remain in the "
-            "procedural-learning store rather than editing executable skill files. "
+            "ground it in a concrete user, assistant, or tool-outcome excerpt. Compare the promised result with "
+            "the supplied ACTUAL_OUTCOMES. Add an outcome_review when tools or actions ran, label it succeeded, "
+            "partially_succeeded, failed, or unknown, and derive skill learnings from observed success/failure—not "
+            "from confident assistant prose. Skill learnings are proposals requiring Hermes review before use and "
+            "remain in the procedural-learning store rather than editing executable skill files. "
             "If nothing durable changed, return empty arrays.\n\n"
             f"CURRENT STATE:\n{json.dumps(state, ensure_ascii=False)}\n\n"
-            f"USER:\n{user_text[:8_000]}\n\nASSISTANT:\n{assistant_text[:8_000]}\n"
+            f"USER:\n{user_text[:8_000]}\n\nASSISTANT:\n{assistant_text[:8_000]}\n\n"
+            f"ACTUAL_OUTCOMES:\n{outcome_summary[:12_000] or 'No tool/action outcomes were recorded.'}\n"
         )
-        chat_kwargs = (
-            {"max_tokens": 1_500, "temperature": 0.1}
-            if isinstance(self.llm, LLMClient) else {}
-        )
+        chat_kwargs: dict[str, Any] = {}
+        if isinstance(self.llm, LLMClient):
+            chat_kwargs = {"max_tokens": 1_500, "temperature": 0.1}
+            review_model = str(getattr(self.config, "model", "") or "").strip()
+            review_provider = provider_for_model(review_model) if review_model else None
+            if (
+                review_model
+                and (
+                    review_provider is None
+                    or normalize_provider(review_provider)
+                    == normalize_provider(getattr(self.llm, "provider", None))
+                )
+            ):
+                chat_kwargs.update({
+                    "model": review_model,
+                    "fallback_model": self.llm.model,
+                })
         response = await asyncio.wait_for(
             self.llm.chat(
                 [{"role": "user", "content": prompt}], tools=[], **chat_kwargs
@@ -581,6 +629,7 @@ class ReflectionApplier:
         user_text: str,
         reflection_id: str,
         scope: str,
+        outcome_summary: str = "",
     ) -> list[dict[str, Any]]:
         outcomes: list[dict[str, Any]] = []
 
@@ -784,6 +833,18 @@ class ReflectionApplier:
                     follow_up_id=item.follow_up_id, error=str(exc)[:500],
                 )
 
+        for review in result.outcome_reviews:
+            record(
+                "outcome_review",
+                "reviewed",
+                status=review.status,
+                summary=review.summary[:1_000],
+                reusable_lesson=review.reusable_lesson[:1_000],
+            )
+
+        evidence_corpus = "\n".join(
+            part for part in (user_text, outcome_summary) if str(part or "").strip()
+        )
         for item in result.skill_learnings:
             try:
                 staged = self.self_improvement_store.stage(
@@ -792,7 +853,7 @@ class ReflectionApplier:
                     summary=item.summary,
                     rationale=item.rationale,
                     evidence=item.evidence,
-                    evidence_grounded=_supported_evidence(item.evidence, user_text),
+                    evidence_grounded=_supported_evidence(item.evidence, evidence_corpus),
                     confidence=item.confidence,
                     existing_skill=item.existing_skill,
                     source_conversation_id=scope,
@@ -803,7 +864,7 @@ class ReflectionApplier:
                 else:
                     record(
                         "skill_learning",
-                        "learned",
+                        str(staged.get("status") or "pending_approval"),
                         improvement_id=staged.get("improvement_id"),
                     )
             except Exception as exc:
@@ -877,14 +938,79 @@ class ReflectionService:
         self._tasks: set[asyncio.Task] = set()
         self._scope_tasks: dict[str, asyncio.Task] = {}
         self._apply_lock = asyncio.Lock()
+        self._foreground_idle = asyncio.Event()
+        self._foreground_idle.set()
+        self._foreground_turns = 0
+        self._closed = False
 
     def _augment_automatic_learning(
         self,
         result: ReflectionResult,
         *,
         user_text: str,
+        outcome_summary: str = "",
     ) -> ReflectionResult:
         """Honor explicit memory and reusable correction signals deterministically."""
+
+        if outcome_summary and not result.outcome_reviews:
+            try:
+                payload = json.loads(outcome_summary)
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            tool_outcomes = payload.get("tool_outcomes") if isinstance(payload, dict) else []
+            tool_outcomes = tool_outcomes if isinstance(tool_outcomes, list) else []
+            execution_record = payload.get("execution_record") if isinstance(payload, dict) else {}
+            execution_record = execution_record if isinstance(execution_record, dict) else {}
+            def execution_count(name: str) -> int:
+                try:
+                    return int(execution_record.get(name) or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            meaningful_execution = bool(
+                tool_outcomes
+                or execution_count("tool_call_count") > 0
+                or execution_count("agent_count") > 0
+                or str(execution_record.get("kind") or "ordinary") != "ordinary"
+            )
+            if meaningful_execution:
+                statuses = [
+                    str(item.get("status") or "unknown").casefold()
+                    for item in tool_outcomes
+                    if isinstance(item, dict)
+                ]
+                completed = sum(status in {"completed", "succeeded", "success"} for status in statuses)
+                failed = sum(status in {"failed", "failure", "error", "timed_out", "blocked"} for status in statuses)
+                execution_status = str(execution_record.get("status") or "").casefold()
+                if statuses and completed == len(statuses) and execution_status not in {
+                    "partial", "partial_or_failed", "failed", "timed_out", "blocked"
+                }:
+                    review_status = "succeeded"
+                elif statuses and failed == len(statuses):
+                    review_status = "failed"
+                elif completed or failed or execution_status in {"partial", "partial_or_failed"}:
+                    review_status = "partially_succeeded"
+                elif execution_status in {"succeeded", "completed", "success"}:
+                    review_status = "succeeded"
+                elif execution_status in {"failed", "timed_out", "blocked"}:
+                    review_status = "failed"
+                else:
+                    review_status = "unknown"
+                evidence_parts = [
+                    str(item.get("result") or "")[:500]
+                    for item in tool_outcomes[:3]
+                    if isinstance(item, dict) and item.get("result")
+                ]
+                result.outcome_reviews.append(OutcomeReview(
+                    status=review_status,
+                    summary=(
+                        f"Observed {len(tool_outcomes)} tool outcome(s): "
+                        f"{completed} completed, {failed} failed."
+                        if tool_outcomes
+                        else f"Observed execution status: {execution_status or 'unknown'}."
+                    ),
+                    evidence=" | ".join(evidence_parts)[:1_500],
+                ))
 
         capture = getattr(self.memory_config, "capture", None)
         if (
@@ -934,6 +1060,7 @@ class ReflectionService:
             result = await self.reflector.extract(
                 user_text=job["user_text"],
                 assistant_text=job["assistant_text"],
+                outcome_summary=str(job.get("outcome_summary") or ""),
                 # Reflection is a background convenience task.  Its context
                 # lookup must not initialize or run the embedding model on
                 # the CLI event loop after a reply has already been shown.
@@ -948,7 +1075,9 @@ class ReflectionService:
                 profile_text=self.profile_manager.read(),
             )
             result = self._augment_automatic_learning(
-                result, user_text=str(job["user_text"])
+                result,
+                user_text=str(job["user_text"]),
+                outcome_summary=str(job.get("outcome_summary") or ""),
             )
             async with self._apply_lock:
                 outcomes = self.applier.apply(
@@ -956,6 +1085,7 @@ class ReflectionService:
                     user_text=job["user_text"],
                     reflection_id=reflection_id,
                     scope=job["scope"],
+                    outcome_summary=str(job.get("outcome_summary") or ""),
                 )
                 self.store.complete(reflection_id, result, outcomes)
                 self.store.finish_compaction(
@@ -995,10 +1125,24 @@ class ReflectionService:
     async def _run_scope_worker(self, scope_key: str) -> None:
         """Drain one durable session queue without blocking conversation turns."""
         while True:
+            await self._foreground_idle.wait()
+            idle_delay = max(0.0, float(getattr(self.config, "idle_delay_seconds", 0.35)))
+            if idle_delay:
+                await asyncio.sleep(idle_delay)
+            if not self._foreground_idle.is_set():
+                continue
             job = self.store.claim_next(scope_key)
             if job is None:
                 return
-            outcome = await self._process_job(job)
+            try:
+                outcome = await self._process_job(job)
+            except asyncio.CancelledError:
+                self.store.requeue_preempted(str(job["reflection_id"]))
+                self.store.finish_compaction(
+                    job.get("compaction_checkpoint"), status="pending",
+                    error="preempted by foreground turn",
+                )
+                raise
             if outcome == "retry":
                 # The pending head deliberately blocks later jobs until a
                 # future kick retries it, preserving causal session ordering.
@@ -1039,11 +1183,25 @@ class ReflectionService:
         for scope_key in self.store.pending_scopes():
             self._ensure_scope_worker(scope_key)
 
-    def enqueue_turn(self, *, scope: str | None, user_text: str, assistant_text: str) -> str | None:
+    def enqueue_turn(
+        self,
+        *,
+        scope: str | None,
+        user_text: str,
+        assistant_text: str,
+        outcome_summary: str = "",
+    ) -> str | None:
+        if bool(getattr(self, "_closed", False)):
+            return None
         if not bool(getattr(self.config, "enabled", True)) or not user_text.strip():
             return None
         scope_key = str(scope or "global")
-        reflection_id = self.store.enqueue(scope_key, user_text, assistant_text)
+        reflection_id = self.store.enqueue(
+            scope_key,
+            user_text,
+            assistant_text,
+            outcome_summary=outcome_summary,
+        )
         self._ensure_scope_worker(scope_key)
         return reflection_id
 
@@ -1073,6 +1231,8 @@ class ReflectionService:
         if not user_parts:
             return None
         scope_key = str(scope or "global")
+        if bool(getattr(self, "_closed", False)):
+            return
         digest_source = f"{scope_key}\n" + "\n".join(checkpoint_parts)
         checkpoint = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
         reflection_id = self.store.enqueue_compaction(
@@ -1092,22 +1252,47 @@ class ReflectionService:
         synchronize: bool = False,
         timeout_seconds: float | None = None,
     ) -> None:
-        """Kick durable reflection work without putting it on the chat path.
+        """Give a foreground turn priority over durable background review.
 
-        ``synchronize`` is an opt-in, bounded barrier for callers serving an
-        explicit memory/profile/goal inspection.  ``shield`` is essential:
-        timing out the foreground request must never cancel the persisted
-        reflection task that owns the queued state transition.
+        Normal chat preempts and requeues an active review. ``synchronize`` is
+        an opt-in, bounded barrier for explicit state inspection; its shielded
+        timeout does not cancel the review it deliberately chose to await.
         """
+        if bool(getattr(self, "_closed", False)):
+            return
         scope_key = str(scope or "global")
+        foreground_idle = getattr(self, "_foreground_idle", None)
+        if foreground_idle is None:
+            foreground_idle = asyncio.Event()
+            foreground_idle.set()
+            self._foreground_idle = foreground_idle
+        foreground_idle.clear()
+        if not synchronize:
+            self._foreground_turns = int(getattr(self, "_foreground_turns", 0)) + 1
+            # Reflection is useful only when it stays off the user's critical
+            # path. Cancel any in-flight review and durably requeue it; the
+            # normal foreground reply always gets provider priority.
+            active_tasks = tuple(
+                task for task in self._scope_tasks.values() if not task.done()
+            )
+            for task in active_tasks:
+                task.cancel()
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+            return
+        # Explicit state-inspection callers can request a bounded flush. This
+        # is never used by normal chat turns and does not cancel active work.
+        foreground_idle.set()
         self._resume_pending_workers()
         active = self._ensure_scope_worker(scope_key)
-        if not synchronize or active is None:
+        if active is None:
+            self._foreground_idle.clear()
             return
         if timeout_seconds is None:
             timeout_seconds = 0.25
         timeout = max(0.0, min(float(timeout_seconds), 5.0))
         if timeout <= 0:
+            self._foreground_idle.clear()
             return
         try:
             await asyncio.wait_for(asyncio.shield(active), timeout=timeout)
@@ -1117,12 +1302,31 @@ class ReflectionService:
             raise
         except Exception:
             return
+        finally:
+            self._foreground_idle.clear()
+
+    def after_turn(self) -> None:
+        """Release background reviews only after foreground delivery finishes."""
+        if bool(getattr(self, "_closed", False)):
+            return
+        self._foreground_turns = max(0, int(getattr(self, "_foreground_turns", 0)) - 1)
+        if self._foreground_turns:
+            return
+        self._foreground_idle.set()
+        self._resume_pending_workers()
 
     async def close(self) -> None:
-        if self._tasks:
-            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
-        if self._owns_llm:
-            await self.llm.close()
+        if bool(getattr(self, "_closed", False)):
+            return
+        self._foreground_idle.set()
+        self._resume_pending_workers()
+        try:
+            if self._tasks:
+                await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+            if self._owns_llm:
+                await self.llm.close()
+        finally:
+            self._closed = True
 
 
 __all__ = [

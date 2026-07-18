@@ -7,6 +7,7 @@ import pytest
 
 from ares.conversations import ConversationStore
 from ares.memory import MemoryStore
+from ares.self_improvement import SelfImprovementStore
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.tools.project_checks import run_project_check, snapshot_agent_checks
 
@@ -15,7 +16,7 @@ class TestToolDefinitions:
     def test_has_expected_tools(self):
         """We define the expected local tool surface."""
         tools = get_tool_definitions()
-        assert len(tools) == 156
+        assert len(tools) == 158
 
     def test_tool_names(self):
         """Tool names match expected set."""
@@ -31,6 +32,8 @@ class TestToolDefinitions:
             "cancel_agent_run",
             "resume_agent_run",
             "store_memory",
+            "list_learning_reviews",
+            "review_learning",
             "search_memory",
             "update_memory",
             "delete_memory",
@@ -297,6 +300,40 @@ class TestToolExecutor:
 
         assert result.startswith("Stored memory")
         assert executor.memory.search("rainy")
+
+    def test_hermes_learning_review_tools_require_and_apply_decision(self, executor):
+        store = SelfImprovementStore(
+            executor.memory.conn,
+            config=type("Config", (), {
+                "enabled": True,
+                "approval_required": True,
+                "max_active": 100,
+            })(),
+        )
+        executor.self_improvement_store = store
+        proposed = store.stage(
+            title="Read actual outcomes",
+            kind="workflow",
+            summary="Inspect the real tool result before claiming success.",
+            rationale="Outcome-aware review",
+            evidence="12 passed",
+            evidence_grounded=True,
+            confidence=0.9,
+            existing_skill=None,
+            source_conversation_id="tools-test",
+            source_reflection_id="reflection-test",
+        )
+
+        pending = json.loads(executor.execute(
+            "list_learning_reviews", {"status": "pending_approval"}
+        ))
+        assert pending["learnings"][0]["improvement_id"] == proposed["improvement_id"]
+        reviewed = json.loads(executor.execute(
+            "review_learning",
+            {"improvement_id": proposed["improvement_id"], "decision": "approve"},
+        ))
+        assert reviewed["learning"]["status"] == "active"
+        assert store.search("actual outcomes")
 
     def test_search_memory(self, executor):
         """search_memory tool retrieves relevant facts."""

@@ -8,6 +8,7 @@ runtime checks in :mod:`ares.turn_policy` immediately before execution.
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -52,6 +53,7 @@ WORKFLOW_TOOL_NAMES = frozenset({
 })
 RECALL_TOOL_NAMES = frozenset({
     "search_memory", "search_actions", "search_person", "list_memories", "get_memory",
+    "list_learning_reviews",
 })
 READ_ONLY_FILE_TOOL_NAMES = frozenset({
     "read_file", "search_files", "list_directory", "get_file_info", "glob_pattern",
@@ -78,6 +80,20 @@ VISION_READ_TOOL_NAMES = frozenset({
     "vision_compare", "vision_list_watches",
     "vision_list_events", "vision_list_sources",
 })
+_BROWSER_SESSION_TURN_RE = re.compile(
+    r"\b(?:new|fresh)\s+(?:playwright|browser|chrome)(?:\s+session+)?\b|"
+    r"\b(?:start|launch)\s+(?:a\s+)?(?:new|fresh)\s+"
+    r"(?:playwright|browser|chrome)(?:\s+session+)?\b|"
+    r"\b(?:start|restart|reopen|launch)\s+(?:the\s+)?(?:playwright|browser|chrome)"
+    r"(?:\s+session+)?\b",
+    re.IGNORECASE,
+)
+_BROWSER_SESSION_TOOL_SUFFIXES = (
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_tabs",
+    "browser_close",
+)
 
 
 def schema_tool_name(schema: Mapping[str, Any]) -> str:
@@ -95,6 +111,7 @@ def categorize_tool_name(name: str) -> ToolCategory:
         return ToolCategory.WORKFLOWS
     if normalized in RECALL_TOOL_NAMES or lowered.startswith((
         "store_memory", "update_memory", "delete_memory", "remember_person", "update_person", "forget_person",
+        "review_learning",
     )):
         return ToolCategory.RECALL
     if normalized in FILE_TOOL_NAMES:
@@ -216,10 +233,125 @@ class RootToolRegistry:
         delegation_decision: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Return the narrow schema set appropriate for the current turn."""
-        # FIX: Return ALL tools regardless of intent - remove restrictions
-        # The original code filtered tools based on intent and targets
-        # This caused tools to be hidden from the model
-        return [copy.deepcopy(dict(tool.schema)) for tool in self._tools.values()]
+        intent = self._intent_value(context)
+        mode = self._decision_mode(delegation_decision)
+        should_delegate = bool(getattr(delegation_decision, "should_delegate", False))
+        text = str(getattr(context, "user_input", "") or "").casefold()
+        targets = {str(value).casefold() for value in getattr(context, "explicit_targets", ())}
+        grant_names = {
+            str(getattr(grant, "tool_name", "") or "")
+            for grant in getattr(context, "confirmation_grants", ())
+            if getattr(grant, "tool_name", "")
+        }
+
+        explicit_delegation = intent == "delegation" or mode == "explicit" or should_delegate
+        agent_meta = mode == "meta" or bool(targets & {"agent", "agents", "agent_runs"})
+        if explicit_delegation:
+            return self._schemas_named(
+                set(DELEGATION_TOOL_NAMES) | set(CORE_TOOL_NAMES) | grant_names
+            )
+        if agent_meta:
+            return self._schemas_named(set(AGENT_INTROSPECTION_TOOL_NAMES) | grant_names)
+
+        # Keep the Hermes workflow usable from every chat surface while
+        # avoiding two extra schemas on unrelated turns.
+        learning_review = any(
+            marker in text
+            for marker in (
+                "learning review", "learning proposal", "procedural learning",
+                "hermes review", "approve learning", "reject learning",
+            )
+        ) or bool(re.search(r"\b(?:approve|reject)\s+#?\s*\d+\b", text))
+        if learning_review:
+            return self._schemas_named({
+                "list_learning_reviews", "review_learning", "search_memory", *grant_names,
+            })
+        if intent in {"conversation", "confirmation_response"}:
+            return self._schemas_named(grant_names)
+
+        if intent == "browser_interaction" and _BROWSER_SESSION_TURN_RE.search(text):
+            browser_session_names = {
+                tool.name
+                for tool in self._tools.values()
+                if tool.category is ToolCategory.BROWSER
+                and tool.name.casefold().endswith(_BROWSER_SESSION_TOOL_SUFFIXES)
+            }
+            return self._schemas_named(
+                browser_session_names | set(CORE_TOOL_NAMES) | grant_names
+            )
+
+        if "prior_task" in targets and intent == "local_mutation":
+            return self._schemas_named({
+                "search_memory", "search_actions", "list_tasks", "get_task_status",
+                "run_task", *grant_names,
+            })
+
+        if intent == "read_only":
+            if "prior_task" in targets:
+                return self._schemas_named({
+                    "search_memory", "search_actions", "list_tasks", "get_task_status",
+                    "list_agent_runs", "get_latest_agent_run", "get_agent_run",
+                    *grant_names,
+                })
+            selected_reads: list[dict[str, Any]] = []
+            for tool in self._tools.values():
+                if tool.name in grant_names:
+                    selected_reads.append(copy.deepcopy(dict(tool.schema)))
+                    continue
+                if not is_harmless_read_tool(tool.name):
+                    continue
+                if tool.category is ToolCategory.MCP:
+                    parts = tool.name.casefold().split("__")
+                    server = parts[1] if len(parts) > 2 else ""
+                    if not any(marker in text for marker in ("mcp", "connector", "integration", server)):
+                        continue
+                selected_reads.append(copy.deepcopy(dict(tool.schema)))
+            return selected_reads
+
+        allowed_categories: set[ToolCategory] = {ToolCategory.CORE_CONVERSATION}
+        allowed_names: set[str] = set(CORE_TOOL_NAMES) | grant_names
+        if intent == "local_mutation":
+            if "recall" in targets:
+                allowed_categories.add(ToolCategory.RECALL)
+            if targets & {"filesystem", "code", "research"}:
+                allowed_categories.add(ToolCategory.FILES)
+            if "code" in targets:
+                allowed_categories.add(ToolCategory.CODE_EXECUTION)
+            if targets & {"workflow", "prior_task"}:
+                allowed_categories.add(ToolCategory.WORKFLOWS)
+            if "goals" in targets:
+                allowed_categories.add(ToolCategory.GOALS)
+            if "watchers" in targets:
+                allowed_categories.add(ToolCategory.WATCHERS)
+            if "vision" in targets:
+                allowed_categories.add(ToolCategory.VISION)
+            if "research" in targets:
+                allowed_categories.add(ToolCategory.RESEARCH)
+            if "config" in targets:
+                allowed_names.add("update_config")
+        elif intent == "browser_interaction":
+            allowed_categories |= {ToolCategory.BROWSER, ToolCategory.RESEARCH}
+        elif intent == "external_action":
+            allowed_categories |= {
+                ToolCategory.COMMUNICATION, ToolCategory.PHONE, ToolCategory.TELEPHONY,
+                ToolCategory.MCP,
+            }
+            if any(marker in text for marker in ("browser", "website", "page", "site", "url")):
+                allowed_categories.add(ToolCategory.BROWSER)
+
+        selected: list[dict[str, Any]] = []
+        for tool in self._tools.values():
+            if tool.name in allowed_names or tool.category in allowed_categories:
+                if tool.category is ToolCategory.CORE_CONVERSATION and tool.name not in allowed_names:
+                    continue
+                if (
+                    intent == "browser_interaction"
+                    and tool.category is ToolCategory.RESEARCH
+                    and not is_harmless_read_tool(tool.name)
+                ):
+                    continue
+                selected.append(copy.deepcopy(dict(tool.schema)))
+        return selected
 
     def _schemas_named(self, names: set[str]) -> list[dict[str, Any]]:
         return [

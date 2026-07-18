@@ -187,6 +187,27 @@ def get_tool_definitions() -> list[dict]:
             ["content"],
         ),
         _tool(
+            "list_learning_reviews",
+            "List Hermes procedural-learning proposals and their real outcome evidence. Use pending_approval to show what needs the user's review; only active learnings affect future turns.",
+            {
+                "status": {
+                    "type": "string",
+                    "enum": ["pending_approval", "active", "rejected", "archived"],
+                    "default": "pending_approval",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            },
+        ),
+        _tool(
+            "review_learning",
+            "Approve or reject one pending Hermes procedural-learning proposal. Call only when the user explicitly identifies the proposal and says approve or reject. Approval makes it available to future prompts; rejection retains its audit record but never activates it.",
+            {
+                "improvement_id": {"type": "integer"},
+                "decision": {"type": "string", "enum": ["approve", "reject"]},
+            },
+            ["improvement_id", "decision"],
+        ),
+        _tool(
             "search_memory",
             "Search all local recall sources: durable facts, complete saved people records, SQLite conversations, persisted JSONL sessions, and action provenance. Returns exact stored content and stable source IDs.",
             {

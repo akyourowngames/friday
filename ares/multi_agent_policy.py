@@ -67,7 +67,7 @@ COMMUNICATION_TOOLS = frozenset({
 DATABASE_READ_TOOLS = frozenset({
     "search_memory", "search_actions", "search_person", "list_tasks", "get_task_status",
     "list_goals", "get_goal_status", "get_goal_signals", "list_watchers", "get_watcher",
-    "list_follow_ups",
+    "list_follow_ups", "list_learning_reviews",
     "list_watcher_events", "get_watcher_overview", "get_cron_job", "list_cron_jobs",
     "get_cron_logs", "telephony_get_call", "telephony_list_calls", "telephony_list_contacts",
 })
@@ -91,6 +91,7 @@ MULTI_EFFECT_CAPABILITIES: dict[str, tuple[AgentCapability, ...]] = {
 }
 DATABASE_WRITE_PREFIXES = (
     "store_", "update_memory", "delete_memory", "remember_person", "update_person", "forget_person",
+    "review_learning",
     "create_goal", "update_goal", "delete_goal", "create_task", "update_task", "create_cron_",
     "update_cron_", "delete_cron_", "create_watcher", "update_watcher", "remove_watcher",
 )

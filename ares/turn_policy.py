@@ -58,6 +58,14 @@ BROWSER_TARGET_RE = re.compile(
     r"dashboard|form|tab|url|google|github|youtube|instagram|linkedin|twitter)\b|https?://",
     re.IGNORECASE,
 )
+BROWSER_SESSION_REQUEST_RE = re.compile(
+    r"\b(?:new|fresh)\s+(?:playwright|browser|chrome)(?:\s+session+)?\b|"
+    r"\b(?:start|launch)\s+(?:a\s+)?(?:new|fresh)\s+"
+    r"(?:playwright|browser|chrome)(?:\s+session+)?\b|"
+    r"\b(?:start|restart|reopen|launch)\s+(?:the\s+)?(?:playwright|browser|chrome)"
+    r"(?:\s+session+)?\b",
+    re.IGNORECASE,
+)
 BROWSER_WINDOW_EXCEPTIONS = (
     "actual chrome window", "browser window", "chrome window", "visible desktop",
     "windows window", "desktop window",
@@ -362,7 +370,10 @@ def is_browser_action_request(text: str) -> bool:
     lowered = str(text or "").casefold()
     if any(phrase in lowered for phrase in BROWSER_WINDOW_EXCEPTIONS):
         return False
-    return bool(BROWSER_ACTION_RE.search(lowered) and BROWSER_TARGET_RE.search(lowered))
+    return bool(
+        BROWSER_SESSION_REQUEST_RE.search(lowered)
+        or (BROWSER_ACTION_RE.search(lowered) and BROWSER_TARGET_RE.search(lowered))
+    )
 
 
 def is_desktop_action_request(text: str) -> bool:
@@ -496,6 +507,7 @@ _READ_ONLY_VISION_TOOLS = frozenset({
 })
 _MUTATING_RECALL_PREFIXES = (
     "store_", "update_memory", "delete_memory", "remember_person", "update_person", "forget_person",
+    "review_learning",
 )
 _READ_VERBS = ("get", "list", "read", "search", "find", "fetch", "inspect", "snapshot", "status", "show")
 _EXTERNAL_VERBS = ("send", "publish", "push", "call", "submit", "purchase", "pay", "transfer", "invite", "share")

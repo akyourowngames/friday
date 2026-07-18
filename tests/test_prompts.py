@@ -12,12 +12,13 @@ def test_system_prompt_prioritizes_evidence_over_agreement():
     assert "Never change a factual answer just because the user sounds annoyed" in prompt
 
 
-def test_system_prompt_memory_is_selective_not_everything():
+def test_system_prompt_exposes_local_memory_lifecycle_tools():
     prompt = SYSTEM_PROMPT
 
-    assert "Remember selectively" in prompt
-    assert "Do not store one-off moods, insults, temporary facts" in prompt
-    assert "No hardcoded assumptions" in prompt
+    assert "**store_memory**" in prompt
+    assert "**search_memory**" in prompt
+    assert "**update_memory**" in prompt
+    assert "**delete_memory**" in prompt
 
 
 def test_system_prompt_discourages_repeated_emotional_openings():
@@ -66,3 +67,13 @@ def test_store_memory_tool_describes_automatic_ungated_capture():
     assert "no content-policy or approval gate" in description
     assert "useful provenance" in description
     assert "calibrated confidence" in description
+
+
+def test_hermes_review_tools_require_explicit_learning_decision():
+    tools = {tool["function"]["name"]: tool["function"] for tool in get_tool_definitions()}
+
+    assert "real outcome evidence" in tools["list_learning_reviews"]["description"]
+    assert "explicitly identifies" in tools["review_learning"]["description"]
+    assert tools["review_learning"]["parameters"]["required"] == [
+        "improvement_id", "decision"
+    ]

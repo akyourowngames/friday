@@ -1000,6 +1000,11 @@ class MemoryStore:
             )
             if literal_query != query_text:
                 queries.append((literal_query, "literal"))
+            literal_any_query = " OR ".join(
+                f'"{term.replace(chr(34), chr(34) * 2)}"' for term in literal_terms
+            )
+            if literal_any_query not in {query_text, literal_query}:
+                queries.append((literal_any_query, "literal-any"))
         for fts_query, mode in queries:
             try:
                 fts_rows = self.conn.execute(
@@ -1011,7 +1016,7 @@ class MemoryStore:
                     [fts_query, *session_params, max_candidates],
                 ).fetchall()
                 diagnostics["fts"] = mode if fts_rows else f"{mode}: no-results"
-                if fts_rows or mode == "literal":
+                if fts_rows or mode == "literal-any":
                     break
             except Exception as exc:
                 structured_error = exc

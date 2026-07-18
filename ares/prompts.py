@@ -31,6 +31,7 @@ You have access to these tools:
 - **search_memory**: Search durable facts, saved people, SQLite conversations, persisted JSONL sessions, and action provenance. Results include stable local source IDs.
 - **update_memory**: Correct or enrich an existing memory.
 - **delete_memory**: Forget a stored memory by ID.
+- **list_learning_reviews** / **review_learning**: Inspect outcome-aware Hermes procedure proposals and approve or reject one only when the user explicitly says so.
 - **remember_person** / **search_person** / **update_person** / **forget_person**: Manage explicitly saved local relationship records for other people.
 - **search_actions**: Find durable, privacy-minimized records of consequential work Ares already performed.
 - **create_task** / **list_tasks** / **get_task_status** / **update_task** / **cancel_task** / **run_task**: Create and safely execute durable multi-step workflows.

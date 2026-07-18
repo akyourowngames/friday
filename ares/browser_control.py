@@ -30,6 +30,13 @@ _BROWSER_HINTS = (
     "browser", "website", "web page", "webpage", "playwright", "http://", "https://",
     "log in", "login", "form", "tab", "click", "navigate",
 )
+_BROWSER_CLOSED_RE = re.compile(
+    r"\b(?:target\s+(?:page|context|browser)\s+has\s+been\s+closed|"
+    r"browser\s+(?:is|was|has\s+been)\s+closed|browser\s+disconnected|"
+    r"browser\s+process\s+(?:exited|terminated|crashed)|"
+    r"connection\s+(?:is\s+)?closed|transport\s+(?:is\s+)?closed)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -122,6 +129,17 @@ class BrowserTaskController:
         """Public result check used when composing recovery telemetry."""
         return not cls._result_failed(result)
 
+    @classmethod
+    def failure_kind(cls, result: str) -> str:
+        """Classify a failed action without inventing browser availability."""
+        if not cls._result_failed(result):
+            return "none"
+        if cls._stale_ref(result):
+            return "stale_reference"
+        if _BROWSER_CLOSED_RE.search(str(result or "")):
+            return "browser_closed"
+        return "action_failed"
+
     @staticmethod
     def _stale_ref(result: str) -> bool:
         lowered = str(result or "").casefold()
@@ -154,10 +172,16 @@ class BrowserTaskController:
                     return True
         return False
 
-    def begin_turn(self, session_id: str | None, user_input: str) -> str:
+    def begin_turn(
+        self,
+        session_id: str | None,
+        user_input: str,
+        *,
+        routing_text: str = "",
+    ) -> str:
         """Record the current browser goal and return compact runtime guidance."""
         text = str(user_input or "").strip()
-        lowered = text.casefold()
+        lowered = f"{text} {routing_text}".casefold()
         with self._lock:
             state = self._state(session_id)
             state.goal = text[:800]
@@ -280,7 +304,31 @@ class BrowserTaskController:
                     f"{text}\n\nBrowser controller: page state may have changed. "
                     "Take a fresh browser_snapshot and verify the requested outcome before reporting success."
                 )
+            if failed:
+                failure_kind = self.failure_kind(text)
+                if failure_kind == "stale_reference":
+                    diagnosis = (
+                        "Browser controller diagnosis: stale_reference. The page reference expired; "
+                        "this is not evidence that the browser closed or crashed."
+                    )
+                elif failure_kind == "browser_closed":
+                    diagnosis = (
+                        "Browser controller diagnosis: browser_closed. Playwright explicitly reported "
+                        "a closed or disconnected browser runtime."
+                    )
+                else:
+                    diagnosis = (
+                        "Browser controller diagnosis: action_failed. This result does not prove that "
+                        "the browser closed or crashed; verify availability with browser_tabs(list) or "
+                        "browser_snapshot before describing the browser state."
+                    )
+                return f"{text}\n\n{diagnosis}"
             return text
+
+    def verification_pending(self, session_id: str | None) -> bool:
+        """Return whether a successful browser mutation still needs read-back."""
+        with self._lock:
+            return self._state(session_id).verification_required
 
     def should_recover_stale_ref(
         self, session_id: str | None, tool_name: str, arguments: dict[str, Any], result: str

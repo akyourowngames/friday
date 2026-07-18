@@ -1,4 +1,4 @@
-"""Fail-open query rewriting, active-memory judging, and provider adapters."""
+"""Local fast recall, optional deep recall, warm-up, and provider adapters."""
 
 from __future__ import annotations
 
@@ -29,6 +29,13 @@ _INSTRUCTION_LEAK_RE = re.compile(
     r"follow (?:these|the) instructions|<\/?(?:system|assistant|developer)|```)",
     re.IGNORECASE,
 )
+_LOCAL_STOP_WORDS = frozenset({
+    "about", "after", "again", "also", "been", "before", "being", "can", "could",
+    "continue", "did", "does", "doing", "for", "from", "have", "how", "into", "just",
+    "last", "like", "more", "much", "our", "please", "same", "should", "that", "the",
+    "their", "them", "then", "there", "these", "they", "this", "those", "through", "was",
+    "were", "what", "when", "where", "which", "while", "with", "would", "you", "your",
+})
 
 
 @dataclass(frozen=True)
@@ -254,7 +261,7 @@ class ActiveMemoryJudge:
 
 
 class MemoryRecallService:
-    """One bounded async recall pipeline for normal conversational turns."""
+    """Low-latency foreground recall with optional background model warm-up."""
 
     def __init__(self, memory_store: Any, llm_client: Any, config: Any) -> None:
         self.memory_store = memory_store
@@ -262,6 +269,69 @@ class MemoryRecallService:
         self.rewriter = MemoryQueryRewriter(llm_client, config)
         self.judge = ActiveMemoryJudge(llm_client, config)
         self.last_diagnostics: dict[str, Any] = {}
+        self._warmup_task: asyncio.Task[None] | None = None
+        self._embedding_ready = False
+        self._warmup_diagnostics: dict[str, Any] = {"status": "cold"}
+
+    @staticmethod
+    def _local_query(user_message: str, recent_history: list[dict]) -> str:
+        """Build a permissive FTS query locally; never call a model here."""
+        original = " ".join(str(user_message or "").split()).strip()
+        source_parts = [original]
+        if MemoryQueryRewriter.should_rewrite(original):
+            source_parts.extend(
+                str(item.get("content") or "")[:600]
+                for item in recent_history[-4:]
+                if item.get("role") in {"user", "assistant"} and item.get("content")
+            )
+        terms: list[str] = []
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", " ".join(source_parts)):
+            normalized = token.casefold()
+            if normalized in _LOCAL_STOP_WORDS or normalized in terms:
+                continue
+            terms.append(normalized)
+        # MemoryStore tries exact/AND matching first and then a bounded OR
+        # fallback; keeping this text plain also makes warm vector search sane.
+        return " ".join(terms[-12:]) or original
+
+    def schedule_warmup(self, *, delay_seconds: float = 0.0) -> None:
+        """Warm only the embedding model after a response; never block chat."""
+        if not bool(getattr(self.config, "background_embedding_warmup", True)):
+            self._warmup_diagnostics = {"status": "disabled"}
+            return
+        if not bool(getattr(self.memory_store, "vector_enabled", False)):
+            self._warmup_diagnostics = {"status": "vector-unavailable"}
+            return
+        if self._embedding_ready:
+            return
+        if self._warmup_task is not None and not self._warmup_task.done():
+            return
+
+        async def warm() -> None:
+            started = time.monotonic()
+            self._warmup_diagnostics = {"status": "warming"}
+            try:
+                if delay_seconds > 0:
+                    await asyncio.sleep(float(delay_seconds))
+                provider = self.memory_store.embedding_provider
+                await asyncio.to_thread(provider.embed_bytes, "ares memory warmup")
+                self._embedding_ready = True
+                self._warmup_diagnostics = {
+                    "status": "ready",
+                    "backend": str(getattr(provider, "backend_used", "unknown")),
+                    "elapsed_ms": round((time.monotonic() - started) * 1_000, 3),
+                }
+            except asyncio.CancelledError:
+                self._warmup_diagnostics = {"status": "cancelled"}
+                raise
+            except Exception as exc:
+                self._warmup_diagnostics = {
+                    "status": "failed",
+                    "error": type(exc).__name__,
+                    "elapsed_ms": round((time.monotonic() - started) * 1_000, 3),
+                }
+
+        self._warmup_task = asyncio.create_task(warm(), name="ares-memory-embedding-warmup")
 
     async def prepare(
         self,
@@ -283,12 +353,20 @@ class MemoryRecallService:
                 "candidate_count": 0,
                 "selected_ids": [],
                 "active_judge_result": "skipped-trivial",
+                "foreground_model_calls": 0,
+                "embedding_warmup": dict(self._warmup_diagnostics),
                 "elapsed_ms": round((time.monotonic() - started) * 1_000, 3),
             }
             self.last_diagnostics = diagnostics
             return MemoryRecallResult(original, original, [], diagnostics)
 
-        rewritten = await self.rewriter.rewrite(original, recent_history)
+        foreground_models = bool(
+            getattr(self.config, "foreground_model_calls_enabled", False)
+        )
+        if foreground_models:
+            rewritten = await self.rewriter.rewrite(original, recent_history)
+        else:
+            rewritten = self._local_query(original, recent_history)
         try:
             memories = self.memory_store.search(
                 rewritten,
@@ -296,6 +374,7 @@ class MemoryRecallService:
                 scope=scope,
                 session_id=session_id,
                 recent_sessions=recent_sessions,
+                semantic=(None if foreground_models else self._embedding_ready),
                 retrieval_config=self.config,
             )
         except Exception as exc:
@@ -303,18 +382,41 @@ class MemoryRecallService:
             search_diagnostics = {"fallback": type(exc).__name__, "mode": "failed-open"}
         else:
             search_diagnostics = dict(getattr(self.memory_store, "last_search_diagnostics", {}) or {})
-        selected = await self.judge.judge(original, recent_history, memories)
+        if foreground_models:
+            selected = await self.judge.judge(original, recent_history, memories)
+            judge_result: Any = self.judge.last_diagnostics.get("result", "NONE")
+            judge_diagnostics = dict(self.judge.last_diagnostics)
+            rewrite_diagnostics = dict(self.rewriter.last_diagnostics)
+        else:
+            selected = (
+                []
+                if not ActiveMemoryJudge.eligible(original, memories)
+                else memories[: int(getattr(self.config, "max_injected", 5))]
+            )
+            judge_result = [int(item["fact_id"]) for item in selected] or "NONE"
+            judge_diagnostics = {
+                "result": judge_result,
+                "fallback": "local-rank",
+                "elapsed_ms": 0.0,
+            }
+            rewrite_diagnostics = {
+                "used": rewritten != original,
+                "fallback": "local-fts",
+                "elapsed_ms": 0.0,
+            }
         selected = selected[: max(1, min(int(limit), int(getattr(self.config, "max_injected", 5))))]
         diagnostics = {
             "original_query": original,
             "rewritten_query": rewritten,
             "rewrite_used": rewritten != original,
-            "rewrite": dict(self.rewriter.last_diagnostics),
+            "rewrite": rewrite_diagnostics,
             "candidate_count": len(memories),
             "search": search_diagnostics,
             "selected_ids": [int(item["fact_id"]) for item in selected],
-            "active_judge_result": self.judge.last_diagnostics.get("result", "NONE"),
-            "judge": dict(self.judge.last_diagnostics),
+            "active_judge_result": judge_result,
+            "judge": judge_diagnostics,
+            "foreground_model_calls": 2 if foreground_models else 0,
+            "embedding_warmup": dict(self._warmup_diagnostics),
             "elapsed_ms": round((time.monotonic() - started) * 1_000, 3),
         }
         self.last_diagnostics = diagnostics
@@ -322,6 +424,13 @@ class MemoryRecallService:
 
     def explain_last_retrieval(self) -> dict[str, Any]:
         return dict(self.last_diagnostics)
+
+    async def close(self) -> None:
+        task = self._warmup_task
+        if task is not None and not task.done():
+            task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
 
 class MemoryProvider(Protocol):
@@ -385,7 +494,7 @@ class BuiltInMemoryProvider:
         return None
 
     async def shutdown(self) -> None:
-        return None
+        await self.recall.close()
 
 
 __all__ = [

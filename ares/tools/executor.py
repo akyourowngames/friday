@@ -166,6 +166,7 @@ class ToolExecutor:
         vision_service: Any | None = None,
     ):
         self.memory = memory_store
+        self.self_improvement_store: Any | None = None
         self.conversations = conversation_store
         self.config = config
         self.mcp_manager = mcp_manager
@@ -356,6 +357,8 @@ class ToolExecutor:
         """Execute a tool by name with the given arguments. Returns a result string."""
         handlers = {
             "store_memory": self._store_memory,
+            "list_learning_reviews": self._list_learning_reviews,
+            "review_learning": self._review_learning,
             "search_memory": self._search_memory,
             "update_memory": self._update_memory,
             "delete_memory": self._delete_memory,
@@ -563,6 +566,53 @@ class ToolExecutor:
         return self.execute(tool_name, arguments)
 
     # ── Memory tools ──────────────────────────────────────────────
+
+    def _list_learning_reviews(self, args: dict) -> str:
+        store = self.self_improvement_store
+        if store is None:
+            return "Error: Hermes procedural learning is unavailable."
+        status = str(args.get("status") or "pending_approval").strip().casefold()
+        limit = max(1, min(int(args.get("limit", 20)), 100))
+        rows = store.list(status=status, limit=limit)
+        return json.dumps(
+            {"status": status, "count": len(rows), "learnings": rows},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
+    def _review_learning(self, args: dict) -> str:
+        store = self.self_improvement_store
+        if store is None:
+            return "Error: Hermes procedural learning is unavailable."
+        improvement_id = int(args["improvement_id"])
+        decision = str(args["decision"]).strip().casefold()
+        if decision not in {"approve", "reject"}:
+            return "Error: decision must be approve or reject."
+        existing = store.get(improvement_id)
+        if existing is None:
+            return f"Error: learning #{improvement_id} was not found."
+        if existing.get("status") != "pending_approval":
+            return f"Learning #{improvement_id} is already {existing.get('status')}."
+        updated = (
+            store.approve(improvement_id)
+            if decision == "approve"
+            else store.reject(improvement_id)
+        )
+        return json.dumps(
+            {
+                "decision": decision,
+                "learning": updated,
+                "message": (
+                    f"Learning #{improvement_id} approved and active."
+                    if decision == "approve"
+                    else f"Learning #{improvement_id} rejected."
+                ),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
 
     def _store_memory(self, args: dict) -> str:
         content = args["content"]

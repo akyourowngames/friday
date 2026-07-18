@@ -77,7 +77,7 @@ async def _wait_for_status(service, reflection_id, status):
 
 
 @pytest.mark.asyncio
-async def test_before_turn_never_waits_for_background_reflection():
+async def test_before_turn_preempts_background_reflection_without_waiting():
     service = ReflectionService.__new__(ReflectionService)
     blocker = asyncio.Event()
     active = asyncio.create_task(blocker.wait())
@@ -86,10 +86,7 @@ async def test_before_turn_never_waits_for_background_reflection():
 
     await asyncio.wait_for(service.before_turn("conversation-1"), timeout=0.05)
 
-    assert not active.done()
-    active.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await active
+    assert active.cancelled()
 
 
 @pytest.mark.asyncio
@@ -476,7 +473,7 @@ async def test_reflection_follow_up_queue_persists_lifecycle_and_resolution(
 
 
 @pytest.mark.asyncio
-async def test_before_turn_does_not_wait_for_slow_active_reflection(tmp_path, fake_embedding_provider):
+async def test_before_turn_preempts_and_requeues_slow_active_reflection(tmp_path, fake_embedding_provider):
     memory = MemoryStore(tmp_path / "ares.db", embedding_provider=fake_embedding_provider)
     goals = GoalStore(tmp_path / "ares.db", connection=memory.conn)
     commitments = CommitmentStore(tmp_path / "ares.db", connection=memory.conn)
@@ -500,11 +497,12 @@ async def test_before_turn_does_not_wait_for_slow_active_reflection(tmp_path, fa
     try:
         await asyncio.wait_for(llm.started.wait(), timeout=0.5)
 
-        # A following normal turn invokes this method before it can ask the
-        # foreground provider.  It must return while the slow job is still
-        # running, rather than waiting for the reflection LLM response.
+        # A following normal turn gets provider priority. The slow review is
+        # cancelled and durably requeued instead of contending with chat.
         await asyncio.wait_for(service.before_turn("conversation-fast-next-turn"), timeout=0.1)
-        assert service.store.get(reflection_id)["status"] == "running"
+        assert service.store.get(reflection_id)["status"] == "pending"
+        assert service.store.get(reflection_id)["attempts"] == 0
+        service.after_turn()
     finally:
         llm.release.set()
         await service.close()

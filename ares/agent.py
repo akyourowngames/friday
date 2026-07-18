@@ -26,6 +26,7 @@ from ares.llm import (
     LLMClient,
     configured_provider_api_key,
     normalize_provider,
+    provider_for_model,
     resolve_provider_base_url,
 )
 from ares.latency import RequestLatency
@@ -53,6 +54,7 @@ from ares.turn_policy import (
     TurnIntent,
     authorize_turn_tool,
     build_turn_execution_context,
+    is_browser_action_request,
 )
 
 _SESSION_UNSET = object()
@@ -70,6 +72,20 @@ _STREAM_TOOL_DECISION_GRACE_SECONDS = 0.03
 _EXECUTION_GUARD_SIGNAL_RE = re.compile(
     r"\b(?:agents?|researchers?|specialists?|tool\s+calls?|delegat(?:e|ion)|"
     r"parallel|execution\s+waves?|run\s+id)\b",
+    re.IGNORECASE,
+)
+_BROWSER_EXECUTION_CLAIM_RE = re.compile(
+    r"\b(?:"
+    r"(?:i(?:'ve|\s+have)?\s+)?(?:started|restarted|launched|opened|navigated|clicked)|"
+    r"(?:starting|restarting|launching|opening|navigating|clicking)\b|"
+    r"(?:browser|chrome|playwright|instagram|website|web\s*page|tab)\s+"
+    r"(?:is|has\s+been)\s+(?:now\s+)?(?:open|opened|started|launched|loaded)"
+    r")\b",
+    re.IGNORECASE,
+)
+_BROWSER_CONTINUATION_RE = re.compile(
+    r"^\s*(?:(?:yes|yeah|yep|ok(?:ay)?|sure)\b[,.!]?\s*)?"
+    r"(?:try\s+again|retry|do\s+it|go\s+ahead|proceed|continue|resume)\b",
     re.IGNORECASE,
 )
 _TEXT_TOOL_CALL_RE = re.compile(
@@ -357,6 +373,9 @@ class Agent:
                 llm_client=self.llm,
                 memory_config=getattr(self.config, "memory", None),
             )
+            self.tool_executor.self_improvement_store = (
+                self.reflection_service.self_improvement_store
+            )
         self.memory_recall_service: MemoryRecallService | None = None
         self.memory_provider: BuiltInMemoryProvider | None = None
         memory_config = getattr(self.config, "memory", None)
@@ -545,6 +564,24 @@ class Agent:
         return f"{text}\n\nResolved prior task: {prior[:12_000]}", None
 
     @staticmethod
+    def _resolve_referential_browser_continuation(
+        user_input: str, conversation_history: list[dict]
+    ) -> str:
+        """Use the last browser offer only when this turn explicitly continues it."""
+        text = str(user_input or "").strip()
+        if is_browser_action_request(text) or not _BROWSER_CONTINUATION_RE.search(text):
+            return text
+        prior = next((
+            str(message.get("content") or "").strip()
+            for message in reversed(conversation_history)
+            if message.get("role") == "assistant"
+            and str(message.get("content") or "").strip()
+        ), "")
+        if not prior or not is_browser_action_request(prior):
+            return text
+        return f"{text}\n\nResolved browser continuation: {prior[:2_000]}"
+
+    @staticmethod
     def _execution_session_key(session_id: str | None) -> str:
         return str(session_id or "__unscoped__")
 
@@ -571,6 +608,7 @@ class Agent:
             "agent_count": 0,
             "tool_call_count": 0,
             "tools": [],
+            "tool_outcomes": [],
             "execution_waves": [],
             "status": "succeeded",
         })
@@ -594,11 +632,25 @@ class Agent:
                 "agent_count": 0,
                 "tool_call_count": 0,
                 "tools": [],
+                "tool_outcomes": [],
                 "execution_waves": [],
                 "status": "succeeded",
             }
         existing["tool_call_count"] = int(existing.get("tool_call_count") or 0) + len(names)
         existing["tools"] = [*list(existing.get("tools") or []), *names]
+        outcomes = []
+        for name, result in zip(names, results):
+            rendered = str(result.get("content") or "")
+            failed = rendered.lstrip().casefold().startswith(("error:", "failed:"))
+            outcomes.append({
+                "tool": name,
+                "status": "failed" if failed else "completed",
+                "result": rendered[:1_500],
+            })
+        existing["tool_outcomes"] = [
+            *list(existing.get("tool_outcomes") or []),
+            *outcomes,
+        ]
         existing["execution_waves"] = [
             *list(existing.get("execution_waves") or []),
             *[[names[index] for index in wave] for wave in waves],
@@ -624,6 +676,10 @@ class Agent:
         schema_filter = getattr(self, "_tool_schema_filter", None)
         if schema_filter is not None:
             self.tools = schema_filter(self.tools)
+        from ares.tool_registry import RootToolRegistry
+
+        self._root_tool_registry = RootToolRegistry(self.tools)
+        self._root_tool_registry_source = (id(self.tools), len(self.tools))
 
     def _tools_for_turn(
         self,
@@ -633,13 +689,48 @@ class Agent:
         """Select schemas for this request without mutating shared Agent state."""
         if getattr(self, "delegation_depth", 0) > 0:
             return list(self.tools)
-        from ares.tool_registry import select_root_tools
+        source = (id(self.tools), len(self.tools))
+        registry = getattr(self, "_root_tool_registry", None)
+        if registry is None or getattr(self, "_root_tool_registry_source", None) != source:
+            from ares.tool_registry import RootToolRegistry
 
-        return select_root_tools(
-            self.tools,
-            context,
-            delegation_decision=delegation_decision,
-        )
+            registry = RootToolRegistry(self.tools)
+            self._root_tool_registry = registry
+            self._root_tool_registry_source = source
+        return registry.select_for_turn(context, delegation_decision=delegation_decision)
+
+    def _model_for_turn(
+        self,
+        context: TurnExecutionContext,
+        turn_tools: list[dict],
+    ) -> str | None:
+        """Use the measured fast lane only for genuinely tool-free conversation."""
+        if turn_tools or context.intent is not TurnIntent.CONVERSATION:
+            return None
+        if not bool(getattr(self.config, "fast_conversation_enabled", True)):
+            return None
+        candidate = str(
+            getattr(self.config, "fast_conversation_model", "") or ""
+        ).strip()
+        if not candidate:
+            return None
+        candidate_provider = provider_for_model(candidate)
+        active_provider = normalize_provider(getattr(self.llm, "provider", None))
+        if candidate_provider is not None and normalize_provider(candidate_provider) != active_provider:
+            return None
+        return candidate
+
+    @staticmethod
+    def _supports_model_override(callback: Any) -> bool:
+        """Keep embedders/test doubles compatible with the older call shape."""
+        try:
+            parameters = tuple(inspect.signature(callback).parameters.values())
+        except (TypeError, ValueError):
+            return False
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+            return True
+        names = {parameter.name for parameter in parameters}
+        return {"model", "fallback_model"} <= names
 
     def _live_mcp_context(self) -> str:
         """Describe authoritative current MCP readiness for the next LLM turn."""
@@ -718,8 +809,18 @@ class Agent:
         if context:
             system_content += f"\n\n## Current Context\n{context}"
         browser_controller = getattr(self, "browser_controller", None)
+        active_turn = self.turn_context
+        browser_routing_text = (
+            active_turn.user_input
+            if active_turn is not None and active_turn.intent is TurnIntent.BROWSER_INTERACTION
+            else ""
+        )
         browser_guidance = (
-            browser_controller.begin_turn(self.session_id, user_input)
+            browser_controller.begin_turn(
+                self.session_id,
+                user_input,
+                routing_text=browser_routing_text,
+            )
             if browser_controller is not None
             else ""
         )
@@ -731,7 +832,8 @@ class Agent:
             "The previous conversation is context only. Answer the next user message as the current task. "
             "Do not continue, repeat, or summarize an earlier user request unless the next user message "
             "explicitly asks to continue it. If tool results are used, base the final answer on the current "
-            "user request plus those tool results."
+            "user request plus those tool results. A sentence saying an action is starting or completed is "
+            "not an action: when a matching tool is advertised, call it before reporting progress or success."
         )
         live_mcp_context = self._live_mcp_context()
         if live_mcp_context:
@@ -796,7 +898,7 @@ class Agent:
         )
 
     def _procedural_learning_context(self, user_input: str) -> str:
-        """Render automatically learned Hermes-style procedures for this turn."""
+        """Render only approved Hermes-style procedures for this turn."""
         service = self.reflection_service
         if service is None:
             return ""
@@ -1486,6 +1588,44 @@ class Agent:
             for result in tool_results
         ]
 
+    @staticmethod
+    def _reflection_outcome_summary(
+        tool_results: list[dict], execution_record: dict[str, Any] | None = None
+    ) -> str:
+        """Bound real tool/action results for outcome-aware Hermes review."""
+        outcomes: list[dict[str, Any]] = []
+        for result in tool_results[-12:]:
+            raw = result.get("content")
+            structured_failure = False
+            if isinstance(raw, dict):
+                status = str(raw.get("status") or raw.get("state") or "").casefold()
+                structured_failure = (
+                    status in {"failed", "failure", "error", "timed_out", "blocked"}
+                    or raw.get("success") is False
+                    or raw.get("ok") is False
+                )
+            if isinstance(raw, str):
+                rendered = raw
+            else:
+                try:
+                    rendered = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str)
+                except Exception:
+                    rendered = str(raw)
+            lowered = rendered.lstrip().casefold()
+            outcomes.append({
+                "tool": str(result.get("tool_name") or "unknown"),
+                "status": (
+                    "failed"
+                    if structured_failure or lowered.startswith(("error:", "failed:"))
+                    else "completed"
+                ),
+                "result": rendered[:1_500],
+            })
+        payload: dict[str, Any] = {"tool_outcomes": outcomes}
+        if execution_record:
+            payload["execution_record"] = execution_record
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:12_000]
+
     def _delegation_decision(self, context: TurnExecutionContext) -> DelegationDecision:
         """Route this request before the general model sees any tool schemas."""
         if getattr(self, "delegation_depth", 0) > 0:
@@ -1726,6 +1866,100 @@ class Agent:
         return "\n".join(kept).strip(), removed
 
     @staticmethod
+    def _strip_browser_execution_claims(content: str) -> tuple[str, bool]:
+        """Remove status narration that asserts a browser action already happened."""
+        kept_lines: list[str] = []
+        removed = False
+        for line in str(content or "").splitlines():
+            kept_sentences: list[str] = []
+            for sentence in re.split(r"(?<=[.!?])\s+", line.strip()):
+                if _BROWSER_EXECUTION_CLAIM_RE.search(sentence):
+                    removed = True
+                    continue
+                if sentence:
+                    kept_sentences.append(sentence)
+            if kept_sentences:
+                kept_lines.append(" ".join(kept_sentences))
+        return "\n".join(kept_lines).strip(), removed
+
+    @staticmethod
+    def _is_browser_tool_name(tool_name: str) -> bool:
+        lowered = str(tool_name or "").casefold()
+        return lowered.startswith("mcp__playwright__browser_") or lowered.startswith("browser_")
+
+    @classmethod
+    def _has_browser_tool_schema(cls, schemas: Iterable[dict]) -> bool:
+        return any(
+            cls._is_browser_tool_name(schema.get("function", {}).get("name", ""))
+            for schema in schemas
+        )
+
+    def _browser_execution_state(
+        self, context: TurnExecutionContext
+    ) -> tuple[bool, str]:
+        """Return verified browser execution state and a truthful fallback."""
+        record = self._last_execution_record(context)
+        if record is None or record.get("request_id") != context.request_id:
+            return False, (
+                "I did not start or open the browser: no Playwright tool executed for this request."
+            )
+        browser_tools = [
+            str(name) for name in record.get("tools") or []
+            if self._is_browser_tool_name(str(name))
+        ]
+        outcomes = [
+            item for item in record.get("tool_outcomes") or []
+            if isinstance(item, dict) and self._is_browser_tool_name(str(item.get("tool") or ""))
+        ]
+        if not browser_tools and not outcomes:
+            return False, (
+                "I did not start or open the browser: no Playwright tool executed for this request."
+            )
+
+        controller = getattr(self, "browser_controller", None)
+        verification_pending = bool(
+            controller is not None
+            and controller.verification_pending(context.session_id)
+        )
+        completed = any(str(item.get("status")) == "completed" for item in outcomes)
+        if not outcomes:
+            completed = str(record.get("status") or "").casefold() == "succeeded"
+        if completed and not verification_pending:
+            return True, ""
+        if verification_pending:
+            return False, (
+                "Playwright executed a browser action, but the resulting page was not verified "
+                "with a fresh snapshot, so I cannot report it as open yet."
+            )
+        detail = str(outcomes[-1].get("result") or "")[:500].strip() if outcomes else ""
+        if detail:
+            return False, f"Playwright attempted the browser action but did not verify success: {detail}"
+        return False, "Playwright attempted the browser action but did not verify success."
+
+    def _should_retry_missing_browser_execution(
+        self,
+        context: TurnExecutionContext,
+        content: str,
+        turn_tools: Iterable[dict],
+        *,
+        already_retried: bool,
+    ) -> bool:
+        """Give a status-only browser response one chance to become a real call."""
+        if (
+            already_retried
+            or context.intent is not TurnIntent.BROWSER_INTERACTION
+            or not _BROWSER_EXECUTION_CLAIM_RE.search(str(content or ""))
+            or not self._has_browser_tool_schema(turn_tools)
+        ):
+            return False
+        record = self._last_execution_record(context)
+        if record is None or record.get("request_id") != context.request_id:
+            return True
+        return not any(
+            self._is_browser_tool_name(str(name)) for name in record.get("tools") or []
+        )
+
+    @staticmethod
     def _native_record_payload(record: dict[str, Any]) -> dict[str, Any]:
         payload = record.get("payload")
         return dict(payload) if isinstance(payload, dict) else dict(record)
@@ -1831,6 +2065,21 @@ class Agent:
         content: str,
     ) -> str:
         cleaned, removed = self._strip_unverified_agent_claims(content)
+        browser_truth = ""
+        browser_removed = False
+        if (
+            context.intent is TurnIntent.BROWSER_INTERACTION
+            and _BROWSER_EXECUTION_CLAIM_RE.search(cleaned)
+        ):
+            browser_verified, browser_truth = self._browser_execution_state(context)
+            if not browser_verified:
+                cleaned, browser_removed = self._strip_browser_execution_claims(cleaned)
+
+        def append_browser_truth(value: str) -> str:
+            if not browser_removed:
+                return value
+            return "\n\n".join(part for part in (value, browser_truth) if part).strip()
+
         record = self._last_execution_record(context)
         if decision.should_delegate and record and record.get("request_id") == context.request_id:
             payload = self._native_record_payload(record)
@@ -1841,10 +2090,16 @@ class Agent:
             if missing:
                 sources = "Verified sources:\n" + "\n".join(f"- {url}" for url in missing[:50])
                 footer = "\n\n".join(part for part in (footer, sources) if part)
-            return "\n\n".join(part for part in (cleaned, footer) if part).strip()
+            return append_browser_truth(
+                "\n\n".join(part for part in (cleaned, footer) if part).strip()
+            )
         if removed:
             truth = self._render_execution_summary(record)
-            return "\n\n".join(part for part in (cleaned, truth) if part).strip()
+            return append_browser_truth(
+                "\n\n".join(part for part in (cleaned, truth) if part).strip()
+            )
+        if browser_removed:
+            return append_browser_truth(cleaned)
         return cleaned or str(content or "")
 
     async def run(
@@ -1869,6 +2124,9 @@ class Agent:
             latency.mark("reflection_check_finished")
             routing_input, reference_error = self._resolve_referential_delegation(
                 user_input, conversation_history
+            )
+            routing_input = self._resolve_referential_browser_continuation(
+                routing_input, conversation_history
             )
             turn_context = self._new_turn_context(
                 routing_input,
@@ -1908,6 +2166,14 @@ class Agent:
                 ):
                     yield chunk
         finally:
+            if self.reflection_service is not None:
+                after_turn = getattr(self.reflection_service, "after_turn", None)
+                if callable(after_turn):
+                    after_turn()
+            if self.memory_recall_service is not None:
+                schedule_warmup = getattr(self.memory_recall_service, "schedule_warmup", None)
+                if callable(schedule_warmup):
+                    schedule_warmup()
             self._record_request_latency(latency)
 
     async def _run_scoped(
@@ -1938,16 +2204,36 @@ class Agent:
             if tools_override is not None
             else self._tools_for_turn(turn_context, delegation_decision)
         )
+        turn_model = (
+            self._model_for_turn(turn_context, turn_tools)
+            if isinstance(self.llm, LLMClient)
+            and self._supports_model_override(self.llm.chat)
+            else None
+        )
+        self.last_turn_model = turn_model or str(getattr(self.llm, "model", ""))
+        self.last_turn_tool_schema_count = len(turn_tools)
+        if latency is not None:
+            latency.model = self.last_turn_model
+            latency.tool_schema_count = len(turn_tools)
         if latency is not None:
             latency.mark("context_build_finished")
 
         # Agent loop: keep going while LLM wants to call tools
         max_iterations = self.config.agent_max_iterations
+        completed_tool_results: list[dict] = []
+        missing_browser_execution_retry_used = False
         for iteration in range(max_iterations):
             self.last_iteration_count = iteration + 1
             if latency is not None:
                 latency.mark("provider_request_started")
-            response = await self.llm.chat(messages, tools=turn_tools)
+            response = await self.llm.chat(
+                messages,
+                tools=turn_tools,
+                **(
+                    {"model": turn_model, "fallback_model": self.llm.model}
+                    if turn_model else {}
+                ),
+            )
             if latency is not None:
                 latency.mark("provider_first_token_received")
 
@@ -1977,6 +2263,7 @@ class Agent:
                 # Execute tools
                 tool_started_at = time.monotonic()
                 tool_results = await self.process_tool_calls_async(response["tool_calls"])
+                completed_tool_results.extend(tool_results)
                 if latency is not None:
                     latency.add_tool_execution(tool_started_at)
                 messages.extend(self._tool_messages(tool_results))
@@ -1987,6 +2274,23 @@ class Agent:
 
             # No tool calls — LLM produced final text response
             content = response.get("content", "")
+            if self._should_retry_missing_browser_execution(
+                turn_context,
+                str(content or ""),
+                turn_tools,
+                already_retried=missing_browser_execution_retry_used,
+            ):
+                missing_browser_execution_retry_used = True
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Runtime correction: no Playwright tool executed, so the status-only response was not "
+                        "shown to the user. Call the appropriate advertised Playwright tool now. Do not emit "
+                        "another starting/opening status sentence; if execution is impossible, report the exact "
+                        "runtime blocker without claiming success."
+                    ),
+                })
+                continue
             if not delegation_decision.should_delegate:
                 self._ensure_ordinary_execution_record(turn_context)
             content = self._guard_final_answer(
@@ -1999,6 +2303,10 @@ class Agent:
                     scope=self.session_id,
                     user_text=reflection_input if reflection_input is not None else user_input,
                     assistant_text=content,
+                    outcome_summary=self._reflection_outcome_summary(
+                        completed_tool_results,
+                        self._last_execution_record(turn_context),
+                    ),
                 )
             if content:
                 if latency is not None:
@@ -2033,6 +2341,9 @@ class Agent:
             latency.mark("reflection_check_finished")
             routing_input, reference_error = self._resolve_referential_delegation(
                 user_input, conversation_history
+            )
+            routing_input = self._resolve_referential_browser_continuation(
+                routing_input, conversation_history
             )
             turn_context = self._new_turn_context(
                 routing_input,
@@ -2072,6 +2383,14 @@ class Agent:
                 ):
                     yield chunk
         finally:
+            if self.reflection_service is not None:
+                after_turn = getattr(self.reflection_service, "after_turn", None)
+                if callable(after_turn):
+                    after_turn()
+            if self.memory_recall_service is not None:
+                schedule_warmup = getattr(self.memory_recall_service, "schedule_warmup", None)
+                if callable(schedule_warmup):
+                    schedule_warmup()
             self._record_request_latency(latency)
 
     async def _run_stream_scoped(
@@ -2101,10 +2420,23 @@ class Agent:
             if tools_override is not None
             else self._tools_for_turn(turn_context, delegation_decision)
         )
+        turn_model = (
+            self._model_for_turn(turn_context, turn_tools)
+            if isinstance(self.llm, LLMClient)
+            and self._supports_model_override(self.llm.chat_stream)
+            else None
+        )
+        self.last_turn_model = turn_model or str(getattr(self.llm, "model", ""))
+        self.last_turn_tool_schema_count = len(turn_tools)
+        if latency is not None:
+            latency.model = self.last_turn_model
+            latency.tool_schema_count = len(turn_tools)
         if latency is not None:
             latency.mark("context_build_finished")
 
         max_iterations = self.config.agent_max_iterations
+        completed_tool_results: list[dict] = []
+        missing_browser_execution_retry_used = False
         for iteration in range(max_iterations):
             self.last_iteration_count = iteration + 1
             tool_calls: dict[int, dict] = {}
@@ -2133,6 +2465,10 @@ class Agent:
                     and existing_execution_record.get("request_id") == turn_context.request_id
                 )
                 or bool(_EXECUTION_GUARD_SIGNAL_RE.search(turn_context.user_input))
+                or (
+                    turn_context.intent is TurnIntent.BROWSER_INTERACTION
+                    and bool(turn_tools)
+                )
             )
             allow_live_content = not guard_sensitive_turn
             stream_committed = allow_live_content and not turn_tools
@@ -2142,7 +2478,14 @@ class Agent:
 
             if latency is not None:
                 latency.mark("provider_request_started")
-            stream = self.llm.chat_stream(messages, tools=turn_tools).__aiter__()
+            stream = self.llm.chat_stream(
+                messages,
+                tools=turn_tools,
+                **(
+                    {"model": turn_model, "fallback_model": self.llm.model}
+                    if turn_model else {}
+                ),
+            ).__aiter__()
             next_chunk: asyncio.Future[Any] | None = asyncio.ensure_future(anext(stream))
             try:
                 while next_chunk is not None:
@@ -2285,6 +2628,27 @@ class Agent:
                             "arguments": str(function.get("arguments") or ""),
                         }
 
+            if (
+                not has_tool_calls
+                and self._should_retry_missing_browser_execution(
+                    turn_context,
+                    content.content,
+                    turn_tools,
+                    already_retried=missing_browser_execution_retry_used,
+                )
+            ):
+                missing_browser_execution_retry_used = True
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Runtime correction: no Playwright tool executed, so the status-only response was not "
+                        "shown to the user. Call the appropriate advertised Playwright tool now. Do not emit "
+                        "another starting/opening status sentence; if execution is impossible, report the exact "
+                        "runtime blocker without claiming success."
+                    ),
+                })
+                continue
+
             if has_tool_calls:
                 formatted_calls = []
                 for index in sorted(tool_calls):
@@ -2344,6 +2708,7 @@ class Agent:
                             active_tools.pop(tool_name, None)
                             reported_seconds.pop(tool_name, None)
                     tool_results = await tool_task
+                    completed_tool_results.extend(tool_results)
                 finally:
                     if not tool_task.done():
                         tool_task.cancel()
@@ -2374,6 +2739,10 @@ class Agent:
                     scope=self.session_id,
                     user_text=reflection_input if reflection_input is not None else user_input,
                     assistant_text=final_content,
+                    outcome_summary=self._reflection_outcome_summary(
+                        completed_tool_results,
+                        self._last_execution_record(turn_context),
+                    ),
                 )
             if final_content and not visible_content:
                 if latency is not None:
@@ -2398,6 +2767,8 @@ class Agent:
         """Clean up resources."""
         if self.reflection_service is not None:
             await self.reflection_service.close()
+        if self.memory_recall_service is not None:
+            await self.memory_recall_service.close()
         if self.multi_agent_runtime is not None and self.delegation_depth == 0:
             await self.multi_agent_runtime.close()
         if self.memory_provider is not None:

@@ -340,13 +340,15 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
         temperature: float = 0.3,
+        model: str | None = None,
+        fallback_model: str | None = None,
     ) -> dict:
         """Send a chat completion request. Returns the full response dict."""
         if self.provider == "copilot":
             return await self._copilot().chat(messages, tools)
         messages = self._sanitize_tool_call_ids(messages)
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": max(0.0, min(float(temperature), 2.0)),
         }
@@ -361,6 +363,11 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         last_error: Exception | None = None
+        fallback = (
+            str(fallback_model).strip()
+            if fallback_model and str(fallback_model).strip() != payload["model"]
+            else None
+        )
         for attempt in range(3):
             try:
                 resp = await self._client.post(
@@ -373,16 +380,31 @@ class LLMClient:
                     return data["choices"][0]["message"]
                 body = resp.text[:1000]
                 last_error = Exception(f"LLM API error {resp.status_code}: {body}")
+                if fallback is not None:
+                    payload["model"] = fallback
+                    fallback = None
+                    continue
                 if not self._is_retryable_status(resp.status_code) or attempt == 2:
                     raise last_error
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
+                if fallback is not None:
+                    payload["model"] = fallback
+                    fallback = None
+                    continue
                 if attempt == 2:
                     raise Exception(f"LLM API transport error: {exc}") from exc
             await asyncio.sleep(self._retry_delay(attempt))
         raise last_error or Exception("LLM API error")
 
-    async def chat_stream(self, messages: list[dict], tools: list[dict] | None = None) -> AsyncIterator[dict]:
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        *,
+        model: str | None = None,
+        fallback_model: str | None = None,
+    ) -> AsyncIterator[dict]:
         """Stream a chat completion and yield structured content/tool chunks."""
         if self.provider == "copilot":
             async for chunk in self._copilot().chat_stream(messages, tools):
@@ -390,7 +412,7 @@ class LLMClient:
             return
         messages = self._sanitize_tool_call_ids(messages)
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": 0.3,
             "stream": True,
@@ -403,6 +425,12 @@ class LLMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        fallback = (
+            str(fallback_model).strip()
+            if fallback_model and str(fallback_model).strip() != payload["model"]
+            else None
+        )
+        emitted = False
         for attempt in range(3):
             try:
                 async with self._client.stream(
@@ -417,6 +445,10 @@ class LLMClient:
                             body += chunk
                             if len(body) > 1000:
                                 break
+                        if fallback is not None:
+                            payload["model"] = fallback
+                            fallback = None
+                            continue
                         if self._is_retryable_status(resp.status_code) and attempt < 2:
                             await asyncio.sleep(self._retry_delay(attempt))
                             continue
@@ -433,6 +465,7 @@ class LLMClient:
 
                             content = delta.get("content")
                             if content:
+                                emitted = True
                                 yield {"type": "content", "text": content}
 
                             if "tool_calls" in delta:
@@ -440,6 +473,7 @@ class LLMClient:
                                     index = tool_call.get("index", 0)
                                     fn = tool_call.get("function", {})
                                     if tool_call.get("id") or fn.get("name"):
+                                        emitted = True
                                         yield {
                                             "type": "tool_call",
                                             "index": index,
@@ -447,6 +481,7 @@ class LLMClient:
                                             "name": fn.get("name", ""),
                                         }
                                     if fn.get("arguments"):
+                                        emitted = True
                                         yield {
                                             "type": "tool_call_delta",
                                             "index": index,
@@ -457,6 +492,12 @@ class LLMClient:
                     yield {"type": "done"}
                     return
             except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if emitted:
+                    raise Exception(f"LLM API transport error after partial stream: {exc}") from exc
+                if fallback is not None:
+                    payload["model"] = fallback
+                    fallback = None
+                    continue
                 if attempt == 2:
                     raise Exception(f"LLM API transport error: {exc}") from exc
                 await asyncio.sleep(self._retry_delay(attempt))

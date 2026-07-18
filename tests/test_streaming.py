@@ -11,6 +11,7 @@ from ares.latency import LATENCY_EVENTS, LATENCY_METRICS
 from ares.llm import LLMClient
 from ares.memory import MemoryStore
 from ares.models import AppConfig
+from ares.turn_policy import build_turn_execution_context
 
 
 class FakeStreamResponse:
@@ -47,6 +48,26 @@ class FakeHttpClient:
         return FakeStreamResponse(self.lines)
 
 
+class FakeChatResponse:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class SequencedChatClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.models = []
+
+    async def post(self, _url, *, json, headers):
+        self.models.append(json["model"])
+        return self.responses.pop(0)
+
+
 class FakeReflectionService:
     def __init__(self):
         self.llm = None
@@ -59,6 +80,49 @@ class FakeReflectionService:
 
     def enqueue_turn(self, **kwargs):
         self.enqueued.append(kwargs)
+
+
+class FakePlaywrightManager:
+    def __init__(self):
+        self.calls = []
+        self.tool_definitions = [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": "test Playwright tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for name in (
+                "mcp__playwright__browser_navigate",
+                "mcp__playwright__browser_snapshot",
+            )
+        ]
+
+    def readiness_report(self):
+        return {"servers": {"playwright": {"ready": True}}}
+
+    async def call_tool(self, tool_name, arguments):
+        self.calls.append((tool_name, arguments))
+        if tool_name.endswith("browser_navigate"):
+            return "Navigated to https://www.instagram.com/"
+        if tool_name.endswith("browser_snapshot"):
+            return "- document 'Instagram'\n- link 'Home'"
+        return "Error: unexpected Playwright tool"
+
+
+def test_try_again_resolves_the_last_explicit_browser_offer():
+    resolved = Agent._resolve_referential_browser_continuation(
+        "yeah try again",
+        [{
+            "role": "assistant",
+            "content": "Want me to start a fresh browser session and try again?",
+        }],
+    )
+
+    assert "Resolved browser continuation" in resolved
+    assert build_turn_execution_context(resolved).intent.value == "browser_interaction"
 
 
 @pytest.mark.asyncio
@@ -82,6 +146,28 @@ async def test_llm_chat_stream_yields_structured_content_and_tool_chunks():
         {"type": "tool_call_delta", "index": 0, "arguments": '"blue"}'},
         {"type": "done"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_fast_model_failure_falls_back_to_primary_model():
+    client = LLMClient(api_key="test", base_url="http://localhost:1234", model="big-pickle")
+    transport = SequencedChatClient([
+        FakeChatResponse(404, text="fast model unavailable"),
+        FakeChatResponse(200, payload={
+            "choices": [{"message": {"content": "primary worked"}}]
+        }),
+    ])
+    client._client = transport
+
+    response = await client.chat(
+        [{"role": "user", "content": "hello"}],
+        tools=[],
+        model="deepseek-v4-flash-free",
+        fallback_model="big-pickle",
+    )
+
+    assert response["content"] == "primary worked"
+    assert transport.models == ["deepseek-v4-flash-free", "big-pickle"]
 
 
 @pytest.mark.asyncio
@@ -155,6 +241,8 @@ async def test_agent_run_stream_emits_before_provider_finishes_and_records_laten
     record = agent.recent_latency_metrics[-1]
     assert record["request_id"] == "stream-timing-1"
     assert record["session_id"] == "timing-session"
+    assert record["model"]
+    assert record["tool_schema_count"] >= 0
     assert set(record["events"]) == set(LATENCY_EVENTS)
     assert set(record["metrics"]) == set(LATENCY_METRICS)
     assert all(value >= 0 for value in record["events"].values())
@@ -289,15 +377,17 @@ async def test_agent_starts_next_chat_while_reflection_is_running(
 
     try:
         await asyncio.wait_for(reflection_started.wait(), timeout=0.5)
-        task = asyncio.create_task(
-            anext(agent.run_stream("Say hello", [], request_id="foreground-during-reflection"))
+        stream = agent.run_stream(
+            "Say hello", [], request_id="foreground-during-reflection"
         )
+        task = asyncio.create_task(anext(stream))
         await asyncio.wait_for(response_started.wait(), timeout=0.5)
-        # The provider is already running while the preceding reflection model
-        # call remains deliberately blocked.
-        assert agent.reflection_service.store.get(reflection_id)["status"] == "running"
+        # The foreground provider is running after the preceding background
+        # review was cancelled and durably requeued.
+        assert agent.reflection_service.store.get(reflection_id)["status"] == "pending"
         assert not release_reflection.is_set()
         assert await task == "Foreground reply."
+        await stream.aclose()
     finally:
         release_reflection.set()
         await agent.close()
@@ -331,11 +421,14 @@ async def test_agent_run_stream_normalizes_proxy_snapshots_and_preserves_final_s
     assert tokens == ["Hel", "lo", "!"]
     assert "".join(tokens) == "Hello!"
     assert agent.last_messages[-1] == {"role": "assistant", "content": "Hello!"}
-    assert reflection.enqueued == [{
-        "scope": None,
-        "user_text": "Say hello",
-        "assistant_text": "Hello!",
-    }]
+    assert len(reflection.enqueued) == 1
+    enqueued = reflection.enqueued[0]
+    assert enqueued["scope"] is None
+    assert enqueued["user_text"] == "Say hello"
+    assert enqueued["assistant_text"] == "Hello!"
+    outcome = json.loads(enqueued["outcome_summary"])
+    assert outcome["tool_outcomes"] == []
+    assert outcome["execution_record"]["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -407,6 +500,75 @@ async def test_agent_run_stream_detects_and_executes_tool_call(tmp_path, fake_em
     assert any(token.startswith("[tool:store_memory:Stored memory") for token in tokens)
     assert "".join(token for token in tokens if not token.startswith("[tool")) == "Stored!"
     assert mem_store.search("blue")
+
+
+@pytest.mark.asyncio
+async def test_browser_status_only_response_is_retried_as_real_verified_execution(
+    tmp_path, fake_embedding_provider
+):
+    mem_store = MemoryStore(db_path=tmp_path / "mem.db", embedding_provider=fake_embedding_provider)
+    manager = FakePlaywrightManager()
+    config = AppConfig(data_dir=str(tmp_path / "ares-data"), project_context_enabled=False)
+    config.reflection.enabled = False
+    agent = Agent(
+        memory_store=mem_store,
+        api_key="test-key",
+        session_id="browser-false-negative",
+        config=config,
+        mcp_manager=manager,
+    )
+    response_count = 0
+
+    async def fake_chat_stream(messages, tools=None):
+        nonlocal response_count
+        response_count += 1
+        names = {item["function"]["name"] for item in tools or []}
+        assert "mcp__playwright__browser_navigate" in names
+        assert "mcp__playwright__browser_snapshot" in names
+        if response_count == 1:
+            yield {
+                "type": "content",
+                "text": "Starting a fresh browser session now. Opening Instagram.",
+            }
+        elif response_count == 2:
+            assert "Runtime correction: no Playwright tool executed" in messages[-1]["content"]
+            yield {
+                "type": "tool_call", "index": 0, "id": "navigate",
+                "name": "mcp__playwright__browser_navigate",
+            }
+            yield {
+                "type": "tool_call_delta", "index": 0,
+                "arguments": json.dumps({"url": "https://www.instagram.com/"}),
+            }
+        elif response_count == 3:
+            yield {
+                "type": "tool_call", "index": 0, "id": "snapshot",
+                "name": "mcp__playwright__browser_snapshot",
+            }
+            yield {"type": "tool_call_delta", "index": 0, "arguments": "{}"}
+        else:
+            yield {"type": "content", "text": "Instagram is open."}
+        yield {"type": "done"}
+
+    agent.llm.chat_stream = fake_chat_stream
+    tokens = [
+        token async for token in agent.run_stream(
+            "yeah new browser sessionn",
+            [{"role": "assistant", "content": "I can start a fresh browser and open Instagram."}],
+        )
+    ]
+    visible = "".join(token for token in tokens if not token.startswith("[tool"))
+
+    assert response_count == 4
+    assert manager.calls == [
+        (
+            "mcp__playwright__browser_navigate",
+            {"url": "https://www.instagram.com/"},
+        ),
+        ("mcp__playwright__browser_snapshot", {}),
+    ]
+    assert visible == "Instagram is open."
+    assert "Starting a fresh browser session" not in "".join(tokens)
 
 
 def test_text_tool_markup_maps_search_watchers_to_advertised_watcher_query():

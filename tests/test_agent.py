@@ -23,6 +23,33 @@ def agent(tmp_path, fake_embedding_provider):
 
 
 class TestAgent:
+    def test_reflection_outcome_summary_uses_real_tool_results(self):
+        payload = json.loads(Agent._reflection_outcome_summary(
+            [
+                {"tool_name": "shell", "content": "12 passed"},
+                {"tool_name": "deploy", "content": "Error: connection refused"},
+            ],
+            {"status": "partial", "request_id": "req-1"},
+        ))
+
+        assert payload["tool_outcomes"] == [
+            {"tool": "shell", "status": "completed", "result": "12 passed"},
+            {"tool": "deploy", "status": "failed", "result": "Error: connection refused"},
+        ]
+        assert payload["execution_record"]["request_id"] == "req-1"
+
+    def test_tool_free_conversation_uses_fast_model_without_changing_primary(self, agent):
+        agent.config.fast_conversation_enabled = True
+        agent.config.fast_conversation_model = "deepseek-v4-flash-free"
+        agent.llm.model = "big-pickle"
+        conversation = build_turn_execution_context("hey")
+        substantive = build_turn_execution_context("Write and test a Python file")
+
+        assert agent._tools_for_turn(conversation) == []
+        assert agent._model_for_turn(conversation, []) == "deepseek-v4-flash-free"
+        assert agent._model_for_turn(substantive, agent._tools_for_turn(substantive)) is None
+        assert agent.llm.model == "big-pickle"
+
     def test_reflection_nested_config_does_not_become_an_llm_config(self, agent, monkeypatch):
         created_with = []
 
