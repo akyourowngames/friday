@@ -2,7 +2,7 @@
 
 # ⚡ Ares
 
-### A local-first personal AI assistant for your terminal, voice, phone, and remote chat
+### A personal AI assistant for your terminal, voice, phone, and remote chat — with local-first data control
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![Protocol](https://img.shields.io/badge/Integrations-MCP-6C47FF)](docs/mcp.md)
@@ -18,7 +18,9 @@
 
 ## ✨ What Ares is
 
-Ares is a terminal-first AI assistant with a separate Next.js power workspace, an optional local WebSocket API, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local tool surface.
+Ares is a terminal-first AI assistant with a separate Next.js power workspace, an optional local WebSocket API, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local and remote tool surface.
+
+Ares is **not** an offline or local-only assistant: it reaches external providers (OpenCode Zen, NVIDIA NIM, GitHub Copilot), connects to remote MCP servers, and serves allowlisted Telegram, phone, and web surfaces. "Local-first" here refers to *data control* — your facts, people, conversations, sessions, and configuration live under `~/.ares` on your machine — not to a limitation on where Ares can act.
 
 <table>
   <tr>
@@ -41,6 +43,11 @@ Ares is a terminal-first AI assistant with a separate Next.js power workspace, a
 - **Research delivery:** search and rank web sources, fetch online pages/PDFs/reports, extract readable content, save sourced artifacts, and deliver supported files through Telegram.
 - **Power workspace:** isolated background chats, smooth token streaming, cached history with skeleton loading, structured tool traces, and built-in previews for Markdown, PDFs, images, and generated files.
 - **One runtime:** `python -m ares --all` starts chat, Telegram, integrations, watchers, the workspace, and the advanced console around the same Ares agent.
+- **True parallel specialists:** the multi-agent resource coordinator now uses per-resource semaphores (e.g. `external: 12`, `communication: 8`, `delegation: 8`) instead of one lock per resource, so independent specialists run concurrently in a single wave. The unresponsive-tool quarantine is now per-resource, so one hung call no longer freezes unrelated workers. SQLite writes and the REPL stay serialized for safety.
+- **Telegram model & provider switching:** `/model [id|list]` and `/provider [name|list]` change the active model/provider from Telegram and persist to the shared config.
+- **Telegram + CLI MCP removal:** `/mcp remove <name>` (Telegram, with the same confirm-code safety as add) and `/mcp remove SERVER` (CLI) disconnect and delete a configured MCP server and reload tools.
+- **Shared database connection:** `ConversationStore` reuses the agent's memory connection, eliminating a startup `database is locked` race when multiple stores opened separate connections to `ares.db`.
+- **Dev hot-reload:** `python -m ares.dev` runs `python -m ares --all` and auto-restarts the process when any `ares/` source or `pyproject.toml` changes — zero extra dependencies, clean terminate-and-respawn.
 
 ## 🚀 Quick start
 
@@ -442,6 +449,7 @@ Manage connections without editing code:
 /mcp reconnect windows
 /mcp search browser automation
 /mcp add SERVER
+/mcp remove SERVER
 ```
 
 See [MCP configuration and diagnostics](docs/mcp.md) for `stdio`, SSE, and Streamable HTTP server examples, browser modes, and OAuth token storage.
@@ -540,7 +548,7 @@ python -m ares --telegram-setup
 python -m ares --telegram-authorize 123456789
 ```
 
-Telegram uses long polling: no public IP, webhook, or port forwarding is required. Authorized chats can use `/new`, `/status`, `/skills`, `/mcp`, `/file`, `/agents`, and `/workers`; unknown chats never receive tool access. Ares registers the command menu with Telegram automatically. During delegated work, one throttled, chat-scoped status message shows every specialist's role, task, state, current tool, team totals, and final success/issue count instead of posting a new message for every event. Remote supervisor commands can inspect or cancel only runs owned by that Telegram session; enable/disable, forced runs, doctor, and provider-backed smoke tests stay local.
+Telegram uses long polling: no public IP, webhook, or port forwarding is required. Authorized chats can use `/new`, `/status`, `/model`, `/provider`, `/skills`, `/mcp`, `/file`, `/agents`, and `/workers`; unknown chats never receive tool access. Ares registers the command menu with Telegram automatically. During delegated work, one throttled, chat-scoped status message shows every specialist's role, task, state, current tool, team totals, and final success/issue count instead of posting a new message for every event. Remote supervisor commands can inspect or cancel only runs owned by that Telegram session; enable/disable, forced runs, doctor, and provider-backed smoke tests stay local.
 
 Useful remote supervisor commands:
 
@@ -620,6 +628,11 @@ The default soul is warm, grounded, and naturally expressive while remaining hon
 # Python behavior
 python -m pytest -q
 
+# Hot-reload dev server (zero extra dependencies): restarts on any source change
+python -m ares.dev            # runs python -m ares --all and auto-restarts on edit
+python -m ares.dev --once     # single run, no watching
+python -m ares.dev --port 8799 --poll 0.3
+
 # Next.js power workspace
 cd ares-workspace
 npm run lint
@@ -637,7 +650,9 @@ npm run build
 | Watcher core or dashboard | `python -m pytest tests/watcher -q` plus `node --check ares/watcher/dashboard/static/app.js` |
 | Documentation | Validate links, commands, and code examples |
 
-## 🔐 Local-first boundaries
+## 🔐 Local-first data boundaries
+
+Ares acts across local and remote surfaces (Telegram, phone, web, MCP servers, cloud model providers). "Local-first" here means your **data** stays under your control on this machine; it does not mean Ares is offline or limited to local action.
 
 - Ares stores its local state under `~/.ares` by default.
 - Web search sends queries to the selected provider; connected MCP servers run according to your local configuration.

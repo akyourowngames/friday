@@ -996,7 +996,23 @@ class AresCLI(MarketplaceCommandMixin):
                 self.agent.refresh_tools()
             self._show_mcp_status(self.mcp_manager.readiness_report())
             return
-        self.console.print("[red]Usage: /mcp [status|tools [SERVER]|reconnect SERVER|health|reload|config][/red]")
+        if action == "remove" and server_name and len(parts) == 3:
+            before = len(self.config.mcp_servers)
+            self.config.mcp_servers = [
+                item for item in self.config.mcp_servers
+                if str(item.get("name") or "") != server_name
+            ]
+            if len(self.config.mcp_servers) == before:
+                self.console.print(f"[yellow]MCP server '{server_name}' was not configured.[/yellow]")
+                return
+            save_config(self.config)
+            self._sync_shared_state()
+            await self._refresh_mcp_manager_if_needed()
+            if hasattr(self.agent, "refresh_tools"):
+                self.agent.refresh_tools()
+            self.console.print(f"[green]Removed MCP server '{server_name}' and reloaded tools.[/green]")
+            return
+        self.console.print("[red]Usage: /mcp [status|tools [SERVER]|reconnect SERVER|health|reload|remove SERVER|config][/red]")
 
     def _tool_status(self, tool_name: str) -> tuple[str, str]:
         """Return status text and border style for a running tool."""

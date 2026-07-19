@@ -15,10 +15,20 @@ from ares.sqlite_utils import connect_sqlite
 class ConversationStore:
     """Stores chat sessions, messages, and compact summaries in SQLite."""
 
-    def __init__(self, db_path: Path | None = None):
-        self.db_path = db_path or get_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = connect_sqlite(self.db_path)
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ):
+        self.db_path = Path(db_path) if db_path is not None else get_db_path()
+        if connection is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._owns_connection = True
+            self.conn = connect_sqlite(self.db_path)
+        else:
+            self._owns_connection = False
+            self.conn = connection
         self._init_db()
 
     def _init_db(self) -> None:

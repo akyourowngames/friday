@@ -31,24 +31,39 @@ class BuilderWorkspace:
         return {"root": self.root, "isolated": self.isolated, "reason": self.reason}
 
 
+_DEFAULT_RESOURCE_CONCURRENCY: dict[str, int] = {
+    "browser": 4,
+    "shell": 4,
+    "repl": 1,
+    "project_check": 4,
+    "database": 1,
+    "communication": 8,
+    "external": 12,
+    "delegation": 8,
+}
+
+
 class ResourceCoordinator:
     """Coordinate mutable resources across every root and child Agent.
 
     Files use a path-aware readers/writer lease.  Stateful global surfaces use
-    one lock each.  The coordinator is deliberately independent from an Agent
-    instance so every child can share exactly the same authority boundary.
+    a bounded-concurrency semaphore each so independent specialists can run
+    in parallel up to a safe limit instead of being serialized by a single
+    ``asyncio.Lock``.
     """
 
-    def __init__(self, *, provider_limit: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        provider_limit: int = 0,
+        resource_limits: dict[str, int] | None = None,
+    ) -> None:
+        limits = {**_DEFAULT_RESOURCE_CONCURRENCY}
+        if resource_limits:
+            limits.update(resource_limits)
         self._locks = {
-            "browser": asyncio.Lock(),
-            "shell": asyncio.Lock(),
-            "repl": asyncio.Lock(),
-            "project_check": asyncio.Lock(),
-            "database": asyncio.Lock(),
-            "communication": asyncio.Lock(),
-            "external": asyncio.Lock(),
-            "delegation": asyncio.Lock(),
+            name: asyncio.Semaphore(max(1, int(limit)))
+            for name, limit in limits.items()
         }
         self._fs_condition = asyncio.Condition()
         self._fs_leases: dict[int, tuple[bool, tuple[str, ...]]] = {}
@@ -75,11 +90,19 @@ class ResourceCoordinator:
             "quarantined_operations": list(self._quarantined.values()),
         }
 
-    async def _wait_for_quarantine(self) -> None:
+    async def _wait_for_quarantine(self, resource: str = "") -> None:
         # A detached tool may still hold a process, socket, or external side
-        # effect. Conservatively quarantine new shared work until it exits.
+        # effect. Quarantine only same-resource work so one unresponsive call
+        # does not freeze unrelated parallel workers. When no resource is
+        # named, fall back to the global behavior for backwards compatibility.
         async with self._quarantine_condition:
-            await self._quarantine_condition.wait_for(lambda: not self._quarantined)
+            if resource:
+                predicate = lambda: not any(
+                    q.get("resource") == resource for q in self._quarantined.values()
+                )
+            else:
+                predicate = lambda: not self._quarantined
+            await self._quarantine_condition.wait_for(predicate)
 
     async def quarantine_call(
         self,
@@ -88,6 +111,7 @@ class ResourceCoordinator:
         *,
         owner_run_id: str = "",
         reason: str = "unresponsive",
+        resource: str = "",
     ) -> dict[str, str]:
         """Detach an unresponsive operation while retaining a logical lease."""
         async with self._quarantine_condition:
@@ -96,6 +120,7 @@ class ResourceCoordinator:
             payload = {
                 "tool": str(tool_name), "owner_run_id": str(owner_run_id),
                 "reason": str(reason), "state": "quarantined",
+                "resource": str(resource),
             }
             self._quarantined[token] = payload
 
@@ -175,7 +200,7 @@ class ResourceCoordinator:
 
     @asynccontextmanager
     async def acquire(self, resource: ToolCallResource) -> AsyncIterator[None]:
-        await self._wait_for_quarantine()
+        await self._wait_for_quarantine(resource.resource.value)
         async with AsyncExitStack() as stack:
             if resource.resource is ToolResource.FILESYSTEM_READ:
                 await stack.enter_async_context(

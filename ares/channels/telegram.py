@@ -37,6 +37,16 @@ from ares.mcp_registry import MCPRegistryClient
 from ares.models import AppConfig, TelegramConfig
 from ares.proactive import ProactiveService
 from ares.reminders import DesktopNotifier
+from ares.llm import (
+    MODEL_REGISTRY,
+    PROVIDER_BASE_URLS,
+    SUPPORTED_PROVIDERS,
+    activate_provider_config,
+    configured_provider_api_key,
+    default_model_for_provider,
+    normalize_provider,
+    provider_for_model,
+)
 from ares.multi_agent_display import ACTIVE_STATUSES, active_runs, telegram_overview, telegram_run
 from ares.skill_registry import (
     RegistryError as SkillRegistryError,
@@ -68,6 +78,8 @@ TELEGRAM_COMMANDS = (
     ("help", "Show Ares commands"),
     ("new", "Start a fresh Ares session"),
     ("status", "Show runtime and active team status"),
+    ("model", "Change the active model or list models"),
+    ("provider", "Switch the provider or list providers"),
     ("agents", "Inspect specialist teams and workers"),
     ("workers", "Show every active specialist worker"),
     ("monitors", "List proactive watchers"),
@@ -460,6 +472,8 @@ class TelegramChannel:
                     "/file <path> — upload a local PC file\n"
                     "/skills [list|search|info|install] — manage skills\n"
                     "/mcp [list|search|info|add|test|refresh] — manage MCPs\n"
+                    "/model [id|list] — change the active model\n"
+                    "/provider [name|list] — switch provider\n"
                     "/monitors — list proactive watchers\n"
                     "/monitor [add|status|pause|resume|remove|events|test] — control watchers\n"
                     "/alerts — recent watcher incidents\n"
@@ -501,6 +515,9 @@ class TelegramChannel:
                 return
             if command == "/file":
                 await self._send_requested_file(chat_id, argument, reply_to)
+                return
+            if command in {"/model", "/provider"}:
+                await self._handle_model_command(chat_id, command, argument, reply_to)
                 return
             if command in {"/monitor", "/monitors", "/alerts"}:
                 await self._handle_watcher_command(chat_id, command, argument, reply_to)
@@ -593,6 +610,84 @@ class TelegramChannel:
                 "/workers — shortcut for active workers"
             )
         await self._send_text_chunks(chat_id, _telegram_trim(text), reply_to)
+
+    async def _handle_model_command(self, chat_id: int, command: str, argument: str, reply_to: int | None) -> None:
+        """Switch the active model/provider from Telegram.
+
+        Mirrors the local ``/model`` and ``/provider`` commands: listing is
+        read-only, while a change is applied to the live Agent and persisted to
+        the shared config.
+        """
+        arg = (argument or "").strip()
+        if command == "/provider":
+            if not arg or arg.casefold() == "list":
+                lines = ["Ares providers"]
+                current = normalize_provider(getattr(self.config, "provider", "opencode"))
+                for name, url in PROVIDER_BASE_URLS.items():
+                    status = "current" if name == current else "available"
+                    lines.append(f"• {name} — {url or 'GitHub Copilot SDK (OAuth)'} · {status}")
+                lines.append("\nUsage: /provider <name>  (e.g. /provider nim)")
+                await self.api.send_message(chat_id, _telegram_trim("\n".join(lines)), reply_to_message_id=reply_to)
+                return
+            provider = normalize_provider(arg)
+            if provider not in SUPPORTED_PROVIDERS:
+                valid = ", ".join((*SUPPORTED_PROVIDERS, "nvidia (alias for nim)"))
+                await self.api.send_message(
+                    chat_id, f"Unknown provider: {arg}. Valid: {valid}", reply_to_message_id=reply_to
+                )
+                return
+            self._activate_provider(provider)
+            replacement_model = None
+            if provider_for_model(self.config.model) != provider:
+                replacement_model = default_model_for_provider(provider)
+                self.config.model = replacement_model
+                self.agent.set_model(replacement_model)
+            save_config(self.config)
+            note = f" Model set to {replacement_model}." if replacement_model else ""
+            await self.api.send_message(
+                chat_id, f"Provider switched to {provider}.{note}", reply_to_message_id=reply_to
+            )
+            return
+
+        # command == "/model"
+        if not arg or arg.casefold() == "list":
+            lines = ["Ares models"]
+            for group_key, group in MODEL_REGISTRY.items():
+                for m in group["models"]:
+                    backend = provider_for_model(m["id"])
+                    endpoint = (
+                        "NVIDIA NIM" if backend == "nim"
+                        else "GitHub Copilot" if backend == "copilot"
+                        else "OpenCode Zen"
+                    )
+                    status = "current" if m["id"] == self.config.model else "available"
+                    lines.append(f"• {m['id']} — {endpoint} · {status}")
+            lines.append("\nUsage: /model <id>  (e.g. /model gpt-oss-120b)")
+            await self.api.send_message(chat_id, _telegram_trim("\n".join(lines)), reply_to_message_id=reply_to)
+            return
+        selected_provider = provider_for_model(arg)
+        switched_provider = False
+        if selected_provider and selected_provider != normalize_provider(self.config.provider):
+            self._activate_provider(selected_provider)
+            switched_provider = True
+        self.config.model = arg
+        save_config(self.config)
+        self.agent.set_model(arg)
+        provider_note = f" Provider switched to {selected_provider}." if switched_provider else ""
+        await self.api.send_message(
+            chat_id, f"Model switched to {arg}.{provider_note}", reply_to_message_id=reply_to
+        )
+
+    def _activate_provider(self, provider: str) -> str:
+        """Apply a provider switch to config and the live LLM client."""
+        active = activate_provider_config(self.config, provider)
+        llm = getattr(self.agent, "llm", None)
+        if llm is not None:
+            llm.provider = active
+            llm.base_url = self.config.api_base_url.rstrip("/")
+            llm.api_key = configured_provider_api_key(self.config, active)
+            llm.config = self.config
+        return active
 
     async def _handle_watcher_command(self, chat_id: int, command: str, argument: str, reply_to: int | None) -> None:
         """Run the same watcher controls exposed by the local terminal."""
@@ -1188,6 +1283,10 @@ class TelegramChannel:
                 return
             await self._review_marketplace_action(chat_id, "mcp_add", name, None, reply_to)
             return
+        if action == "remove" and len(tokens) == 2:
+            name = tokens[1].strip()
+            await self._review_marketplace_action(chat_id, "mcp_remove", name, None, reply_to)
+            return
         if action == "test" and len(tokens) <= 2:
             if manager is None:
                 await self._send_marketplace_message(chat_id, "No MCP manager is active in this Ares process.", reply_to)
@@ -1212,7 +1311,7 @@ class TelegramChannel:
             self.agent.refresh_tools()
             await self._send_marketplace_message(chat_id, "MCP connections refreshed. Run /mcp status for readiness.", reply_to)
             return
-        await self._send_marketplace_message(chat_id, "Usage: /mcp [list|status|search <need>|info <name-or-number>|add <name-or-number>|test [server]|refresh]", reply_to)
+        await self._send_marketplace_message(chat_id, "Usage: /mcp [list|status|search <need>|info <name-or-number>|add <name-or-number>|remove <name>|test [server]|refresh]", reply_to)
 
     def _resolve_marketplace_result(self, chat_id: int, kind: str, value: str) -> str | None:
         """Resolve a numbered result from the most recent search for this chat."""
@@ -1258,6 +1357,12 @@ class TelegramChannel:
                 f"Trust: {detail.security_status}\nCommunity: {_community_label(detail)}\n"
                 f"Needs: {', '.join(f'{item.type}:{item.name}' for item in detail.dependencies) or 'none declared'}"
             )
+        elif action == "mcp_remove":
+            existing = {str(item.get("name") or "") for item in self.config.mcp_servers if isinstance(item, dict)}
+            if name not in existing:
+                await self._send_marketplace_message(chat_id, f"MCP server '{name}' is not configured.", reply_to)
+                return
+            summary = f"Remove MCP · {name}\n\nThis disconnects the server and removes it from the shared Ares config. Any tools it provided will no longer be available."
         else:
             existing = {str(item.get("name") or "") for item in self.config.mcp_servers if isinstance(item, dict)}
             if name in existing:
@@ -1305,6 +1410,27 @@ class TelegramChannel:
                 return
             self.skill_manager = SkillManager(skill_dirs=list(self.config.skill_dirs or []) or None)
             await self._send_marketplace_message(chat_id, f"Installed skill '{installed.skill.name}' on this PC. It is now available to Ares everywhere.", reply_to)
+            return
+        if action == "mcp_remove":
+            current = self._config_provider()
+            before = len(current.mcp_servers)
+            current.mcp_servers = [
+                item for item in current.mcp_servers
+                if str(item.get("name") or "") != name
+            ]
+            if len(current.mcp_servers) == before:
+                await self._send_marketplace_message(chat_id, f"MCP server '{name}' was not found; nothing changed.", reply_to)
+                return
+            save_config(current)
+            self.config = current
+            self.agent.apply_config(current)
+            previous = getattr(self.agent, "mcp_manager", None)
+            if previous is not None:
+                await previous.close()
+            manager = MCPClientManager(current.mcp_servers, data_dir=current.data_dir)
+            await manager.start()
+            self.agent.set_mcp_manager(manager)
+            await self._send_marketplace_message(chat_id, f"Removed MCP '{name}' from the shared Ares config and refreshed this process. Run /mcp status to confirm.", reply_to)
             return
         client = MCPRegistryClient(self.config.mcp_registries)
         try:

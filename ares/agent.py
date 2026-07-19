@@ -39,7 +39,7 @@ from ares.delegation_router import (
     runtime_failure_decision,
 )
 from ares.multi_agent import AgentTask, AgentTeamResult, ContextMode
-from ares.multi_agent_policy import ActionGrantRegistry
+from ares.multi_agent_policy import ActionGrantRegistry, call_resource
 from ares.multi_agent_resources import ResourceCoordinator
 from ares.profile import ProfileManager
 from ares.reflection import ReflectionService
@@ -1444,10 +1444,14 @@ class Agent:
                     done, _pending = await asyncio.wait({dispatch}, timeout=cleanup_grace)
                     if not done:
                         if coordinator is not None:
+                            _resource = call_resource(
+                                0, {"function": {"name": tool_name}}, args
+                            ).resource.value
                             record = await coordinator.quarantine_call(
                                 tool_name, dispatch,
                                 owner_run_id=self.root_run_id or self.child_run_id,
                                 reason="timeout",
+                                resource=_resource,
                             )
                             if not hasattr(self, "unresponsive_tool_records"):
                                 self.unresponsive_tool_records = []
@@ -1487,10 +1491,14 @@ class Agent:
                         dispatch.cancel()
                         done, _pending = await asyncio.wait({dispatch}, timeout=cleanup_grace)
                         if not done:
+                            _resource = call_resource(
+                                0, {"function": {"name": tool_name}}, args
+                            ).resource.value
                             record = await coordinator.quarantine_call(
                                 tool_name, dispatch,
                                 owner_run_id=self.root_run_id or self.child_run_id,
                                 reason="cancelled_with_unresponsive_tool",
+                                resource=_resource,
                             )
                             if not hasattr(self, "unresponsive_tool_records"):
                                 self.unresponsive_tool_records = []

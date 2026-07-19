@@ -161,7 +161,9 @@ class AresServer:
         if workspace_port:
             self.config.workspace.port = workspace_port
         self.memory_store = memory_store or MemoryStore()
-        self.conversation_store = conversation_store or ConversationStore()
+        self.conversation_store = conversation_store or ConversationStore(
+            connection=getattr(self.memory_store, "conn", None)
+        )
         self.mcp_manager = (
             MCPClientManager(self.config.mcp_servers, data_dir=self.config.data_dir)
             if self.config.mcp_servers
