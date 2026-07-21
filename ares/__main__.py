@@ -152,6 +152,11 @@ def main():
     parser.add_argument("--telegram-revoke", type=int, metavar="CHAT_ID", help="Remove one Telegram chat ID")
     parser.add_argument("--voice", action="store_true", help="Run continuous voice mode (always listening)")
     parser.add_argument(
+        "--desktop",
+        action="store_true",
+        help="Run the background desktop voice assistant with system tray and push-to-talk",
+    )
+    parser.add_argument(
         "--telephony-webhook",
         action="store_true",
         help="Run the signed Twilio Voice webhook server (place behind public HTTPS)",
@@ -204,6 +209,8 @@ def main():
                 tts_backend=args.tts_backend,
                 barge_in=args.barge_in,
             ))
+        elif args.desktop:
+            _run_coro(_run_desktop())
         elif args.telephony_webhook:
             _run_telephony_webhook(args.telephony_webhook_host, args.telephony_webhook_port)
         elif args.telephony_media_gateway:
