@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ares.turn_policy import (
+from ares.integrations.turn_policy import (
     ActionGrant,
     ActionGrantUseRegistry,
     TurnExecutionContext,
@@ -16,7 +16,7 @@ from ares.turn_policy import (
     classify_turn_intent,
     issue_action_grant,
 )
-from ares.tool_registry import RootToolRegistry
+from ares.integrations.tool_registry import RootToolRegistry
 from ares.tools.definitions import get_tool_definitions
 
 

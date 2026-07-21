@@ -3,7 +3,7 @@
 import json
 
 from ares.tools import exporter as exporter_module
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 from ares.exporter import export_data, import_data
 from ares.memory import MemoryStore
 from ares.models import AppConfig

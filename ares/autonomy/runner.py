@@ -9,8 +9,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ares.actions import ActionLedger, action_task_context, collect_action_ids
-from ares.tasks import (
+from ares.skills.actions import ActionLedger, action_task_context, collect_action_ids
+from ares.skills.tasks import (
     TaskAlreadyRunningError,
     TaskConflictError,
     TaskLeaseLostError,

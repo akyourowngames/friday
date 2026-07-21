@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 from ares.cron.store import CronStore
 from ares.cron.tools import CronToolHandlers
 from ares.exporter import export_data, import_data

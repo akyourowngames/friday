@@ -2,8 +2,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from ares.actions import ActionLedger
-from ares.goals import GoalStore
+from ares.skills.actions import ActionLedger
+from ares.skills.goals import GoalStore
 from ares.watcher.fetchers.base import BaseFetcher, FetchResult
 from ares.watcher.integration import GoalWatcherBridge
 from ares.watcher.models import Monitor, utc_now

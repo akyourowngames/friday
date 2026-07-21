@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ares.skill_generator import SkillGenerationError, SkillGenerator
+from ares.skills.generator import SkillGenerationError, SkillGenerator
 
 
 @pytest.mark.asyncio

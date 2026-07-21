@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from ares.mcp_registry import MCPRegistryClient, MCPServerDetail, derive_server_name, installation_plan
+from ares.integrations.mcp_registry import MCPRegistryClient, MCPServerDetail, derive_server_name, installation_plan
 from ares.models import MCPRegistry
 
 

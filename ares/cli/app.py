@@ -33,21 +33,21 @@ from rich.text import Text
 from rich.table import Table
 
 from ares.agent import Agent
-from ares.browser import BrowserManager, VALID_BROWSER_MODES
-from ares.context import ProjectContext
-from ares.context_blend import build_context_prompt
-from ares.conversations import ConversationStore
+from ares.integrations.browser import BrowserManager, VALID_BROWSER_MODES
+from ares.context.discovery import ProjectContext
+from ares.context.blend import build_context_prompt
+from ares.context.conversations import ConversationStore
 from ares.tools.exporter import export_data, import_data
 from ares.memory import MemoryStore
-from ares.memory_cleaner import MemoryCleaner
+from ares.memory.cleaner import MemoryCleaner
 from ares.profile import ProfileManager, PROFILE_TEMPLATE
-from ares.proactive import ProactiveService
-from ares.onboarding import OnboardingWizard
-from ares.reminders import DesktopNotifier
+from ares.skills.proactive import ProactiveService
+from ares.infra.onboarding import OnboardingWizard
+from ares.skills.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.config import _ensure_mcp_defaults, load_config, save_config
-from ares.llm import (
+from ares.integrations.llm import (
     MODEL_REGISTRY,
     PROVIDER_BASE_URLS,
     SUPPORTED_PROVIDERS,
@@ -57,15 +57,15 @@ from ares.llm import (
     normalize_provider,
     provider_for_model,
 )
-from ares.multi_agent_display import ACTIVE_STATUSES, elapsed_label, one_line, summarize_runs
-from ares.skills import SkillManager
+from ares.multi_agent.display import ACTIVE_STATUSES, elapsed_label, one_line, summarize_runs
+from ares.skills.discovery import SkillManager
 from ares.tools.mcp_client import MCPClientManager, redact_mcp_text
 from ares.tools.adb_bridge import phone_status as get_phone_status
 from ares.cron import CronScheduler, CronStore
 from ares.cron.toast import CronToastManager
 from ares.session import SessionManager
 from ares.sessions import SessionStore
-from .constants import CLI_BOX, COMPLETER, STYLE, TOOL_OUTPUT_MODES
+from .constants import ASCII_BOX, UNICODE_BOX, COMPLETER, STYLE, TOOL_OUTPUT_MODES
 from .marketplace import MarketplaceCommandMixin
 from .runtime import clear_current_task_cancellation, history_path, supports_unicode_output
 
@@ -637,7 +637,7 @@ class AresCLI(MarketplaceCommandMixin):
         if command == "/menu":
             destination = await self._select_interactive_option(
                 title="Ares Command Center",
-                text="Use ↑/↓ then Enter. Escape cancels.",
+                text="Use arrow keys then Enter. Escape cancels.",
                 values=[
                     ("/provider", "Provider & endpoint"),
                     ("/model", "Model"),
@@ -755,9 +755,10 @@ class AresCLI(MarketplaceCommandMixin):
             ("  /  ", "dim"),
             ("open Notepad and write a note", "cyan"),
         ))
+        arrow_hint = "up/down" if not getattr(self, "unicode_output", False) else "↑ ↓"
         overview.add_row(Text.assemble(
             ("Commands  ", "dim"), ("/help", "cyan"),
-            ("    Type / for suggestions; use ", "dim"), ("↑ ↓", "cyan"),
+            ("    Type / for suggestions; use ", "dim"), (arrow_hint, "cyan"),
             (" to choose", "dim"),
         ))
 
@@ -777,7 +778,7 @@ class AresCLI(MarketplaceCommandMixin):
         if not memories:
             self.console.print("[dim]No memories found.[/dim]")
             return
-        table = Table(title=title, border_style="bright_green", box=CLI_BOX)
+        table = Table(title=title, border_style="bright_green", box=self._ui_box())
         table.add_column("ID", style="dim", no_wrap=True)
         table.add_column("Category", style="cyan", no_wrap=True)
         table.add_column("Importance", justify="right", no_wrap=True)
@@ -794,7 +795,7 @@ class AresCLI(MarketplaceCommandMixin):
         self.console.print(table)
 
     def _show_model_list(self, provider: str | None = None) -> None:
-        table = Table(title="Models", border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title="Models", border_style="bright_cyan", box=self._ui_box())
         table.add_column("Model", style="cyan")
         table.add_column("Endpoint", style="dim")
         table.add_column("Status", no_wrap=True)
@@ -815,7 +816,7 @@ class AresCLI(MarketplaceCommandMixin):
         self.console.print(table)
 
     def _show_provider_list(self) -> None:
-        table = Table(title="Providers", border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title="Providers", border_style="bright_cyan", box=self._ui_box())
         table.add_column("Provider", style="cyan")
         table.add_column("Base URL", style="dim")
         table.add_column("Status", no_wrap=True)
@@ -860,7 +861,7 @@ class AresCLI(MarketplaceCommandMixin):
             f"MCP Status  {report.get('connected', 0)}/{report.get('configured', 0)} connected"
             f"  {report.get('tools', 0)} tools"
         )
-        table = Table(title=title, border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title=title, border_style="bright_cyan", box=self._ui_box())
         table.add_column("Server", style="cyan", no_wrap=True)
         table.add_column("Status", no_wrap=True)
         table.add_column("Transport", no_wrap=True)
@@ -896,7 +897,7 @@ class AresCLI(MarketplaceCommandMixin):
             if not tools:
                 self.console.print(f"[dim]{name}: no tools discovered yet. Run /mcp reconnect {name}.[/dim]")
                 continue
-            table = Table(title=f"MCP Tools: {name}", border_style="bright_cyan", box=CLI_BOX)
+            table = Table(title=f"MCP Tools: {name}", border_style="bright_cyan", box=self._ui_box())
             table.add_column("Tool", style="cyan", no_wrap=True)
             table.add_column("Description", ratio=4)
             for tool in tools:
@@ -908,7 +909,7 @@ class AresCLI(MarketplaceCommandMixin):
         if self.mcp_manager is None or not self.mcp_manager.servers:
             self.console.print("[dim]No MCP servers are configured.[/dim]")
             return
-        table = Table(title="MCP Configuration", border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title="MCP Configuration", border_style="bright_cyan", box=self._ui_box())
         table.add_column("Server", style="cyan", no_wrap=True)
         table.add_column("Transport", no_wrap=True)
         table.add_column("Target", ratio=3)
@@ -930,7 +931,7 @@ class AresCLI(MarketplaceCommandMixin):
         self.console.print(table)
 
     def _show_mcp_help(self) -> None:
-        table = Table(title="MCP Commands", border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title="MCP Commands", border_style="bright_cyan", box=self._ui_box())
         table.add_column("Command", style="cyan", no_wrap=True)
         table.add_column("Description", ratio=4)
         table.add_row("/mcp", "Show this MCP command guide")
@@ -1067,7 +1068,7 @@ class AresCLI(MarketplaceCommandMixin):
 
     def _ui_box(self):
         """Avoid Unicode border redraw issues in classic Command Prompt."""
-        return CLI_BOX if getattr(self, "unicode_output", False) else box.ASCII
+        return UNICODE_BOX if getattr(self, "unicode_output", False) else ASCII_BOX
 
     def _activity_marker(self, state: str) -> str:
         unicode_markers = {
@@ -1277,7 +1278,7 @@ class AresCLI(MarketplaceCommandMixin):
         if mode == "hidden" or not events:
             return None
 
-        table = Table(title="Tools", border_style="bright_cyan", box=CLI_BOX, header_style="bold bright_cyan")
+        table = Table(title="Tools", border_style="bright_cyan", box=self._ui_box(), header_style="bold bright_cyan")
         table.add_column("Tool", style="bright_cyan", no_wrap=True)
         table.add_column("Status", no_wrap=True)
         table.add_column("Detail", ratio=4)
@@ -1414,13 +1415,13 @@ class AresCLI(MarketplaceCommandMixin):
         """Return a conservative width for readable assistant text."""
         fallback_width = getattr(self.console, "width", 100) or 100
         columns = shutil.get_terminal_size((fallback_width, 24)).columns
-        return max(48, min(columns, fallback_width, 110) - 2)
+        return min(columns, max(48, min(columns, fallback_width, 110) - 2))
 
     def _panel_width(self) -> int:
         """Return a panel width that fits inside the live terminal."""
         fallback_width = getattr(self.console, "width", 100) or 100
         columns = shutil.get_terminal_size((fallback_width, 24)).columns
-        return max(52, min(columns, fallback_width, 112) - 1)
+        return min(columns, max(52, min(columns, fallback_width, 112) - 1))
 
     def _plain_response_line(self, line: str) -> str:
         """Remove lightweight Markdown that makes plain terminal alignment noisy."""
@@ -1849,7 +1850,7 @@ class AresCLI(MarketplaceCommandMixin):
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if command == "/help":
-            table = Table(title="Commands", border_style="bright_cyan", box=CLI_BOX)
+            table = Table(title="Commands", border_style="bright_cyan", box=self._ui_box())
             table.add_column("Command", style="cyan", no_wrap=True)
             table.add_column("Description", ratio=4)
             table.add_row("/help", "Show available commands")
@@ -1895,7 +1896,7 @@ class AresCLI(MarketplaceCommandMixin):
                 self._print_memories(self.memory_store.search(arg[7:].strip(), limit=10), "Memory Search")
             elif arg == "clean":
                 stats = MemoryCleaner(self.memory_store).cleanup()
-                table = Table(title="Memory Cleanup", border_style="bright_green", box=CLI_BOX)
+                table = Table(title="Memory Cleanup", border_style="bright_green", box=self._ui_box())
                 table.add_column("Metric", style="cyan")
                 table.add_column("Count", justify="right")
                 table.add_row("Duplicates merged", str(stats.get("duplicates_merged", 0)))
@@ -1920,7 +1921,7 @@ class AresCLI(MarketplaceCommandMixin):
                     if requested_status == "pending_approval"
                     else "Approved Procedural Learning"
                 )
-                table = Table(title=title, box=CLI_BOX)
+                table = Table(title=title, box=self._ui_box())
                 table.add_column("ID", justify="right", style="cyan")
                 table.add_column("Kind")
                 table.add_column("Learning")
@@ -2003,7 +2004,7 @@ class AresCLI(MarketplaceCommandMixin):
                 self.console.print("[yellow]No completed message timing is available yet.[/yellow]")
             else:
                 latest = records[-1]
-                table = Table(title="Latest Message Latency", box=CLI_BOX)
+                table = Table(title="Latest Message Latency", box=self._ui_box())
                 table.add_column("Metric", style="cyan")
                 table.add_column("Value", justify="right")
                 table.add_row("Model", str(latest.get("model") or "unknown"))
@@ -2028,7 +2029,7 @@ class AresCLI(MarketplaceCommandMixin):
                 self.console.print("[red]Goal store is unavailable.[/red]")
             else:
                 def print_goal_table(goals, title):
-                    table = Table(title=title, border_style="bright_red", box=CLI_BOX)
+                    table = Table(title=title, border_style="bright_red", box=self._ui_box())
                     table.add_column("ID", style="bright_red", justify="right", no_wrap=True)
                     table.add_column("Goal", ratio=4)
                     table.add_column("Status", no_wrap=True)
@@ -2046,7 +2047,7 @@ class AresCLI(MarketplaceCommandMixin):
                     self.console.print(table if goals else "[dim]No matching goals.[/dim]")
 
                 def print_signal_table(signals, title="Pending Goal Signals"):
-                    table = Table(title=title, border_style="bright_red", box=CLI_BOX)
+                    table = Table(title=title, border_style="bright_red", box=self._ui_box())
                     table.add_column("Signal", style="bright_red", justify="right", no_wrap=True)
                     table.add_column("Goal", justify="right", no_wrap=True)
                     table.add_column("Severity", no_wrap=True)
@@ -2102,7 +2103,7 @@ class AresCLI(MarketplaceCommandMixin):
                         if signals:
                             print_signal_table(signals, f"Goal #{goal_id} · Pending Watcher Signals")
                         if timeline:
-                            event_table = Table(title="Recent Goal Timeline", border_style="dim", box=CLI_BOX)
+                            event_table = Table(title="Recent Goal Timeline", border_style="dim", box=self._ui_box())
                             event_table.add_column("When", style="dim")
                             event_table.add_column("Event")
                             event_table.add_column("Progress", justify="right")
@@ -2123,7 +2124,7 @@ class AresCLI(MarketplaceCommandMixin):
                 self.config.multi_agent.enabled = enabled
                 save_config(self.config)
                 if enabled and runtime is None:
-                    from ares.multi_agent_runtime import MultiAgentRuntime
+                    from ares.multi_agent.runtime import MultiAgentRuntime
                     runtime = MultiAgentRuntime(self.agent)
                     self.agent.multi_agent_runtime = runtime
                 self.agent.refresh_tools()
@@ -2145,7 +2146,7 @@ class AresCLI(MarketplaceCommandMixin):
                     name=f"ares-cli-agents-{normalized}",
                 )
             elif action in {"list", "roles"}:
-                table = Table(title="Ares Specialists", border_style="bright_cyan", box=CLI_BOX)
+                table = Table(title="Ares Specialists", border_style="bright_cyan", box=self._ui_box())
                 table.add_column("Role", style="cyan")
                 table.add_column("Mode")
                 table.add_column("Budget")
@@ -2255,7 +2256,7 @@ class AresCLI(MarketplaceCommandMixin):
                 if not client_id:
                     self.console.print("[red]Usage: /copilot login GITHUB_OAUTH_CLIENT_ID[/red]")
                 else:
-                    from ares.copilot_oauth import authorize_github_device_flow
+                    from ares.integrations.copilot_oauth import authorize_github_device_flow
                     self.console.print("Requesting a GitHub device code…")
                     try:
                         token = authorize_github_device_flow(
@@ -2297,7 +2298,7 @@ class AresCLI(MarketplaceCommandMixin):
             action = pieces[0].lower() if pieces else "status"
             manager = self._browser()
             if action == "status" and len(pieces) == 1:
-                table = Table(title="Browser", border_style="bright_cyan", box=CLI_BOX)
+                table = Table(title="Browser", border_style="bright_cyan", box=self._ui_box())
                 table.add_column("Setting", style="cyan", no_wrap=True)
                 table.add_column("Value", ratio=3)
                 cdp_ready = manager.detect_chrome_cdp()
@@ -2424,7 +2425,7 @@ class AresCLI(MarketplaceCommandMixin):
                 if not options:
                     self.console.print("[dim]No saved conversations are available yet.[/dim]")
                 else:
-                    table = Table(title="Saved conversations", border_style="bright_cyan", box=CLI_BOX)
+                    table = Table(title="Saved conversations", border_style="bright_cyan", box=self._ui_box())
                     table.add_column("ID", style="cyan", no_wrap=True)
                     table.add_column("Summary", ratio=4)
                     table.add_column("Last active", style="dim")
@@ -2493,7 +2494,7 @@ class AresCLI(MarketplaceCommandMixin):
         elif command == "/skills":
             if not arg:
                 skills = self.skill_manager.list_all()
-                table = Table(title="Skills", border_style="bright_magenta", box=CLI_BOX)
+                table = Table(title="Skills", border_style="bright_magenta", box=self._ui_box())
                 table.add_column("Name", style="cyan", no_wrap=True)
                 table.add_column("Category", no_wrap=True)
                 table.add_column("Description", ratio=4)
@@ -2502,7 +2503,7 @@ class AresCLI(MarketplaceCommandMixin):
                 self.console.print(table if skills else "[dim]No skills installed.[/dim]")
             elif arg == "categories":
                 cats = self.skill_manager.list_categories()
-                table = Table(title="Skill Categories", border_style="bright_magenta", box=CLI_BOX)
+                table = Table(title="Skill Categories", border_style="bright_magenta", box=self._ui_box())
                 table.add_column("Category", style="cyan")
                 table.add_column("Skills", justify="right")
                 for category, count in cats.items():
@@ -2514,7 +2515,7 @@ class AresCLI(MarketplaceCommandMixin):
                 if not skills:
                     self.console.print("[dim]No matching skills found.[/dim]")
                 else:
-                    table = Table(title=f"Skill Search: {query}", border_style="bright_magenta", box=CLI_BOX)
+                    table = Table(title=f"Skill Search: {query}", border_style="bright_magenta", box=self._ui_box())
                     table.add_column("Name", style="cyan", no_wrap=True)
                     table.add_column("Category", no_wrap=True)
                     table.add_column("Description", ratio=4)
@@ -2539,7 +2540,7 @@ class AresCLI(MarketplaceCommandMixin):
             else:
                 import json
                 payload = json.loads(get_phone_status())
-                table = Table(title="Phone Bridge", border_style="bright_cyan", box=CLI_BOX)
+                table = Table(title="Phone Bridge", border_style="bright_cyan", box=self._ui_box())
                 table.add_column("Bridge", style="cyan", no_wrap=True)
                 table.add_column("Status")
                 table.add_column("Details", style="dim", ratio=4)
@@ -2616,7 +2617,7 @@ class AresCLI(MarketplaceCommandMixin):
                 result = controller.execute(arg if command == "/monitor" else "list")
                 action = result["action"]
                 if action == "list":
-                    table = Table(title="Ares Watchers", border_style="bright_red", box=CLI_BOX)
+                    table = Table(title="Ares Watchers", border_style="bright_red", box=self._ui_box())
                     table.add_column("ID", style="red", no_wrap=True); table.add_column("Watcher", ratio=3)
                     table.add_column("Type"); table.add_column("Status"); table.add_column("Interval", justify="right")
                     for item in result["monitors"]:
@@ -2624,7 +2625,7 @@ class AresCLI(MarketplaceCommandMixin):
                         table.add_row(item["id"][:8], item["name"], item["type"], status, f"{item['interval_seconds']}s")
                     self.console.print(table if result["monitors"] else "[dim]No watchers configured. Use /monitor add \"Name\" URL[/dim]")
                 elif action == "events":
-                    table = Table(title=f"Watcher Events · {result['monitor']['name']}", border_style="bright_red", box=CLI_BOX)
+                    table = Table(title=f"Watcher Events · {result['monitor']['name']}", border_style="bright_red", box=self._ui_box())
                     table.add_column("When"); table.add_column("Severity"); table.add_column("Change", ratio=4)
                     for item in result["events"]: table.add_row(item["created_at"], item["severity"], item["change_summary"] or item["event_type"])
                     self.console.print(table if result["events"] else "[dim]No changes recorded.[/dim]")
@@ -2667,7 +2668,7 @@ class AresCLI(MarketplaceCommandMixin):
                     "details": "Live activity and rendered results; huge MCP payloads stay collapsed.",
                     "hidden": "No tool activity unless an error reaches the answer.",
                 }
-                table = Table(title="Tool Output", border_style="bright_cyan", box=CLI_BOX)
+                table = Table(title="Tool Output", border_style="bright_cyan", box=self._ui_box())
                 table.add_column("Mode", style="cyan", no_wrap=True)
                 table.add_column("Status", no_wrap=True)
                 table.add_column("Description", ratio=4)

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 from rich.console import Console
 
 from ares.cli import app as cli_module
-from ares.browser import BrowserManager
+from ares.integrations.browser import BrowserManager
 from ares.cli import AresCLI
 from ares.config import _ensure_mcp_defaults
 from ares.models import AppConfig
@@ -54,7 +54,7 @@ def test_extension_token_is_only_exposed_to_extension_mode():
 
 def test_detect_chrome_cdp_handles_open_closed_and_errors():
     manager = BrowserManager(AppConfig(browser_cdp_port=9333))
-    with patch("ares.browser.socket.socket") as socket_factory:
+    with patch("ares.integrations.browser.socket.socket") as socket_factory:
         connection = MagicMock()
         socket_factory.return_value.__enter__.return_value = connection
         connection.connect_ex.return_value = 0
@@ -62,7 +62,7 @@ def test_detect_chrome_cdp_handles_open_closed_and_errors():
         connection.connect_ex.assert_called_with(("127.0.0.1", 9333))
         connection.connect_ex.return_value = 111
         assert manager.detect_chrome_cdp() is False
-    with patch("ares.browser.socket.socket", side_effect=OSError("offline")):
+    with patch("ares.integrations.browser.socket.socket", side_effect=OSError("offline")):
         assert manager.detect_chrome_cdp() is False
 
 
@@ -80,12 +80,12 @@ def test_mode_hints_and_chrome_path_resolution():
 
 def test_launch_system_chrome_reports_safe_errors(monkeypatch):
     manager = BrowserManager(AppConfig(browser_chrome_path="C:/chrome.exe"))
-    with patch("ares.browser.subprocess.Popen") as launch:
+    with patch("ares.integrations.browser.subprocess.Popen") as launch:
         message = manager.launch_system_chrome(9333)
         assert "CDP on :9333" in message
         assert "Close all other Chrome windows" in message
         assert "--remote-debugging-port=9333" in launch.call_args.args[0]
-    with patch("ares.browser.subprocess.Popen", side_effect=FileNotFoundError):
+    with patch("ares.integrations.browser.subprocess.Popen", side_effect=FileNotFoundError):
         assert "not found" in manager.launch_system_chrome().lower()
     assert "between 1 and 65535" in manager.launch_system_chrome(70000)
 
@@ -94,7 +94,7 @@ def test_wait_for_chrome_cdp_observes_readiness(monkeypatch):
     manager = BrowserManager(AppConfig())
     attempts = iter([False, True])
     monkeypatch.setattr(manager, "detect_chrome_cdp", lambda: next(attempts))
-    monkeypatch.setattr("ares.browser.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("ares.integrations.browser.time.sleep", lambda _seconds: None)
 
     assert manager.wait_for_chrome_cdp(timeout_seconds=1) is True
 

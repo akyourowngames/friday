@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 from ares.memory import MemoryStore
-from ares.self_improvement import SelfImprovementStore
+from ares.skills.self_improvement import SelfImprovementStore
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.tools.project_checks import run_project_check, snapshot_agent_checks
 

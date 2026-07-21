@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from ares import embeddings
+from ares.memory import embeddings
 from ares.memory import MemoryStore
 
 

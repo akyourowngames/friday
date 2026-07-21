@@ -1,12 +1,12 @@
-from ares.commitments import CommitmentStore
-from ares.context import ProjectContext
-from ares.conversations import ConversationStore
-from ares.goals import GoalStore
+from ares.skills.commitments import CommitmentStore
+from ares.context.discovery import ProjectContext
+from ares.context.conversations import ConversationStore
+from ares.skills.goals import GoalStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.profile import ProfileManager
 from ares.soul import SoulManager
-from ares.user_context import build_user_context, is_deep_context_request
+from ares.context.user_context import build_user_context, is_deep_context_request
 
 
 def test_build_user_context_retrieves_all_durable_layers(tmp_path, fake_embedding_provider):

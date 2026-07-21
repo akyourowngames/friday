@@ -1,6 +1,6 @@
 """Tests for persistent conversations."""
 
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 
 
 def test_store_messages_and_summarize(tmp_path):

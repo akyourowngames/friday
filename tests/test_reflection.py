@@ -4,16 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from ares.commitments import CommitmentStore
-from ares.context import ProjectContext
-from ares.followups import FollowUpStore
-from ares.goals import GoalStore
+from ares.skills.commitments import CommitmentStore
+from ares.context.discovery import ProjectContext
+from ares.skills.followups import FollowUpStore
+from ares.skills.goals import GoalStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig, ReflectionConfig
 from ares.profile import ProfileManager
-from ares.reflection import ReflectionService
+from ares.skills.reflection import ReflectionService
 from ares.soul import SoulManager
-from ares.user_context import build_user_context
+from ares.context.user_context import build_user_context
 
 
 class FakeReflectionLLM:

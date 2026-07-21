@@ -1,6 +1,6 @@
 """Tests for reminder service."""
 
-from ares.reminders import DesktopNotifier
+from ares.skills.reminders import DesktopNotifier
 
 
 class RecordingNotifier(DesktopNotifier):

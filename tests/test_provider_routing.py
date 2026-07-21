@@ -2,7 +2,7 @@
 
 import asyncio
 
-from ares.llm import (
+from ares.integrations.llm import (
     LLMClient,
     PROVIDER_BASE_URLS,
     activate_provider_config,

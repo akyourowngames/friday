@@ -2,12 +2,12 @@
 
 import json
 
-from ares.context_blend import TokenEstimator, estimate_tokens, format_memories, truncate_to_tokens
+from ares.context.blend import TokenEstimator, estimate_tokens, format_memories, truncate_to_tokens
 from ares.tool_truncator import ToolTruncator
-from ares.compactor import ContextCompactor
-from ares.memory_extractor import MemoryExtractor
-from ares.memory_cleaner import MemoryCleaner
-from ares.context_manager import ContextManager
+from ares.context.compactor import ContextCompactor
+from ares.memory.extractor import MemoryExtractor
+from ares.memory.cleaner import MemoryCleaner
+from ares.context.manager import ContextManager
 from ares.models import AppConfig
 
 

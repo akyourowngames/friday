@@ -8,16 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from ares.commitments import CommitmentStore
-from ares.embeddings import EmbeddingProvider
-from ares.goals import GoalStore
+from ares.skills.commitments import CommitmentStore
+from ares.memory.embeddings import EmbeddingProvider
+from ares.skills.goals import GoalStore
 from ares.memory import MemoryStore
-from ares.memory_lifecycle import MemoryLifecycleStore, MemoryPromotionService
-from ares.memory_retrieval import MemoryRecallService
+from ares.memory.lifecycle import MemoryLifecycleStore, MemoryPromotionService
+from ares.memory.retrieval import MemoryRecallService
 from ares.models import AppConfig, ReflectionConfig
 from ares.profile import ProfileManager
-from ares.reflection import ReflectionService, ReflectionStore
-from ares.self_improvement import SelfImprovementStore
+from ares.skills.reflection import ReflectionService, ReflectionStore
+from ares.skills.self_improvement import SelfImprovementStore
 
 
 def _real_store(path):

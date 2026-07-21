@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from PIL import Image
 
 if TYPE_CHECKING:
-    from ares.conversations import ConversationStore
+    from ares.context.conversations import ConversationStore
     from ares.watcher.service import WatcherService
 
 from ares.tools.exporter import (
@@ -43,18 +43,18 @@ from ares.tools.filesystem import (
 from ares.memory import MemoryConflictError, MemoryStore, calculate_importance
 from ares.config import save_config
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
-from ares.people import (
+from ares.memory.people import (
     PeopleStore, PersonConflictError, PersonResolutionError,
     mask_email, mask_phone, normalize_reference,
 )
-from ares.actions import ActionLedger
+from ares.skills.actions import ActionLedger
 from ares.sessions import SessionStore
-from ares.tasks import TaskStore, TaskToolHandlers
-from ares.goals import GoalStore, GoalToolHandlers
-from ares.skills import SkillManager
+from ares.skills.tasks import TaskStore, TaskToolHandlers
+from ares.skills.goals import GoalStore, GoalToolHandlers
+from ares.skills.discovery import SkillManager
 from ares.delegation.upgrades import DelegationUpgradeError, rank_skills_for_delegation
-from ares.mcp_registry import MCPRegistryClient
-from ares.skill_registry import (
+from ares.integrations.mcp_registry import MCPRegistryClient
+from ares.skills.registry import (
     SafeSkillInstaller,
     SkillRegistryClient,
     SkillValidationError,
@@ -98,9 +98,9 @@ from ares.tools.image_edit import crop_image as _crop_image
 from ares.tools.image_edit import crop_geometry as _crop_geometry
 from ares.tools.image_edit import resize_geometry as _resize_geometry
 from ares.tools.image_edit import transform_image as _transform_image
-from ares.memory_policy import memory_rejection_reason
-from ares.commitments import CommitmentStore
-from ares.followups import FollowUpStore, future_utc
+from ares.memory.policy import memory_rejection_reason
+from ares.skills.commitments import CommitmentStore
+from ares.skills.followups import FollowUpStore, future_utc
 from ares.cron.store import CronStore
 from ares.cron.tools import CronToolHandlers
 from ares.tools.datetime_tool import get_current_datetime_result as _get_current_datetime_impl
@@ -547,7 +547,7 @@ class ToolExecutor:
         # on disk or subprocess I/O. Keep them off the shared event loop. DB-
         # backed handlers intentionally remain on their owning thread because
         # sqlite connections enforce thread affinity.
-        from ares.multi_agent_policy import (
+        from ares.multi_agent.policy import (
             FILESYSTEM_READ_TOOLS,
             FILESYSTEM_WRITE_TOOLS,
             REPL_TOOLS,

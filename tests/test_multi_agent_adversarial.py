@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ares.agent import Agent
-from ares.delegation_router import DelegationDecision, DelegationMode
+from ares.integrations.delegation_router import DelegationDecision, DelegationMode
 from ares.models import AppConfig, MultiAgentConfig
 from ares.multi_agent import (
     AgentExecutionContext,
@@ -25,12 +25,12 @@ from ares.multi_agent import (
     MultiAgentOrchestrator,
     RetryableAgentError,
 )
-from ares.multi_agent_adapter import AresAgentAdapter
-from ares.multi_agent_runtime import MultiAgentRuntime
-from ares.multi_agent_store import MultiAgentRunStore
-from ares.server import AresServer
-from ares.tool_registry import select_root_tools
-from ares.turn_policy import build_turn_execution_context
+from ares.multi_agent.adapter import AresAgentAdapter
+from ares.multi_agent.runtime import MultiAgentRuntime
+from ares.multi_agent.store import MultiAgentRunStore
+from ares.infra.server import AresServer
+from ares.integrations.tool_registry import select_root_tools
+from ares.integrations.turn_policy import build_turn_execution_context
 from ares.workspace.app import create_workspace_app
 
 
@@ -217,8 +217,8 @@ def _adapter_root(tmp_path: Path) -> SimpleNamespace:
 async def test_adapter_enforces_specialist_output_token_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("ares.multi_agent_adapter.LLMClient", _FakeLLM)
-    monkeypatch.setattr("ares.multi_agent_adapter.Agent", _PayloadAgent)
+    monkeypatch.setattr("ares.multi_agent.adapter.LLMClient", _FakeLLM)
+    monkeypatch.setattr("ares.multi_agent.adapter.Agent", _PayloadAgent)
     _PayloadAgent.payload = "This output is longer than one estimated token."
     adapter = AresAgentAdapter(_adapter_root(tmp_path))
 
@@ -261,8 +261,8 @@ def _source_claim(claim: str, url: str, confidence: float) -> dict[str, object]:
 async def test_synthesizer_cannot_inflate_confidence_or_hide_source_conflict(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("ares.multi_agent_adapter.LLMClient", _FakeLLM)
-    monkeypatch.setattr("ares.multi_agent_adapter.Agent", _PayloadAgent)
+    monkeypatch.setattr("ares.multi_agent.adapter.LLMClient", _FakeLLM)
+    monkeypatch.setattr("ares.multi_agent.adapter.Agent", _PayloadAgent)
     positive = _source_claim(
         "The feature is enabled", "https://source.example/enabled", 0.6
     )

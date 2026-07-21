@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from ares.delegation_router import (
+from ares.integrations.delegation_router import (
     DelegationAvailability,
     DelegationFailureReason,
     DelegationMode,
     DelegationRouter,
     runtime_failure_decision,
 )
-from ares.tool_registry import RootToolRegistry, ToolCategory, categorize_tool_name
+from ares.integrations.tool_registry import RootToolRegistry, ToolCategory, categorize_tool_name
 from ares.tools.definitions import get_tool_definitions
-from ares.turn_policy import build_turn_execution_context
+from ares.integrations.turn_policy import build_turn_execution_context
 
 
 ROLES = ("planner", "researcher", "analyst", "builder", "reviewer", "synthesizer")

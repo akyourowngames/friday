@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ares.cli import marketplace as marketplace_module
-from ares.mcp_registry import MCPResult
+from ares.integrations.mcp_registry import MCPResult
 from ares.models import AppConfig
-from ares.skill_registry import SkillResult
+from ares.skills.registry import SkillResult
 from tests.test_cli import make_cli
 
 

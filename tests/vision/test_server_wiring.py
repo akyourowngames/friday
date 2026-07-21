@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from ares.models import AppConfig
-from ares.server import AresServer
+from ares.infra.server import AresServer
 from ares.vision.models import (
     DetectedObject,
     SceneSnapshot,

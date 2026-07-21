@@ -1,7 +1,7 @@
 
 import pytest
 
-from ares.skills import SkillManager
+from ares.skills.discovery import SkillManager
 from ares.tools.definitions import get_tool_definitions
 from ares.tools.executor import ToolExecutor
 

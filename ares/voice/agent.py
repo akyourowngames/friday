@@ -421,7 +421,7 @@ class ContinuousVoiceAgent:
     def _get_or_create_agent(self):
         if self.agent is None:
             from ares.agent import Agent
-            from ares.conversations import ConversationStore
+            from ares.context.conversations import ConversationStore
             from ares.memory import MemoryStore
 
             self.agent = Agent(

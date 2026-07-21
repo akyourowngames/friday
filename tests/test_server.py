@@ -7,9 +7,9 @@ from contextvars import ContextVar
 import pytest
 
 from ares.models import AppConfig
-from ares.goals import GoalStore
-from ares.server import AresServer, parse_tool_start_token, parse_tool_token
-from ares.skills import SkillManager
+from ares.skills.goals import GoalStore
+from ares.infra.server import AresServer, parse_tool_start_token, parse_tool_token
+from ares.skills.discovery import SkillManager
 from ares.watcher.tools import WatcherToolHandlers
 
 
@@ -759,7 +759,7 @@ async def test_session_search_matches_full_message_content(server):
 
 
 def test_trim_history_strips_old_tool_calls():
-    from ares.server import _trim_history
+    from ares.infra.server import _trim_history
 
     history = [{"role": "user", "content": str(i), "tool_calls": [{"id": str(i)}]} for i in range(12)]
     trimmed = _trim_history(history, max_messages=10)

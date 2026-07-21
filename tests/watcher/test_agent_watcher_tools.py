@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from ares.goals import GoalStore
+from ares.skills.goals import GoalStore
 from ares.watcher.service import WatcherService
 from ares.watcher.tools import WatcherToolHandlers
 

@@ -22,7 +22,7 @@ class AIAnalyzer:
             return None
         if self.llm is None:
             try:
-                from ares.llm import LLMClient
+                from ares.integrations.llm import LLMClient
                 self.llm = LLMClient()
             except Exception:
                 return "AI analysis is enabled, but no LLM client is available."

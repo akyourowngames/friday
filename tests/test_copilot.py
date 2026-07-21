@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from ares.llm import (
+from ares.integrations.llm import (
     LLMClient,
     activate_provider_config,
     configured_provider_api_key,
@@ -13,8 +13,8 @@ from ares.llm import (
     resolve_provider_base_url,
 )
 from ares.models import AppConfig
-from ares import copilot_oauth
-from ares.copilot_oauth import authorization_url
+from ares.integrations import copilot_oauth
+from ares.integrations.copilot_oauth import authorization_url
 
 
 class FakeSession:

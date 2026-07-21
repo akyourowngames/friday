@@ -31,13 +31,13 @@ from ares.attachments import build_attachment_context, inspect_attachment
 from ares.channels.audio import AudioTranscriptionError, EnglishAudioTranscriber, EnglishTranscript
 from ares.channels.store import ChannelStore
 from ares.config import get_db_path, load_config, save_config
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 from ares.memory import MemoryStore
-from ares.mcp_registry import MCPRegistryClient
+from ares.integrations.mcp_registry import MCPRegistryClient
 from ares.models import AppConfig, TelegramConfig
-from ares.proactive import ProactiveService
-from ares.reminders import DesktopNotifier
-from ares.llm import (
+from ares.skills.proactive import ProactiveService
+from ares.skills.reminders import DesktopNotifier
+from ares.integrations.llm import (
     MODEL_REGISTRY,
     PROVIDER_BASE_URLS,
     SUPPORTED_PROVIDERS,
@@ -47,15 +47,15 @@ from ares.llm import (
     normalize_provider,
     provider_for_model,
 )
-from ares.multi_agent_display import ACTIVE_STATUSES, active_runs, telegram_overview, telegram_run
-from ares.skill_registry import (
+from ares.multi_agent.display import ACTIVE_STATUSES, active_runs, telegram_overview, telegram_run
+from ares.skills.registry import (
     RegistryError as SkillRegistryError,
     SafeSkillInstaller,
     SkillRegistryClient,
     SkillValidationError,
     marketplace_record,
 )
-from ares.skills import SkillManager
+from ares.skills.discovery import SkillManager
 from ares.tools.mcp_client import MCPClientManager
 
 
@@ -857,14 +857,25 @@ class TelegramChannel:
 
         clean_response, paths = self._extract_file_markers(response, text)
         tool_calls_json = json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
-        if clean_response or tool_calls_json:
-            self.conversation_store.add_message(session_id, "assistant", clean_response, tool_calls_json)
+        # Always record the assistant response (even empty) so reflection and
+        # history stay consistent across turns.
+        self.conversation_store.add_message(
+            session_id, "assistant", clean_response, tool_calls_json,
+        )
         await status.finish("✅ Done")
 
         if clean_response:
             await self._send_text_chunks(chat_id, clean_response, reply_to)
         elif not paths:
-            await self.api.send_message(chat_id, "Done.", reply_to_message_id=reply_to)
+            logger.warning(
+                "Telegram agent returned empty response for %r",
+                text[:80],
+            )
+            await self.api.send_message(
+                chat_id,
+                "Got it — anything else you need?",
+                reply_to_message_id=reply_to,
+            )
         for path in paths:
             delivery_status = await self._send_local_file(chat_id, path, reply_to)
             self.conversation_store.add_message(session_id, "assistant", delivery_status)

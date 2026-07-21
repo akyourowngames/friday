@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ares.context_blend import truncate_to_tokens
-from ares.static_cache import MtimeFileCache
+from ares.context.blend import truncate_to_tokens
+from ares.infra.static_cache import MtimeFileCache
 
 SOUL_TEMPLATE = """# Ares - My AI Assistant
 

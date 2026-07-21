@@ -8,10 +8,10 @@ from datetime import date, timedelta
 
 import pytest
 
-from ares.context_blend import build_context_prompt, format_goals
-from ares.goals import GoalConflictError, GoalStore, GoalToolHandlers
+from ares.context.blend import build_context_prompt, format_goals
+from ares.skills.goals import GoalConflictError, GoalStore, GoalToolHandlers
 from ares.memory import MemoryStore
-from ares.tasks import TaskStore
+from ares.skills.tasks import TaskStore
 from ares.tools import ToolExecutor
 from ares.tools.exporter import export_data, import_data
 from ares.watcher.database import WatcherDatabase

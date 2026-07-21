@@ -3,14 +3,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ares.commitments import CommitmentStore
-from ares.conversations import ConversationStore
-from ares.followups import FollowUpStore
-from ares.goals import GoalStore
+from ares.skills.commitments import CommitmentStore
+from ares.context.conversations import ConversationStore
+from ares.skills.followups import FollowUpStore
+from ares.skills.goals import GoalStore
 from ares.memory import MemoryStore
 from ares.models import ProactiveConfig
 from ares.profile import ProfileManager
-from ares.proactive import ProactiveService
+from ares.skills.proactive import ProactiveService
 
 
 class FakeInitiativeLLM:

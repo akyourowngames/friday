@@ -209,7 +209,7 @@ async def run_twilio_media_gateway(*, host: str = "127.0.0.1", port: int = 8767)
 
     from ares.agent import Agent
     from ares.config import load_config
-    from ares.conversations import ConversationStore
+    from ares.context.conversations import ConversationStore
     from ares.memory import MemoryStore
 
     config = load_config()

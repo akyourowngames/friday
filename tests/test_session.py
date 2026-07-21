@@ -25,7 +25,7 @@ def test_get_id_returns_session_id():
 
 
 def test_build_context_includes_previous_summary():
-    from ares.context_blend import build_context_prompt
+    from ares.context.blend import build_context_prompt
     result = build_context_prompt(
         previous_session_summary="User discussed Python testing",
         token_budget=2000,
@@ -35,7 +35,7 @@ def test_build_context_includes_previous_summary():
 
 
 def test_build_context_omits_empty_summary():
-    from ares.context_blend import build_context_prompt
+    from ares.context.blend import build_context_prompt
     result = build_context_prompt(
         previous_session_summary="",
         token_budget=2000,
@@ -44,7 +44,7 @@ def test_build_context_omits_empty_summary():
 
 
 def test_build_context_omits_none_summary():
-    from ares.context_blend import build_context_prompt
+    from ares.context.blend import build_context_prompt
     result = build_context_prompt(
         previous_session_summary=None,
         token_budget=2000,

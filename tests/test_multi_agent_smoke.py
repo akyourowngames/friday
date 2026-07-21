@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 
-import ares.multi_agent_smoke as smoke_module
-from ares.multi_agent_smoke import main, run_smoke_scenarios
+import ares.multi_agent.smoke as smoke_module
+from ares.multi_agent.smoke import main, run_smoke_scenarios
 
 
 def test_production_path_smoke_scenarios_cover_a_through_e() -> None:

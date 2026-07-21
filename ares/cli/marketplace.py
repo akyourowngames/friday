@@ -13,19 +13,17 @@ from typing import Any
 from rich.table import Table
 
 from ares.config import save_config
-from ares.mcp_registry import MCPRegistryClient
+from ares.integrations.mcp_registry import MCPRegistryClient
 from ares.models import DEFAULT_MCP_SERVERS
-from ares.skill_generator import SkillGenerationError, SkillGenerator
-from ares.skill_registry import (
+from ares.skills.generator import SkillGenerationError, SkillGenerator
+from ares.skills.registry import (
     RegistryError as SkillRegistryError,
     SafeSkillInstaller,
     SkillRegistryClient,
     SkillValidationError,
     marketplace_record,
 )
-from ares.skills import SkillManager
-
-from .constants import CLI_BOX
+from ares.skills.discovery import SkillManager
 
 
 class MarketplaceCommandMixin:
@@ -137,7 +135,7 @@ class MarketplaceCommandMixin:
 
     def _show_marketplace_skills(self) -> None:
         skills = self.skill_manager.list_all()
-        table = Table(title="Installed Skills", border_style="bright_magenta", box=CLI_BOX)
+        table = Table(title="Installed Skills", border_style="bright_magenta", box=self._ui_box())
         table.add_column("Name", style="cyan", no_wrap=True)
         table.add_column("Category", no_wrap=True)
         table.add_column("Version", no_wrap=True)
@@ -156,7 +154,7 @@ class MarketplaceCommandMixin:
 
     def _show_skill_categories(self) -> None:
         categories = self.skill_manager.list_categories()
-        table = Table(title="Skill Categories", border_style="bright_magenta", box=CLI_BOX)
+        table = Table(title="Skill Categories", border_style="bright_magenta", box=self._ui_box())
         table.add_column("Category", style="cyan")
         table.add_column("Skills", justify="right")
         for name, count in categories.items():
@@ -181,7 +179,7 @@ class MarketplaceCommandMixin:
             self.console.print(f"[yellow]No marketplace skills found for '{query}'.[/yellow]")
             self._show_registry_errors(client.last_errors)
             return
-        table = Table(title=f"Marketplace Skills: {query}", border_style="bright_magenta", box=CLI_BOX)
+        table = Table(title=f"Marketplace Skills: {query}", border_style="bright_magenta", box=self._ui_box())
         table.add_column("Skill", style="cyan", no_wrap=True)
         table.add_column("Version", no_wrap=True)
         table.add_column("Publisher", no_wrap=True)
@@ -212,7 +210,7 @@ class MarketplaceCommandMixin:
             self.console.print(f"[yellow]Skill '{name}' was not found in the configured registries.[/yellow]")
             self._show_registry_errors(client.last_errors)
             return
-        table = Table(title=f"Marketplace Skill: {detail.name}", border_style="bright_magenta", box=CLI_BOX)
+        table = Table(title=f"Marketplace Skill: {detail.name}", border_style="bright_magenta", box=self._ui_box())
         table.add_column("Field", style="cyan", no_wrap=True)
         table.add_column("Value", ratio=4)
         table.add_row("Slug", detail.slug)
@@ -391,7 +389,7 @@ class MarketplaceCommandMixin:
         if not servers:
             self.console.print("[dim]No MCP servers are configured. Search with /mcp search QUERY.[/dim]")
             return
-        table = Table(title="Configured MCP Servers", border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title="Configured MCP Servers", border_style="bright_cyan", box=self._ui_box())
         table.add_column("Name", style="cyan", no_wrap=True)
         table.add_column("Status", no_wrap=True)
         table.add_column("Transport", no_wrap=True)
@@ -418,7 +416,7 @@ class MarketplaceCommandMixin:
             self.console.print(f"[yellow]No MCP servers found for '{query}'.[/yellow]")
             self._show_registry_errors(client.last_errors)
             return
-        table = Table(title=f"MCP Marketplace: {query}", border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title=f"MCP Marketplace: {query}", border_style="bright_cyan", box=self._ui_box())
         table.add_column("Server", style="cyan", no_wrap=True)
         table.add_column("Version", no_wrap=True)
         table.add_column("Registry", no_wrap=True)
@@ -447,7 +445,7 @@ class MarketplaceCommandMixin:
             self._show_registry_errors(client.last_errors)
             return
         plan = await client.get_install_command(name, registry)
-        table = Table(title=f"MCP Server: {detail.title or detail.name}", border_style="bright_cyan", box=CLI_BOX)
+        table = Table(title=f"MCP Server: {detail.title or detail.name}", border_style="bright_cyan", box=self._ui_box())
         table.add_column("Field", style="cyan", no_wrap=True)
         table.add_column("Value", ratio=4)
         table.add_row("Name", detail.name)
@@ -483,7 +481,7 @@ class MarketplaceCommandMixin:
             config = plan.as_config(existing_names=existing)
             source = f"{plan.registry} registry"
             requirements = list(plan.env_requirements)
-        table = Table(title="Confirm MCP Configuration", border_style="yellow", box=CLI_BOX)
+        table = Table(title="Confirm MCP Configuration", border_style="yellow", box=self._ui_box())
         table.add_column("Field", style="cyan", no_wrap=True)
         table.add_column("Value", ratio=4)
         table.add_row("Server", config["name"])

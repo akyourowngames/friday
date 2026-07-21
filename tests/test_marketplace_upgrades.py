@@ -8,9 +8,9 @@ from zipfile import ZipFile
 
 import pytest
 
-from ares.mcp_registry import InstallCommand, MCPResult, MCPServerDetail
+from ares.integrations.mcp_registry import InstallCommand, MCPResult, MCPServerDetail
 from ares.models import AppConfig, SkillDependency
-from ares.skill_registry import SkillDetail, SkillResult, SkillVersion
+from ares.skills.registry import SkillDetail, SkillResult, SkillVersion
 from ares.tools import ToolExecutor
 from ares.tools import executor as executor_module
 from ares.tools.definitions import get_tool_definitions

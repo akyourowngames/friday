@@ -13,25 +13,25 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Iterator
 
-from ares.context import ProjectContext
-from ares.user_context import build_user_context
+from ares.context.discovery import ProjectContext
+from ares.context.user_context import build_user_context
 from ares.autonomy import AutonomousWorkflowRunner
-from ares.browser_control import BrowserTaskController
-from ares.followups import FollowUpStore
+from ares.integrations.browser_control import BrowserTaskController
+from ares.skills.followups import FollowUpStore
 from ares.memory import MemoryStore
-from ares.memory_retrieval import BuiltInMemoryProvider, MemoryRecallService
-from ares.conversations import ConversationStore
+from ares.memory.retrieval import BuiltInMemoryProvider, MemoryRecallService
+from ares.context.conversations import ConversationStore
 from ares.tools import ToolExecutor, get_tool_definitions
-from ares.llm import (
+from ares.integrations.llm import (
     LLMClient,
     configured_provider_api_key,
     normalize_provider,
     provider_for_model,
     resolve_provider_base_url,
 )
-from ares.latency import RequestLatency
+from ares.infra.latency import RequestLatency
 from ares.models import AppConfig
-from ares.delegation_router import (
+from ares.integrations.delegation_router import (
     DelegationAvailability,
     DelegationDecision,
     DelegationMode,
@@ -39,15 +39,15 @@ from ares.delegation_router import (
     runtime_failure_decision,
 )
 from ares.multi_agent import AgentTask, AgentTeamResult, ContextMode
-from ares.multi_agent_policy import ActionGrantRegistry, call_resource
-from ares.multi_agent_resources import ResourceCoordinator
+from ares.multi_agent.policy import ActionGrantRegistry, call_resource
+from ares.multi_agent.resources import ResourceCoordinator
 from ares.profile import ProfileManager
-from ares.reflection import ReflectionService
+from ares.skills.reflection import ReflectionService
 from ares.prompts import SYSTEM_PROMPT
 from ares.soul import SoulManager
-from ares.skills import SkillManager
+from ares.skills.discovery import SkillManager
 from ares.tools.datetime_tool import get_current_datetime_result
-from ares.turn_policy import (
+from ares.integrations.turn_policy import (
     ActionGrant as TurnActionGrant,
     ActionGrantUseRegistry,
     TurnExecutionContext,
@@ -400,7 +400,7 @@ class Agent:
         # The root owns one lightweight supervisor. Child specialists share its
         # stores and executor but never receive recursive delegation by default.
         if self.multi_agent_runtime is None and delegation_depth == 0 and self.config.multi_agent.enabled:
-            from ares.multi_agent_runtime import MultiAgentRuntime
+            from ares.multi_agent.runtime import MultiAgentRuntime
 
             self.multi_agent_runtime = MultiAgentRuntime(self)
             self.refresh_tools()
@@ -539,7 +539,7 @@ class Agent:
         user_input: str, conversation_history: list[dict]
     ) -> tuple[str, str | None]:
         """Resolve explicit 'use agents for that' only to a concrete prior user turn."""
-        from ares.turn_policy import has_explicit_delegation_signal
+        from ares.integrations.turn_policy import has_explicit_delegation_signal
 
         text = str(user_input or "").strip()
         referential = bool(
@@ -676,7 +676,7 @@ class Agent:
         schema_filter = getattr(self, "_tool_schema_filter", None)
         if schema_filter is not None:
             self.tools = schema_filter(self.tools)
-        from ares.tool_registry import RootToolRegistry
+        from ares.integrations.tool_registry import RootToolRegistry
 
         self._root_tool_registry = RootToolRegistry(self.tools)
         self._root_tool_registry_source = (id(self.tools), len(self.tools))
@@ -692,7 +692,7 @@ class Agent:
         source = (id(self.tools), len(self.tools))
         registry = getattr(self, "_root_tool_registry", None)
         if registry is None or getattr(self, "_root_tool_registry_source", None) != source:
-            from ares.tool_registry import RootToolRegistry
+            from ares.integrations.tool_registry import RootToolRegistry
 
             registry = RootToolRegistry(self.tools)
             self._root_tool_registry = registry
@@ -704,19 +704,21 @@ class Agent:
         context: TurnExecutionContext,
         turn_tools: list[dict],
     ) -> str | None:
-        """Use the measured fast lane only for genuinely tool-free conversation."""
-        if turn_tools or context.intent is not TurnIntent.CONVERSATION:
-            return None
+        """Route to a fast model when available and enabled.
+
+        When ``fast_conversation_model`` is set and ``fast_conversation_enabled``
+        is true, use it for **all** turns — including tool-calling turns.  Free
+        OpenCode models support tool calling and are much faster/more reliable than
+        a timing-out NIM main model.  The LLM client resolves the correct
+        endpoint (base URL + API key) per model at call time, so cross-provider
+        routing works automatically.
+        """
         if not bool(getattr(self.config, "fast_conversation_enabled", True)):
             return None
         candidate = str(
             getattr(self.config, "fast_conversation_model", "") or ""
         ).strip()
         if not candidate:
-            return None
-        candidate_provider = provider_for_model(candidate)
-        active_provider = normalize_provider(getattr(self.llm, "provider", None))
-        if candidate_provider is not None and normalize_provider(candidate_provider) != active_provider:
             return None
         return candidate
 
@@ -775,6 +777,19 @@ class Agent:
         ])
         return "\n".join(lines)
 
+    # Lightweight system prompt for casual conversation turns.  Free-tier
+    # models choke on the full 8K-token tool-laden prompt for simple messages
+    # like "hi" — this keeps the personality while dropping tool specs.
+    _CONVERSATION_SYSTEM_PROMPT = (
+        "You are Ares, a personal AI assistant. "
+        "Be a real conversational partner — respond with natural warmth, "
+        "curiosity, humor, or concern as the moment calls for. "
+        "Match the user's energy. Keep replies natural and compact. "
+        "You have tools available for tasks, but for casual chat just "
+        "converse naturally. Do not say 'I'm here whenever you need something' "
+        "or similar filler — respond to what the user actually said."
+    )
+
     def build_messages(self, user_input: str, conversation_history: list[dict],
                        context: str = "") -> list[dict]:
         """Build the message list for the LLM."""
@@ -783,7 +798,19 @@ class Agent:
         # letting a stale assistant statement become the perceived truth.
         if getattr(self, "mcp_manager", None) is not None:
             self.refresh_tools()
-        system_content = getattr(self, "system_prompt_override", None) or SYSTEM_PROMPT
+
+        # Use a lightweight prompt for casual conversation so free-tier models
+        # can actually generate a reply without choking on tool descriptions.
+        active_turn = self.turn_context
+        is_conversation = (
+            active_turn is not None
+            and active_turn.intent is TurnIntent.CONVERSATION
+        )
+        if is_conversation and not getattr(self, "system_prompt_override", None):
+            system_content = self._CONVERSATION_SYSTEM_PROMPT
+        else:
+            system_content = getattr(self, "system_prompt_override", None) or SYSTEM_PROMPT
+
         runtime = get_current_datetime_result()
         system_content += (
             "\n\n## Runtime"
@@ -798,6 +825,7 @@ class Agent:
         )
         if (
             not bounded_specialist
+            and not is_conversation
             and getattr(self.config, "skills_enabled", True)
             and skill_manager is not None
         ):
@@ -809,7 +837,6 @@ class Agent:
         if context:
             system_content += f"\n\n## Current Context\n{context}"
         browser_controller = getattr(self, "browser_controller", None)
-        active_turn = self.turn_context
         browser_routing_text = (
             active_turn.user_input
             if active_turn is not None and active_turn.intent is TurnIntent.BROWSER_INTERACTION
@@ -860,14 +887,26 @@ class Agent:
             return ""
         # A greeting must never wait on semantic-memory initialization or a
         # background embedding model. Its personality still matters, though:
-        # include the lightweight, user-owned soul/profile layers without
-        # retrieving memories, goals, or project context.
+        # include the lightweight, user-owned soul/profile layers AND standing
+        # memories so Ares actually knows who it's talking to.
         active_turn = self.turn_context
         if active_turn is not None and active_turn.intent is TurnIntent.CONVERSATION:
+            standing: list[dict[str, Any]] = []
+            try:
+                if self.memory_store is not None:
+                    standing = self.memory_store.get_standing_memories(
+                        limit=int(getattr(self.config, "standing_memory_limit", 8)),
+                        min_importance=float(getattr(self.config, "standing_memory_min_importance", 0.3)),
+                    )
+            except Exception:
+                standing = []
             personal_context = [
                 self.soul_manager.get_context(token_budget=200),
                 self.profile_manager.get_context(token_budget=400),
             ]
+            if standing:
+                from ares.context.blend import format_memories
+                personal_context.append(format_memories(standing, token_budget=600))
             return "\n\n".join(section for section in personal_context if section)
         context_kwargs: dict[str, Any] = {}
         if memories_override is not _SESSION_UNSET:
@@ -1046,7 +1085,7 @@ class Agent:
             self.tool_executor.skill_manager = self.skill_manager
         if self.delegation_depth == 0:
             if self.multi_agent_runtime is None and config.multi_agent.enabled:
-                from ares.multi_agent_runtime import MultiAgentRuntime
+                from ares.multi_agent.runtime import MultiAgentRuntime
 
                 self.multi_agent_runtime = MultiAgentRuntime(self)
         self.refresh_tools()
@@ -1238,7 +1277,7 @@ class Agent:
             if self.mcp_manager is None:
                 return "Error: MCP manager is not configured."
             return await self.mcp_manager.call_tool(tool_name, resolved_args)
-        from ares.multi_agent_policy import ToolResource, classify_tool
+        from ares.multi_agent.policy import ToolResource, classify_tool
 
         is_browser = (
             browser_controller.is_playwright_tool(tool_name)
@@ -1521,7 +1560,7 @@ class Agent:
         progress_callback: ToolProgressCallback | None = None,
     ) -> list[dict]:
         """Execute safe independent calls concurrently and preserve result order."""
-        from ares.multi_agent_policy import call_resource, execution_waves
+        from ares.multi_agent.policy import call_resource, execution_waves
 
         mcp_results: dict[int, str] = {}
         local_results: dict[int, str] = {}
@@ -2490,7 +2529,8 @@ class Agent:
                 messages,
                 tools=turn_tools,
                 **(
-                    {"model": turn_model, "fallback_model": self.llm.model}
+                    {"model": turn_model, "fallback_model": self.llm.model,
+                     "timeout": 15.0}
                     if turn_model else {}
                 ),
             ).__aiter__()
@@ -2655,6 +2695,28 @@ class Agent:
                         "runtime blocker without claiming success."
                     ),
                 })
+                continue
+
+            # If the fast conversation model returned empty content, retry
+            # once with a different model so casual messages still get a reply.
+            # Prefer mimo-v2.5-free which reliably returns content (some free
+            # models like deepseek-v4-flash-free are reasoning models that put
+            # output in reasoning_content, leaving content empty).
+            if (
+                not has_tool_calls
+                and not content.content.strip()
+                and turn_model is not None
+            ):
+                from ares.integrations.llm import FREE_MODELS
+                _preferred = "mimo-v2.5-free"
+                fallback = (
+                    _preferred
+                    if _preferred != turn_model and _preferred in FREE_MODELS
+                    else next(
+                        (m for m in FREE_MODELS if m != turn_model), None,
+                    )
+                )
+                turn_model = fallback  # None → use main model
                 continue
 
             if has_tool_calls:

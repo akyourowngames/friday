@@ -7,8 +7,8 @@ import pytest
 
 from ares.models import AppConfig, MultiAgentConfig
 from ares.multi_agent import AgentOutput
-from ares.multi_agent_runtime import MultiAgentRuntime
-from ares.skills import SkillManager
+from ares.multi_agent.runtime import MultiAgentRuntime
+from ares.skills.discovery import SkillManager
 from ares.tools.executor import ToolExecutor
 
 

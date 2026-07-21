@@ -1,7 +1,7 @@
 import json
 
 from ares.models import AppConfig, PhoneConfig
-from ares.memory_extractor import MemoryExtractor
+from ares.memory.extractor import MemoryExtractor
 from ares.tools.executor import ToolExecutor
 
 

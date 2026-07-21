@@ -7,6 +7,12 @@ from rich import box
 
 STYLE = Style.from_dict({"prompt": "bold ansicyan"})
 
+# Safe default box for tables; CLI classes should use self._cli_box() for
+# Unicode-aware selection at runtime.  Keeping this as ASCII prevents
+# UnicodeEncodeError on cp1252 / legacy Windows terminals.
+ASCII_BOX = box.ASCII
+UNICODE_BOX = box.ROUNDED
+
 COMPLETER = WordCompleter(
     [
         "/help", "/menu", "/memory", "/memory clean", "/memory learning", "/memory learning pending", "/memory learning active", "/memory learning approve", "/memory learning reject", "/memory explain", "/latency", "/model", "/provider", "/copilot", "/copilot login", "/copilot token", "/copilot status", "/clear",
@@ -29,4 +35,4 @@ COMPLETER = WordCompleter(
 )
 
 TOOL_OUTPUT_MODES = {"summary", "details", "hidden"}
-CLI_BOX = box.ROUNDED
+CLI_BOX = ASCII_BOX

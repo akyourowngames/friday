@@ -9,8 +9,8 @@ import httpx
 import pytest
 
 from ares.models import SkillRegistry
-from ares.skill_registry import SafeSkillInstaller, SkillRegistryClient, SkillValidationError
-from ares.skills import SkillManager
+from ares.skills.registry import SafeSkillInstaller, SkillRegistryClient, SkillValidationError
+from ares.skills.discovery import SkillManager
 
 
 def _client_factory(handler):

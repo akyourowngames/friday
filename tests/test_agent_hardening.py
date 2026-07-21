@@ -19,8 +19,8 @@ from ares.multi_agent import (
     ChildRunManifest,
     ContextMode,
 )
-from ares.turn_policy import build_turn_execution_context
-from ares.multi_agent_resources import BuilderWorktreeManager
+from ares.integrations.turn_policy import build_turn_execution_context
+from ares.multi_agent.resources import BuilderWorktreeManager
 
 
 class _Registry:

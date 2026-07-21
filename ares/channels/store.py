@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ares.sqlite_utils import connect_sqlite
+from ares.infra.sqlite_utils import connect_sqlite
 from ares.tools.dates import now_local_iso
 
 

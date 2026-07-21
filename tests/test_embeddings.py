@@ -6,8 +6,8 @@ import types
 import numpy as np
 import pytest
 
-from ares import embeddings
-from ares.embeddings import DEFAULT_EMBEDDING_MODEL, DEFAULT_ONNX_FILE_NAME, EMBEDDING_DIMS, EmbeddingProvider
+from ares.memory import embeddings
+from ares.memory.embeddings import DEFAULT_EMBEDDING_MODEL, DEFAULT_ONNX_FILE_NAME, EMBEDDING_DIMS, EmbeddingProvider
 
 
 def test_embedding_provider_uses_onnx_backend(monkeypatch):

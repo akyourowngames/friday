@@ -61,7 +61,7 @@ async def _run_server(
     workspace_host: str | None = None,
     workspace_port: int | None = None,
 ) -> None:
-    from ares.server import run_server
+    from ares.infra.server import run_server
 
     await run_server(
         host=host,

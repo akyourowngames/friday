@@ -9,18 +9,18 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from rich.console import Console
 
-from ares.actions import ActionLedger
+from ares.skills.actions import ActionLedger
 from ares.agent import Agent
 from ares.autonomy import AutonomousWorkflowRunner
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig, PhoneConfig
-from ares.people import PeopleStore, PersonConflictError
+from ares.memory.people import PeopleStore, PersonConflictError
 from ares.sessions import SessionStore
-from ares.tasks import TaskConflictError, TaskStore, TaskToolHandlers
+from ares.skills.tasks import TaskConflictError, TaskStore, TaskToolHandlers
 from ares.tools import ToolExecutor
 from ares.tools.renders import get_renderer
-from ares.turn_policy import build_turn_execution_context
+from ares.integrations.turn_policy import build_turn_execution_context
 
 
 def test_people_store_resolves_exact_aliases_and_returns_complete_records(tmp_path):

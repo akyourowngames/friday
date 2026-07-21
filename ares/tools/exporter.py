@@ -12,16 +12,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ares.commitments import CommitmentStore
-    from ares.conversations import ConversationStore
+    from ares.skills.commitments import CommitmentStore
+    from ares.context.conversations import ConversationStore
 
 from ares.config import load_config, save_config
 from ares.tools.dates import now_local, now_local_iso
-from ares.actions import ActionLedger
+from ares.skills.actions import ActionLedger
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.people import PeopleStore
-from ares.goals import GoalStore
+from ares.memory.people import PeopleStore
+from ares.skills.goals import GoalStore
 
 EXPORT_PROFILES: dict[str, dict[str, bool]] = {
     "full": {"config": True, "memories": True, "conversations": True, "actions": True, "people": True, "goals": True, "commitments": True},

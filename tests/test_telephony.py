@@ -11,7 +11,7 @@ from io import BytesIO
 
 import httpx
 
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.telephony.call_session import TelephonyStore

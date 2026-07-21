@@ -1,6 +1,6 @@
 """Tests for SQLite connection helpers."""
 
-from ares.sqlite_utils import connect_sqlite
+from ares.infra.sqlite_utils import connect_sqlite
 
 
 def test_connect_sqlite_sets_busy_timeout_and_row_factory(tmp_path):

@@ -1,6 +1,6 @@
 """Browser task policy tests: evidence freshness, authority, and recovery."""
 
-from ares.browser_control import BrowserTaskController
+from ares.integrations.browser_control import BrowserTaskController
 
 
 SNAPSHOT = "- button 'Continue' [ref=e12]"

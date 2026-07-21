@@ -18,9 +18,9 @@ from ares.multi_agent import (
     AgentSpec,
     AgentTask,
 )
-from ares.multi_agent_display import active_runs, summarize_runs, telegram_overview, telegram_run
-from ares.multi_agent_adapter import AresAgentAdapter
-from ares.multi_agent_policy import (
+from ares.multi_agent.display import active_runs, summarize_runs, telegram_overview, telegram_run
+from ares.multi_agent.adapter import AresAgentAdapter
+from ares.multi_agent.policy import (
     ToolResource,
     authorize_tool_call,
     call_resource,
@@ -28,8 +28,8 @@ from ares.multi_agent_policy import (
     execution_waves,
     filter_tool_schemas,
 )
-from ares.multi_agent_runtime import MultiAgentRuntime
-from ares.multi_agent_store import MultiAgentRunStore
+from ares.multi_agent.runtime import MultiAgentRuntime
+from ares.multi_agent.store import MultiAgentRunStore
 
 
 def schema(name: str) -> dict:
@@ -341,8 +341,8 @@ async def test_existing_agent_adapter_isolates_history_model_tools_and_output(mo
         async def close(self):
             return None
 
-    monkeypatch.setattr("ares.multi_agent_adapter.LLMClient", FakeLLM)
-    monkeypatch.setattr("ares.multi_agent_adapter.Agent", FakeAgent)
+    monkeypatch.setattr("ares.multi_agent.adapter.LLMClient", FakeLLM)
+    monkeypatch.setattr("ares.multi_agent.adapter.Agent", FakeAgent)
     parent_messages = [{"role": "assistant", "content": "parent"}]
     root = SimpleNamespace(
         config=AppConfig(data_dir=str(tmp_path)), memory_store=object(), conversation_store=object(),

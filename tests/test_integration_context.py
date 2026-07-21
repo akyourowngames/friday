@@ -1,7 +1,7 @@
 """Integration tests for the proactive context pipeline."""
 
-from ares.context import ProjectContext
-from ares.context_blend import build_context_prompt
+from ares.context.discovery import ProjectContext
+from ares.context.blend import build_context_prompt
 from ares.profile import ProfileManager
 from ares.soul import SoulManager
 

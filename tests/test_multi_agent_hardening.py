@@ -24,8 +24,8 @@ from ares.multi_agent import (
     ChildRunManifest,
     trusted_local_agent_spec,
 )
-from ares.multi_agent_adapter import AresAgentAdapter
-from ares.multi_agent_policy import (
+from ares.multi_agent.adapter import AresAgentAdapter
+from ares.multi_agent.policy import (
     ActionGrantRegistry,
     ToolResource,
     authorize_tool_call,
@@ -34,15 +34,15 @@ from ares.multi_agent_policy import (
     execution_waves,
     filter_tool_schemas,
 )
-from ares.multi_agent_research import (
+from ares.multi_agent.research import (
     ResearchClaim,
     parse_research_claims,
     synthesis_confidence,
     validate_research_claim,
 )
-from ares.multi_agent_resources import BuilderWorktreeManager, ResourceCoordinator
-from ares.multi_agent_runtime import MultiAgentRuntime
-from ares.multi_agent_store import MultiAgentRunStore
+from ares.multi_agent.resources import BuilderWorktreeManager, ResourceCoordinator
+from ares.multi_agent.runtime import MultiAgentRuntime
+from ares.multi_agent.store import MultiAgentRunStore
 
 
 def _call(name: str) -> dict:
@@ -716,8 +716,8 @@ async def test_adapter_passes_bounded_context_and_unique_child_session(monkeypat
         async def close(self):
             return None
 
-    monkeypatch.setattr("ares.multi_agent_adapter.LLMClient", FakeLLM)
-    monkeypatch.setattr("ares.multi_agent_adapter.Agent", FakeAgent)
+    monkeypatch.setattr("ares.multi_agent.adapter.LLMClient", FakeLLM)
+    monkeypatch.setattr("ares.multi_agent.adapter.Agent", FakeAgent)
     root = SimpleNamespace(
         config=AppConfig(data_dir=str(tmp_path)), memory_store=object(), conversation_store=object(),
         mcp_manager=None, _session_store=object(), tool_executor=object(), browser_controller=object(),

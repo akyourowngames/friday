@@ -1,6 +1,6 @@
 """Tests for token estimation, truncation, and context blending."""
 
-from ares.context_blend import (
+from ares.context.blend import (
     CONTEXT_WINDOWS,
     build_context_prompt,
     estimate_token_breakdown,

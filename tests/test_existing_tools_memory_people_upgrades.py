@@ -8,7 +8,7 @@ import pytest
 
 from ares.memory import MemoryConflictError, MemoryStore
 from ares.models import AppConfig
-from ares.people import PersonConflictError
+from ares.memory.people import PersonConflictError
 from ares.tools import ToolExecutor, get_tool_definitions
 from ares.tools.results import ToolResultEnvelope
 

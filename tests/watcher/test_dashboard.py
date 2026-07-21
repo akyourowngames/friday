@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from ares.goals import GoalStore
+from ares.skills.goals import GoalStore
 from ares.watcher.dashboard.app import create_app
 from ares.watcher.service import WatcherService
 

@@ -9,7 +9,7 @@ from tempfile import NamedTemporaryFile
 
 from pydantic import BaseModel, ValidationError
 
-from ares.browser import BrowserManager
+from ares.integrations.browser import BrowserManager
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
 
 logger = logging.getLogger(__name__)

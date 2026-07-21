@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from ares.context import SCAN_TARGETS, ProjectContext
+from ares.context.discovery import SCAN_TARGETS, ProjectContext
 from ares.profile import ProfileManager
 from ares.soul import SoulManager
 

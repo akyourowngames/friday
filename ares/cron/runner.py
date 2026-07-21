@@ -103,7 +103,7 @@ class CronRunner:
             else:
                 config.agent_max_iterations = int(getattr(config, "cron_max_iterations", 10))
 
-            from ares.conversations import ConversationStore
+            from ares.context.conversations import ConversationStore
             from ares.memory import MemoryStore
             from ares.agent import Agent
 

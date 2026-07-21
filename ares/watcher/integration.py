@@ -7,9 +7,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ares.actions import ActionLedger
+    from ares.skills.actions import ActionLedger
     from ares.agent import Agent
-    from ares.goals import GoalStore
+    from ares.skills.goals import GoalStore
     from ares.models import AppConfig
     from ares.watcher.models import Event, Monitor
 

@@ -5,7 +5,7 @@ import pytest
 from rich.console import Console
 
 from ares.config import AppConfig
-from ares.onboarding import OnboardingWizard, _detect_os
+from ares.infra.onboarding import OnboardingWizard, _detect_os
 from ares.profile import ProfileManager
 from ares.soul import SoulManager
 

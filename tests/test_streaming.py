@@ -7,11 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from ares.agent import Agent
-from ares.latency import LATENCY_EVENTS, LATENCY_METRICS
-from ares.llm import LLMClient
+from ares.infra.latency import LATENCY_EVENTS, LATENCY_METRICS
+from ares.integrations.llm import LLMClient
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.turn_policy import build_turn_execution_context
+from ares.integrations.turn_policy import build_turn_execution_context
 
 
 class FakeStreamResponse:

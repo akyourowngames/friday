@@ -1,6 +1,6 @@
 import pytest
 
-from ares.goals import GoalStore
+from ares.skills.goals import GoalStore
 from ares.watcher.commands import WatcherCommands, parse_interval
 
 

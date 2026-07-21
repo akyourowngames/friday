@@ -1,4 +1,4 @@
-from ares.commitments import CommitmentStore
+from ares.skills.commitments import CommitmentStore
 
 
 def test_commitments_are_deduplicated_and_track_completion(tmp_path):

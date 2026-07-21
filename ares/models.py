@@ -377,7 +377,7 @@ class ReflectionConfig(BaseModel):
     """Background conversation-to-state extraction controls."""
 
     enabled: bool = True
-    model: str = "deepseek-v4-flash-free"
+    model: str = "mimo-v2.5-free"
     min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     completion_min_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
@@ -550,7 +550,7 @@ class AppConfig(BaseModel):
     provider_api_keys: dict[str, str] = Field(default_factory=dict)
     model: str = "deepseek-v4-flash-free"
     fast_conversation_enabled: bool = True
-    fast_conversation_model: str = "deepseek-v4-flash-free"
+    fast_conversation_model: str = "mimo-v2.5-free"
     api_key: str = ""
     api_base_url: str = "https://opencode.ai/zen/v1"
     copilot_github_token: str = ""

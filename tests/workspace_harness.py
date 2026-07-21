@@ -9,10 +9,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from ares.conversations import ConversationStore
+from ares.context.conversations import ConversationStore
 from ares.models import AppConfig
-from ares.server import AresServer
-from ares.skills import SkillManager
+from ares.infra.server import AresServer
+from ares.skills.discovery import SkillManager
 from ares.watcher.tools import WatcherToolHandlers
 
 

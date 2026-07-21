@@ -358,7 +358,7 @@ def run_dashboard(host: str = "127.0.0.1", port: int = 8080, database_path: str 
                   notification_settings: dict[str, Any] | None = None, max_concurrency: int = 8,
                   poll_seconds: float = 5.0) -> None:
     import uvicorn
-    from ares.goals import GoalStore
+    from ares.skills.goals import GoalStore
     service = WatcherService(database_path or Path("~/.ares/data/watchers.db").expanduser(),
                              notification_settings=notification_settings, max_concurrency=max_concurrency, poll_seconds=poll_seconds)
     goal_store = GoalStore()

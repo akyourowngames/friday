@@ -7,9 +7,9 @@ import pytest
 from ares.agent import Agent
 from ares.memory import MemoryStore
 from ares.models import AppConfig
-from ares.reflection import ReflectionService
-from ares.skills import SkillManager
-from ares.turn_policy import build_turn_execution_context
+from ares.skills.reflection import ReflectionService
+from ares.skills.discovery import SkillManager
+from ares.integrations.turn_policy import build_turn_execution_context
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ class TestAgent:
             def __init__(self, config=None):
                 created_with.append(config)
 
-        monkeypatch.setattr("ares.reflection.LLMClient", StubLLM)
+        monkeypatch.setattr("ares.skills.reflection.LLMClient", StubLLM)
         service = ReflectionService(
             memory_store=agent.memory_store,
             goal_store=agent.goal_store,

@@ -40,9 +40,9 @@ if not (_SOURCE_ROOT / "ares").is_dir():
 sys.path.insert(0, str(_SOURCE_ROOT))
 
 from ares.agent import Agent
-from ares.commitments import CommitmentStore
-from ares.embeddings import EmbeddingProvider
-from ares.goals import GoalStore
+from ares.skills.commitments import CommitmentStore
+from ares.memory.embeddings import EmbeddingProvider
+from ares.skills.goals import GoalStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 
