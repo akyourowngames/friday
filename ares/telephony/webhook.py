@@ -38,22 +38,11 @@ def telephony_readiness(config: Any) -> dict[str, Any]:
     media_stream_url = str(getattr(telephony, "media_stream_url", "") or "")
     if not media_stream_url.startswith("wss://"):
         missing.append("public WSS media gateway URL")
-    if not str(getattr(telephony, "livekit_url", "") or ""):
-        missing.append("LiveKit URL")
-    if not str(getattr(telephony, "livekit_api_key", "") or ""):
-        missing.append("LiveKit API key")
-    if not str(getattr(telephony, "livekit_api_secret", "") or ""):
-        missing.append("LiveKit API secret")
     return {
         "ready": not missing,
         "missing": missing,
         "twilio_credentials_configured": bool(
             getattr(telephony, "account_sid", "") and getattr(telephony, "auth_token", "")
-        ),
-        "livekit_credentials_configured": bool(
-            getattr(telephony, "livekit_url", "")
-            and getattr(telephony, "livekit_api_key", "")
-            and getattr(telephony, "livekit_api_secret", "")
         ),
     }
 
@@ -90,7 +79,9 @@ class TwilioWebhookApp:
             start_response("403 Forbidden", [("Content-Type", "text/plain; charset=utf-8")])
             return [b"Invalid Twilio signature"]
         if path == getattr(config, "voice_webhook_path", "/telephony/twilio/voice"):
-            _session, twiml = self.manager.receive_incoming_call(values.get("From", ""), values.get("To", ""), call_sid=values.get("CallSid", ""))
+            session = self.manager.receive_incoming_call(values.get("From", ""), values.get("To", ""), call_sid=values.get("CallSid", ""))
+            # Return a simple TwiML response to answer the call
+            twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Hello</Say></Response>'
             start_response("200 OK", [("Content-Type", "application/xml; charset=utf-8")])
             return [twiml.encode("utf-8")]
         if path == getattr(config, "status_webhook_path", "/telephony/twilio/status"):

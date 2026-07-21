@@ -87,19 +87,3 @@ class TwilioClient:
     def transfer(self, call_sid: str, *, destination: str) -> dict[str, Any]:
         twiml = f"<Response><Dial><Number>{escape(destination)}</Number></Dial></Response>"
         return self._request("POST", self._calls_url(call_sid), data={"Twiml": twiml})
-
-    def send_to_livekit(self, *, media_stream_url: str, call_id: str) -> str:
-        """Build TwiML for a Twilio Media Stream → LiveKit gateway.
-
-        The configured endpoint must be a publicly reachable WebSocket media
-        gateway that forwards Twilio audio into the LiveKit room for ``call_id``.
-        """
-        if not media_stream_url:
-            raise TwilioError("A public media_stream_url is required to bridge Twilio audio to LiveKit.")
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            "<Response><Connect><Stream url=\""
-            f"{escape(media_stream_url, quote=True)}\">"
-            f"<Parameter name=\"call_id\" value=\"{escape(call_id, quote=True)}\"/>"
-            "</Stream></Connect></Response>"
-        )

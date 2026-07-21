@@ -512,32 +512,6 @@ async def test_voice_note_is_transcribed_to_english_before_running_ares(telegram
 
 
 @pytest.mark.asyncio
-async def test_audio_transcriber_auto_falls_back_to_whisper_when_sarvam_fails(monkeypatch):
-    from ares.models import TelegramConfig
-
-    config = TelegramConfig(audio_stt_backend="auto")
-    transcriber = EnglishAudioTranscriber(lambda: config)
-    calls = []
-
-    async def sarvam_failure(_path):
-        calls.append("sarvam")
-        raise RuntimeError("temporary provider outage")
-
-    async def whisper_success(_path, _model):
-        calls.append("whisper")
-        return EnglishTranscript(text="English fallback transcript", backend="whisper")
-
-    monkeypatch.setenv("SARVAM_API_KEY", "configured")
-    monkeypatch.setattr(transcriber, "_transcribe_with_sarvam", sarvam_failure)
-    monkeypatch.setattr(transcriber, "_transcribe_with_whisper", whisper_success)
-
-    result = await transcriber.transcribe_to_english("voice.ogg", duration_seconds=10)
-
-    assert result.text == "English fallback transcript"
-    assert calls == ["sarvam", "whisper"]
-
-
-@pytest.mark.asyncio
 async def test_new_command_closes_old_channel_session(telegram_channel):
     channel, conversations, api, state = telegram_channel
     state.set_conversation_id("telegram", 123, 4)

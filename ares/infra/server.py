@@ -670,7 +670,7 @@ class AresServer:
 
     def _telephony_settings(self) -> dict[str, Any]:
         telephony = self.config.telephony.model_dump()
-        for key in ("account_sid", "auth_token", "livekit_api_key", "livekit_api_secret"):
+        for key in ("account_sid", "auth_token"):
             telephony[key] = ""
         manager = getattr(getattr(self.agent, "tool_executor", None), "telephony", None)
         return {
@@ -685,7 +685,7 @@ class AresServer:
             await self._send_error(websocket, "Telephony settings must be an object.")
             return
         candidate = self.config.model_dump()
-        secret_keys = {"account_sid", "auth_token", "livekit_api_key", "livekit_api_secret"}
+        secret_keys = {"account_sid", "auth_token"}
         for key, value in updates.items():
             if key not in candidate["telephony"]:
                 continue

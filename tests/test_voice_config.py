@@ -23,8 +23,8 @@ def test_app_config_has_voice_defaults():
 
 def test_voice_env_overrides(monkeypatch):
     monkeypatch.setenv("ARES_VOICE_ENABLED", "true")
-    monkeypatch.setenv("ARES_STT_BACKEND", "sarvam")
-    monkeypatch.setenv("ARES_TTS_BACKEND", "sarvam")
+    monkeypatch.setenv("ARES_STT_BACKEND", "whisper")
+    monkeypatch.setenv("ARES_TTS_BACKEND", "edge")
     monkeypatch.setenv("ARES_TTS_VOICE", "en-US-GuyNeural")
     monkeypatch.setenv("ARES_STT_MODEL", "tiny")
     monkeypatch.setenv("ARES_STT_LANGUAGE", "en")
@@ -34,16 +34,12 @@ def test_voice_env_overrides(monkeypatch):
     monkeypatch.setenv("ARES_VOICE_BARGE_IN_DELAY_MS", "480")
     monkeypatch.setenv("ARES_VOICE_BARGE_IN_MIN_VOICED_MS", "420")
     monkeypatch.setenv("ARES_VOICE_TTS_CHUNK_CHARS", "72")
-    monkeypatch.setenv("SARVAM_STT_MODEL", "saaras:v3")
-    monkeypatch.setenv("SARVAM_TTS_MODEL", "bulbul:v3")
-    monkeypatch.setenv("SARVAM_LANGUAGE_CODE", "hi-IN")
-    monkeypatch.setenv("SARVAM_SPEAKER", "shubh")
 
     resolved = voice_config_from_env(VoiceConfig())
 
     assert resolved.enabled is True
-    assert resolved.stt_backend == "sarvam"
-    assert resolved.tts_backend == "sarvam"
+    assert resolved.stt_backend == "whisper"
+    assert resolved.tts_backend == "edge"
     assert resolved.tts_voice == "en-US-GuyNeural"
     assert resolved.stt_model == "tiny"
     assert resolved.stt_language == "en"
@@ -53,10 +49,6 @@ def test_voice_env_overrides(monkeypatch):
     assert resolved.barge_in_delay_ms == 480
     assert resolved.barge_in_min_voiced_ms == 420
     assert resolved.tts_chunk_chars == 72
-    assert resolved.sarvam_stt_model == "saaras:v3"
-    assert resolved.sarvam_tts_model == "bulbul:v3"
-    assert resolved.sarvam_language_code == "hi-IN"
-    assert resolved.sarvam_speaker == "shubh"
 
 
 def test_edge_tts_uses_configured_voice():

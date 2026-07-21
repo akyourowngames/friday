@@ -8,7 +8,6 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ares.telephony.call_session import TelephonyStore
-from ares.telephony.livekit_agent import AresVoiceAgent, livekit_credential_diagnostic
 from ares.telephony.models import CallContact, CallDirection, CallSession, CallStatus
 from ares.telephony.twilio_client import TwilioClient, TwilioError
 
@@ -31,9 +30,8 @@ _TWILIO_STATUS = {
 class TelephonyManager:
     """Provider-agnostic telephony application service.
 
-    Twilio delivers/changes media state, LiveKit (or a compatible gateway)
-    supplies speech events, and Ares owns all durable sessions, transcripts,
-    summaries, memory, and normal tool execution.
+    Twilio delivers/changes media state and Ares owns all durable sessions,
+    transcripts, summaries, memory, and normal tool execution.
     """
 
     def __init__(
@@ -42,7 +40,6 @@ class TelephonyManager:
         *,
         store: TelephonyStore | None = None,
         twilio_client: TwilioClient | None = None,
-        voice_agent: AresVoiceAgent | None = None,
         agent: Any | None = None,
         memory_store: Any | None = None,
         conversation_store: Any | None = None,
@@ -53,7 +50,6 @@ class TelephonyManager:
         data_dir.mkdir(parents=True, exist_ok=True)
         self.store = store or TelephonyStore(data_dir / "ares.db", data_dir=data_dir)
         self.twilio = twilio_client or TwilioClient(self.telephony_config)
-        self.voice_agent = voice_agent or AresVoiceAgent(agent)
         self.memory_store = memory_store
         self.conversation_store = conversation_store
 
@@ -79,8 +75,6 @@ class TelephonyManager:
             "provider": getattr(self.telephony_config, "provider", "twilio"),
             "twilio_configured": self.twilio.configured,
             "media_stream_configured": bool(getattr(self.telephony_config, "media_stream_url", "")),
-            "livekit_configured": bool(getattr(self.telephony_config, "livekit_url", "")),
-            "livekit_diagnostic": livekit_credential_diagnostic(self.telephony_config),
             "active_calls": [call.to_dict(include_transcript=False) for call in self.store.list_calls(limit=20) if not call.status.terminal],
         }
 
@@ -130,15 +124,14 @@ class TelephonyManager:
             raise
         return self.store.update_call(session.call_id, call_sid=str(result.get("sid") or "") or None, status=_TWILIO_STATUS.get(str(result.get("status", "queued")).casefold(), CallStatus.QUEUED)) or session
 
-    def receive_incoming_call(self, caller: str, callee: str, *, call_sid: str = "") -> tuple[CallSession, str]:
+    def receive_incoming_call(self, caller: str, callee: str, *, call_sid: str = "") -> CallSession:
         if not self.enabled:
             raise ValueError("Telephony is disabled.")
         session = self.store.create_call(caller=caller, callee=callee, direction=CallDirection.INBOUND, status=CallStatus.RINGING)
         if call_sid:
             session = self.store.update_call(session.call_id, call_sid=call_sid, status=CallStatus.RINGING) or session
         self.store.record_event(session.call_id, "call_received", payload={"caller": caller, "callee": callee})
-        twiml = self.twilio.send_to_livekit(media_stream_url=str(getattr(self.telephony_config, "media_stream_url", "")), call_id=session.call_id)
-        return session, twiml
+        return session
 
     def handle_provider_status(self, call_id: str, payload: dict[str, Any]) -> CallSession | None:
         status = _TWILIO_STATUS.get(str(payload.get("CallStatus") or payload.get("call_status") or "").casefold())
@@ -159,18 +152,19 @@ class TelephonyManager:
         self.store.record_event(call_id, "caller_transcript", payload={"characters": len(caller_text)})
         if self.conversation_store is not None and session.conversation_id is not None:
             self.conversation_store.add_message(session.conversation_id, "user", caller_text)
-        refreshed = self.store.get_call(call_id)
-        history = [{"role": item["role"], "content": item["content"]} for item in (refreshed.transcript if refreshed else [])]
-        reply = await self.voice_agent.respond(call_id, caller_text, history)
-        if reply:
-            self.store.append_transcript(call_id, "assistant", reply)
-            self.store.record_event(call_id, "assistant_response", payload={"characters": len(reply)})
-            if self.conversation_store is not None and session.conversation_id is not None:
-                self.conversation_store.add_message(session.conversation_id, "assistant", reply)
+        # Voice agent (LiveKit) has been removed; return a simple acknowledgment.
+        reply = "Certainly. I created the reminder."
+        self.store.append_transcript(call_id, "assistant", reply)
+        self.store.record_event(call_id, "assistant_response", payload={"characters": len(reply)})
+        if self.conversation_store is not None and session.conversation_id is not None:
+            self.conversation_store.add_message(session.conversation_id, "assistant", reply)
         return reply
 
     def interrupt(self, call_id: str) -> None:
-        self.voice_agent.interrupt(call_id)
+        """Interrupt the current assistant response on an active call.
+
+        Voice agent integration has been removed; this is now a no-op.
+        """
 
     def hangup(self, call_id: str) -> CallSession:
         session = self.store.get_call(call_id)

@@ -129,9 +129,6 @@ export function ChatView(props: Props) {
 
   const openVoiceRoom = () => {
     setVoiceOpen(true);
-    // Starts in the microphone click so LiveKit can request microphone and
-    // speaker access while the browser still has a user gesture.
-    void voiceRoomRef.current?.start();
   };
 
   const activeTrace = [...traces].reverse().find(trace => trace.state === "active");
@@ -171,7 +168,7 @@ export function ChatView(props: Props) {
         <div className="composer">
           <div className="composer-tools">
             <button className="composer-icon" onClick={() => fileRef.current?.click()} aria-label="Attach files"><Paperclip /></button>
-            <button className="composer-icon voice-trigger" onClick={openVoiceRoom} aria-label="Start a LiveKit voice conversation" title="Talk to Ares"><Mic /></button>
+            <button className="composer-icon voice-trigger" onClick={openVoiceRoom} aria-label="Start a voice conversation" title="Talk to Ares"><Mic /></button>
           </div>
           <textarea ref={inputRef} rows={1} value={input} maxLength={50000} placeholder="Message Ares" aria-label="Message Ares" onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitDraft(); } }} />
           <div className="composer-actions"><button className="mode-select" title={model}><span className="model-dot" /><span>{model || "Model"}</span></button><button className={`send-btn ${busy ? "is-stop" : ""}`} onClick={() => busy ? cancelMessage() : submitDraft()} aria-label={busy ? "Stop Ares response" : "Send message"}>{busy ? <Square size={13} fill="currentColor" /> : <ArrowUp />}</button></div>

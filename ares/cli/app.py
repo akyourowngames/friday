@@ -1878,7 +1878,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/browser [status|isolated|system|extension|auto|launch]", "Manage Playwright browser connection mode")
             table.add_row("/phone status", "Check Android phone bridge pairing health")
             table.add_row("/call CONTACT|NUMBER [--confirm]", "Place a provider-backed telephone call")
-            table.add_row("/telephony [status|contacts|recent|hangup|mute|unmute]", "Manage Twilio/LiveKit telephony")
+            table.add_row("/telephony [status|contacts|recent|hangup|mute|unmute]", "Manage Twilio telephony")
             table.add_row("/tools [summary|details|hidden]", "Control tool activity display")
             table.add_row("/agents run REQUEST", "Force a real native specialist delegation")
             table.add_row("/agents [doctor|smoke-test]", "Verify runtime, persistence, roles, limits, and harmless parallel execution")

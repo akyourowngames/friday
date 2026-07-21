@@ -1,7 +1,7 @@
 """Continuous voice mode for Ares.
 
 The rebuilt loop is intentionally small: listen, transcribe, run Ares, speak,
-then go right back to listening. It can use local Whisper/Edge or Sarvam AI.
+then go right back to listening. Uses local Whisper for STT and Edge TTS.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from rich.panel import Panel
 from ares.config import load_config
 from ares.models import VoiceConfig
 from ares.voice.player import audio_bytes_to_pcm16, play_audio_stream
-from ares.voice.sarvam import SarvamTTS, SarvamTranscriber, sarvam_api_key
 from ares.voice.stt import WhisperTranscriber, trim_silence
 from ares.voice.tts import DEFAULT_EDGE_VOICE, EdgeTTS
 
@@ -69,10 +68,6 @@ def voice_config_from_env(config: VoiceConfig) -> VoiceConfig:
         "ARES_VOICE_TTS_CHUNK_CHARS": ("tts_chunk_chars", int),
         "ARES_TTS_SAMPLE_RATE": ("tts_sample_rate", int),
         "ARES_TTS_VOLUME": ("tts_volume", float),
-        "SARVAM_STT_MODEL": ("sarvam_stt_model", str),
-        "SARVAM_TTS_MODEL": ("sarvam_tts_model", str),
-        "SARVAM_LANGUAGE_CODE": ("sarvam_language_code", str),
-        "SARVAM_SPEAKER": ("sarvam_speaker", str),
         "ARES_VOICE_MAX_HISTORY": ("voice_max_history", int),
         "ARES_VOICE_MAX_MEMORIES": ("voice_max_memories", int),
     }
@@ -200,47 +195,17 @@ class ContinuousVoiceAgent:
     def _resolve_backend(self, backend: str, *, local: str) -> str:
         backend = (backend or "auto").lower().strip()
         if backend == "auto":
-            # Older configs stored ``auto``. TTS should not select Sarvam
-            # implicitly; Edge is the stable default for spoken replies.
-            if local == "edge":
-                return "edge"
-            return "sarvam" if sarvam_api_key() else local
+            return local
         return backend
 
     def _create_transcriber(self):
-        if self.stt_backend == "sarvam":
-            return SarvamTranscriber(
-                model=self.voice_config.sarvam_stt_model,
-                language_code=self.voice_config.sarvam_language_code,
-            )
         return WhisperTranscriber(
             self.voice_config.stt_model,
             language=self.voice_config.stt_language,
         )
 
     def _create_tts(self):
-        if self.tts_backend == "sarvam":
-            return SarvamTTS(
-                speaker=self.voice_config.sarvam_speaker,
-                model=self.voice_config.sarvam_tts_model,
-                language_code=self.voice_config.sarvam_language_code,
-                sample_rate=self.voice_config.tts_sample_rate,
-                pace=self.voice_config.sarvam_pace,
-            )
         return EdgeTTS(self.voice_config.tts_voice)
-
-    def _fallback_tts_to_edge(self, exc: Exception) -> None:
-        """Switch speech output to Edge when Sarvam is unavailable."""
-        if getattr(self, "_tts_backend_explicit", False):
-            raise exc
-        if self.tts_backend == "edge":
-            return
-        self.console.print(
-            f"[yellow]Sarvam TTS unavailable ({type(exc).__name__}); switching speech to Edge TTS[/yellow]"
-        )
-        self.tts_backend = "edge"
-        self.tts = EdgeTTS(self.voice_config.tts_voice)
-        self.tts_sample_rate = self.voice_config.tts_sample_rate
 
     def _load_vad(self):
         try:
@@ -252,8 +217,6 @@ class ContinuousVoiceAgent:
         return webrtcvad.Vad(2)
 
     def _display_voice(self) -> str:
-        if self.tts_backend == "sarvam":
-            return self.voice_config.sarvam_speaker
         return self.voice_config.tts_voice
 
     async def _cooldown_after_speech(self) -> None:
@@ -627,13 +590,7 @@ class ContinuousVoiceAgent:
         text = self._sanitize_tts_text(text)
         if not text:
             return b""
-        try:
-            return await self.tts.synthesize(text, self._display_voice())
-        except Exception as exc:
-            if self.tts_backend != "sarvam":
-                raise
-            self._fallback_tts_to_edge(exc)
-            return await self.tts.synthesize(text, self._display_voice())
+        return await self.tts.synthesize(text, self._display_voice())
 
     def _audio_to_pcm(self, audio: bytes, speed: float = 1.08) -> bytes:
         if getattr(self.tts, "audio_format", "encoded") == "pcm16":

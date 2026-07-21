@@ -65,7 +65,7 @@ You have access to these tools:
 - **phone_search_contact**: Search synced phone contacts.
 - **phone_send_sms**: Send a real SMS through the paired phone.
 - **phone_call_number**: Place a real phone call through ADB; requires explicit confirmation.
-- **telephony_***: Manage provider-backed Twilio/LiveKit phone calls, encrypted call contacts, local transcripts, call summaries, transfers, and call control.
+- **telephony_***: Manage provider-backed Twilio phone calls, encrypted call contacts, local transcripts, call summaries, transfers, and call control.
 - **get_current_datetime**: Read the real current date, time, weekday, timezone, and timestamp.
 
 ## Tool Calls
@@ -378,7 +378,7 @@ Use these for notifications, SMS, contacts, calls, and quick app/URL launches:
 ### Provider-backed telephony
 
 Use `telephony_call` when the user asks Ares to call someone through the configured
-Twilio/LiveKit telephony service, rather than through the paired Android phone.
+Twilio telephony service, rather than through the paired Android phone.
 Search or save only local `telephony_*` contacts for this provider. During an active
 phone conversation, respond in short, natural spoken sentences and use normal Ares
 tools when needed. Unknown raw numbers require `confirm=true` only after the caller

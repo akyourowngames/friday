@@ -196,65 +196,6 @@ def test_wait_for_utterance_skips_low_energy_audio():
     assert asyncio.run(run()) is None
 
 
-def test_tts_sarvam_failure_falls_back_to_edge(monkeypatch):
-    class FailingSarvamTTS:
-        audio_format = "pcm16"
-
-        async def synthesize(self, text, voice=""):
-            raise RuntimeError("failed to establish link to worker")
-
-    class FakeEdgeTTS:
-        audio_format = "encoded"
-
-        def __init__(self, voice):
-            self.default_voice = voice
-
-        async def synthesize(self, text, voice=""):
-            return b"edge-audio"
-
-    async def run():
-        agent = MagicMock(spec=ContinuousVoiceAgent)
-        agent.console = MagicMock()
-        agent.voice_config = VoiceConfig(tts_voice="en-US-GuyNeural")
-        agent.tts_backend = "sarvam"
-        agent._tts_backend_explicit = False
-        agent.tts = FailingSarvamTTS()
-        agent.tts_sample_rate = agent.voice_config.tts_sample_rate
-        agent._display_voice = lambda: ContinuousVoiceAgent._display_voice(agent)
-        agent._fallback_tts_to_edge = lambda exc: ContinuousVoiceAgent._fallback_tts_to_edge(agent, exc)
-        return await ContinuousVoiceAgent._synthesize_with_fallback(agent, "hello")
-
-    monkeypatch.setattr(voice_agent, "EdgeTTS", FakeEdgeTTS)
-
-    assert asyncio.run(run()) == b"edge-audio"
-
-
-def test_explicit_sarvam_tts_failure_does_not_fall_back(monkeypatch):
-    class FailingSarvamTTS:
-        audio_format = "encoded"
-
-        async def synthesize(self, text, voice=""):
-            raise RuntimeError("sarvam rejected request")
-
-    async def run():
-        agent = MagicMock(spec=ContinuousVoiceAgent)
-        agent.console = MagicMock()
-        agent.voice_config = VoiceConfig(tts_voice="en-US-GuyNeural")
-        agent.tts_backend = "sarvam"
-        agent._tts_backend_explicit = True
-        agent.tts = FailingSarvamTTS()
-        agent._display_voice = lambda: ContinuousVoiceAgent._display_voice(agent)
-        agent._fallback_tts_to_edge = lambda exc: ContinuousVoiceAgent._fallback_tts_to_edge(agent, exc)
-        await ContinuousVoiceAgent._synthesize_with_fallback(agent, "hello")
-
-    try:
-        asyncio.run(run())
-    except RuntimeError as exc:
-        assert "sarvam rejected request" in str(exc)
-    else:
-        raise AssertionError("explicit Sarvam TTS failure should not fall back")
-
-
 def test_audio_to_pcm_amplifies_edge_audio(monkeypatch):
     agent = MagicMock(spec=ContinuousVoiceAgent)
     agent.voice_config = VoiceConfig(tts_volume=2.0)

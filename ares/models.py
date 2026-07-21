@@ -152,8 +152,6 @@ class VoiceConfig(BaseModel):
 
     enabled: bool = False
     stt_backend: str = "auto"
-    # Prefer Sarvam when configured; otherwise use the reliable Edge fallback.
-    # Workspace dictation is browser-native and does not use this backend.
     tts_backend: str = "auto"
     tts_voice: str = "en-US-JennyNeural"
     stt_model: str = "small"
@@ -173,11 +171,6 @@ class VoiceConfig(BaseModel):
     tts_chunk_chars: int = 90
     tts_sample_rate: int = 24000
     tts_volume: float = 1.6
-    sarvam_stt_model: str = "saaras:v3"
-    sarvam_tts_model: str = "bulbul:v3"
-    sarvam_language_code: str = "en-IN"
-    sarvam_speaker: str = "shubh"
-    sarvam_pace: float = 1.0
     voice_max_history: int = 10
     voice_max_memories: int = 3
 
@@ -193,12 +186,26 @@ class PhoneConfig(BaseModel):
     adb_path: str = ""              # auto-detected if empty
 
 
+class DesktopConfig(BaseModel):
+    """Configuration for the desktop voice assistant mode."""
+
+    enabled: bool = False
+    hotkey_ptt: str = "ctrl+space"
+    hotkey_mute: str = "ctrl+shift+m"
+    hotkey_window: str = "ctrl+shift+h"
+    window_x: int = -1
+    window_y: int = -1
+    window_opacity: float = 0.85
+    auto_hide_seconds: int = 3
+    history_size: int = 5
+
+
 class TelephonyConfig(BaseModel):
     """Provider-backed telephone voice settings.
 
     Values may be supplied through the local config file or environment
-    variables (``TWILIO_*`` / ``LIVEKIT_*``).  Secret-bearing fields are
-    automatically redacted by Ares exports and diagnostics.
+    variables (``TWILIO_*``).  Secret-bearing fields are automatically
+    redacted by Ares exports and diagnostics.
     """
 
     enabled: bool = False
@@ -210,12 +217,6 @@ class TelephonyConfig(BaseModel):
     voice_webhook_path: str = "/telephony/twilio/voice"
     status_webhook_path: str = "/telephony/twilio/status"
     media_stream_url: str = ""
-    livekit_url: str = ""
-    livekit_api_key: str = ""
-    livekit_api_secret: str = ""
-    # Ares routes phone transcripts through its configured assistant model.
-    # Keep this blank by default: a LiveKit/Twilio deployment must never
-    # silently select an OpenAI Realtime model or require an OpenAI key.
     realtime_model: str = ""
     voice: str = ""
     language: str = "en-US"
@@ -245,7 +246,7 @@ class TelegramConfig(BaseModel):
     max_attachment_bytes: int = Field(default=20 * 1024 * 1024, ge=1, le=20 * 1024 * 1024)
     max_outbound_file_bytes: int = Field(default=50 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
     audio_transcription_enabled: bool = True
-    audio_stt_backend: str = "auto"  # auto: Sarvam when configured, otherwise local Whisper
+    audio_stt_backend: str = "auto"  # auto: local Whisper
     audio_stt_model: str = "small"
     max_audio_duration_seconds: int = Field(default=600, ge=1, le=7200)
 
@@ -598,6 +599,7 @@ class AppConfig(BaseModel):
         description="MCP server configurations for remote Model Context Protocol tools.",
     )
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    desktop: DesktopConfig = Field(default_factory=DesktopConfig)
     phone: PhoneConfig = Field(default_factory=PhoneConfig)
     telephony: TelephonyConfig = Field(default_factory=TelephonyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

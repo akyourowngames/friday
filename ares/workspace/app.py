@@ -105,25 +105,8 @@ def create_workspace_app(
 
     @app.get("/api/voice/session", include_in_schema=False)
     async def voice_session(request: Request) -> JSONResponse:
-        """Mint one short-lived LiveKit token for the local workspace voice panel.
-
-        The API secret remains entirely in Ares' local configuration. The JWT
-        is never written to a URL and cannot be requested over a network bind.
-        """
-        if not _is_loopback_client(request):
-            raise HTTPException(status_code=403, detail="Voice sessions are available only from the local Ares workspace.")
-        try:
-            from ares.telephony.livekit_room import DEFAULT_ROOM, create_room_session
-
-            payload = create_room_session(
-                DEFAULT_ROOM,
-                f"workspace-{uuid.uuid4().hex[:20]}",
-                ttl_seconds=600,
-                config=voice_config_provider(),
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail="Ares voice is not configured or unavailable.") from exc
-        return JSONResponse(payload, headers={"Cache-Control": "no-store, max-age=0"})
+        """Voice session endpoint (placeholder — LiveKit removed)."""
+        raise HTTPException(status_code=503, detail="Voice sessions are not available. LiveKit has been removed.")
 
     @app.post("/api/speech", include_in_schema=False)
     async def speech(payload: SpeechPayload) -> Response:

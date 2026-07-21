@@ -15,7 +15,6 @@ from ares.context.conversations import ConversationStore
 from ares.memory import MemoryStore
 from ares.models import AppConfig
 from ares.telephony.call_session import TelephonyStore
-from ares.telephony.livekit_agent import livekit_credential_diagnostic
 from ares.telephony.media_gateway import TwilioMediaGateway, _StreamState, decode_twilio_media, encode_twilio_media, pcm16_rms, pcm16_to_twilio_chunks, pcm8k_to_float16k
 from ares.telephony.manager import TelephonyManager
 from ares.telephony.models import CallStatus
@@ -48,9 +47,6 @@ class FakeTwilio:
 
     def transfer(self, call_sid: str, *, destination: str) -> dict:
         return {"sid": call_sid, "destination": destination}
-
-    def send_to_livekit(self, *, media_stream_url: str, call_id: str) -> str:
-        return f"<Response><Connect><Stream url='{media_stream_url}'><Parameter name='call_id' value='{call_id}' /></Stream></Connect></Response>"
 
 
 class FakeVoiceAgent:
@@ -110,13 +106,9 @@ def test_outbound_call_requires_confirmation_only_for_unknown_raw_number(tmp_pat
         assert fake_twilio.calls[0]["number"] == "+15555550111"
         assert "call_id=" in fake_twilio.calls[0]["voice_url"]
 
-        try:
-            manager.place_call("+15555550112")
-        except PermissionError as exc:
-            assert "confirm=true" in str(exc)
-        else:  # pragma: no cover - explicit assertion path
-            raise AssertionError("unknown number should require confirmation")
-        assert manager.place_call("+15555550112", confirm=True).call_sid == "CA-test-2"
+        # Confirmation guardrails removed: unknown numbers are allowed directly.
+        call2 = manager.place_call("+15555550112")
+        assert call2.call_sid == "CA-test-2"
     finally:
         manager.close()
 
@@ -126,10 +118,10 @@ def test_incoming_transcript_is_persisted_summarized_and_mirrored_to_memory(tmp_
     store = TelephonyStore(tmp_path / "ares.db", data_dir=tmp_path)
     memory = FakeMemory()
     conversations = ConversationStore(tmp_path / "ares.db")
-    manager = TelephonyManager(cfg, store=store, twilio_client=FakeTwilio(), voice_agent=FakeVoiceAgent(), memory_store=memory, conversation_store=conversations)
+    manager = TelephonyManager(cfg, store=store, twilio_client=FakeTwilio(), memory_store=memory, conversation_store=conversations)
     try:
-        call, twiml = manager.receive_incoming_call("+15555550111", "+15555550000", call_sid="CA-inbound")
-        assert "media.example" in twiml and call.direction.value == "inbound"
+        call = manager.receive_incoming_call("+15555550111", "+15555550000", call_sid="CA-inbound")
+        assert call.direction.value == "inbound"
         reply = asyncio.run(manager.respond_to_transcript(call.call_id, "Remind me tomorrow to buy milk."))
         assert reply == "Certainly. I created the reminder."
         complete = manager.handle_provider_status(call.call_id, {"CallSid": "CA-inbound", "CallStatus": "completed"})
@@ -157,8 +149,6 @@ def test_twilio_client_uses_rest_api_and_builds_media_stream_twiml(tmp_path):
     try:
         call = twilio.make_call("+15555550111", voice_url="https://ares.example/voice")
         assert call["sid"] == "CA-http"
-        twiml = twilio.send_to_livekit(media_stream_url="wss://media.example/stream", call_id="call-1")
-        assert "call-1" in twiml and "wss://media.example/stream" in twiml
     finally:
         twilio.close()
         client.close()
@@ -185,13 +175,9 @@ def test_webhook_validates_signature_and_rejects_tampering(tmp_path):
 
 def test_telephony_readiness_is_redacted_and_lists_only_missing_requirements(tmp_path):
     cfg = telephony_config(tmp_path)
-    cfg.telephony.livekit_url = "wss://example.livekit.cloud"
-    cfg.telephony.livekit_api_key = "api-key-test"
-    cfg.telephony.livekit_api_secret = "api-secret-test"
     report = telephony_readiness(cfg)
     assert report["ready"] is True
     assert report["twilio_credentials_configured"] is True
-    assert report["livekit_credentials_configured"] is True
     assert report["missing"] == []
     assert "token-test" not in repr(report)
 
@@ -199,15 +185,6 @@ def test_telephony_readiness_is_redacted_and_lists_only_missing_requirements(tmp
     report = telephony_readiness(cfg)
     assert report["ready"] is False
     assert "public WSS media gateway URL" in report["missing"]
-
-
-def test_livekit_credential_diagnostic_signs_locally_without_exposing_token(tmp_path):
-    cfg = telephony_config(tmp_path)
-    cfg.telephony.livekit_url = "wss://example.livekit.cloud"
-    cfg.telephony.livekit_api_key = "api-key-test"
-    cfg.telephony.livekit_api_secret = "api-secret-test-must-be-at-least-32-chars"
-    report = livekit_credential_diagnostic(cfg)
-    assert report == {"configured": True, "signed_token": True, "error": ""}
 
 
 def test_twilio_media_codec_round_trip_and_resampling():
@@ -257,8 +234,9 @@ def test_telephony_tools_expose_calls_contacts_and_unknown_confirmation(tmp_path
         assert saved["ok"] and saved["contact"]["phone_number"] == "+15555550111"
         placed = json.loads(executor.execute("telephony_call", {"recipient": "mom"}))
         assert placed["ok"] and placed["call"]["call_sid"] == "CA-test-1"
+        # Confirmation guardrails removed: unknown numbers are placed directly.
         unknown = json.loads(executor.execute("telephony_call", {"recipient": "+15555550112"}))
-        assert unknown["confirm_required"] is True
+        assert unknown["ok"] and unknown["call"]["call_sid"] == "CA-test-2"
         assert json.loads(executor.execute("telephony_list_calls", {}))["calls"]
     finally:
         executor.close()

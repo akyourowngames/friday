@@ -28,6 +28,12 @@ async def _run_voice(
     await run_voice_agent(voice_name, stt_backend=stt_backend, tts_backend=tts_backend, barge_in=barge_in)
 
 
+async def _run_desktop() -> None:
+    from ares.desktop.agent import run_desktop
+
+    await run_desktop()
+
+
 def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
     """Run a coroutine from sync code, even if this thread already has a loop."""
     try:
@@ -89,22 +95,6 @@ async def _run_telephony_media_gateway(host: str, port: int) -> None:
     from ares.telephony.media_gateway import run_twilio_media_gateway
 
     await run_twilio_media_gateway(host=host, port=port)
-
-
-def _run_livekit_assistant() -> None:
-    """Launch the LiveKit worker in its local development mode."""
-    import sys
-
-    from ares.telephony.livekit_worker import main as worker_main
-
-    # Ares' own flags are not valid LiveKit-agent CLI flags. Start the worker
-    # with a clean local-development argv instead of forwarding ``--livekit``.
-    original_argv = sys.argv
-    sys.argv = [original_argv[0], "dev"]
-    try:
-        worker_main()
-    finally:
-        sys.argv = original_argv
 
 
 def _authorize_telegram_chat(chat_id: int, *, revoke: bool = False) -> None:
@@ -176,8 +166,8 @@ def main():
     parser.add_argument("--telephony-media-host", default="127.0.0.1", help="Bind host for --telephony-media-gateway")
     parser.add_argument("--telephony-media-port", type=int, default=8767, help="Bind port for --telephony-media-gateway")
     parser.add_argument("--voice-name", default=None, help="Edge TTS voice for --voice")
-    parser.add_argument("--stt-backend", choices=["auto", "whisper", "sarvam"], default=None, help="STT backend for --voice")
-    parser.add_argument("--tts-backend", choices=["auto", "edge", "sarvam"], default=None, help="TTS backend for --voice")
+    parser.add_argument("--stt-backend", choices=["auto", "whisper"], default=None, help="STT backend for --voice")
+    parser.add_argument("--tts-backend", choices=["auto", "edge"], default=None, help="TTS backend for --voice")
     parser.add_argument(
         "--barge-in",
         action=argparse.BooleanOptionalAction,
@@ -185,17 +175,6 @@ def main():
         help="Enable or disable microphone interruption of TTS (defaults to the saved voice setting)",
     )
     parser.add_argument("--tts", choices=["edge"], default=None, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--livekit",
-        action="store_true",
-        help="Run the LiveKit voice worker in development mode (requires LIVEKIT_URL, API key, and secret)",
-    )
-    parser.add_argument("--livekit-join", action="store_true", help="Open a local Ares LiveKit room that mints a token and joins automatically")
-    parser.add_argument("--livekit-room", default="ares-voice-room", help="Room name for --livekit-join")
-    parser.add_argument("--livekit-identity", default="ares-user", help="Browser participant identity for --livekit-join")
-    parser.add_argument("--livekit-room-host", default="127.0.0.1", help="Loopback host for --livekit-join")
-    parser.add_argument("--livekit-room-port", type=int, default=8790, help="Local browser launcher port for --livekit-join")
-    parser.add_argument("--livekit-no-browser", action="store_true", help="Do not open a browser for --livekit-join")
     parser.add_argument("--host", default="127.0.0.1", help="Server host for --server")
     parser.add_argument("--port", type=int, default=8765, help="Server port for --server")
     args = parser.parse_args()
@@ -229,20 +208,6 @@ def main():
             _run_telephony_webhook(args.telephony_webhook_host, args.telephony_webhook_port)
         elif args.telephony_media_gateway:
             _run_coro(_run_telephony_media_gateway(args.telephony_media_host, args.telephony_media_port))
-        elif args.livekit and args.livekit_join:
-            parser.error("Run the LiveKit worker and room launcher in separate terminals: --livekit, then --livekit-join.")
-        elif args.livekit_join:
-            from ares.telephony.livekit_room import run_room_launcher
-
-            run_room_launcher(
-                room=args.livekit_room,
-                identity=args.livekit_identity,
-                host=args.livekit_room_host,
-                port=args.livekit_room_port,
-                open_browser=not args.livekit_no_browser,
-            )
-        elif args.livekit:
-            _run_livekit_assistant()
         else:
             _run_coro(_run_cli())
     except asyncio.CancelledError:
