@@ -45,19 +45,23 @@ class TrayIcon:
         on_status: Callable[[], None] | None = None,
         on_mute_toggle: Callable[[], None] | None = None,
         on_wake_toggle: Callable[[], None] | None = None,
+        on_barge_toggle: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
         history_provider: Callable[[], list[dict[str, str]]] | None = None,
         mute_state_provider: Callable[[], bool] | None = None,
         wake_state_provider: Callable[[], bool] | None = None,
+        barge_state_provider: Callable[[], bool] | None = None,
     ) -> None:
         self._on_new_session = on_new_session
         self._on_status = on_status
         self._on_mute_toggle = on_mute_toggle
         self._on_wake_toggle = on_wake_toggle
+        self._on_barge_toggle = on_barge_toggle
         self._on_quit = on_quit
         self._history_provider = history_provider
         self._mute_state_provider = mute_state_provider
         self._wake_state_provider = wake_state_provider
+        self._barge_state_provider = barge_state_provider
         self._icon: Any = None
         self._thread: threading.Thread | None = None
 
@@ -115,6 +119,10 @@ class TrayIcon:
         items.append(pystray.MenuItem(mute_label, self._handle_mute_toggle))
         wake_label = "Disable Wake Word" if self._is_wake_enabled() else "Enable Wake Word"
         items.append(pystray.MenuItem(wake_label, self._handle_wake_toggle))
+        barge_label = (
+            "Disable Interruption" if self._is_barge_enabled() else "Enable Interruption"
+        )
+        items.append(pystray.MenuItem(barge_label, self._handle_barge_toggle))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", self._handle_quit))
 
@@ -135,6 +143,10 @@ class TrayIcon:
     def _handle_wake_toggle(self, icon: Any, item: Any) -> None:
         if self._on_wake_toggle:
             self._on_wake_toggle()
+
+    def _handle_barge_toggle(self, icon: Any, item: Any) -> None:
+        if self._on_barge_toggle:
+            self._on_barge_toggle()
 
     def _handle_quit(self, icon: Any, item: Any) -> None:
         if self._on_quit:
@@ -160,6 +172,14 @@ class TrayIcon:
         if self._wake_state_provider:
             try:
                 return self._wake_state_provider()
+            except Exception:
+                return False
+        return False
+
+    def _is_barge_enabled(self) -> bool:
+        if self._barge_state_provider:
+            try:
+                return self._barge_state_provider()
             except Exception:
                 return False
         return False

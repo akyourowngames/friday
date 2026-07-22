@@ -113,6 +113,10 @@ class DesktopVoiceAgent:
         self._speaking = False
         self._speaking_started_at = 0.0
         self._barge_voiced_frames = 0
+        self._barge_in_progress = False
+        self._barge_candidate_frames: collections.deque[np.ndarray] = (
+            collections.deque(maxlen=40)
+        )
 
         # Always-on local wake-word state. Audio is transcribed locally by the
         # same Whisper backend used for push-to-talk.
@@ -158,10 +162,12 @@ class DesktopVoiceAgent:
                 on_status=self._handle_status,
                 on_mute_toggle=self._handle_mute_toggle,
                 on_wake_toggle=self._handle_wake_toggle,
+                on_barge_toggle=self._handle_barge_toggle,
                 on_quit=self._handle_quit,
                 history_provider=lambda: self._history.recent(),
                 mute_state_provider=lambda: self._muted,
                 wake_state_provider=lambda: self.desktop_config.wake_word_enabled,
+                barge_state_provider=lambda: self.voice_config.barge_in_enabled,
             )
             self._tray.start()
 
@@ -282,6 +288,10 @@ class DesktopVoiceAgent:
         if self._loop:
             asyncio.run_coroutine_threadsafe(self._toggle_wake_word(), self._loop)
 
+    def _handle_barge_toggle(self) -> None:
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(self._toggle_barge_in(), self._loop)
+
     def _handle_new_session(self) -> None:
         self._conversation_history.clear()
         if self._window:
@@ -364,13 +374,15 @@ class DesktopVoiceAgent:
                     with self._ptt_lock:
                         self._ptt_frames.append(frame)
                     continue
-                self._consume_barge_in_frame(frame)
+                if self._consume_barge_in_frame(frame):
+                    continue
                 if self._wake_transcribing:
                     continue
                 if self._wake_armed_until > 0:
                     self._consume_wake_frame(frame)
-                elif self.desktop_config.wake_word_enabled and not self._speaking:
-                    self._record_ambient_level(frame)
+                elif self.desktop_config.wake_word_enabled:
+                    if not self._speaking:
+                        self._record_ambient_level(frame)
                     self._wake_pre_roll.append(frame)
                     if self._wake_detector and self._wake_detector.process(frame):
                         await self._handle_wake_word_detection()
@@ -456,28 +468,56 @@ class DesktopVoiceAgent:
                 * float(self.desktop_config.wake_sensitivity),
             )
         elif barge_in:
-            threshold = max(threshold * 1.35, 0.006)
+            # The former fixed 0.006 floor rejected normal speech from this
+            # machine's Realtek array. Use the measured quiet-room level and a
+            # conservative fraction of the configured speech floor instead.
+            ambient = (
+                float(np.median(self._ambient_rms_samples))
+                if self._ambient_rms_samples
+                else 0.0005
+            )
+            threshold = max(0.0012, ambient * 3.0, threshold * 0.65)
         return rms >= threshold
 
-    def _consume_barge_in_frame(self, frame: np.ndarray) -> None:
-        if not self._speaking or not self.voice_config.barge_in_enabled:
+    def _consume_barge_in_frame(self, frame: np.ndarray) -> bool:
+        """Detect an interruption and seed command capture with its opening."""
+        if (
+            not self._speaking
+            or not self.voice_config.barge_in_enabled
+            or self._barge_in_progress
+        ):
             self._barge_voiced_frames = 0
-            return
+            self._barge_candidate_frames.clear()
+            return False
         if self._loop is None:
-            return
+            return False
         delay = max(0, int(self.voice_config.barge_in_delay_ms)) / 1000
         if self._loop.time() - self._speaking_started_at < delay:
-            return
+            return False
         if self._frame_is_speech(frame, barge_in=True):
             self._barge_voiced_frames += 1
+            self._barge_candidate_frames.append(frame)
         else:
             self._barge_voiced_frames = 0
+            self._barge_candidate_frames.clear()
         required = max(
             int(self.voice_config.start_speech_frames),
             int(np.ceil(max(30, self.voice_config.barge_in_min_voiced_ms) / _FRAME_MS)),
         )
         if self._barge_voiced_frames >= required:
+            captured = list(self._barge_candidate_frames)
             self._barge_voiced_frames = 0
+            self._barge_candidate_frames.clear()
+            self._barge_in_progress = True
+            self._reset_wake_detector()
+            # Preserve the beginning of a short interruption such as "stop".
+            # Without this, the detector consumed the word and then listened
+            # only for whatever came after it, usually producing empty text.
+            self._wake_pre_roll.extend(captured)
+            self._wake_speech = captured
+            self._wake_consecutive_speech = len(captured)
+            self._wake_voiced_frames = len(captured)
+            self._wake_silence_frames = 0
             self._wake_armed_until = self._loop.time() + float(
                 self.desktop_config.wake_command_timeout_seconds
             )
@@ -485,6 +525,8 @@ class DesktopVoiceAgent:
                 self._interrupt_current_turn(show_listening=True),
                 name="ares-desktop-barge-in",
             )
+            return True
+        return False
 
     def _expire_wake_window(self) -> None:
         if self._wake_armed_until <= 0 or self._loop is None:
@@ -850,6 +892,24 @@ class DesktopVoiceAgent:
         if self._tray:
             self._tray.refresh_menu()
 
+    async def _toggle_barge_in(self) -> None:
+        self.voice_config.barge_in_enabled = not self.voice_config.barge_in_enabled
+        save_config(self.config)
+        self._barge_voiced_frames = 0
+        self._barge_candidate_frames.clear()
+        self._barge_in_progress = False
+        enabled = self.voice_config.barge_in_enabled
+        if self._window:
+            self._window.set_state(
+                StatusState.IDLE,
+                "Interruption on — speak while Ares is talking"
+                if enabled
+                else "Interruption off",
+            )
+        if self._tray:
+            self._tray.refresh_menu()
+        logger.info("Barge-in %s", "enabled" if enabled else "disabled")
+
     async def _get_response(self, text: str) -> str:
         agent = self._get_or_create_agent()
         response_parts: list[str] = []
@@ -949,12 +1009,16 @@ class DesktopVoiceAgent:
         self._speaking = True
         self._speaking_started_at = asyncio.get_running_loop().time()
         self._barge_voiced_frames = 0
+        self._barge_candidate_frames.clear()
+        self._barge_in_progress = False
         try:
             await play_audio_stream(q, stop, sample_rate=self._tts_sample_rate)
         finally:
             self._speaking = False
             self._speech_stop_event = None
             self._barge_voiced_frames = 0
+            self._barge_candidate_frames.clear()
+            self._barge_in_progress = False
 
     @staticmethod
     def _sanitize_display_text(text: str) -> str:

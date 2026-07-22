@@ -22,6 +22,9 @@ def _bare_agent() -> DesktopVoiceAgent:
     agent._ambient_rms_samples = __import__("collections").deque(
         [0.0002] * 20, maxlen=200
     )
+    agent._barge_voiced_frames = 0
+    agent._barge_in_progress = False
+    agent._barge_candidate_frames = __import__("collections").deque(maxlen=40)
     return agent
 
 
@@ -172,3 +175,42 @@ def test_post_wake_command_gate_accepts_quiet_bluetooth_speech():
     quiet_speech = np.full(480, 0.001, dtype=np.float32)
 
     assert agent._frame_is_command_speech(quiet_speech) is True
+
+
+def test_barge_in_gate_accepts_quiet_realtek_speech():
+    agent = _bare_agent()
+    quiet_speech = np.full(480, 0.003, dtype=np.float32)
+
+    assert agent._frame_is_speech(quiet_speech, barge_in=True) is True
+
+
+@pytest.mark.asyncio
+async def test_barge_in_interrupts_once_and_preserves_opening_audio():
+    agent = _bare_agent()
+    agent._loop = asyncio.get_running_loop()
+    agent._speaking = True
+    agent._speaking_started_at = agent._loop.time() - 1.0
+    agent.voice_config.barge_in_enabled = True
+    agent.voice_config.start_speech_frames = 3
+    agent.voice_config.barge_in_min_voiced_ms = 90
+    agent._speech_stop_event = asyncio.Event()
+    agent._active_turn_task = None
+    agent._window = None
+    agent._tray = None
+    agent._wake_pre_roll = __import__("collections").deque(maxlen=20)
+    agent._wake_speech = []
+    agent._wake_consecutive_speech = 0
+    agent._wake_voiced_frames = 0
+    agent._wake_silence_frames = 0
+    frame = np.full(480, 0.003, dtype=np.float32)
+
+    assert agent._consume_barge_in_frame(frame) is False
+    assert agent._consume_barge_in_frame(frame) is False
+    assert agent._consume_barge_in_frame(frame) is True
+    assert agent._consume_barge_in_frame(frame) is False
+    await asyncio.sleep(0)
+
+    assert agent._speech_stop_event.is_set()
+    assert agent._barge_in_progress is True
+    assert len(agent._wake_speech) == 3
+    assert agent._wake_armed_until > agent._loop.time()
