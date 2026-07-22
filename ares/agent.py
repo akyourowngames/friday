@@ -316,10 +316,7 @@ class Agent:
         if self._owns_tool_executor:
             self.tool_executor.config = self.llm.config
             self.tool_executor.set_session_id(session_id)
-        if self._owns_tool_executor and getattr(self.tool_executor, "telephony", None) is not None:
-            # Phone transcripts use the normal agent loop, so call-time tool
-            # access and memory behavior remain identical to chat.
-            self.tool_executor.telephony.voice_agent.agent = self
+        # Voice agent (LiveKit) has been removed from telephony manager.
         self.people_store = self.tool_executor.people_store
         self.action_ledger = self.tool_executor.action_ledger
         self.task_store = self.tool_executor.task_store

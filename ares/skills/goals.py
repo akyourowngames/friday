@@ -17,7 +17,11 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from ares.config import get_db_path
-from ares.infra.sqlite_utils import connect_sqlite
+from ares.infra.sqlite_utils import (
+    connect_sqlite,
+    is_sqlite_lock_error,
+    retry_sqlite_locked,
+)
 
 
 _UNSET = object()
@@ -116,6 +120,19 @@ class GoalStore:
         self._init_db()
 
     def _init_db(self) -> None:
+        """Initialize and migrate goals without failing on another Ares writer."""
+        retry_sqlite_locked(
+            self._init_db_once,
+            description="goal database initialization",
+            on_retry=self._rollback_after_lock,
+        )
+
+    def _rollback_after_lock(self, _exc: sqlite3.OperationalError) -> None:
+        """Clear a partial migration transaction before its idempotent retry."""
+        if self.conn.in_transaction:
+            self.conn.rollback()
+
+    def _init_db_once(self) -> None:
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS goals_meta (
@@ -235,7 +252,9 @@ class GoalStore:
             meta_count = self.conn.execute("SELECT COUNT(*) FROM goals_meta").fetchone()[0]
             if count != meta_count:
                 self.conn.execute("INSERT INTO goals_fts(goals_fts) VALUES('rebuild')")
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as exc:
+            if is_sqlite_lock_error(exc):
+                raise
             self.fts_enabled = False
         self.conn.commit()
 
@@ -259,11 +278,19 @@ class GoalStore:
         for name, definition in additions.items():
             if name not in existing:
                 self.conn.execute(f"ALTER TABLE goals_meta ADD COLUMN {name} {definition}")
-        self.conn.execute(
-            """UPDATE goals_meta SET last_activity_at=COALESCE(last_activity_at, updated_at, created_at),
-               next_action=CASE WHEN TRIM(COALESCE(next_action, ''))='' THEN
-                 'Define the next concrete step for ' || title ELSE next_action END"""
-        )
+        needs_backfill = self.conn.execute(
+            """SELECT EXISTS(
+                   SELECT 1 FROM goals_meta
+                   WHERE last_activity_at IS NULL
+                      OR TRIM(COALESCE(next_action, '')) = ''
+               )"""
+        ).fetchone()[0]
+        if needs_backfill:
+            self.conn.execute(
+                """UPDATE goals_meta SET last_activity_at=COALESCE(last_activity_at, updated_at, created_at),
+                   next_action=CASE WHEN TRIM(COALESCE(next_action, ''))='' THEN
+                     'Define the next concrete step for ' || title ELSE next_action END"""
+            )
         rows = self.conn.execute(
             """SELECT goal_id, title FROM goals_meta WHERE NOT EXISTS (
                    SELECT 1 FROM goal_milestones m WHERE m.goal_id=goals_meta.goal_id

@@ -198,6 +198,23 @@ class DesktopConfig(BaseModel):
     window_opacity: float = 0.85
     auto_hide_seconds: int = 3
     history_size: int = 5
+    wake_word_enabled: bool = True
+    wake_words: list[str] = Field(default_factory=lambda: ["hey jarvis", "jarvis"])
+    wake_command_timeout_seconds: float = Field(default=8.0, ge=2.0, le=30.0)
+    # Bluetooth microphones often deliver quieter frames and short gaps.  A
+    # multiplier below 1 makes only wake-word capture more sensitive; normal
+    # push-to-talk and barge-in thresholds remain unchanged.
+    wake_sensitivity: float = Field(default=0.35, ge=0.20, le=1.0)
+    wake_silence_timeout_ms: int = Field(default=750, ge=300, le=2_000)
+    wake_min_utterance_ms: int = Field(default=220, ge=100, le=1_000)
+    wake_detection_threshold: float = Field(default=0.30, ge=0.05, le=0.95)
+    translate_speech_to_english: bool = True
+    # Follow the input selected by Windows. This takes precedence over the
+    # legacy Bluetooth preference so Ares never pins a stale headset endpoint.
+    follow_system_default_microphone: bool = True
+    avoid_bluetooth_microphone: bool = True
+    prefer_bluetooth_microphone: bool = False
+    tool_panel_enabled: bool = True
 
 
 class TelephonyConfig(BaseModel):

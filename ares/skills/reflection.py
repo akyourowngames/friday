@@ -10,6 +10,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
+
+from ares.infra.sqlite_utils import retry_sqlite_locked
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, ValidationError
@@ -172,6 +174,17 @@ class ReflectionStore:
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.conn = connection
+        retry_sqlite_locked(
+            self._init_db,
+            description="reflection database initialization",
+            on_retry=self._rollback_after_lock,
+        )
+
+    def _rollback_after_lock(self, _exc: sqlite3.OperationalError) -> None:
+        if self.conn.in_transaction:
+            self.conn.rollback()
+
+    def _init_db(self) -> None:
         self.conn.execute(
             """CREATE TABLE IF NOT EXISTS reflection_runs (
                 reflection_id TEXT PRIMARY KEY,
@@ -225,8 +238,15 @@ class ReflectionStore:
             "CREATE INDEX IF NOT EXISTS idx_reflection_checkpoint "
             "ON reflection_runs(compaction_checkpoint)"
         )
-        # A process may have stopped after claiming but before finishing.
-        self.conn.execute("UPDATE reflection_runs SET status='pending' WHERE status='running'")
+        # A process may have stopped after claiming but before finishing. Avoid
+        # taking a write lock on every startup when there is nothing to repair.
+        has_interrupted = self.conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM reflection_runs WHERE status='running')"
+        ).fetchone()[0]
+        if has_interrupted:
+            self.conn.execute(
+                "UPDATE reflection_runs SET status='pending' WHERE status='running'"
+            )
         self.conn.commit()
 
     def enqueue(

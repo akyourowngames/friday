@@ -1,5 +1,5 @@
 from ares.models import AppConfig, VoiceConfig
-from ares.voice.agent import voice_config_from_env
+from ares.voice.agent import friendly_input_device_name, resolve_input_device, voice_config_from_env
 from ares.voice.tts import DEFAULT_EDGE_VOICE, EdgeTTS
 
 
@@ -70,3 +70,118 @@ def test_voice_config_custom_history():
 
     assert config.voice_max_history == 5
     assert config.voice_max_memories == 2
+
+
+def test_bluetooth_microphone_is_preferred_over_windows_default(monkeypatch):
+    devices = [
+        {
+            "name": "Microphone Array (Realtek Audio)",
+            "max_input_channels": 2,
+            "default_samplerate": 44100.0,
+            "hostapi": 0,
+        },
+        {
+            "name": "Headset (Airdopes 181 Pro Hands-Free AG Audio)",
+            "max_input_channels": 1,
+            "default_samplerate": 16000.0,
+            "hostapi": 1,
+        },
+    ]
+
+    class FakeSoundDevice:
+        default = type("Default", (), {"device": [0, 3]})()
+
+        @staticmethod
+        def query_devices(device=None, _kind=None):
+            if device is None and _kind == "input":
+                return devices[0]
+            return devices if device is None else devices[device]
+
+        @staticmethod
+        def query_hostapis(index):
+            return {"name": "Windows WASAPI" if index == 1 else "MME"}
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", FakeSoundDevice)
+
+    selected, name = resolve_input_device(None, prefer_bluetooth=True)
+
+    assert selected == 1
+    assert "Airdopes" in name
+    assert friendly_input_device_name(name) == "Airdopes 181 Pro"
+
+
+def test_system_default_microphone_is_not_pinned_to_numeric_device(monkeypatch):
+    default_info = {
+        "name": "Microphone Array (Realtek Audio)",
+        "max_input_channels": 2,
+        "default_samplerate": 48000.0,
+        "hostapi": 0,
+    }
+
+    class FakeSoundDevice:
+        default = type("Default", (), {"device": [7, 3]})()
+
+        @staticmethod
+        def query_devices(device=None, kind=None):
+            if device is None and kind == "input":
+                return default_info
+            return [default_info]
+
+        @staticmethod
+        def query_hostapis(_index):
+            return {"name": "Windows WASAPI"}
+
+        @staticmethod
+        def check_input_settings(**kwargs):
+            assert kwargs["device"] is None
+
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", FakeSoundDevice)
+
+    selected, name = resolve_input_device(None, prefer_bluetooth=False)
+
+    assert selected is None
+    assert name == "Microphone Array (Realtek Audio)"
+    assert friendly_input_device_name(name) == "Realtek Audio Microphone Array"
+
+
+def test_bluetooth_default_falls_back_to_non_bluetooth_input(monkeypatch):
+    devices = [
+        {
+            "name": "Headset (Airdopes Hands-Free AG Audio)",
+            "max_input_channels": 1,
+            "default_samplerate": 16000.0,
+            "hostapi": 0,
+        },
+        {
+            "name": "Microphone Array (Realtek Audio)",
+            "max_input_channels": 2,
+            "default_samplerate": 48000.0,
+            "hostapi": 1,
+        },
+    ]
+
+    class FakeSoundDevice:
+        @staticmethod
+        def query_devices(device=None, kind=None):
+            if device is None and kind == "input":
+                return devices[0]
+            return devices if device is None else devices[device]
+
+        @staticmethod
+        def query_hostapis(index):
+            return {"name": "Windows WASAPI" if index == 1 else "MME"}
+
+        @staticmethod
+        def check_input_settings(**_kwargs):
+            return None
+
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", FakeSoundDevice)
+
+    selected, name = resolve_input_device(None, avoid_bluetooth=True)
+
+    assert selected == 1
+    assert "Realtek" in name

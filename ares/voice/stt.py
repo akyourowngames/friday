@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -26,13 +27,23 @@ class WhisperTranscriber:
         self.language = language or None
         self.compute_type = compute_type
         self._model = None
+        self._model_lock = threading.Lock()
 
     def _ensure_model(self):
         if self._model is None:
-            from faster_whisper import WhisperModel
+            with self._model_lock:
+                if self._model is not None:
+                    return self._model
+                from faster_whisper import WhisperModel
 
-            self._model = WhisperModel(self.model_name, device="cpu", compute_type=self.compute_type)
+                self._model = WhisperModel(
+                    self.model_name, device="cpu", compute_type=self.compute_type
+                )
         return self._model
+
+    def warmup(self) -> None:
+        """Load the local model before the first interactive voice command."""
+        self._ensure_model()
 
     def transcribe_file(
         self,
@@ -68,15 +79,24 @@ class WhisperTranscriber:
             segments, _info = model.transcribe(str(path), **kwargs)
         return clean_transcript(" ".join(segment.text.strip() for segment in segments))
 
-    def transcribe_samples(self, samples: np.ndarray, sample_rate: int = 16000) -> str:
-        """Transcribe mono float32 samples by writing a short WAV temp file."""
+    def transcribe_samples(
+        self,
+        samples: np.ndarray,
+        sample_rate: int = 16000,
+        *,
+        task: str = "transcribe",
+        multilingual: bool = False,
+    ) -> str:
+        """Transcribe or translate mono float32 samples via a temporary WAV."""
         import soundfile as sf
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
             sf.write(tmp_path, np.asarray(samples, dtype=np.float32), sample_rate)
-            return self.transcribe_file(tmp_path)
+            return self.transcribe_file(
+                tmp_path, task=task, multilingual=multilingual
+            )
         finally:
             tmp_path.unlink(missing_ok=True)
 

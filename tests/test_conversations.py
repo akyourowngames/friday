@@ -1,6 +1,9 @@
 """Tests for persistent conversations."""
 
+import sqlite3
+
 from ares.context.conversations import ConversationStore
+from ares.infra.sqlite_utils import connect_sqlite
 
 
 def test_store_messages_and_summarize(tmp_path):
@@ -103,3 +106,33 @@ def test_local_conversation_recall_indexes_existing_and_new_messages(tmp_path):
     recent = store.search_recall("", limit=2)
     assert [item["role"] for item in recent] == ["assistant", "user"]
     store.close()
+
+
+def test_shared_connection_is_not_closed_by_conversation_store(tmp_path):
+    connection = connect_sqlite(tmp_path / "shared.db")
+    store = ConversationStore(connection=connection)
+    store.close()
+    try:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_recall_startup_failure_rolls_back_partial_write_transaction(tmp_path, monkeypatch):
+    store = ConversationStore(db_path=tmp_path / "recall-rollback.db")
+    conversation_id = store.start_conversation()
+    store.add_message(conversation_id, "user", "rollback probe")
+    store.conn.execute("DELETE FROM conversation_recall")
+    store.conn.commit()
+
+    def fail_rebuild():
+        store.conn.execute("DELETE FROM conversation_recall")
+        raise sqlite3.DatabaseError("simulated FTS failure")
+
+    monkeypatch.setattr(store, "_rebuild_recall_index", fail_rebuild)
+    store._init_recall_index()
+    try:
+        assert store.recall_enabled is False
+        assert store.conn.in_transaction is False
+    finally:
+        store.close()
