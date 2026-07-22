@@ -29,9 +29,12 @@ async def _run_voice(
 
 
 async def _run_desktop() -> None:
-    from ares.desktop.agent import run_desktop
+    from ares.desktop.agent import DesktopAlreadyRunningError, run_desktop
 
-    await run_desktop()
+    try:
+        await run_desktop()
+    except DesktopAlreadyRunningError as exc:
+        print(str(exc))
 
 
 def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
@@ -39,6 +42,13 @@ def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
+        has_running_loop = False
+    else:
+        has_running_loop = True
+
+    # Keep asyncio.run outside the exception handler. Otherwise a later app
+    # error is misleadingly chained to the expected "no running event loop".
+    if not has_running_loop:
         return asyncio.run(coro)
 
     result: dict[str, Any] = {}
@@ -217,7 +227,9 @@ def main():
             _run_coro(_run_telephony_media_gateway(args.telephony_media_host, args.telephony_media_port))
         else:
             _run_coro(_run_cli())
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # Desktop mode performs its own shutdown in a finally block.  A normal
+        # Ctrl+C should not print a cancellation traceback after that cleanup.
         return
 
 

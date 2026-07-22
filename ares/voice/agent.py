@@ -79,6 +79,132 @@ def voice_config_from_env(config: VoiceConfig) -> VoiceConfig:
     return config.model_copy(update=updates)
 
 
+_BLUETOOTH_INPUT_MARKERS = (
+    "hands-free",
+    "hands free",
+    "airpods",
+    "airdopes",
+    "bluetooth",
+    "wireless headset",
+    " galaxy buds",
+    " buds ",
+    "bthhfenum",
+)
+
+
+def resolve_input_device(
+    device: int | str | None,
+    *,
+    sample_rate: int = _SAMPLE_RATE,
+    prefer_bluetooth: bool = False,
+    avoid_bluetooth: bool = False,
+) -> tuple[int | str | None, str]:
+    """Resolve and validate a microphone instead of trusting a silent default.
+
+    Windows commonly keeps a laptop microphone as the PortAudio default even
+    when Bluetooth headphones are the active output. Desktop mode explicitly
+    prefers a compatible Bluetooth hands-free input unless the user configured
+    a device themselves.
+    """
+    import sounddevice as sd
+
+    if device is not None:
+        info = sd.query_devices(device, "input")
+        sd.check_input_settings(
+            device=device, channels=1, samplerate=sample_rate, dtype="float32"
+        )
+        return device, str(info.get("name") or device)
+
+    devices = list(sd.query_devices())
+    bluetooth: list[tuple[int, int, str]] = []
+    non_bluetooth: list[tuple[int, int, str]] = []
+    for index, info in enumerate(devices):
+        if int(info.get("max_input_channels", 0)) < 1:
+            continue
+        name = str(info.get("name") or "")
+        folded = f" {name.casefold()} "
+        is_bluetooth = any(
+            marker in folded for marker in _BLUETOOTH_INPUT_MARKERS
+        )
+        try:
+            sd.check_input_settings(
+                device=index, channels=1, samplerate=sample_rate, dtype="float32"
+            )
+        except Exception:
+            continue
+        try:
+            host_name = str(sd.query_hostapis(info.get("hostapi"))["name"]).casefold()
+        except Exception:
+            host_name = ""
+        score = 0
+        if "wasapi" in host_name:
+            score += 30
+        elif "directsound" in host_name:
+            score += 15
+        elif "mme" in host_name:
+            score += 10
+        if int(float(info.get("default_samplerate", 0))) == int(sample_rate):
+            score += 20
+        if "microphone array" in folded or "realtek" in folded:
+            score += 10
+        if is_bluetooth:
+            bluetooth.append((100 + score, index, name))
+        elif "mapper" not in folded and "primary sound" not in folded:
+            non_bluetooth.append((score, index, name))
+
+    if prefer_bluetooth and bluetooth:
+        _score, index, name = max(bluetooth, key=lambda item: (item[0], -item[1]))
+        return index, name
+
+    if avoid_bluetooth:
+        try:
+            default_info = sd.query_devices(None, "input")
+            default_name = str(default_info.get("name") or "")
+        except Exception:
+            default_name = ""
+        folded_default = f" {default_name.casefold()} "
+        default_is_bluetooth = any(
+            marker in folded_default for marker in _BLUETOOTH_INPUT_MARKERS
+        )
+        if default_is_bluetooth and non_bluetooth:
+            _score, index, name = max(
+                non_bluetooth, key=lambda item: (item[0], -item[1])
+            )
+            return index, name
+
+    # Passing None to PortAudio is important: it binds the stream through the
+    # current Windows default route instead of pinning a numeric endpoint that
+    # can become stale when headsets connect or disconnect.
+    try:
+        info = sd.query_devices(None, "input")
+        sd.check_input_settings(
+            device=None,
+            channels=1,
+            samplerate=sample_rate,
+            dtype="float32",
+        )
+        return None, str(info.get("name") or "Windows default microphone")
+    except Exception:
+        return None, "Windows default microphone"
+
+
+def friendly_input_device_name(name: str) -> str:
+    """Return a compact microphone name suitable for the status card."""
+    value = re.sub(r"[\r\n]+", " ", str(name or "")).strip()
+    if re.search(r"\bmicrophone array\b", value, re.I):
+        brand = re.search(r"\(([^()]+)\)", value)
+        if brand:
+            return f"{brand.group(1).strip()} Microphone Array"[:64]
+        return value[:64]
+    parenthesized = re.search(r"\(([^()]*(?:AirPods|Airdopes|Buds)[^()]*)\)", value, re.I)
+    if parenthesized:
+        value = parenthesized.group(1)
+    value = re.sub(r"\bHands[- ]Free(?: AG)? Audio\b", "", value, flags=re.I)
+    value = re.sub(r"^(?:Headset|Microphone)\s*\(?", "", value, flags=re.I)
+    value = value.strip(" ()-–—")
+    return re.sub(r"\s+", " ", value)[:64] or "Microphone"
+
+
 class MicrophoneFrames:
     """Capture microphone audio and expose fixed-size 16 kHz frames."""
 
@@ -88,11 +214,19 @@ class MicrophoneFrames:
         sample_rate: int = _SAMPLE_RATE,
         frame_samples: int = _FRAME_SAMPLES,
         device: int | str | None = None,
+        prefer_bluetooth: bool = False,
+        follow_system_default: bool = False,
+        avoid_bluetooth: bool = False,
         max_seconds: int = 30,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_samples = frame_samples
         self.device = device
+        self.prefer_bluetooth = prefer_bluetooth
+        self.follow_system_default = follow_system_default
+        self.avoid_bluetooth = avoid_bluetooth
+        self.selected_device: int | str | None = device
+        self.device_name = ""
         self._frames: collections.deque[np.ndarray] = collections.deque(
             maxlen=max_seconds * sample_rate // frame_samples
         )
@@ -105,15 +239,48 @@ class MicrophoneFrames:
     def start(self) -> None:
         import sounddevice as sd
 
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-            blocksize=self.frame_samples,
-            device=self.device,
-            callback=self._callback,
+        selected, name = resolve_input_device(
+            self.device,
+            sample_rate=self.sample_rate,
+            prefer_bluetooth=(
+                self.prefer_bluetooth and not self.follow_system_default
+            ),
+            avoid_bluetooth=self.avoid_bluetooth,
         )
-        self._stream.start()
+        self.selected_device = selected
+        self.device_name = friendly_input_device_name(name)
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype="float32",
+                blocksize=self.frame_samples,
+                device=selected,
+                callback=self._callback,
+            )
+            self._stream.start()
+        except Exception:
+            # A paired Bluetooth endpoint can remain listed after disconnect.
+            # Fall back only for automatic selection; explicit user choices
+            # should fail loudly instead of silently opening another mic.
+            if self.device is not None:
+                raise
+            fallback, fallback_name = resolve_input_device(
+                None, sample_rate=self.sample_rate, prefer_bluetooth=False
+            )
+            if fallback == selected:
+                raise
+            self.selected_device = fallback
+            self.device_name = friendly_input_device_name(fallback_name)
+            self._stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype="float32",
+                blocksize=self.frame_samples,
+                device=fallback,
+                callback=self._callback,
+            )
+            self._stream.start()
 
     def close(self) -> None:
         stream = self._stream

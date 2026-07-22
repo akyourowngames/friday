@@ -466,6 +466,7 @@ For the optional GitHub Copilot SDK provider and user-authorized OAuth setup, se
 | Unified runtime | Next.js power workspace, desktop API, MCP tools, Telegram, watcher scheduler, and advanced watcher console | `python -m ares --all` |
 | WebSocket API compatibility alias | Same unified runtime | `python -m ares --server` |
 | Voice | Streaming speech, interruption/barge-in, local Whisper or Sarvam/Edge options | `python -m ares --voice` |
+| Desktop voice | “Hey Jarvis” wake word, push-to-talk, barge-in, tray controls, and a tool/file activity drawer | `python -m ares --desktop` |
 | Twilio webhook | Signed Voice and status callbacks (behind public HTTPS) | `python -m ares --telephony-webhook` |
 | Twilio media | Bidirectional Media Streams, local Whisper, Ares tools/memory, Edge TTS (behind public WSS) | `python -m ares --telephony-media-gateway` |
 | LiveKit worker | Ares voice worker that accepts LiveKit agent jobs | `ares-livekit dev` |

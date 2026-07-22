@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ares.config import get_db_path
 from ares.tools.dates import now_local_iso
-from ares.infra.sqlite_utils import connect_sqlite
+from ares.infra.sqlite_utils import connect_sqlite, is_sqlite_lock_error, retry_sqlite_locked
 
 
 class ConversationStore:
@@ -75,20 +75,45 @@ class ConversationStore:
                 )
                 """
             )
-            self.conn.execute("DELETE FROM conversation_recall")
-            self.conn.execute(
-                """
-                INSERT INTO conversation_recall (rowid, content, role, conversation_id, created_at)
-                SELECT id, content, role, conversation_id, created_at
-                FROM conversation_messages
-                """
-            )
             self.conn.commit()
+            recall_count = self.conn.execute(
+                "SELECT COUNT(*) FROM conversation_recall"
+            ).fetchone()[0]
+            message_count = self.conn.execute(
+                "SELECT COUNT(*) FROM conversation_messages"
+            ).fetchone()[0]
+            if recall_count != message_count:
+                retry_sqlite_locked(
+                    self._rebuild_recall_index,
+                    description="conversation recall index rebuild",
+                    on_retry=self._rollback_recall_startup,
+                )
             self.recall_enabled = True
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as exc:
+            # Never leave a swallowed FTS startup error holding a write lock.
+            # That used to deadlock the memory connection later in Agent init.
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            if is_sqlite_lock_error(exc):
+                raise
             # SQLite builds without FTS5 still get the deterministic LIKE
             # fallback in search_recall.
             self.recall_enabled = False
+
+    def _rebuild_recall_index(self) -> None:
+        self.conn.execute("DELETE FROM conversation_recall")
+        self.conn.execute(
+            """
+            INSERT INTO conversation_recall (rowid, content, role, conversation_id, created_at)
+            SELECT id, content, role, conversation_id, created_at
+            FROM conversation_messages
+            """
+        )
+        self.conn.commit()
+
+    def _rollback_recall_startup(self, _exc: sqlite3.OperationalError) -> None:
+        if self.conn.in_transaction:
+            self.conn.rollback()
 
     def _index_message(self, message_id: int, conversation_id: int, role: str, content: str, created_at: str) -> None:
         if not self.recall_enabled:
@@ -505,4 +530,5 @@ class ConversationStore:
 
     def close(self) -> None:
         """Close the database connection."""
-        self.conn.close()
+        if self._owns_connection:
+            self.conn.close()

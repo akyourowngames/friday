@@ -27,6 +27,7 @@ def _create_icon_image(color: str = "#666666") -> Image.Image:
 
 _ICON_COLORS = {
     "idle": "#666666",
+    "awake": "#69e6a6",
     "listening": "#00d4ff",
     "thinking": "#ffaa00",
     "speaking": "#4488ff",
@@ -43,16 +44,20 @@ class TrayIcon:
         on_new_session: Callable[[], None] | None = None,
         on_status: Callable[[], None] | None = None,
         on_mute_toggle: Callable[[], None] | None = None,
+        on_wake_toggle: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
         history_provider: Callable[[], list[dict[str, str]]] | None = None,
         mute_state_provider: Callable[[], bool] | None = None,
+        wake_state_provider: Callable[[], bool] | None = None,
     ) -> None:
         self._on_new_session = on_new_session
         self._on_status = on_status
         self._on_mute_toggle = on_mute_toggle
+        self._on_wake_toggle = on_wake_toggle
         self._on_quit = on_quit
         self._history_provider = history_provider
         self._mute_state_provider = mute_state_provider
+        self._wake_state_provider = wake_state_provider
         self._icon: Any = None
         self._thread: threading.Thread | None = None
 
@@ -81,12 +86,20 @@ class TrayIcon:
             color = _ICON_COLORS.get(state, "#666666")
             self._icon.icon = _create_icon_image(color)
 
+    def refresh_menu(self) -> None:
+        if self._icon is not None:
+            try:
+                self._icon.menu = self._build_menu()
+                self._icon.update_menu()
+            except Exception:
+                logger.debug("Tray menu refresh failed", exc_info=True)
+
     def _build_menu(self) -> Any:
         import pystray
 
         items = [
+            pystray.MenuItem("Open Ares", self._handle_status, default=True),
             pystray.MenuItem("New Session", self._handle_new_session),
-            pystray.MenuItem("Status", self._handle_status),
             pystray.Menu.SEPARATOR,
         ]
 
@@ -100,6 +113,8 @@ class TrayIcon:
         muted = self._is_muted()
         mute_label = "Unmute TTS" if muted else "Mute TTS"
         items.append(pystray.MenuItem(mute_label, self._handle_mute_toggle))
+        wake_label = "Disable Wake Word" if self._is_wake_enabled() else "Enable Wake Word"
+        items.append(pystray.MenuItem(wake_label, self._handle_wake_toggle))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", self._handle_quit))
 
@@ -117,6 +132,10 @@ class TrayIcon:
         if self._on_mute_toggle:
             self._on_mute_toggle()
 
+    def _handle_wake_toggle(self, icon: Any, item: Any) -> None:
+        if self._on_wake_toggle:
+            self._on_wake_toggle()
+
     def _handle_quit(self, icon: Any, item: Any) -> None:
         if self._on_quit:
             self._on_quit()
@@ -133,6 +152,14 @@ class TrayIcon:
         if self._mute_state_provider:
             try:
                 return self._mute_state_provider()
+            except Exception:
+                return False
+        return False
+
+    def _is_wake_enabled(self) -> bool:
+        if self._wake_state_provider:
+            try:
+                return self._wake_state_provider()
             except Exception:
                 return False
         return False

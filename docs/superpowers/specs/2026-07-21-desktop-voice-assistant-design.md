@@ -302,7 +302,7 @@ python -m ares --desktop
 
 ## What This Does NOT Include (Future Considerations)
 
-- Always-on mode with wake word ("Hey Ares")
+- Always-on mode with wake word ("Hey Jarvis")
 - Multiple hotkey modes (push-to-ask vs push-to-command)
 - Voice activity visualization beyond the status window
 - Speaker diarization

@@ -76,6 +76,23 @@ def test_load_config_upgrades_legacy_agent_iteration_default(tmp_path, monkeypat
     assert "windows" in {server["name"] for server in loaded.mcp_servers}
 
 
+def test_load_config_upgrades_legacy_desktop_wake_words(tmp_path, monkeypatch):
+    from ares import config as config_module
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {"desktop": {"wake_words": ["hey ares", "ares", "hey aries", "aries"]}}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+
+    loaded = config_module.load_config()
+
+    assert loaded.desktop.wake_words == ["hey jarvis", "jarvis"]
+
+
 def test_browser_mode_config_has_safe_defaults_and_validates_port():
     config = AppConfig()
 

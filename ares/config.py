@@ -54,6 +54,14 @@ def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
     # so existing users gain enough room for a real desktop workflow.
     if config.agent_max_iterations <= 40:
         config.agent_max_iterations = 80
+    # Upgrade the short-lived Ares/Aries wake aliases. "Jarvis" is much more
+    # consistently recognized across English, Hindi, and Hinglish accents.
+    legacy_wake_words = ["hey ares", "ares", "hey aries", "aries"]
+    configured_wake_words = [
+        str(value).strip().casefold() for value in config.desktop.wake_words
+    ]
+    if configured_wake_words == legacy_wake_words:
+        config.desktop.wake_words = ["hey jarvis", "jarvis"]
     _configure_playwright_mcp(config)
     _configure_windows_mcp(config)
     return config
