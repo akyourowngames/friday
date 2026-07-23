@@ -361,7 +361,7 @@ def test_artifact_endpoint_rejects_direct_paths_and_expired_tokens(
     server._artifact_preview_tokens = {
         "expired": (str(artifact), 7, 99.0),
     }
-    monkeypatch.setattr("ares.server.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr("ares.infra.server.time.monotonic", lambda: 100.0)
     assert server._resolve_artifact_preview_token("expired") is None
     assert "expired" not in server._artifact_preview_tokens
 

@@ -45,6 +45,7 @@ from ares.tools.mcp_upgrades import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MCP_RECONNECT_INTERVAL_SECONDS = 10.0
+DEFAULT_MCP_HEALTH_PROBE_INTERVAL_SECONDS = 30.0
 MAX_MCP_RECONNECT_BACKOFF_SECONDS = 120.0
 
 _SENSITIVE_MCP_QUERY_KEYS = {
@@ -383,6 +384,7 @@ class MCPClientManager:
         server_configs: list[dict[str, Any] | MCPServerConfig] | dict[str, Any],
         data_dir: str = "~/.ares/data",
         reconnect_interval_seconds: float = DEFAULT_MCP_RECONNECT_INTERVAL_SECONDS,
+        health_probe_interval_seconds: float = DEFAULT_MCP_HEALTH_PROBE_INTERVAL_SECONDS,
     ):
         configs = [
             self._coerce_config(name, value)
@@ -393,14 +395,26 @@ class MCPClientManager:
         self.sessions: dict[str, Any] = {}
         self._exit_stacks: dict[str, AsyncExitStack] = {}
         self._http_clients: dict[str, httpx.AsyncClient] = {}
+        # AnyIO transports used by the MCP SDK must be entered and exited by
+        # the same asyncio task. Each server therefore gets a long-lived owner
+        # task that opens the transport, publishes the session, and closes it.
+        self._owner_tasks: dict[str, asyncio.Task[None]] = {}
+        self._owner_stop_events: dict[str, asyncio.Event] = {}
         self.tool_definitions: list[dict[str, Any]] = []
         self.schema_cache: dict[str, list[dict[str, Any]]] = {}
         self.server_errors: dict[str, str] = {}
         self._reconnect_locks: dict[str, asyncio.Lock] = {}
         self._reconnect_interval_seconds = max(0.1, float(reconnect_interval_seconds))
+        self._health_probe_interval_seconds = max(
+            self._reconnect_interval_seconds,
+            float(health_probe_interval_seconds),
+        )
+        self._last_health_probe_at = 0.0
         self._reconnect_failures: dict[str, int] = {}
         self._next_reconnect_at: dict[str, float] = {}
         self._reconnect_monitor_task: asyncio.Task[None] | None = None
+        self._maintenance_lock = asyncio.Lock()
+        self._active_calls: dict[str, int] = {}
         # This cache is used only by an explicit, read-only call policy. It
         # stays in memory so neither MCP output nor request details persist.
         self._response_cache = MCPResponseCache()
@@ -450,17 +464,17 @@ class MCPClientManager:
         CancelledError that the MCP SDK can raise is fully consumed so it never
         leaks into the caller's event loop.
         """
-        if self.sessions or self._exit_stacks or self._http_clients:
+        if self.sessions or self._exit_stacks or self._http_clients or self._owner_tasks:
             await self.close()
         self.tool_definitions = []
         self.server_errors = {}
         async def connect_one(name: str, config: MCPServerConfig) -> None:
             try:
-                await asyncio.wait_for(
-                    self._connect_server(name, config),
-                    timeout=self._connection_timeout(config),
-                )
-                self.server_errors.pop(name, None)
+                report = await self.reconnect_server(name, force=True)
+                if not report.get("ready"):
+                    raise ConnectionError(
+                        str(report.get("error") or "connection completed without a live session")
+                    )
             except asyncio.CancelledError as exc:
                 _clear_current_task_cancellation()
                 self.server_errors[name] = f"Connection cancelled: {exc or 'cancelled'}"
@@ -482,6 +496,7 @@ class MCPClientManager:
             *(connect_one(name, config) for name, config in self.servers.items()),
             return_exceptions=True,
         )
+        self._last_health_probe_at = asyncio.get_running_loop().time()
         self._start_reconnect_monitor()
 
     async def close(self) -> None:
@@ -491,15 +506,17 @@ class MCPClientManager:
             monitor.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await monitor
-        for stack in list(self._exit_stacks.values()):
-            with suppress(Exception):
-                await stack.aclose()
-        for client in list(self._http_clients.values()):
-            with suppress(Exception):
-                await client.aclose()
+        server_names = set(self.sessions) | set(self._exit_stacks) | set(self._http_clients)
+        server_names.update(self._owner_tasks)
+        await asyncio.gather(
+            *(self.close_server(name) for name in server_names),
+            return_exceptions=True,
+        )
         self.sessions.clear()
         self._exit_stacks.clear()
         self._http_clients.clear()
+        self._owner_tasks.clear()
+        self._owner_stop_events.clear()
         self.tool_definitions.clear()
         self._response_cache.clear()
 
@@ -514,14 +531,22 @@ class MCPClientManager:
 
     async def _reconnect_monitor(self) -> None:
         """Retry disconnected servers in the background with bounded backoff."""
-        try:
-            while True:
+        while True:
+            try:
                 await asyncio.sleep(self._reconnect_interval_seconds)
                 await self.maintain_connections_once()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("MCP auto-reconnect loop failed; restarting on the next manager start")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One broken server or unexpected maintenance error must not
+                # permanently kill reconnection for the lifetime of Ares.
+                logger.exception("MCP auto-reconnect iteration failed; continuing")
+
+    async def ensure_running(self) -> dict[str, Any]:
+        """Start recovery in any Ares mode and reconnect missing transports now."""
+        self._start_reconnect_monitor()
+        await self.maintain_connections_once()
+        return self.readiness_report()
 
     async def maintain_connections_once(self) -> dict[str, Any]:
         """Reconnect every configured server that currently has no live session.
@@ -530,8 +555,20 @@ class MCPClientManager:
         monitor. It never replays an MCP tool request; it only rebuilds missing
         transports and refreshes their schemas.
         """
+        async with self._maintenance_lock:
+            return await self._maintain_connections_unlocked()
+
+    async def _maintain_connections_unlocked(self) -> dict[str, Any]:
+        """Perform one serialized health-and-reconnect maintenance pass."""
         loop = asyncio.get_running_loop()
         now = loop.time()
+        if (
+            self.sessions
+            and now - self._last_health_probe_at >= self._health_probe_interval_seconds
+        ):
+            self._last_health_probe_at = now
+            await self.health_probe()
+            now = loop.time()
 
         async def reconnect_one(name: str) -> None:
             if name in self.sessions or now < self._next_reconnect_at.get(name, 0.0):
@@ -555,21 +592,43 @@ class MCPClientManager:
         )
         return self.readiness_report()
 
-    async def close_server(self, name: str) -> None:
-        """Close one MCP server session and keep all other servers connected."""
-        stack = self._exit_stacks.pop(name, None)
-        if stack is not None:
-            with suppress(Exception):
-                await stack.aclose()
-        client = self._http_clients.pop(name, None)
-        if client is not None:
-            with suppress(Exception):
-                await client.aclose()
+    async def close_server(self, name: str, *, drop_schemas: bool = False) -> None:
+        """Close one transport while retaining cached schemas for recovery."""
+        owner = self._owner_tasks.get(name)
+        stop_event = self._owner_stop_events.get(name)
+        if stop_event is not None:
+            stop_event.set()
+        if owner is not None and owner is not asyncio.current_task():
+            # The owner performs the actual exit so AnyIO sees the same task
+            # that entered its task group. Direct cross-task aclose() calls
+            # are the source of otherwise permanent stdio reconnect failures.
+            with suppress(asyncio.CancelledError, Exception):
+                await owner
+        elif owner is None:
+            # Compatibility for injected/test sessions that have no owner.
+            stack = self._exit_stacks.pop(name, None)
+            if stack is not None:
+                with suppress(Exception):
+                    await stack.aclose()
+            client = self._http_clients.pop(name, None)
+            if client is not None:
+                with suppress(Exception):
+                    await client.aclose()
         self.sessions.pop(name, None)
+        self._owner_tasks.pop(name, None)
+        self._owner_stop_events.pop(name, None)
+        prefix = f"mcp__{name}__"
         self.tool_definitions = [
             tool for tool in self.tool_definitions
-            if not tool.get("function", {}).get("name", "").startswith(f"mcp__{name}__")
+            if not tool.get("function", {}).get("name", "").startswith(prefix)
         ]
+        if not drop_schemas:
+            # A disconnected server is still configured. Keeping its last
+            # known schemas advertised lets the next call reconnect on demand
+            # instead of making the integration disappear for the session.
+            self.tool_definitions.extend(self.schema_cache.get(name, ()))
+        else:
+            self.schema_cache.pop(name, None)
         # A server restart can change even a read-only result. Clearing this
         # small in-memory cache is conservative and avoids stale projections.
         self._response_cache.clear()
@@ -692,18 +751,66 @@ class MCPClientManager:
                 self.server_errors[name] = str(exc)
                 await self.close_server(name)
         await asyncio.gather(
-            *(probe_one(name, session) for name, session in list(self.sessions.items())),
+            *(
+                probe_one(name, session)
+                for name, session in list(self.sessions.items())
+                if self._active_calls.get(name, 0) <= 0
+            ),
             return_exceptions=True,
         )
         return self.readiness_report()
 
     async def _connect_server(self, name: str, config: MCPServerConfig) -> None:
+        """Start one task-affine transport owner and wait until it is ready."""
         if ClientSession is None:
             raise RuntimeError(
                 "The 'mcp' package is required for MCP server connections"
             )
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[None] = loop.create_future()
+        stop_event = asyncio.Event()
+        owner = asyncio.create_task(
+            self._server_owner(name, config, ready, stop_event),
+            name=f"ares-mcp-{name}",
+        )
+        self._owner_tasks[name] = owner
+        self._owner_stop_events[name] = stop_event
+        try:
+            # Shield the readiness future so an outer connection timeout can
+            # cancel and cleanly join the owner without cancelling this signal.
+            await asyncio.shield(ready)
+        except asyncio.CancelledError:
+            _clear_current_task_cancellation()
+            stop_event.set()
+            owner.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await owner
+            # The owner reports an opening failure through this future. The
+            # outer timeout already decided the result, so retrieve it only to
+            # prevent an unobserved-future warning.
+            if ready.done() and not ready.cancelled():
+                with suppress(Exception):
+                    ready.exception()
+            raise
+        except BaseException:
+            stop_event.set()
+            with suppress(asyncio.CancelledError, Exception):
+                await owner
+            raise
+
+    async def _server_owner(
+        self,
+        name: str,
+        config: MCPServerConfig,
+        ready: asyncio.Future[None],
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Own one MCP transport for its full lifetime in a single task."""
         stack = AsyncExitStack()
         http_client = None
+        session = None
+        cancelled = False
+        opened = False
         try:
             if config.transport in {"streamable_http", "sse"}:
                 if not config.endpoint:
@@ -752,29 +859,67 @@ class MCPClientManager:
                 ClientSession(read_stream, write_stream)
             )
             await asyncio.wait_for(session.initialize(), timeout=config.timeout_seconds)
-            tools_response =             await asyncio.wait_for(
+            tools_response = await asyncio.wait_for(
                 session.list_tools(), timeout=config.timeout_seconds
             )
+            self.sessions[name] = session
+            self._exit_stacks[name] = stack
+            if http_client is not None:
+                self._http_clients[name] = http_client
+            schemas = [
+                self._to_openai_schema(name, tool)
+                for tool in getattr(tools_response, "tools", [])
+            ]
+            self.schema_cache[name] = schemas
+            prefix = f"mcp__{name}__"
+            self.tool_definitions = [
+                tool for tool in self.tool_definitions
+                if not tool.get("function", {}).get("name", "").startswith(prefix)
+            ] + schemas
+            opened = True
+            if not ready.done():
+                ready.set_result(None)
+            await stop_event.wait()
         except asyncio.CancelledError as exc:
-            _uncancel_task()
-            await stack.aclose()
+            cancelled = True
+            _clear_current_task_cancellation()
+            message = f"MCP transport owner stopped: {exc or 'cancelled'}"
+            if not ready.done():
+                ready.set_exception(RuntimeError(message))
+            elif not stop_event.is_set():
+                self.server_errors[name] = message
+                self._next_reconnect_at[name] = 0.0
+        except BaseException as exc:
+            if not ready.done():
+                ready.set_exception(exc)
+            else:
+                self.server_errors[name] = str(exc) or exc.__class__.__name__
+                self._next_reconnect_at[name] = 0.0
+                logger.warning("MCP transport owner for '%s' stopped: %s", name, exc)
+        finally:
+            current = asyncio.current_task()
+            if session is not None and self.sessions.get(name) is session:
+                self.sessions.pop(name, None)
+            if self._exit_stacks.get(name) is stack:
+                self._exit_stacks.pop(name, None)
+            if http_client is not None and self._http_clients.get(name) is http_client:
+                self._http_clients.pop(name, None)
+            with suppress(asyncio.CancelledError, Exception):
+                await stack.aclose()
             if http_client is not None:
-                await http_client.aclose()
-            raise RuntimeError(f"MCP connection cancelled: {exc or 'cancelled'}") from exc
-        except Exception:
-            await stack.aclose()
-            if http_client is not None:
-                await http_client.aclose()
-            raise
-        self.sessions[name] = session
-        self._exit_stacks[name] = stack
-        if http_client is not None:
-            self._http_clients[name] = http_client
-        schemas: list[dict[str, Any]] = []
-        for tool in getattr(tools_response, "tools", []):
-            schemas.append(self._to_openai_schema(name, tool))
-        self.schema_cache[name] = schemas
-        self.tool_definitions.extend(schemas)
+                with suppress(asyncio.CancelledError, Exception):
+                    await http_client.aclose()
+            # Keep the owner registered until cleanup is complete. A monitor
+            # that observes the missing session will then join this owner
+            # before it creates a replacement transport.
+            if self._owner_tasks.get(name) is current:
+                self._owner_tasks.pop(name, None)
+                self._owner_stop_events.pop(name, None)
+            if opened and not stop_event.is_set() and name not in self.server_errors:
+                self.server_errors[name] = "MCP transport stopped unexpectedly."
+                self._next_reconnect_at[name] = 0.0
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _to_openai_schema(self, server_name: str, tool: Any) -> dict[str, Any]:
         schema = (
@@ -862,6 +1007,10 @@ class MCPClientManager:
         structured = self._structured_result_requested(prepared.metadata)
         warnings: list[str] = []
         read_only = self._is_read_only_tool(mcp_tool)
+        # Some embedders construct a manager without calling start(). A tool
+        # call must still activate persistent recovery for the rest of the
+        # process lifetime.
+        self._start_reconnect_monitor()
         # Cache keys intentionally exclude execution metadata. Do not cache a
         # paginated aggregate under the same key as a one-shot read.
         cache_enabled = (
@@ -919,22 +1068,56 @@ class MCPClientManager:
                 warnings=warnings,
             )
 
-        if prepared.pagination.enabled and read_only:
-            rendered, failed, pagination = await self._call_paginated_tool(
-                server_name=server_name,
-                mcp_tool=mcp_tool,
-                base_arguments=prepared.arguments,
-                timeout=timeout,
-                policy=prepared.pagination,
-            )
-        else:
-            rendered, failed, _payload = await self._call_rendered_tool(
-                server_name=server_name,
-                mcp_tool=mcp_tool,
-                arguments=prepared.arguments,
-                timeout=timeout,
-            )
-            pagination = None
+        async def invoke() -> tuple[str, bool, dict[str, Any] | None]:
+            self._active_calls[server_name] = self._active_calls.get(server_name, 0) + 1
+            try:
+                if prepared.pagination.enabled and read_only:
+                    return await self._call_paginated_tool(
+                        server_name=server_name,
+                        mcp_tool=mcp_tool,
+                        base_arguments=prepared.arguments,
+                        timeout=timeout,
+                        policy=prepared.pagination,
+                    )
+                rendered_result, call_failed, _payload = await self._call_rendered_tool(
+                    server_name=server_name,
+                    mcp_tool=mcp_tool,
+                    arguments=prepared.arguments,
+                    timeout=timeout,
+                )
+                return rendered_result, call_failed, None
+            finally:
+                remaining = self._active_calls.get(server_name, 1) - 1
+                if remaining > 0:
+                    self._active_calls[server_name] = remaining
+                else:
+                    self._active_calls.pop(server_name, None)
+
+        rendered, failed, pagination = await invoke()
+
+        # A transport exception evicts the dead session. Reconnect immediately
+        # so schemas and the next model iteration remain usable. Read-only
+        # operations are safe to replay once; mutations are never replayed
+        # because the remote side may have applied them before disconnecting.
+        if failed and server_name not in self.sessions:
+            recovery = await self.reconnect_server(server_name, force=True)
+            if recovery.get("ready"):
+                if read_only:
+                    warnings.append(
+                        "MCP transport reconnected and the read-only operation was retried once."
+                    )
+                    rendered, failed, pagination = await invoke()
+                else:
+                    rendered = (
+                        f"{rendered}\n\nMCP connection recovered. The original mutation was not "
+                        "replayed because its remote outcome is uncertain."
+                    )
+            else:
+                recovery_error = str(recovery.get("error") or "reconnect did not become ready")
+                rendered = (
+                    f"{rendered}\n\nImmediate MCP reconnect failed: "
+                    f"{redact_mcp_text(recovery_error)}. Background recovery will keep trying."
+                )
 
         if failed:
             return self._format_upgraded_result(
@@ -971,9 +1154,9 @@ class MCPClientManager:
     async def _reconnect_before_first_call(self, server_name: str) -> str | None:
         """Reconnect an explicitly configured server once before a tool call.
 
-        This intentionally runs only while no call has been issued.  Retrying
-        a request after it reached an MCP server could duplicate a mutation,
-        so transport recovery after a started call is left for the next call.
+        This intentionally runs only while no call has been issued. Recovery
+        after a started call follows the separate read-only replay policy in
+        :meth:`call_tool`; mutation calls are never replayed.
         """
 
         if server_name not in self.servers or server_name in self.sessions:

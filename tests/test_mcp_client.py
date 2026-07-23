@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+import ares.tools.mcp_client as mcp_client_module
 from ares.agent import Agent
 from ares.config import _ensure_mcp_defaults
 from ares.models import AppConfig, DEFAULT_MCP_SERVERS
@@ -52,7 +53,7 @@ def test_existing_builtin_windows_mcp_gets_snapshot_compatibility_env():
 
 
 def test_windows_mcp_compat_replaces_lone_surrogates_in_text_output():
-    from ares.windows_mcp_compat import _sanitize_result
+    from ares.infra.windows_mcp_compat import _sanitize_result
 
     result = _sanitize_result(["safe", "broken \ud83d", {"nested": "still \ud83d"}])
 
@@ -290,6 +291,63 @@ def test_reconnect_server_reports_success(monkeypatch):
     assert report["tools"] == 1
 
 
+@pytest.mark.asyncio
+async def test_transport_is_opened_and_closed_by_the_same_owner_task(monkeypatch):
+    task_events: list[tuple[str, str, asyncio.Task[object] | None]] = []
+
+    class TaskAffineContext:
+        def __init__(self, label, value):
+            self.label = label
+            self.value = value
+            self.owner = None
+
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            task_events.append((self.label, "enter", self.owner))
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            current = asyncio.current_task()
+            task_events.append((self.label, "exit", current))
+            assert current is self.owner
+
+    class FakeSession(TaskAffineContext):
+        def __init__(self, read_stream, write_stream):
+            super().__init__("session", self)
+
+        async def initialize(self):
+            return None
+
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+    monkeypatch.setattr(
+        mcp_client_module,
+        "stdio_client",
+        lambda params: TaskAffineContext("transport", (object(), object())),
+    )
+    monkeypatch.setattr(
+        mcp_client_module,
+        "StdioServerParameters",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(mcp_client_module, "ClientSession", FakeSession)
+    manager = MCPClientManager([{"name": "local", "command": "fake-mcp"}])
+
+    await manager._connect_server("local", manager.servers["local"])
+    owner = manager._owner_tasks["local"]
+    assert owner is not asyncio.current_task()
+    await manager.close_server("local")
+
+    assert [(label, action) for label, action, _ in task_events] == [
+        ("transport", "enter"),
+        ("session", "enter"),
+        ("session", "exit"),
+        ("transport", "exit"),
+    ]
+    assert {task for _, _, task in task_events} == {owner}
+
+
 def test_manager_auto_reconnects_after_initial_connection_failure(monkeypatch):
     attempts: list[str] = []
 
@@ -348,9 +406,9 @@ def test_transport_failure_is_evicted_and_reconnected_without_replaying_call(mon
     async def exercise():
         failed = await manager.call_tool("mcp__calendar__create_event", {"title": "demo"})
         assert "transport closed" in failed
-        assert "calendar" not in manager.sessions
+        assert "connection recovered" in failed.casefold()
+        assert "calendar" in manager.sessions
 
-        await manager.maintain_connections_once()
         recovered = await manager.call_tool("mcp__calendar__list_events", {})
         assert recovered == "recovered"
 
@@ -358,6 +416,99 @@ def test_transport_failure_is_evicted_and_reconnected_without_replaying_call(mon
 
     assert calls == ["create_event", "list_events"]
     assert connections == ["calendar"]
+
+
+def test_read_only_call_reconnects_and_retries_once_after_transport_drop(monkeypatch):
+    calls: list[str] = []
+    connections: list[str] = []
+    schema = {"function": {"name": "mcp__calendar__list_events"}}
+
+    class DeadSession:
+        async def call_tool(self, tool_name, arguments):
+            calls.append(tool_name)
+            raise ConnectionError("transport closed")
+
+    class HealthySession:
+        async def call_tool(self, tool_name, arguments):
+            calls.append(tool_name)
+            return SimpleNamespace(content=[SimpleNamespace(text="recovered read")])
+
+    async def healthy_connect(self, name, config):
+        connections.append(name)
+        self.sessions[name] = HealthySession()
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}]
+    )
+    manager.sessions["calendar"] = DeadSession()
+    manager.schema_cache["calendar"] = [schema]
+    manager.tool_definitions = [schema]
+    monkeypatch.setattr(MCPClientManager, "_connect_server", healthy_connect)
+
+    result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
+
+    assert result == "recovered read"
+    assert calls == ["list_events", "list_events"]
+    assert connections == ["calendar"]
+    assert manager.tool_definitions == [schema]
+
+
+def test_maintenance_probes_a_dead_session_and_reconnects_in_the_same_pass(monkeypatch):
+    connections: list[str] = []
+
+    class DeadSession:
+        async def list_tools(self):
+            raise ConnectionError("heartbeat found a dead transport")
+
+    class HealthySession:
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+    async def healthy_connect(self, name, config):
+        connections.append(name)
+        self.sessions[name] = HealthySession()
+
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}],
+        reconnect_interval_seconds=0.01,
+        health_probe_interval_seconds=0.01,
+    )
+    manager.sessions["calendar"] = DeadSession()
+    manager._last_health_probe_at = -1.0
+    monkeypatch.setattr(MCPClientManager, "_connect_server", healthy_connect)
+
+    report = asyncio.run(manager.maintain_connections_once())
+
+    assert connections == ["calendar"]
+    assert report["servers"]["calendar"]["ready"] is True
+
+
+def test_reconnect_monitor_survives_one_maintenance_exception(monkeypatch):
+    attempts = 0
+    recovered = asyncio.Event()
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}],
+        reconnect_interval_seconds=0.01,
+    )
+
+    async def flaky_maintenance():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("one broken maintenance pass")
+        recovered.set()
+        return manager.readiness_report()
+
+    monkeypatch.setattr(manager, "maintain_connections_once", flaky_maintenance)
+
+    async def exercise():
+        manager._start_reconnect_monitor()
+        await asyncio.wait_for(recovered.wait(), timeout=0.5)
+        await manager.close()
+
+    asyncio.run(exercise())
+
+    assert attempts >= 2
 
 
 def test_agent_refreshes_and_routes_mcp_tools():
@@ -686,7 +837,7 @@ def test_call_tool_never_replays_started_playwright_mutation_after_reconnect(mon
     )
 
     assert "connection reset after request started" in result
-    assert connections == ["playwright"]
+    assert connections == ["playwright", "playwright"]
     assert calls == [("browser_click", {"selector": "#submit"})]
 
 

@@ -1,81 +1,191 @@
 <div align="center">
 
-# ⚡ Ares
+# Ares
 
-### A personal AI assistant for your terminal, voice, phone, and remote chat — with local-first data control
+### A local-first personal AI assistant for terminal, desktop voice, web workspace, phone, and remote chat
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![Protocol](https://img.shields.io/badge/Integrations-MCP-6C47FF)](docs/mcp.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 
-**Remember what matters. Search every saved session. Take action with tools. Keep control local.**
+**Remember context. Work through tools. Speak naturally. Keep durable data under your control.**
 
-[Quick start](#-quick-start) · [Personality](#-personality-and-profile) · [Vision](#-local-vision-v1) · [Watchers](#-proactive-watchers) · [What it does](#-capability-map) · [Memory](#-memory-that-can-explain-itself) · [Skills](#-built-in-skills) · [MCP](#-mcp-integrations) · [Voice, phone, and Telegram](#-voice-phone-and-telegram)
+[Overview](#overview) · [Installation](#installation) · [Desktop voice](#desktop-voice) · [Runtime surfaces](#runtime-surfaces) · [Capabilities](#capability-map) · [Architecture](#architecture) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) · [Development](#development-and-verification)
 
 </div>
 
 ---
 
-## ✨ What Ares is
+## Overview
 
-Ares is a terminal-first AI assistant with a separate Next.js power workspace, an optional local WebSocket API, voice interface, Android phone bridge, and allowlisted Telegram channel. It combines an OpenAI-compatible model client with a local SQLite data layer, an append-only session archive, reusable skills, and a broad local and remote tool surface.
+Ares is a multi-surface personal assistant built around one tool-using agent. It can run as a Rich terminal application, a background Windows desktop voice assistant, a continuous voice session, a local web workspace, an allowlisted Telegram bot, or a telephony gateway. Every surface shares the same configuration, memory, conversations, skills, integrations, and safety rules.
 
-Ares is **not** an offline or local-only assistant: it reaches external providers (OpenCode Zen, NVIDIA NIM, GitHub Copilot), connects to remote MCP servers, and serves allowlisted Telegram, phone, and web surfaces. "Local-first" here refers to *data control* — your facts, people, conversations, sessions, and configuration live under `~/.ares` on your machine — not to a limitation on where Ares can act.
+Ares is **local-first, not offline-only**. Its durable state lives under `~/.ares`, but model requests, web research, Telegram, telephony, and configured MCP servers may communicate with external services. Nothing in “local-first” implies that a cloud-backed capability runs locally.
 
 <table>
   <tr>
-    <td width="33%" valign="top"><h3>🧠 Recall</h3>Durable facts, structured people, SQLite conversations, and JSONL session history are searchable together.</td>
-    <td width="33%" valign="top"><h3>🛠️ Act</h3>Use 156 local tools for goals, watchers, native specialists, files, configured project checks, code, web research, images, local vision, recurring jobs, tasks, phone controls, provider telephony, and more.</td>
-    <td width="33%" valign="top"><h3>🧩 Extend</h3>Load local <code>SKILL.md</code> playbooks and connect MCP servers for browser, GitHub, fetch, Windows, and custom capabilities.</td>
+    <td width="33%" valign="top"><h3>Recall</h3>Search durable facts, people, conversations, actions, and append-only session history with provenance.</td>
+    <td width="33%" valign="top"><h3>Act</h3>Work with files, code, shell sessions, research, goals, watchers, images, vision, phones, and connected services.</td>
+    <td width="33%" valign="top"><h3>Extend</h3>Add instruction-only <code>SKILL.md</code> playbooks and MCP servers without changing the core agent.</td>
   </tr>
 </table>
 
-### Latest upgrades
+### Highlights
 
-- **Keyboard-driven terminal UI:** type slash for command suggestions, use ↑/↓ to select a completion, and open **/menu** for arrow-key screens for models, providers, tools, profile, personality, and saved chats.
-- **Reliable conversation restore:** **/resume** excludes blank startup rows and restores the selected chat into the active model context without replaying its transcript in the terminal.
-- **Provider-aware model switching:** OpenCode Zen, NVIDIA NIM, and GitHub Copilot models select their matching endpoint and credentials automatically, avoiding cross-provider 404s after a model change.
-- **Local Vision V1:** inspect user-supplied images or, with explicit per-source consent, observe local camera and screen sources. Vision can detect objects, read text, compare snapshots, verify visual conditions, and run bounded watches with conservative local retention.
-- **Faster foreground responses:** ordinary chat streams through a short tool-call decision buffer; durable reflection, memory statistics, and reusable context work move off the first-token path when safe.
-- **More capable existing tools:** legacy calls remain compatible while opt-in structured responses add previews, plans, provenance, verification, undo metadata, safer batch operations, and protected exports. See the [existing-tool upgrades guide](docs/existing-tool-upgrades-guide.md).
-- **Native multi-agent supervisor:** Ares can delegate bounded research, code analysis, implementation, review, and synthesis to isolated specialists; independent work runs concurrently, dependencies run in waves, and the root Ares agent still owns the final answer.
-- **Goal-aware monitoring:** link one watcher to multiple goals, review routed signals in both watcher consoles, and keep progress changes explicit instead of automatic.
-- **Research delivery:** search and rank web sources, fetch online pages/PDFs/reports, extract readable content, save sourced artifacts, and deliver supported files through Telegram.
-- **Power workspace:** isolated background chats, smooth token streaming, cached history with skeleton loading, structured tool traces, and built-in previews for Markdown, PDFs, images, and generated files.
-- **One runtime:** `python -m ares --all` starts chat, Telegram, integrations, watchers, the workspace, and the advanced console around the same Ares agent.
-- **True parallel specialists:** the multi-agent resource coordinator now uses per-resource semaphores (e.g. `external: 12`, `communication: 8`, `delegation: 8`) instead of one lock per resource, so independent specialists run concurrently in a single wave. The unresponsive-tool quarantine is now per-resource, so one hung call no longer freezes unrelated workers. SQLite writes and the REPL stay serialized for safety.
-- **Telegram model & provider switching:** `/model [id|list]` and `/provider [name|list]` change the active model/provider from Telegram and persist to the shared config.
-- **Telegram + CLI MCP removal:** `/mcp remove <name>` (Telegram, with the same confirm-code safety as add) and `/mcp remove SERVER` (CLI) disconnect and delete a configured MCP server and reload tools.
-- **Shared database connection:** `ConversationStore` reuses the agent's memory connection, eliminating a startup `database is locked` race when multiple stores opened separate connections to `ares.db`.
-- **Dev hot-reload:** `python -m ares.dev` runs `python -m ares --all` and auto-restarts the process when any `ares/` source or `pyproject.toml` changes — zero extra dependencies, clean terminate-and-respawn.
+- **Desktop voice assistant:** say “Hey Jarvis,” hold `Ctrl+Space` for push-to-talk, interrupt speech with your voice, and inspect tool or file results in the expandable activity panel.
+- **Terminal command center:** slash completion, arrow-key menus, provider-aware model switching, searchable saved chats, and configurable tool-output detail.
+- **Explainable local memory:** hybrid retrieval across facts, people, conversations, actions, and session archives with source IDs.
+- **Power workspace:** local Next.js chat, uploads, settings, skills, MCP connections, watcher operations, and structured tool traces.
+- **Native specialists:** bounded, isolated research, analysis, implementation, review, and synthesis runs with durable manifests.
+- **Proactive operations:** goals, recurring jobs, durable workflows, watchers, incidents, and explicit evidence-based progress.
+- **Extensible tool plane:** built-in tools, reusable local skills, and stdio/SSE/Streamable HTTP MCP integrations.
+- **Remote surfaces:** an exact-chat allowlisted Telegram channel, Android bridge, and optional Twilio voice gateway.
+- **Resilient local storage:** SQLite WAL, busy timeouts, retrying writes, shared connections, and atomic configuration saves.
 
-## 🚀 Quick start
+## Installation
 
-### Terminal
+### Requirements
+
+- Python 3.11 or newer.
+- Git for a source checkout.
+- A supported model-provider account or token configured during `/setup`.
+- Node.js only when developing the Next.js workspace from source.
+- A working microphone and output device for voice modes.
+- Windows 10/11 is the primary target for the desktop tray, global hotkeys, Windows-default microphone routing, and native desktop control.
+
+### Base installation
 
 ```bash
 git clone https://github.com/akyourowngames/friday.git
 cd friday
-pip install -e ".[dev]"
+python -m venv .venv
+```
+
+Activate the environment:
+
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS or Linux
+source .venv/bin/activate
+```
+
+Install Ares and start the terminal:
+
+```bash
+pip install -e .
 python -m ares
 ```
 
-### Keyboard-driven terminal
+The first terminal run can launch the setup flow. You can reopen it at any time with `/setup`, then inspect or change the active provider and model with `/provider` and `/model`.
 
-In an interactive terminal, type slash to open command suggestions. Use **↑/↓** to choose a suggestion and **Enter** to apply it. **/menu** opens the command center; the bare forms of **/model**, **/provider**, **/tools**, **/profile**, **/soul**, and **/resume** open arrow-key screens instead of only printing tables.
+### Optional feature sets
 
-**/resume** lists only chats containing saved user or assistant messages, never the empty row created for a new launch. Selecting a chat restores its bounded history into the next model request without reprinting that chat in the terminal. Use **/resume latest** or **/resume ID** when scripting.
+| Extra | Install command | Adds |
+|---|---|---|
+| Development | `pip install -e ".[dev]"` | Pytest and asyncio test support. |
+| Continuous voice | `pip install -e ".[voice]"` | Edge TTS, local wake-word runtime, audio I/O, and VAD. |
+| Desktop UI | `pip install -e ".[voice,desktop]"` | Voice dependencies plus tray, CustomTkinter UI, and global hotkeys. |
+| Vision | `pip install -e ".[vision]"` | Camera/screen capture, YOLO, OCR, and visual comparison providers. |
+| Telephony | `pip install -e ".[telephony]"` | Twilio/voice-session dependencies. |
+| GitHub Copilot | `pip install -e ".[copilot]"` | Optional Copilot SDK provider. |
 
-Model selection is provider-aware: choosing an OpenCode Zen or NVIDIA NIM model switches to its matching endpoint before the request is made. **/provider opencode**, **/provider nim** (or the **nvidia** alias), and **/provider copilot** also select a compatible default model. Provider-specific keys remain isolated in the local configuration.
+Install multiple extras together when needed:
 
-### Voice mode
+```bash
+pip install -e ".[voice,desktop,vision,dev]"
+```
+
+### Model providers
+
+Ares keeps the transport provider separate from the model family. Selecting a registered model automatically aligns the endpoint so, for example, an NVIDIA NIM model is not sent to the OpenCode Zen URL.
+
+| Provider | Select with | Credential |
+|---|---|---|
+| OpenCode Zen | `/provider opencode` | `OPENCODE_API_KEY` or a provider-scoped key saved by setup. |
+| NVIDIA NIM | `/provider nim` or `/provider nvidia` | `NIM_API_KEY` or `NVIDIA_API_KEY`. |
+| GitHub Copilot | `/provider copilot` | User-authorized Copilot token; install the `copilot` extra. |
+
+Use `/model` to browse models compatible with the active provider. Provider-specific keys are retained separately and are not intentionally forwarded to a different transport.
+
+## Desktop voice
+
+Install the combined voice and desktop extras, then launch the background assistant:
+
+```bash
+pip install -e ".[voice,desktop]"
+python -m ares --desktop
+```
+
+Only one desktop instance may run at a time. Ares places the tray controller and audio coordinator in the background while the Tk interface runs in a dedicated child process, preventing the UI main loop from blocking audio, terminal, or other windows.
+
+### Controls
+
+| Action | Default control |
+|---|---|
+| Wake Ares hands-free | Say **“Hey Jarvis”**. |
+| Push-to-talk | Hold `Ctrl+Space`, speak, then release. |
+| Interrupt speech | Say “Hey Jarvis,” speak a new command, or press `Ctrl+Space` while Ares is talking. |
+| Mute or unmute TTS | `Ctrl+Shift+M` or the tray menu. |
+| Show or hide the panel | `Ctrl+Shift+H`, the tray icon, or **Open Ares**. |
+| Enable/disable wake word | Tray menu. |
+| Enable/disable interruption | Tray menu. |
+| Start clean context | **New Session** in the tray menu. |
+| Quit safely | **Quit** in the tray menu. |
+
+### Voice pipeline
+
+1. The local openWakeWord model continuously evaluates 16 kHz microphone frames for “Hey Jarvis.”
+2. After activation, Ares opens a bounded command window and records until voice activity ends.
+3. Local faster-whisper transcribes the request. With `desktop.translate_speech_to_english` enabled, Hindi, Hinglish, and other supported speech are translated into English command text.
+4. The normal Ares agent runs with the same memory, tools, skills, MCP integrations, and conversation state used by the terminal.
+5. Edge TTS speaks a sanitized response; paths, Markdown decoration, emoji, URLs, and noisy symbols are not read literally.
+6. Barge-in monitors microphone speech during playback, stops TTS, preserves the opening interruption audio, and immediately captures the replacement command.
+
+The desktop panel expands when work begins. It streams the transcript and response, shows tool start/progress/completion states, extracts file paths from structured tool results, and presents existing files as clickable rows.
+
+### Microphone behavior
+
+By default Ares follows the Windows default input device. It avoids Bluetooth microphone endpoints when `desktop.avoid_bluetooth_microphone` is enabled because narrow-band hands-free profiles often reduce wake-word and transcription quality. Set `voice.mic_device` to a PortAudio index or name only when you intentionally want to pin an endpoint.
+
+The first local Whisper command can take longer while the model is loaded. Desktop mode warms the model in the background after wake-word capture has started.
+
+### Continuous voice mode
+
+For a terminal-owned, always-listening conversation without the desktop tray:
 
 ```bash
 pip install -e ".[voice]"
 python -m ares --voice
 ```
 
-### Unified always-on runtime
+Useful overrides:
+
+```bash
+python -m ares --voice --voice-name en-US-GuyNeural
+python -m ares --voice --barge-in
+python -m ares --voice --no-barge-in
+```
+
+## Runtime surfaces
+
+| Surface | Purpose | Command or address |
+|---|---|---|
+| Terminal | Interactive chat, slash commands, tools, setup, and diagnostics | `python -m ares` |
+| Desktop voice | Tray assistant, “Hey Jarvis,” PTT, interruption, and activity panel | `python -m ares --desktop` |
+| Continuous voice | Always-listening terminal voice session | `python -m ares --voice` |
+| Unified runtime | API, workspace, watchers, integrations, and enabled Telegram channel | `python -m ares --all` |
+| WebSocket API | Local client protocol | `ws://127.0.0.1:8765` |
+| Power workspace | Local operational web UI | `http://127.0.0.1:8766` |
+| Watcher console | Fleet, checks, incidents, and delivery telemetry | `http://127.0.0.1:8080` |
+| Telegram | Remote allowlisted chat within the unified runtime | `python -m ares --all` |
+| Twilio webhook | Signed inbound Voice/status callbacks | `python -m ares --telephony-webhook` |
+| Twilio media gateway | Bidirectional Media Streams over a published WSS endpoint | `python -m ares --telephony-media-gateway` |
+
+### Unified runtime
 
 ```bash
 python -m ares --all
@@ -84,7 +194,7 @@ python -m ares --all
 # Advanced watcher console: http://127.0.0.1:8080
 ```
 
-`--all` owns one agent, one integration manager, one watcher scheduler, the Next.js power workspace, the advanced watcher console, the desktop API, and Telegram when it is enabled. `--server` remains a compatibility alias; watchers are tools used by Ares and are not launched as an independent product process.
+`--all` owns one agent, integration manager, watcher scheduler, Next.js power workspace, watcher console, WebSocket API, and Telegram channel when enabled. `--server` and `--telegram` remain compatibility aliases for the same unified runtime.
 
 ### Local Vision V1
 
@@ -107,7 +217,7 @@ Compare this new photo with the previous snapshot and tell me what changed.
 Verify whether the package label is visible; say uncertain if the evidence is weak.
 ```
 
-### Next.js power workspace
+### Power workspace
 
 The power workspace is intentionally separate from the public marketing website. It provides one operational surface for streaming Ares chat, reusable file uploads, skills, MCP connections, watcher fleet management, personalization, browser configuration, Telegram setup, and advanced runtime settings. Chat, watcher actions, MCP operations, and settings all use the same running Ares agent and WebSocket protocol.
 
@@ -119,7 +229,7 @@ npm install
 npm run dev
 ```
 
-`npm run build` creates the static Next.js export and synchronizes it into `ares/workspace/static` for the Python runtime.
+`npm run build` creates the static Next.js export and synchronizes it into `ares/workspace/static` for the Python runtime. The packaged static build is already served by `python -m ares --all`; Node.js is required only for frontend development.
 
 ### Native multi-agent mode
 
@@ -169,7 +279,7 @@ Configuration, lifecycle, failure behavior, safety, truthful counting, and opera
 
 ---
 
-## 📡 Proactive watchers
+## Proactive watchers
 
 Ares can run a durable monitoring fleet over websites, REST/JSON APIs, numeric thresholds, permitted Instagram Graph API endpoints, authenticated Playwright pages, and the results of existing Ares or connected MCP tools. Watchers are part of the normal agent tool plane: you can ask Ares to create, inspect, run, pause, resume, or query them in natural language.
 
@@ -246,32 +356,53 @@ Keep `allow_mutating_tool_steps` off for normal monitoring. Enabling a consequen
 
 ---
 
-## 🧭 How it fits together
+## Architecture
 
 ```mermaid
-flowchart LR
-    User([You]) --> CLI[Rich terminal]
-    User --> Voice[Voice mode]
-    User --> Telegram[Telegram channel]
+flowchart TB
+    User([User])
+
+    subgraph Surfaces
+        CLI[Terminal CLI]
+        Desktop[Desktop voice]
+        Voice[Continuous voice]
+        Workspace[Power workspace]
+        Telegram[Telegram]
+        Telephony[Telephony]
+    end
+
+    User --> CLI
+    User --> Desktop
+    User --> Voice
+    User --> Workspace
+    User --> Telegram
+    User --> Telephony
 
     CLI --> Agent[Ares agent]
+    Desktop --> Agent
     Voice --> Agent
+    Workspace --> Agent
     Telegram --> Agent
+    Telephony --> Agent
 
-    Agent --> Context[Context blend]
+    Agent --> Context[Context and memory retrieval]
     Agent --> Tools[Tool executor]
-    Agent --> LLM[OpenAI-compatible LLM]
+    Agent --> Models[Configured model provider]
+    Agent --> Supervisor[Native specialist supervisor]
 
-    Context --> Data[(Local Ares data)]
-    Data --> Facts[Memory + people + conversations]
-    Data --> Sessions[Append-only JSONL sessions]
-    Data --> Tasks[Tasks + actions + cron]
+    Context --> SQLite[(SQLite stores)]
+    Context --> Sessions[Append-only JSONL sessions]
+    Context --> Personal[Profile and soul]
 
-    Tools --> Local[Files · shell · code · images]
-    Tools --> Bridges[Phone · web · MCP servers]
+    Tools --> Local[Files · shell · code · media]
+    Tools --> Automation[Goals · tasks · cron · watchers]
+    Tools --> Bridges[Web · phone · telephony · MCP]
+    Supervisor --> Specialists[Isolated specialist runs]
 ```
 
-## 🧠 Memory that can explain itself
+The terminal, desktop voice, continuous voice, workspace, Telegram, and telephony surfaces do not maintain separate assistant brains. They route into the same `Agent`, configuration, local stores, tool executor, skills, and integrations. Surface-specific code owns presentation and transport only.
+
+## Memory that can explain itself
 
 The current recall system is deliberately broader than a single “memory facts” table. A question can search all local evidence sources at once:
 
@@ -324,7 +455,7 @@ search_memory("Rohit Instagram")
 
 ---
 
-## 🛠️ Capability map
+## Capability map
 
 <table>
   <tr>
@@ -365,7 +496,7 @@ search_memory("Rohit Instagram")
   </tr>
   <tr>
     <td>☎️ Provider telephony</td>
-    <td>Use Twilio Voice with a LiveKit-compatible media gateway for outbound/inbound calls, interruption-aware Ares conversations, encrypted contacts, local transcripts, summaries, transfers, and call history.</td>
+    <td>Use Twilio Voice with the local Media Streams gateway for outbound/inbound calls, interruption-aware Ares conversations, encrypted contacts, local transcripts, summaries, transfers, and call history.</td>
   </tr>
   <tr>
     <td>🖥️ Desktop control</td>
@@ -397,7 +528,7 @@ See the complete model-facing inventory in [`ares/tools/definitions.py`](ares/to
 
 ---
 
-## 🧩 Built-in skills
+## Built-in skills
 
 Skills are local `SKILL.md` playbooks. Ares discovers relevant instructions, loads them silently when appropriate, and keeps them reusable across surfaces.
 
@@ -406,7 +537,7 @@ Skills are local `SKILL.md` playbooks. Ares discovers relevant instructions, loa
 | Ares operations | `export-backup`, `memory-consolidator`, `weekly-review` |
 | Automation | `browser-content-review`, `browser-form-workflow`, `browser-use`, `computer-use` |
 | Coding | `code-review`, `codebase-summary`, `project-init` |
-| Communication | `conversation-conduct` |
+| Communication | `conversation-conduct`, `email-followup` |
 | Productivity | `daily-planner`, `daily-standup`, `goal-management`, `goal-check-in` |
 | Research | `research-deep-dive`, `web-research` |
 | Utilities | `backup-snapshot`, `image-batch-processor`, `system-info` |
@@ -429,7 +560,7 @@ Useful commands:
 
 ---
 
-## 🔌 MCP integrations
+## MCP integrations
 
 Ares exposes connected MCP tools to the agent as `mcp__server__tool`. The bundled configuration includes these local integration templates:
 
@@ -458,25 +589,28 @@ For the optional GitHub Copilot SDK provider and user-authorized OAuth setup, se
 
 ---
 
-## 💬 Voice, phone, and Telegram
+## Phone, telephony, and Telegram
 
-| Surface | Use it for | Start it with |
-|---|---|---|
-| Rich CLI | Fast local chat, slash commands, tools, and logs | `python -m ares` |
-| Unified runtime | Next.js power workspace, desktop API, MCP tools, Telegram, watcher scheduler, and advanced watcher console | `python -m ares --all` |
-| WebSocket API compatibility alias | Same unified runtime | `python -m ares --server` |
-| Voice | Streaming speech, interruption/barge-in, local Whisper or Sarvam/Edge options | `python -m ares --voice` |
-| Desktop voice | “Hey Jarvis” wake word, push-to-talk, barge-in, tray controls, and a tool/file activity drawer | `python -m ares --desktop` |
-| Twilio webhook | Signed Voice and status callbacks (behind public HTTPS) | `python -m ares --telephony-webhook` |
-| Twilio media | Bidirectional Media Streams, local Whisper, Ares tools/memory, Edge TTS (behind public WSS) | `python -m ares --telephony-media-gateway` |
-| LiveKit worker | Ares voice worker that accepts LiveKit agent jobs | `ares-livekit dev` |
-| LiveKit room | Local browser room that mints a short-lived token and connects after a user click | `ares-livekit-room --room ares-voice-room` |
-| Workspace voice | Embedded LiveKit voice conversation from the composer microphone | `python -m ares --all` + `ares-livekit dev` |
-| Telegram | Allowlisted remote chat inside the unified runtime | `python -m ares --all` |
+### Android phone bridge
+
+Ares can connect to an Android device through KDE Connect and ADB. The bridge supports health checks, notification retrieval, contact lookup, SMS, confirmed phone calls, URL/app launching, and device metadata. It remains disabled until `phone.enabled` is set to `true`.
+
+```json
+{
+  "phone": {
+    "enabled": true,
+    "kdeconnect_device_id": "",
+    "adb_device_address": "",
+    "store_notification_content": false
+  }
+}
+```
+
+Use `/phone status` to inspect both transports. Ares does not store notification content unless `phone.store_notification_content` is explicitly enabled.
 
 ### Provider-backed phone calls
 
-Install the optional runtime, then enable **Telephony** in desktop Settings. Ares provides both local processes: a signed Twilio callback server and a bidirectional Media Streams gateway. Publish their loopback ports through HTTPS/WSS (for example with a reverse proxy or tunnel), then save the public addresses in `telephony.public_base_url` and `telephony.media_stream_url`. A Twilio-owned E.164 caller number is also required.
+Install the optional runtime, then configure the `telephony` section in `~/.ares/config.json`. Ares provides two local processes: a signed Twilio callback server and a bidirectional Media Streams gateway. Publish their loopback ports through HTTPS/WSS, then save the public addresses in `telephony.public_base_url` and `telephony.media_stream_url`. A Twilio-owned E.164 caller number is also required.
 
 ```powershell
 pip install -e ".[telephony]"
@@ -486,45 +620,7 @@ python -m ares --telephony-webhook --telephony-webhook-port 8080
 python -m ares --telephony-media-gateway --telephony-media-port 8767
 ```
 
-The media gateway converts Twilio's 8 kHz mu-law stream to local Whisper input, runs the normal Ares agent (including memory and tools), and returns Edge TTS audio to the call. It does not select an OpenAI realtime model. LiveKit rooms use the same local credentials, a separate voice worker, and a loopback-only browser launcher.
-
-### LiveKit voice rooms
-
-LiveKit rooms are created automatically when the first participant joins. Ares now separates the worker and browser-room concerns so joining is fast and does not require pasting a JWT.
-
-When the unified runtime is open, the microphone in the Power Workspace starts the same conversation directly in Ares. It mints a fresh, short-lived token through a loopback-only workspace endpoint; no token or API credential is placed in a browser URL. Keep `ares-livekit dev` running, click the microphone, and allow microphone access when prompted.
-
-```powershell
-# Terminal 1: start the Ares LiveKit worker.
-ares-livekit dev
-
-# Terminal 2: start the loopback-only room launcher.
-# It opens the browser and issues a 10-minute token locally after Connect is clicked.
-ares-livekit-room --room ares-voice-room --identity krish
-```
-
-The launcher binds only to `127.0.0.1`/localhost, never puts the JWT in the URL, and sends `Cache-Control: no-store`. It reads `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` from the environment or the local `telephony` config. Use `--no-open` when you want to open the local URL yourself.
-
-For a separate client, integration, or debugging workflow, generate only a short-lived token:
-
-```powershell
-ares-livekit-token --room ares-voice-room --identity krish
-ares-livekit-token --room ares-voice-room --identity krish --json
-```
-
-The room launcher is also available through `python -m ares --livekit-join --livekit-room ares-voice-room --livekit-identity krish`. Run the worker and launcher in separate terminals.
-
-#### Sarvam voice for LiveKit
-
-Set `SARVAM_API_KEY` in your local environment and keep `voice.tts_backend` as `auto` (or set it to `sarvam`). The LiveKit worker then uses Sarvam Bulbul v3 instead of Edge TTS; without the key, it safely falls back to Edge.
-
-```powershell
-$env:SARVAM_API_KEY = "your-sarvam-key"
-# Optional Ares voice settings: speaker=shubh, model=bulbul:v3, language=en-IN, pace=0.9
-ares-livekit dev
-```
-
-Bulbul v3 is suited to Indian English, Indic languages, and code-mixed speech. Configure the speaker, language, and pace under `voice.sarvam_speaker`, `voice.sarvam_language_code`, and `voice.sarvam_pace` in `~/.ares/config.json`.
+The media gateway converts Twilio's 8 kHz mu-law stream to local Whisper input, runs the normal Ares agent with memory and tools, and returns Edge TTS audio to the call. The webhook validates Twilio signatures, and unknown numbers require confirmation by default.
 
 Ares stores call sessions, transcripts, summaries, and encrypted telephony contacts locally in `~/.ares/data/ares.db`; the encryption key lives separately at `~/.ares/data/telephony.key`.
 
@@ -532,14 +628,15 @@ Ares stores call sessions, transcripts, summaries, and encrypted telephony conta
 /call Mom
 /call +911234567890 --confirm
 /telephony status
-/contacts
-/recent-calls
-/hangup CALL_ID
+/telephony contacts
+/telephony recent
+/telephony hangup CALL_ID
+/telephony mute CALL_ID
 ```
 
 Run `/telephony status` to see redacted readiness. It reports missing deployment fields without displaying credentials. No call is placed until you explicitly use `/call`.
 
-### Telegram setup
+### Telegram
 
 ```powershell
 # Create a BotFather bot first, then configure its token locally.
@@ -547,6 +644,9 @@ python -m ares --telegram-setup
 
 # After your bot replies with its chat ID, authorize that exact chat on the PC.
 python -m ares --telegram-authorize 123456789
+
+# Remove access later if needed.
+python -m ares --telegram-revoke 123456789
 ```
 
 Telegram uses long polling: no public IP, webhook, or port forwarding is required. Authorized chats can use `/new`, `/status`, `/model`, `/provider`, `/skills`, `/mcp`, `/file`, `/agents`, and `/workers`; unknown chats never receive tool access. Ares registers the command menu with Telegram automatically. During delegated work, one throttled, chat-scoped status message shows every specialist's role, task, state, current tool, team totals, and final success/issue count instead of posting a new message for every event. Remote supervisor commands can inspect or cancel only runs owned by that Telegram session; enable/disable, forced runs, doctor, and provider-backed smoke tests stay local.
@@ -566,12 +666,13 @@ Useful remote supervisor commands:
 
 ---
 
-## ⌨️ Everyday commands
+## Everyday terminal commands
 
 | Command | Purpose |
 |---|---|
 | `/help` | Show available controls. |
 | `/menu` | Open the arrow-key command center in an interactive terminal. |
+| `/setup` | Reopen provider and model onboarding. |
 | `/memory search QUERY` | Search durable facts and recall sources. |
 | `/memory learning [pending\|active\|approve ID\|reject ID]` · `/memory explain` | Review Hermes learning proposals or inspect the last low-latency retrieval decision. |
 | `/latency` | Show the latest message model, tool-schema count, context time, provider TTFT, and total latency. |
@@ -580,22 +681,160 @@ Useful remote supervisor commands:
 | `/context` | Inspect active local context. |
 | `/model [MODEL]` | Choose a model interactively or switch directly; Ares aligns the provider and endpoint. |
 | `/provider [NAME]` | Choose an endpoint interactively or switch provider directly. |
+| `/copilot [login\|token\|status]` | Configure or inspect the optional GitHub Copilot provider. |
 | `/resume ID` or `/resume latest` | Restore a saved chat into the active context without replaying its transcript. |
+| `/clear` | Clear the visible terminal conversation. |
+| `/reset` | Start a new conversation while preserving durable memory. |
+| `/forget ID` | Delete one durable memory by ID. |
 | `/skills` | Discover, inspect, create, install, or manage skills. |
 | `/mcp status` | Inspect MCP readiness and safe diagnostics. |
-| `/browser status` | Inspect the effective Playwright browser connection mode. |
+| `/browser [status\|isolated\|system\|extension\|auto\|launch]` | Inspect or change the Playwright browser connection mode. |
+| `/tools [summary\|details\|hidden]` | Select how much live tool activity the terminal renders. |
 | `/agents [status|active|roles|runs|show|cancel|resume]` | Inspect, cancel, or safely resume specialist teams owned by the current session. |
 | `/agents run REQUEST` | Force a real native specialist run for a bounded request. |
 | `/agents doctor` · `/agents smoke-test` | Inspect local supervisor health or launch two harmless real read-only specialists. |
 | `/agents on` · `/agents off` | Persistently enable/disable new delegation without disabling normal chat. |
 | `/phone status` | Check KDE Connect/ADB health. |
+| `/monitor` · `/monitors` | Create, inspect, test, pause, resume, or list proactive watchers. |
+| `/call RECIPIENT` · `/telephony status` | Place confirmed calls and inspect telephony readiness. |
 | `/export [PATH]` | Export local Ares data. |
 | `/import PATH [--config]` | Import a previous local export. |
 | `/soul show` · `/profile show` | Inspect assistant personality and user-profile context. |
+| `/exit` | Shut down the terminal session cleanly. |
 
 ---
 
-## ✨ Personality and profile
+## Configuration
+
+Ares reads `~/.ares/config.json` into a validated Pydantic model. The terminal, unified runtime, desktop voice assistant, Telegram channel, and telephony processes share this file. Writes use an atomic temporary-file replacement so a partial write does not corrupt startup configuration.
+
+The setup screens are the preferred way to change providers and common settings. Advanced fields can be edited directly while Ares is stopped. JSON does not support comments.
+
+### Desktop and voice example
+
+```json
+{
+  "voice": {
+    "stt_backend": "auto",
+    "tts_backend": "auto",
+    "tts_voice": "en-US-JennyNeural",
+    "stt_model": "small",
+    "stt_language": "",
+    "mic_device": null,
+    "min_audio_rms": 0.004,
+    "barge_in_enabled": true,
+    "barge_in_delay_ms": 350,
+    "barge_in_min_voiced_ms": 300,
+    "tts_volume": 1.6
+  },
+  "desktop": {
+    "wake_word_enabled": true,
+    "wake_words": ["hey jarvis", "jarvis"],
+    "wake_command_timeout_seconds": 8.0,
+    "wake_detection_threshold": 0.30,
+    "translate_speech_to_english": true,
+    "follow_system_default_microphone": true,
+    "avoid_bluetooth_microphone": true,
+    "prefer_bluetooth_microphone": false,
+    "tool_panel_enabled": true
+  }
+}
+```
+
+Lowering `desktop.wake_detection_threshold` makes wake detection more permissive; raising it makes detection stricter. Keep changes small and test in the actual room and microphone setup. `voice.barge_in_min_voiced_ms` controls how long speech must continue before it interrupts playback.
+
+### Configuration groups
+
+| Group | Controls |
+|---|---|
+| Root | Provider, model, API base URL, context budgets, project context, notifications, browser mode, cron, and data directory. |
+| `voice` | STT/TTS backends, model, language, microphone, voice activity, interruption, output voice, volume, and history bounds. |
+| `desktop` | Hotkeys, window placement, wake words, wake sensitivity, command timing, translation, microphone routing, and activity panel. |
+| `memory` | Capture, hybrid retrieval, promotion, reviewed learning, limits, and timeouts. |
+| `multi_agent` | Parallelism, budgets, depth, retries, role overrides, review policy, persistence, and worktree isolation. |
+| `watcher` | Scheduler, database, concurrency, tool-monitor policy, dashboard, notifications, and defaults. |
+| `vision` | Camera/screen grants, detector model, frame size, confidence, watch cadence, and retention. |
+| `telegram` | Enablement, exact chat allowlist, polling, attachments, tool progress, and audio transcription. |
+| `phone` | KDE Connect/ADB endpoints and notification-content retention. |
+| `telephony` | Twilio credentials, public callback/media URLs, voice settings, confirmation, and recording policy. |
+| `workspace` | Local Power Workspace enablement, host, and port. |
+| `mcp_servers` | Connected MCP transports, commands/URLs, arguments, environment, and timeouts. |
+
+The complete validated schema and defaults live in [`ares/models.py`](ares/models.py).
+
+### Environment overrides
+
+Environment variables take priority for selected secrets and voice settings:
+
+| Purpose | Variables |
+|---|---|
+| OpenCode Zen | `OPENCODE_API_KEY` |
+| NVIDIA NIM | `NIM_API_KEY` or `NVIDIA_API_KEY` |
+| GitHub Copilot | `COPILOT_GITHUB_TOKEN` |
+| Telegram | `ARES_TELEGRAM_BOT_TOKEN` |
+| Twilio | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` |
+| Voice | `ARES_STT_MODEL`, `ARES_STT_LANGUAGE`, `ARES_MIC_DEVICE`, `ARES_TTS_VOICE`, `ARES_VOICE_BARGE_IN`, and the other `ARES_VOICE_*` fields in [`ares/voice/agent.py`](ares/voice/agent.py) |
+
+Do not commit `.env`, `~/.ares/config.json`, provider tokens, OAuth files, or exported personal data.
+
+## Troubleshooting
+
+### “Hey Jarvis” does not wake Ares
+
+1. Install both optional groups with `pip install -e ".[voice,desktop]"`.
+2. Confirm Windows is receiving microphone input and select the desired default input in Windows Sound settings.
+3. Quit extra Ares desktop processes; only one instance can own the desktop runtime.
+4. Open the tray menu and confirm the label says **Disable Wake Word**. That label means wake-word detection is currently enabled.
+5. Speak “Hey Jarvis” as one phrase. If necessary, reduce `desktop.wake_detection_threshold` slightly, for example from `0.30` to `0.25`.
+6. Inspect PortAudio devices:
+
+   ```powershell
+   python -c "import sounddevice as sd; print(sd.query_devices())"
+   ```
+
+### Ares wakes but returns an empty transcription
+
+- Wait for **Yes? I'm listening**, then speak the command without a long pause.
+- The first request can be slower while faster-whisper loads the selected model.
+- Increase `desktop.wake_command_timeout_seconds` if you need a longer pause after the wake phrase.
+- Increase `desktop.wake_silence_timeout_ms` for microphones that insert short gaps.
+- Keep `desktop.translate_speech_to_english` enabled when Hindi or Hinglish should become English command text.
+
+### Ares does not stop while speaking
+
+- Open the tray menu and confirm it says **Disable Interruption**.
+- Say “Hey Jarvis,” “stop talking,” or a replacement command while Ares is speaking.
+- A single very short “stop” may be shorter than the default 300 ms voiced-speech gate; use a full phrase or lower `voice.barge_in_min_voiced_ms`.
+- Hold `Ctrl+Space` for an immediate push-to-talk interruption.
+
+### Bluetooth microphone quality is poor
+
+Bluetooth hands-free microphone profiles are often narrow-band. The desktop defaults to the Windows input and avoids Bluetooth endpoints when a non-Bluetooth microphone is available. To force a headset, set `desktop.avoid_bluetooth_microphone` to `false` and either set `desktop.prefer_bluetooth_microphone` to `true` or pin `voice.mic_device`.
+
+### `database is locked`
+
+Current Ares storage uses WAL, busy timeouts, retrying writes, and shared connections. Persistent lock errors usually indicate an older duplicate Ares process or another program holding `~/.ares/data/ares.db`. Shut down duplicate Ares processes cleanly and restart; do not delete the database or its WAL files as a first response.
+
+### Desktop UI freezes or reports a Tk thread error
+
+The current desktop panel runs Tk in a dedicated child process. Quit every older desktop instance and launch a single fresh `python -m ares --desktop`. If an old build is still installed globally, activate the repository virtual environment before launching.
+
+### General diagnostics
+
+```text
+/context
+/latency
+/tools details
+/mcp health
+/phone status
+```
+
+```bash
+python -m ares --help
+python -m pytest tests/test_desktop_agent.py tests/test_voice_stt.py tests/test_wakeword.py -q
+```
+
+## Personality and profile
 
 Ares keeps its personality in `~/.ares/data/soul.md` and user preferences in `~/.ares/data/profile.md`. These are local, user-owned Markdown files: edit them with `/soul edit` and `/profile edit`, or open the files in any editor.
 
@@ -605,7 +844,7 @@ The default soul is warm, grounded, and naturally expressive while remaining hon
 
 ---
 
-## 🗂️ Local data layout
+## Local data layout
 
 ```text
 ~/.ares/
@@ -623,19 +862,21 @@ The default soul is warm, grounded, and naturally expressive while remaining hon
 └── skills/                     # User-installed local skills
 ```
 
-## 🧪 Development and verification
+## Development and verification
 
 ```bash
-# Python behavior
+# Install the editable package and test dependencies.
+pip install -e ".[dev]"
+
+# Run the Python suite.
 python -m pytest -q
 
-# Hot-reload dev server (zero extra dependencies): restarts on any source change
-python -m ares.dev            # runs python -m ares --all and auto-restarts on edit
-python -m ares.dev --once     # single run, no watching
-python -m ares.dev --port 8799 --poll 0.3
+# Run the integrated local services during backend development.
+python -m ares --all
 
-# Next.js power workspace
+# Validate and build the Next.js power workspace.
 cd ares-workspace
+npm ci
 npm run lint
 npm run typecheck
 npm run build
@@ -651,7 +892,7 @@ npm run build
 | Watcher core or dashboard | `python -m pytest tests/watcher -q` plus `node --check ares/watcher/dashboard/static/app.js` |
 | Documentation | Validate links, commands, and code examples |
 
-## 🔐 Local-first data boundaries
+## Local-first data boundaries
 
 Ares acts across local and remote surfaces (Telegram, phone, web, MCP servers, cloud model providers). "Local-first" here means your **data** stays under your control on this machine; it does not mean Ares is offline or limited to local action.
 
@@ -662,7 +903,7 @@ Ares acts across local and remote surfaces (Telegram, phone, web, MCP servers, c
 - Real-world and destructive actions remain explicit in their relevant tool workflows.
 - Do not commit API keys, OAuth tokens, or secrets. Exported configuration redacts recognized secret fields.
 
-## 📚 Further reading
+## Further reading
 
 - [MCP configuration and management](docs/mcp.md)
 - [Existing-tool upgrades guide](docs/existing-tool-upgrades-guide.md)

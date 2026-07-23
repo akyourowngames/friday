@@ -435,7 +435,7 @@ async def test_server_listens_before_optional_mcp_startup_finishes(server, monke
         async def __aexit__(self, *_args):
             return False
 
-    monkeypatch.setattr("ares.server.serve", lambda *_args, **_kwargs: FakeWebSocketServer())
+    monkeypatch.setattr("ares.infra.server.serve", lambda *_args, **_kwargs: FakeWebSocketServer())
     blocking_mcp = BlockingMCPManager()
     server.mcp_manager = blocking_mcp
 
@@ -476,7 +476,7 @@ async def test_server_startup_starts_proactive_worker(server, monkeypatch):
         async def stop(self):
             self.stopped = True
 
-    monkeypatch.setattr("ares.server.serve", lambda *_args, **_kwargs: FakeWebSocketServer())
+    monkeypatch.setattr("ares.infra.server.serve", lambda *_args, **_kwargs: FakeWebSocketServer())
     server.config.watcher.enabled = False
     server._workspace_enabled = False
     server.telegram_channel = None

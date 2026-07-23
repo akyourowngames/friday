@@ -255,6 +255,7 @@ class Agent:
         self._pending_turn_grants: tuple[TurnActionGrant, ...] = ()
         self._execution_records: dict[str, dict[str, Any]] = {}
         self._owns_tool_executor = tool_executor is None
+        self._owns_mcp_manager = False
         self.tool_executor = tool_executor or ToolExecutor(
             memory_store=memory_store,
             conversation_store=conversation_store,
@@ -313,6 +314,23 @@ class Agent:
         if config is not None:
             self.llm.config = config
         self.config = self.llm.config
+        if (
+            self.mcp_manager is None
+            and getattr(self.config, "mcp_servers", None)
+            and (self.is_cron_session or self.is_voice_session)
+        ):
+            # Voice, desktop, cron, and lightweight embedders construct Agent
+            # directly. Give those modes the same live MCP runtime as the CLI,
+            # workspace server, and Telegram surfaces.
+            from ares.tools.mcp_client import MCPClientManager
+
+            self.mcp_manager = MCPClientManager(
+                self.config.mcp_servers,
+                data_dir=self.config.data_dir,
+            )
+            self._owns_mcp_manager = True
+            self.tool_executor.mcp_manager = self.mcp_manager
+            self.refresh_tools()
         if self._owns_tool_executor:
             self.tool_executor.config = self.llm.config
             self.tool_executor.set_session_id(session_id)
@@ -678,6 +696,24 @@ class Agent:
         self._root_tool_registry = RootToolRegistry(self.tools)
         self._root_tool_registry_source = (id(self.tools), len(self.tools))
 
+    async def _ensure_mcp_connections(self) -> None:
+        """Keep configured MCPs alive before every turn in every Ares mode."""
+        manager = getattr(self, "mcp_manager", None)
+        if manager is None:
+            return
+        ensure_running = getattr(manager, "ensure_running", None)
+        if not callable(ensure_running):
+            return
+        try:
+            await ensure_running()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("MCP pre-turn recovery failed; background recovery will continue", exc_info=True)
+        finally:
+            # Reconnected servers can expose a refreshed schema catalog.
+            self.refresh_tools()
+
     def _tools_for_turn(
         self,
         context: TurnExecutionContext,
@@ -768,8 +804,10 @@ class Agent:
             lines.append(f"Not ready now: {', '.join(unavailable)}.")
         lines.extend([
             "This live state overrides older assistant messages and old tool failures in conversation history.",
-            "If the user explicitly requests a ready MCP, call that MCP now. Never claim it is unavailable "
-            "without either this live state marking it not ready or a failure returned by that MCP during this turn.",
+            "If the requested MCP tool schema is advertised, call it even when its server is marked not ready: "
+            "Ares reconnects configured transports on demand and safely retries read-only calls once.",
+            "Do not call a configured MCP permanently unavailable from readiness alone. Report a blocker only "
+            "after the reconnect attempt for this turn fails, using that current tool result.",
             "Do not silently switch to Playwright or another integration when the requested MCP is ready.",
         ])
         return "\n".join(lines)
@@ -1008,6 +1046,7 @@ class Agent:
     def set_mcp_manager(self, mcp_manager: Any | None) -> None:
         """Replace MCP connections after a shared config update."""
         self.mcp_manager = mcp_manager
+        self._owns_mcp_manager = False
         self.tool_executor.mcp_manager = mcp_manager
         self.refresh_tools()
 
@@ -2158,6 +2197,7 @@ class Agent:
         """Run one request under immutable current-turn authority."""
         effective_request_id, latency = self._new_request_latency(request_id)
         try:
+            await self._ensure_mcp_connections()
             if self.reflection_service is not None:
                 # Tests and embedders sometimes replace ``agent.llm`` after
                 # construction. Reflection is a separate call, but it should use
@@ -2378,6 +2418,7 @@ class Agent:
         """Run streaming-first under immutable current-turn authority."""
         effective_request_id, latency = self._new_request_latency(request_id)
         try:
+            await self._ensure_mcp_connections()
             if self.reflection_service is not None:
                 self.reflection_service.llm = self.llm
                 self.reflection_service.reflector.llm = self.llm
@@ -2840,6 +2881,8 @@ class Agent:
             await self.multi_agent_runtime.close()
         if self.memory_provider is not None:
             await self.memory_provider.shutdown()
+        if self._owns_mcp_manager and self.mcp_manager is not None:
+            await self.mcp_manager.close()
         if self._owns_tool_executor:
             await self.tool_executor.shutdown()
         await self.llm.close()
