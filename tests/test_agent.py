@@ -1,5 +1,6 @@
 """Tests for the agent loop."""
 
+import asyncio
 import json
 
 import pytest
@@ -23,6 +24,64 @@ def agent(tmp_path, fake_embedding_provider):
 
 
 class TestAgent:
+    @pytest.mark.parametrize(
+        "mode_kwargs",
+        [{"is_cron_session": True}, {"is_voice_session": True}],
+    )
+    def test_cron_and_voice_agents_own_configured_mcp_runtime(
+        self, tmp_path, fake_embedding_provider, mode_kwargs
+    ):
+        config = AppConfig(
+            data_dir=str(tmp_path / "ares-data"),
+            project_context_enabled=False,
+            mcp_servers=[{
+                "name": "calendar",
+                "server_url": "https://example.test/mcp",
+            }],
+        )
+        config.reflection.enabled = False
+        memory = MemoryStore(
+            db_path=tmp_path / f"{next(iter(mode_kwargs))}.db",
+            embedding_provider=fake_embedding_provider,
+        )
+
+        owned = Agent(memory_store=memory, config=config, **mode_kwargs)
+
+        assert owned._owns_mcp_manager is True
+        assert set(owned.mcp_manager.servers) == {"calendar"}
+        assert owned.tool_executor.mcp_manager is owned.mcp_manager
+        asyncio.run(owned.close())
+        memory.close()
+
+    def test_pre_turn_mcp_recovery_refreshes_reconnected_schemas(self, agent):
+        class FakeManager:
+            def __init__(self):
+                self.ensure_calls = 0
+                self.tool_definitions = []
+
+            async def ensure_running(self):
+                self.ensure_calls += 1
+                self.tool_definitions = [{
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__calendar__list_events",
+                        "description": "List calendar events",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }]
+                return {"ready": True}
+
+        manager = FakeManager()
+        agent.set_mcp_manager(manager)
+
+        asyncio.run(agent._ensure_mcp_connections())
+
+        assert manager.ensure_calls == 1
+        assert any(
+            tool["function"]["name"] == "mcp__calendar__list_events"
+            for tool in agent.tools
+        )
+
     def test_reflection_outcome_summary_uses_real_tool_results(self):
         payload = json.loads(Agent._reflection_outcome_summary(
             [
@@ -38,7 +97,7 @@ class TestAgent:
         ]
         assert payload["execution_record"]["request_id"] == "req-1"
 
-    def test_tool_free_conversation_uses_fast_model_without_changing_primary(self, agent):
+    def test_configured_fast_model_routes_all_turns_without_changing_primary(self, agent):
         agent.config.fast_conversation_enabled = True
         agent.config.fast_conversation_model = "deepseek-v4-flash-free"
         agent.llm.model = "big-pickle"
@@ -47,7 +106,10 @@ class TestAgent:
 
         assert agent._tools_for_turn(conversation) == []
         assert agent._model_for_turn(conversation, []) == "deepseek-v4-flash-free"
-        assert agent._model_for_turn(substantive, agent._tools_for_turn(substantive)) is None
+        assert (
+            agent._model_for_turn(substantive, agent._tools_for_turn(substantive))
+            == "deepseek-v4-flash-free"
+        )
         assert agent.llm.model == "big-pickle"
 
     def test_reflection_nested_config_does_not_become_an_llm_config(self, agent, monkeypatch):
