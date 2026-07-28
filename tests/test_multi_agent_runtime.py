@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +31,10 @@ from ares.multi_agent.policy import (
 )
 from ares.multi_agent.runtime import MultiAgentRuntime
 from ares.multi_agent.store import MultiAgentRunStore
+from ares.integrations.turn_policy import (
+    ActionGrantUseRegistry,
+    build_turn_execution_context,
+)
 
 
 def schema(name: str) -> dict:
@@ -389,10 +394,14 @@ async def test_agent_executes_safe_local_tools_concurrently_and_preserves_order(
     agent.tool_executor = Executor()
     agent.multi_agent_runtime = None
     agent.workflow_runner = None
-    results = await agent.process_tool_calls_async([
-        {"id": "first", "function": {"name": "read_file", "arguments": '{"path":"one.txt"}'}},
-        {"id": "second", "function": {"name": "web_search", "arguments": '{"query":"two"}'}},
-    ])
+    agent._turn_context = ContextVar("test-safe-local-turn")
+    agent._turn_grant_uses = ActionGrantUseRegistry()
+    agent._execution_records = {}
+    with agent.turn_scope(build_turn_execution_context("Read one file and search the web")):
+        results = await agent.process_tool_calls_async([
+            {"id": "first", "function": {"name": "read_file", "arguments": '{"path":"one.txt"}'}},
+            {"id": "second", "function": {"name": "web_search", "arguments": '{"query":"two"}'}},
+        ])
     assert peak == 2
     assert [item["tool_call_id"] for item in results] == ["first", "second"]
     assert [item["content"] for item in results] == ["result:read_file", "result:web_search"]
@@ -417,15 +426,18 @@ async def test_root_agent_routes_native_delegation_tools() -> None:
     agent.multi_agent_runtime = Runtime()
     agent.workflow_runner = None
     agent._default_session_id = "root-session"
-    from contextvars import ContextVar
     agent._session_context = ContextVar("test-root-session", default=object())
+    agent._turn_context = ContextVar("test-root-delegation-turn")
+    agent._turn_grant_uses = ActionGrantUseRegistry()
+    agent._execution_records = {}
     # Avoid the property fallback sentinel on this deliberately minimal Agent.
     agent._session_context.set("root-session")
-    for name in ("delegate_task", "delegate_tasks_parallel"):
-        result = await agent.process_tool_calls_async([
-            {"id": name, "function": {"name": name, "arguments": "{}"}},
-        ])
-        assert "succeeded" in result[0]["content"]
+    with agent.turn_scope(build_turn_execution_context("Use multiple agents to research this")):
+        for name in ("delegate_task", "delegate_tasks_parallel"):
+            result = await agent.process_tool_calls_async([
+                {"id": name, "function": {"name": name, "arguments": "{}"}},
+            ])
+            assert "succeeded" in result[0]["content"]
     assert seen == ["delegate_task", "delegate_tasks_parallel"]
 
 

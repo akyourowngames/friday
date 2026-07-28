@@ -22,7 +22,12 @@ class ToolCategory(str, Enum):
     WORKFLOWS = "workflows"
     FILES = "files"
     CODE_EXECUTION = "code_execution"
-    BROWSER = "browser"
+    BROWSER_DOM = "browser_dom"
+    # Compatibility alias for callers from before browser and desktop
+    # automation were split into separate surfaces.
+    BROWSER = "browser_dom"
+    DESKTOP_UIA = "desktop_uia"
+    SYSTEM = "system"
     RESEARCH = "research"
     COMMUNICATION = "communication"
     GOALS = "goals"
@@ -76,6 +81,7 @@ COMMUNICATION_TOOL_NAMES = frozenset({
     "send_email", "telegram_send_file", "telegram_send_message",
 })
 CORE_TOOL_NAMES = frozenset({"get_current_datetime"})
+SYSTEM_MUTATION_TOOL_NAMES = frozenset({"update_config"})
 VISION_READ_TOOL_NAMES = frozenset({
     "vision_compare", "vision_list_watches",
     "vision_list_events", "vision_list_sources",
@@ -107,6 +113,10 @@ def categorize_tool_name(name: str) -> ToolCategory:
     lowered = normalized.casefold()
     if normalized in DELEGATION_TOOL_NAMES:
         return ToolCategory.DELEGATION
+    if normalized in CORE_TOOL_NAMES:
+        return ToolCategory.CORE_CONVERSATION
+    if normalized in SYSTEM_MUTATION_TOOL_NAMES:
+        return ToolCategory.SYSTEM
     if normalized in WORKFLOW_TOOL_NAMES:
         return ToolCategory.WORKFLOWS
     if normalized in RECALL_TOOL_NAMES or lowered.startswith((
@@ -134,12 +144,10 @@ def categorize_tool_name(name: str) -> ToolCategory:
         return ToolCategory.VISION
     if "goal" in lowered or "follow_up" in lowered:
         return ToolCategory.GOALS
-    if (
-        lowered.startswith("mcp__playwright__")
-        or lowered.startswith("mcp__windows__")
-        or lowered.startswith("browser_")
-    ):
-        return ToolCategory.BROWSER
+    if lowered.startswith("mcp__playwright__") or lowered.startswith("browser_"):
+        return ToolCategory.BROWSER_DOM
+    if lowered.startswith("mcp__windows__"):
+        return ToolCategory.DESKTOP_UIA
     if lowered.startswith("mcp__"):
         return ToolCategory.MCP
     # A new local/plugin tool is consequential until it has an explicit
@@ -273,7 +281,7 @@ class RootToolRegistry:
             browser_session_names = {
                 tool.name
                 for tool in self._tools.values()
-                if tool.category is ToolCategory.BROWSER
+                if tool.category is ToolCategory.BROWSER_DOM
                 and tool.name.casefold().endswith(_BROWSER_SESSION_TOOL_SUFFIXES)
             }
             return self._schemas_named(
@@ -330,14 +338,16 @@ class RootToolRegistry:
             if "config" in targets:
                 allowed_names.add("update_config")
         elif intent == "browser_interaction":
-            allowed_categories |= {ToolCategory.BROWSER, ToolCategory.RESEARCH}
+            allowed_categories |= {ToolCategory.BROWSER_DOM, ToolCategory.RESEARCH}
+        elif intent == "desktop_interaction":
+            allowed_categories.add(ToolCategory.DESKTOP_UIA)
         elif intent == "external_action":
             allowed_categories |= {
                 ToolCategory.COMMUNICATION, ToolCategory.PHONE, ToolCategory.TELEPHONY,
                 ToolCategory.MCP,
             }
             if any(marker in text for marker in ("browser", "website", "page", "site", "url")):
-                allowed_categories.add(ToolCategory.BROWSER)
+                allowed_categories.add(ToolCategory.BROWSER_DOM)
 
         selected: list[dict[str, Any]] = []
         for tool in self._tools.values():

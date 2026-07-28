@@ -1,6 +1,7 @@
 """Tests for MCP client configuration, OAuth storage, and tool routing."""
 
 from datetime import datetime, timedelta, timezone
+from contextvars import ContextVar
 from types import SimpleNamespace
 
 import asyncio
@@ -17,6 +18,10 @@ from ares.tools.mcp_client import (
     MCPClientManager,
     MCPServerConfig,
     redact_mcp_text,
+)
+from ares.integrations.turn_policy import (
+    ActionGrantUseRegistry,
+    build_turn_execution_context,
 )
 
 
@@ -39,6 +44,8 @@ def test_windows_mcp_is_restricted_to_desktop_interaction_tools():
     assert "PowerShell" not in allow_list
     assert "Registry" not in allow_list
     assert "FileSystem" not in allow_list
+    assert "MultiEdit" in allow_list
+    assert "MultiSelect" in allow_list
 
 
 def test_existing_builtin_windows_mcp_gets_snapshot_compatibility_env():
@@ -50,6 +57,22 @@ def test_existing_builtin_windows_mcp_gets_snapshot_compatibility_env():
 
     assert windows["env"]["ARES_WINDOWS_MCP_COMPAT"] == "1"
     assert windows["env"]["PYTHONPATH"]
+
+
+def test_existing_builtin_windows_mcp_gains_safe_batch_tools():
+    config = AppConfig()
+    windows = next(server for server in config.mcp_servers if server["name"] == "windows")
+    tools_index = windows["args"].index("--tools") + 1
+    windows["args"][tools_index] = windows["args"][tools_index].replace(
+        ",MultiEdit,MultiSelect",
+        "",
+    )
+
+    _ensure_mcp_defaults(config)
+
+    allow_list = windows["args"][tools_index].split(",")
+    assert allow_list.count("MultiEdit") == 1
+    assert allow_list.count("MultiSelect") == 1
 
 
 def test_windows_mcp_compat_replaces_lone_surrogates_in_text_output():
@@ -436,6 +459,7 @@ def test_read_only_call_reconnects_and_retries_once_after_transport_drop(monkeyp
     async def healthy_connect(self, name, config):
         connections.append(name)
         self.sessions[name] = HealthySession()
+        self.tool_definitions = [schema]
 
     manager = MCPClientManager(
         [{"name": "calendar", "server_url": "https://example.com/mcp"}]
@@ -451,6 +475,53 @@ def test_read_only_call_reconnects_and_retries_once_after_transport_drop(monkeyp
     assert calls == ["list_events", "list_events"]
     assert connections == ["calendar"]
     assert manager.tool_definitions == [schema]
+
+
+def test_disconnected_cached_schemas_are_not_advertised_to_the_model() -> None:
+    schema = {"function": {"name": "mcp__calendar__list_events"}}
+    manager = MCPClientManager(
+        [{"name": "calendar", "server_url": "https://example.com/mcp"}]
+    )
+    manager.sessions["calendar"] = object()
+    manager.schema_cache["calendar"] = [schema]
+    manager.tool_definitions = [schema]
+
+    asyncio.run(manager.close_server("calendar"))
+
+    assert manager.schema_cache["calendar"] == [schema]
+    assert manager.tool_definitions == []
+    assert manager.readiness_report()["servers"]["calendar"]["schema_cached"] is True
+
+
+def test_targeted_recovery_uses_circuit_breaker_without_touching_other_servers(
+    monkeypatch,
+) -> None:
+    attempts: list[str] = []
+
+    async def failed_connect(self, name, config):
+        attempts.append(name)
+        raise ConnectionError("offline")
+
+    manager = MCPClientManager(
+        [
+            {"name": "playwright", "command": "fake-browser"},
+            {"name": "windows", "command": "fake-desktop"},
+        ],
+        reconnect_interval_seconds=30,
+    )
+    monkeypatch.setattr(MCPClientManager, "_connect_server", failed_connect)
+
+    async def exercise():
+        first = await manager.ensure_server_running("windows")
+        second = await manager.ensure_server_running("windows")
+        await manager.close()
+        return first, second
+
+    first, second = asyncio.run(exercise())
+
+    assert attempts == ["windows"]
+    assert not first["ready"]
+    assert second["retry_after_seconds"] > 0
 
 
 def test_maintenance_probes_a_dead_session_and_reconnects_in_the_same_pass(monkeypatch):
@@ -532,26 +603,30 @@ def test_agent_refreshes_and_routes_mcp_tools():
     agent = Agent.__new__(Agent)
     agent.mcp_manager = FakeMCPManager()
     agent.tool_executor = None
+    agent._turn_context = ContextVar("test_mcp_turn")
+    agent._turn_grant_uses = ActionGrantUseRegistry()
+    agent.delegation_depth = 1
     agent.refresh_tools()
 
     assert any(
         tool["function"]["name"] == "mcp__calendar__list_events" for tool in agent.tools
     )
 
-    results = asyncio.run(
-        agent.process_tool_calls_async(
-            [
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {
-                        "name": "mcp__calendar__list_events",
-                        "arguments": '{"limit": 1}',
-                    },
-                }
-            ]
+    with agent.turn_scope(build_turn_execution_context("List calendar events")):
+        results = asyncio.run(
+            agent.process_tool_calls_async(
+                [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__calendar__list_events",
+                            "arguments": '{"limit": 1}',
+                        },
+                    }
+                ]
+            )
         )
-    )
 
     assert results[0]["content"] == "mcp result"
     assert results[0]["tool_name"] == "mcp__calendar__list_events"

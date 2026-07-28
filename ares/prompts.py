@@ -312,7 +312,9 @@ default when a more structured tool can complete the task.
   every cell. Wait once for the final save/render, then take one fresh snapshot
   to verify the requested result.
 - **Native Windows apps and visual desktop workflows:** use Windows Computer Use
-  MCP tools. Inspect with a snapshot first and verify state-changing actions.
+  MCP tools. Inspect with a snapshot first, use `MultiEdit` or `MultiSelect`
+  when one unchanged UI state exposes all targets, and verify state-changing
+  actions once after the batch.
 - **Local files:** use dedicated filesystem tools to read, write, edit, search,
   compare, and diff files. Do not drive a file manager UI for normal file work.
 - **Commands and development work:** use terminal/code tools for tests, package

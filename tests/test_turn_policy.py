@@ -57,7 +57,7 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent("How many agents did you use for the parallel search?") is TurnIntent.READ_ONLY
     assert classify_turn_intent("Use separate researchers to compare these") is TurnIntent.DELEGATION
     assert classify_turn_intent("Search this website by clicking the search box") is TurnIntent.BROWSER_INTERACTION
-    assert classify_turn_intent("Open Notepad and type a note") is TurnIntent.BROWSER_INTERACTION
+    assert classify_turn_intent("Open Notepad and type a note") is TurnIntent.DESKTOP_INTERACTION
     assert classify_turn_intent("yeah new browser sessionn") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("restart playwright") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("start a new browser session") is TurnIntent.BROWSER_INTERACTION
@@ -71,6 +71,55 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent(
         "hey can you launch multiple agents to research on corruption"
     ) is TurnIntent.DELEGATION
+
+
+def test_browser_and_desktop_surfaces_are_mutually_authorized() -> None:
+    browser = build_turn_execution_context(
+        "Click the search box on this website",
+        request_id="req-browser-surface",
+    )
+    desktop = build_turn_execution_context(
+        "Open Notepad and type a note",
+        request_id="req-desktop-surface",
+    )
+
+    assert authorize_turn_tool(
+        browser, "mcp__playwright__browser_click", {"ref": "e1"}
+    ).allowed
+    assert not authorize_turn_tool(
+        browser, "mcp__windows__Click", {"element": "Notepad"}
+    ).allowed
+    assert authorize_turn_tool(
+        desktop, "mcp__windows__Click", {"element": "Editor"}
+    ).allowed
+    assert not authorize_turn_tool(
+        desktop, "mcp__playwright__browser_click", {"ref": "e1"}
+    ).allowed
+
+
+def test_desktop_turn_only_advertises_windows_surface() -> None:
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "test automation tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in (
+            "mcp__playwright__browser_click",
+            "mcp__windows__Click",
+            "mcp__windows__Snapshot",
+        )
+    ]
+
+    selected = RootToolRegistry(schemas).select_for_turn(
+        build_turn_execution_context("Open Notepad and type a note")
+    )
+    names = {item["function"]["name"] for item in selected}
+
+    assert names == {"mcp__windows__Click", "mcp__windows__Snapshot"}
 
 
 def test_new_browser_session_exposes_playwright_tools_instead_of_zero_tools() -> None:
@@ -206,6 +255,24 @@ def test_unknown_local_tool_is_consequential_and_denied_until_registered() -> No
     context = build_turn_execution_context("Read the README", request_id="req-unknown")
     assert classify_tool_effect("future_plugin_tool").value == "external_action"
     assert not authorize_turn_tool(context, "future_plugin_tool", {}).allowed
+
+
+def test_registered_core_and_system_tools_cross_the_runtime_guard() -> None:
+    read_context = build_turn_execution_context(
+        "What time is it?",
+        request_id="req-clock",
+    )
+    config_context = build_turn_execution_context(
+        "Update the configuration setting",
+        request_id="req-config",
+    )
+
+    assert authorize_turn_tool(read_context, "get_current_datetime", {}).allowed
+    assert authorize_turn_tool(
+        config_context,
+        "update_config",
+        {"path": "agent_max_iterations", "value": 40},
+    ).allowed
 
 
 def test_read_only_and_agent_meta_turns_have_narrow_authority() -> None:
