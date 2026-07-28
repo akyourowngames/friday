@@ -171,7 +171,7 @@ async def test_greeting_exposes_no_tools_and_stale_action_cannot_execute(
 
     assert advertised == [[], []]
     assert "Hey!" in tokens
-    assert any("current conversation turn does not authorize" in token for token in tokens)
+    assert not any("does not authorize" in token for token in tokens)
     await agent.close()
 
 
@@ -234,7 +234,7 @@ async def test_real_child_agent_does_not_reenter_delegation_and_edits_isolated_w
     agent.llm.chat_stream = stream
     try:
         response = "".join([token async for token in agent.run_stream(
-            "Have a builder implement a file and a reviewer verify it using multi-agent mode.", []
+            "Write the implementation to the provided file in the isolated worktree.", []
         )])
         assert "runtime is unavailable" not in response.casefold()
         assert Path(workspace.root, "implemented.txt").read_text(encoding="utf-8") == "implemented\n"
@@ -265,7 +265,9 @@ async def test_cancelling_an_unresponsive_tool_releases_agent_task_and_quarantin
 
     agent._dispatch_one_tool_async = stubborn_dispatch  # type: ignore[method-assign]
     call = {"function": {"name": "web_search", "arguments": json.dumps({"query": "x"})}}
-    pending = asyncio.create_task(agent._execute_one_tool_async(0, call, None))
+    context = build_turn_execution_context("Search the web for x")
+    with agent.turn_scope(context):
+        pending = asyncio.create_task(agent._execute_one_tool_async(0, call, None))
     await asyncio.wait_for(started.wait(), timeout=1)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):

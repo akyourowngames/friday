@@ -72,6 +72,22 @@ BROWSER_WINDOW_EXCEPTIONS = (
     "actual chrome window", "browser window", "chrome window", "visible desktop",
     "windows window", "desktop window",
 )
+_EXPLICIT_WINDOWS_MCP_RE = re.compile(
+    r"\b(?:use|using|with|through|via)?\s*(?:the\s+)?"
+    r"(?:windows|desktop|computer[-\s]?use)\s+mcp\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_PLAYWRIGHT_RE = re.compile(
+    r"\b(?:use|using|with|through|via)?\s*(?:the\s+)?"
+    r"(?:playwright|browser)\s+mcp\b|\b(?:use|using|via|through)\s+playwright\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_SURFACE_ACTION_RE = re.compile(
+    r"\b(?:open|click|type|fill|navigate|visit|login|log\s+in|sign\s+in|submit|"
+    r"upload|download|press|select|inspect|operate|scroll|interact|search|find|"
+    r"send|message|msg|reply|read|look|capture|take|launch)\b",
+    re.IGNORECASE,
+)
 
 _CASUAL_RE = re.compile(
     r"^\s*(?:hi|hello|hey|hiya|yo|sup|thanks|thank\s+you|thx|okay|ok|cool|nice|"
@@ -370,6 +386,16 @@ class TurnAuthorizationDecision:
 
 def is_browser_action_request(text: str) -> bool:
     lowered = str(text or "").casefold()
+    if (
+        _EXPLICIT_WINDOWS_MCP_RE.search(lowered)
+        and _EXPLICIT_SURFACE_ACTION_RE.search(lowered)
+    ):
+        return False
+    if (
+        _EXPLICIT_PLAYWRIGHT_RE.search(lowered)
+        and _EXPLICIT_SURFACE_ACTION_RE.search(lowered)
+    ):
+        return True
     if any(phrase in lowered for phrase in BROWSER_WINDOW_EXCEPTIONS):
         return False
     return bool(
@@ -380,6 +406,11 @@ def is_browser_action_request(text: str) -> bool:
 
 def is_desktop_action_request(text: str) -> bool:
     value = str(text or "")
+    if (
+        _EXPLICIT_WINDOWS_MCP_RE.search(value)
+        and _EXPLICIT_SURFACE_ACTION_RE.search(value)
+    ):
+        return True
     return bool(BROWSER_ACTION_RE.search(value) and _DESKTOP_TARGET_RE.search(value))
 
 
@@ -625,6 +656,7 @@ def authorize_turn_tool(
 ) -> TurnAuthorizationDecision:
     """Authorize one call using only current-turn authority or an exact grant."""
     effect = classify_tool_effect(tool_name)
+    category = categorize_tool_name(tool_name)
     grant_mismatches: list[str] = []
     for grant in context.confirmation_grants:
         mismatch = grant.mismatch_reason(
@@ -692,6 +724,29 @@ def authorize_turn_tool(
                 "ambiguous continue/resume must resolve a specific prior task before acting",
                 effect,
             )
+
+    cross_surface_categories = {
+        TurnIntent.BROWSER_INTERACTION: {
+            ToolCategory.DESKTOP_UIA,
+            ToolCategory.COMMUNICATION,
+            ToolCategory.PHONE,
+            ToolCategory.TELEPHONY,
+            ToolCategory.MCP,
+        },
+        TurnIntent.DESKTOP_INTERACTION: {
+            ToolCategory.BROWSER_DOM,
+            ToolCategory.COMMUNICATION,
+            ToolCategory.PHONE,
+            ToolCategory.TELEPHONY,
+            ToolCategory.MCP,
+        },
+    }
+    if category in cross_surface_categories.get(context.intent, set()):
+        return TurnAuthorizationDecision(
+            False,
+            f"current {context.intent.value} turn is exclusive to its requested UI surface",
+            effect,
+        )
 
     if _intent_allows(effect, context.intent):
         return TurnAuthorizationDecision(

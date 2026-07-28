@@ -48,6 +48,14 @@ def test_windows_mcp_is_restricted_to_desktop_interaction_tools():
     assert "MultiSelect" in allow_list
 
 
+def test_fetch_mcp_pins_the_compatible_sdk_major():
+    config = next(server for server in DEFAULT_MCP_SERVERS if server["name"] == "fetch")
+
+    assert config["command"] == "uvx"
+    assert config["args"][:3] == ["--with", "mcp<2", "mcp-server-fetch"]
+    assert config["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
 def test_existing_builtin_windows_mcp_gets_snapshot_compatibility_env():
     config = AppConfig()
     windows = next(server for server in config.mcp_servers if server["name"] == "windows")
@@ -171,6 +179,85 @@ def test_playwright_and_windows_tool_schemas_explain_routing():
     assert "Do not use for normal websites" in windows_schema["function"]["description"]
 
 
+def test_windows_action_schema_requires_local_semantic_target_metadata():
+    manager = MCPClientManager([])
+    desktop_type = SimpleNamespace(
+        name="Type",
+        description="Type into a desktop control",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "loc": {"type": "array"},
+            },
+            "required": ["text"],
+        },
+    )
+
+    schema = manager._to_openai_schema("windows", desktop_type)
+    parameters = schema["function"]["parameters"]
+    semantic = parameters["properties"]["__ares"]
+
+    assert "__ares" in parameters["required"]
+    assert "expected_region" in semantic["required"]
+    assert "text_owner" in semantic["required"]
+    assert "ui_generation" in semantic["required"]
+    assert "validated locally" in semantic["description"]
+    # Discovery must not mutate the server-owned schema object.
+    assert "__ares" not in desktop_type.inputSchema["properties"]
+
+
+def test_windows_semantic_metadata_is_not_sent_to_mcp_server():
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            assert tool_name == "Type"
+            assert arguments == {"text": "hello", "loc": [10, 20]}
+            return SimpleNamespace(content=[SimpleNamespace(text="typed")])
+
+    manager = MCPClientManager([])
+    manager.sessions["windows"] = FakeSession()
+
+    result = asyncio.run(manager.call_tool(
+        "mcp__windows__Type",
+        {
+            "text": "hello",
+            "loc": [10, 20],
+            "__ares": {
+                "expected_app": "notepad",
+                "expected_region": "editor",
+                "purpose": "write note",
+                "semantic_intent": "type_note",
+                "phase": "type_message",
+                "text_owner": "editor",
+                "ui_generation": 2,
+            },
+        },
+    ))
+
+    assert result == "typed"
+
+
+def test_windows_bootstrap_launch_schema_does_not_invent_a_ui_generation():
+    manager = MCPClientManager([])
+    launch = SimpleNamespace(
+        name="Launch",
+        description="Launch an app",
+        inputSchema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    )
+
+    schema = manager._to_openai_schema("windows", launch)
+    semantic = schema["function"]["parameters"]["properties"]["__ares"]
+
+    assert "__ares" in schema["function"]["parameters"]["required"]
+    assert "expected_region" in semantic["required"]
+    assert "ui_generation" not in semantic["required"]
+    assert "bootstrap Launch" in schema["function"]["description"]
+
+
 def test_call_tool_rejects_invalid_name():
     manager = MCPClientManager([])
     result = asyncio.run(manager.call_tool("not_mcp", {}))
@@ -203,7 +290,7 @@ def test_call_tool_routes_to_session_and_renders_text():
     assert result == "event one\nevent two"
 
 
-def test_windows_snapshot_uses_short_timeout_and_recovers_once(monkeypatch):
+def test_windows_snapshot_timeout_does_not_restart_healthy_transport(monkeypatch):
     class HungSession:
         async def call_tool(self, tool_name, arguments):
             await asyncio.sleep(3600)
@@ -227,7 +314,8 @@ def test_windows_snapshot_uses_short_timeout_and_recovers_once(monkeypatch):
     result = asyncio.run(manager.call_tool("mcp__windows__Snapshot", {}))
 
     assert "timed out after 15s" in result
-    assert len(recoveries) == 1
+    assert recoveries == []
+    assert "windows" in manager.sessions
 
 
 def test_readiness_report_uses_schema_cache():
@@ -654,7 +742,7 @@ def test_stdio_config_infers_transport_from_command():
     assert config.transport == "stdio"
 
 
-def test_call_tool_handles_cancelled_error_without_crashing():
+def test_call_tool_propagates_cancellation_to_caller():
     class FakeSession:
         async def call_tool(self, tool_name, arguments):
             raise asyncio.CancelledError("cancel scope")
@@ -664,9 +752,8 @@ def test_call_tool_handles_cancelled_error_without_crashing():
     )
     manager.sessions["calendar"] = FakeSession()
 
-    result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
-
-    assert "was cancelled" in result
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
 
 
 

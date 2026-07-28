@@ -122,6 +122,61 @@ def test_desktop_turn_only_advertises_windows_surface() -> None:
     assert names == {"mcp__windows__Click", "mcp__windows__Snapshot"}
 
 
+def test_explicit_windows_mcp_message_request_is_one_exclusive_desktop_route() -> None:
+    request = (
+        "hey can you msg Sujal Mankar on Telegram using Windows MCP and send "
+        "a greeting to him; you can search him on Telegram"
+    )
+    context = build_turn_execution_context(
+        request, request_id="req-explicit-windows-mcp"
+    )
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "test tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in (
+            "mcp__windows__Snapshot",
+            "mcp__windows__Click",
+            "mcp__playwright__browser_snapshot",
+            "phone_search_contact",
+            "phone_send_sms",
+            "telegram_send_message",
+        )
+    ]
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(schemas).select_for_turn(context)
+    }
+
+    assert context.intent is TurnIntent.DESKTOP_INTERACTION
+    assert "desktop" in context.explicit_targets
+    assert names == {"mcp__windows__Snapshot", "mcp__windows__Click"}
+    assert authorize_turn_tool(context, "mcp__windows__Snapshot", {}).allowed
+    assert not authorize_turn_tool(
+        context, "mcp__playwright__browser_snapshot", {}
+    ).allowed
+    assert not authorize_turn_tool(context, "phone_search_contact", {}).allowed
+    assert not authorize_turn_tool(
+        context, "telegram_send_message", {"text": "hello"}
+    ).allowed
+
+
+def test_explicit_surface_words_without_an_action_do_not_grant_control() -> None:
+    assert (
+        classify_turn_intent("Why does Windows MCP need permissions?")
+        is TurnIntent.READ_ONLY
+    )
+    assert (
+        classify_turn_intent("Explain the Playwright MCP routing")
+        is TurnIntent.READ_ONLY
+    )
+
+
 def test_new_browser_session_exposes_playwright_tools_instead_of_zero_tools() -> None:
     schemas = [
         {

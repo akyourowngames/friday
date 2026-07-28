@@ -17,6 +17,7 @@ from ares.context.discovery import ProjectContext
 from ares.context.user_context import build_user_context
 from ares.autonomy import AutonomousWorkflowRunner
 from ares.integrations.browser_control import BrowserTaskController
+from ares.integrations.computer_control import ComputerTaskController
 from ares.skills.followups import FollowUpStore
 from ares.memory import MemoryStore
 from ares.memory.retrieval import BuiltInMemoryProvider, MemoryRecallService
@@ -225,7 +226,9 @@ class Agent:
         tool_executor: ToolExecutor | None = None,
         llm_client: LLMClient | None = None,
         browser_controller: BrowserTaskController | None = None,
+        computer_controller: ComputerTaskController | None = None,
         playwright_tool_lock: asyncio.Lock | None = None,
+        windows_tool_lock: asyncio.Lock | None = None,
         skill_manager: SkillManager | None = None,
         system_prompt_override: str | None = None,
         tool_schema_filter: Callable[[list[dict]], list[dict]] | None = None,
@@ -266,9 +269,14 @@ class Agent:
         self._session_store = session_store or self.tool_executor.session_store
         self.mcp_manager = mcp_manager
         self.browser_controller = browser_controller or BrowserTaskController()
+        self.computer_controller = computer_controller or ComputerTaskController()
         # Browser pages are a single mutable surface. Other MCP servers, local
         # tools, and LLM turns can safely proceed in parallel across chats.
         self._playwright_tool_lock = playwright_tool_lock or asyncio.Lock()
+        # The visible Windows desktop is a separate mutable surface.  It must
+        # not contend with Playwright, but concurrent desktop conversations
+        # must not interleave clicks and keystrokes.
+        self._windows_tool_lock = windows_tool_lock or asyncio.Lock()
         self._windows_snapshot_cache: dict[str, tuple[float, str, str]] = {}
         self.system_prompt_override = system_prompt_override
         self._tool_schema_filter = tool_schema_filter
@@ -913,6 +921,23 @@ class Agent:
         )
         if browser_guidance:
             system_content += f"\n\n{browser_guidance}"
+        computer_controller = getattr(self, "computer_controller", None)
+        desktop_routing_text = (
+            active_turn.user_input
+            if active_turn is not None and active_turn.intent is TurnIntent.DESKTOP_INTERACTION
+            else ""
+        )
+        computer_guidance = (
+            computer_controller.begin_turn(
+                self.session_id,
+                user_input,
+                routing_text=desktop_routing_text,
+            )
+            if computer_controller is not None
+            else ""
+        )
+        if computer_guidance:
+            system_content += f"\n\n{computer_guidance}"
 
         turn_guard = (
             "## Current Turn Guard\n"
@@ -1204,6 +1229,98 @@ class Agent:
                 arguments[key] = value
         return arguments
 
+    @staticmethod
+    def _advertised_tool_calls(
+        tool_calls: Iterable[dict[str, Any]],
+        turn_tools: Iterable[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """Keep only tools exposed for this turn and canonicalize their names.
+
+        Provider-side tool constraints are not universally reliable. Some
+        models can emit a remembered Windows, Playwright, or Phone function
+        even when that schema was deliberately omitted. Such calls are routing
+        mistakes, not authorization prompts, and must never reach execution or
+        appear as failed tool attempts in the UI.
+        """
+
+        advertised = {
+            str(schema.get("function", {}).get("name") or "").casefold():
+            str(schema.get("function", {}).get("name") or "")
+            for schema in turn_tools
+            if str(schema.get("function", {}).get("name") or "").strip()
+        }
+        accepted: list[dict[str, Any]] = []
+        rejected: list[str] = []
+        for raw_call in tool_calls:
+            call = dict(raw_call)
+            function = dict(call.get("function") or {})
+            supplied_name = str(function.get("name") or "").strip()
+            canonical_name = advertised.get(supplied_name.casefold())
+            if canonical_name is None:
+                rejected.append(supplied_name or "<unnamed>")
+                continue
+            function["name"] = canonical_name
+            call["function"] = function
+            accepted.append(call)
+        return accepted, tuple(dict.fromkeys(rejected))
+
+    @staticmethod
+    def _serialize_windows_tool_calls(
+        tool_calls: Iterable[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """Keep at most one Windows MCP call from a model-planned batch.
+
+        Native desktop calls depend on UI state which can change after every
+        observation or action. Models sometimes emit Snapshot, App, and Click
+        together; executing that batch serially still leaves later calls based
+        on the pre-Snapshot generation. Defer those calls so the model observes
+        each result and resolves the next target from fresh state. A native
+        Windows batching tool remains one call and is unaffected.
+        """
+
+        accepted: list[dict[str, Any]] = []
+        deferred: list[str] = []
+        windows_seen = False
+        for raw_call in tool_calls:
+            call = dict(raw_call)
+            name = str((call.get("function") or {}).get("name") or "").strip()
+            if name.casefold().startswith("mcp__windows__"):
+                if windows_seen:
+                    deferred.append(name or "<unnamed>")
+                    continue
+                windows_seen = True
+            accepted.append(call)
+        return accepted, tuple(deferred)
+
+    @staticmethod
+    def _deferred_windows_tool_correction(deferred: Iterable[str]) -> str:
+        return (
+            "Runtime desktop sequencing correction: deferred stale same-turn Windows "
+            f"call(s): {', '.join(deferred)}. Inspect the completed Windows result, then "
+            "issue exactly one next Windows call using the current UI generation and phase. "
+            "Use a native Windows batch tool only when every operation is valid against the "
+            "same observed UI state."
+        )
+
+    @staticmethod
+    def _unadvertised_tool_correction(
+        rejected: Iterable[str],
+        turn_tools: Iterable[dict[str, Any]],
+        intent: TurnIntent,
+    ) -> str:
+        available = [
+            str(schema.get("function", {}).get("name") or "")
+            for schema in turn_tools
+            if str(schema.get("function", {}).get("name") or "").strip()
+        ]
+        return (
+            "Runtime routing correction: ignored unadvertised tool call(s): "
+            f"{', '.join(rejected)}. This is a {intent.value} turn. "
+            f"Use only the current surface tools: {', '.join(available) if available else 'none'}. "
+            "Do not try Playwright, Phone, communication connectors, or another fallback "
+            "surface unless the user explicitly requests that surface."
+        )
+
     @classmethod
     def _text_tool_calls_from_content(
         cls,
@@ -1331,7 +1448,7 @@ class Agent:
         return results
 
     async def _execute_external_tool(self, tool_name: str, args: dict) -> str:
-        """Execute one MCP call, serializing only the shared browser surface."""
+        """Execute one MCP call with separate browser and desktop surface locks."""
         resolved_args = self._resolve_external_person_arguments(tool_name, args)
         browser_controller = getattr(self, "browser_controller", None)
         if browser_controller is None:
@@ -1340,19 +1457,35 @@ class Agent:
             return await self.mcp_manager.call_tool(tool_name, resolved_args)
         from ares.multi_agent.policy import ToolResource, classify_tool
 
+        is_windows = str(tool_name).casefold().startswith("mcp__windows__")
         is_browser = (
-            browser_controller.is_playwright_tool(tool_name)
-            or classify_tool(tool_name) in {
-                ToolResource.BROWSER_READ,
-                ToolResource.BROWSER_INTERACTION,
-            }
+            not is_windows
+            and (
+                browser_controller.is_playwright_tool(tool_name)
+                or classify_tool(tool_name) in {
+                    ToolResource.BROWSER_READ,
+                    ToolResource.BROWSER_INTERACTION,
+                }
+            )
         )
 
         async def execute() -> str:
+            computer_controller = getattr(self, "computer_controller", None)
+            computer_preflight = (
+                computer_controller.before_call(
+                    self.session_id, tool_name, resolved_args
+                )
+                if computer_controller is not None and is_windows
+                else None
+            )
+            if computer_preflight is not None and not computer_preflight.allowed:
+                return computer_preflight.message
             preflight = browser_controller.before_call(
                 self.session_id, tool_name, resolved_args
             )
             used_cached_snapshot = preflight.cached_result is not None
+            used_windows_cache = False
+            dispatched = False
             if preflight.cached_result is not None:
                 result = preflight.cached_result
             elif not preflight.allowed:
@@ -1368,11 +1501,13 @@ class Agent:
                 cache_seconds = float(getattr(self.config, "windows_snapshot_cache_seconds", 1.5))
                 if is_windows_snapshot and cached and cached[2] == args_key and time.monotonic() - cached[0] <= cache_seconds:
                     result = cached[1]
+                    used_windows_cache = True
                 elif is_windows_snapshot:
                     timeout = float(getattr(self.config, "windows_snapshot_timeout_seconds", 12.0))
                     try:
                         async with asyncio.timeout(timeout):
                             result = await self.mcp_manager.call_tool(tool_name, resolved_args)
+                            dispatched = True
                     except TimeoutError:
                         screenshot_tool = next(
                             (
@@ -1386,12 +1521,26 @@ class Agent:
                         if not screenshot_tool:
                             result = f"Error: Windows UI-tree Snapshot exceeded {timeout:.0f}s. Use the fast Windows Screenshot tool or retry Snapshot with use_ui_tree=false."
                         else:
-                            fast = await self.mcp_manager.call_tool(screenshot_tool, {"use_annotation": False})
-                            result = (
-                                f"Windows UI-tree Snapshot exceeded {timeout:.0f}s, so Ares automatically returned a fast screenshot-only capture. "
-                                "Use Snapshot again only if interactive element IDs are essential.\n\n"
-                                f"{fast}"
-                            )
+                            try:
+                                async with asyncio.timeout(min(5.0, max(2.0, timeout / 2))):
+                                    fast = await self.mcp_manager.call_tool(
+                                        screenshot_tool, {"use_annotation": False}
+                                    )
+                                    dispatched = True
+                            except TimeoutError:
+                                result = (
+                                    f"Error: Windows UI-tree Snapshot exceeded {timeout:.0f}s "
+                                    "and the fast Screenshot fallback also timed out. Wait for "
+                                    "the app to settle before observing again."
+                                )
+                            else:
+                                result = (
+                                    f"Windows UI-tree Snapshot exceeded {timeout:.0f}s, so Ares "
+                                    "automatically returned a fast screenshot-only capture. "
+                                    "Use Snapshot again only if interactive element IDs are "
+                                    "essential.\n\n"
+                                    f"{fast}"
+                                )
                     self._windows_snapshot_cache[cache_key] = (time.monotonic(), str(result), args_key)
                     if len(self._windows_snapshot_cache) > 64:
                         oldest = min(self._windows_snapshot_cache, key=lambda key: self._windows_snapshot_cache[key][0])
@@ -1400,6 +1549,22 @@ class Agent:
                     if lowered.startswith("mcp__windows__"):
                         self._windows_snapshot_cache.pop(cache_key, None)
                     result = await self.mcp_manager.call_tool(tool_name, resolved_args)
+                    dispatched = True
+            if computer_controller is not None and is_windows:
+                if str(tool_name).casefold().endswith("__snapshot"):
+                    result = computer_controller.after_snapshot(
+                        self.session_id,
+                        str(result),
+                        cached=used_windows_cache,
+                    )
+                elif dispatched:
+                    result = computer_controller.after_action(
+                        self.session_id,
+                        tool_name,
+                        resolved_args,
+                        str(result),
+                        action=computer_preflight.action if computer_preflight else None,
+                    )
             if not used_cached_snapshot:
                 result = browser_controller.after_call(
                     self.session_id, tool_name, resolved_args, result
@@ -1432,6 +1597,9 @@ class Agent:
 
         if is_browser:
             async with self._playwright_tool_lock:
+                return await execute()
+        if is_windows:
+            async with self._windows_tool_lock:
                 return await execute()
         return await execute()
 
@@ -2369,6 +2537,30 @@ class Agent:
 
             # Check for tool calls
             if response.get("tool_calls"):
+                advertised_calls, rejected_calls = self._advertised_tool_calls(
+                    response["tool_calls"], turn_tools
+                )
+                if rejected_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._unadvertised_tool_correction(
+                            rejected_calls, turn_tools, turn_context.intent
+                        ),
+                    })
+                if not advertised_calls:
+                    # Do not surface an authorization failure for a tool the
+                    # model was never offered. Give it one clean routing retry.
+                    continue
+                advertised_calls, deferred_calls = self._serialize_windows_tool_calls(
+                    advertised_calls
+                )
+                if deferred_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._deferred_windows_tool_correction(deferred_calls),
+                    })
+                response = dict(response)
+                response["tool_calls"] = advertised_calls
                 # Ensure every tool call has a non-empty id
                 for i, tc in enumerate(response["tool_calls"]):
                     if not tc.get("id"):
@@ -2588,7 +2780,10 @@ class Agent:
                 )
                 or bool(_EXECUTION_GUARD_SIGNAL_RE.search(turn_context.user_input))
                 or (
-                    turn_context.intent is TurnIntent.BROWSER_INTERACTION
+                    turn_context.intent in {
+                        TurnIntent.BROWSER_INTERACTION,
+                        TurnIntent.DESKTOP_INTERACTION,
+                    }
                     and bool(turn_tools)
                 )
             )
@@ -2805,6 +3000,29 @@ class Agent:
                             "name": call["name"],
                             "arguments": call["arguments"],
                         },
+                    })
+                formatted_calls, rejected_calls = self._advertised_tool_calls(
+                    formatted_calls, turn_tools
+                )
+                if rejected_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._unadvertised_tool_correction(
+                            rejected_calls, turn_tools, turn_context.intent
+                        ),
+                    })
+                if not formatted_calls:
+                    # The provider hallucinated a function from another
+                    # surface. Retry invisibly with an exclusive route instead
+                    # of showing the user a failed/unauthorized tool card.
+                    continue
+                formatted_calls, deferred_calls = self._serialize_windows_tool_calls(
+                    formatted_calls
+                )
+                if deferred_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._deferred_windows_tool_correction(deferred_calls),
                     })
 
                 messages.append({

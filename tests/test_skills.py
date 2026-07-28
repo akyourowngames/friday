@@ -293,6 +293,42 @@ def test_browser_and_windows_skills_have_clear_non_overlapping_routes(tmp_path):
     assert computer_skill is not None and "Do not use this skill for\nnormal browser/web automation" in computer_skill.content
 
 
+def test_explicit_windows_mcp_route_cannot_select_unrelated_telegram_download_skill(
+    tmp_path,
+):
+    manager = SkillManager([tmp_path])
+    manager.create_skill(
+        "Download Song to Telegram",
+        (
+            "---\n"
+            "description: Download a song from YouTube, search for it, and send it to Telegram.\n"
+            "category: general\n"
+            "---\n\n"
+            "# Download Song\n"
+            "Search YouTube, download audio, then send the file to Telegram.\n"
+        ),
+        category="general",
+    )
+    request = (
+        "hey can you msg Sujal Mankar on Telegram using Windows MCP and send "
+        "a greeting to him; you can search him on Telegram"
+    )
+
+    selected = manager.relevant_skills(request)
+
+    assert [skill.name for skill in selected] == ["computer-use"]
+    assert (
+        manager.selection_reason(selected[0], request)
+        == "matches a desktop action request"
+    )
+    assert "download-song-to-telegram" not in {
+        skill.name
+        for skill in manager.relevant_skills(
+            "send a normal Telegram greeting to Sujal"
+        )
+    }
+
+
 def test_tool_executor_skill_tools(tmp_path):
     executor = ToolExecutor(DummyStore(), DummyStore())
     executor.skill_manager = SkillManager([tmp_path])

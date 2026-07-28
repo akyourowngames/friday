@@ -43,6 +43,36 @@ def test_load_config_upgrades_legacy_default_mcp_servers(tmp_path, monkeypatch):
         "fetch",
         "windows",
     }
+    fetch = next(server for server in loaded.mcp_servers if server["name"] == "fetch")
+    assert fetch["args"] == ["--with", "mcp<2", "mcp-server-fetch"]
+    assert fetch["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_load_config_upgrades_unconstrained_builtin_fetch(tmp_path, monkeypatch):
+    from ares import config as config_module
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcp_servers": [
+                    {
+                        "name": "fetch",
+                        "command": "uvx",
+                        "args": ["mcp-server-fetch"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+
+    loaded = config_module.load_config()
+
+    fetch = next(server for server in loaded.mcp_servers if server["name"] == "fetch")
+    assert fetch["args"] == ["--with", "mcp<2", "mcp-server-fetch"]
+    assert fetch["env"]["PYTHONIOENCODING"] == "utf-8"
 
 
 def test_load_config_preserves_custom_mcp_servers(tmp_path, monkeypatch):

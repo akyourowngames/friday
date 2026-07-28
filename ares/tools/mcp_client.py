@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import importlib
 import importlib.util
@@ -968,7 +969,7 @@ class MCPClientManager:
             raise asyncio.CancelledError
 
     def _to_openai_schema(self, server_name: str, tool: Any) -> dict[str, Any]:
-        schema = (
+        schema = copy.deepcopy(
             getattr(tool, "inputSchema", None)
             or getattr(tool, "input_schema", None)
             or {"type": "object", "properties": {}}
@@ -981,9 +982,117 @@ class MCPClientManager:
                 + description
             )
         elif server_name == "windows":
+            schema.setdefault("type", "object")
+            properties = schema.setdefault("properties", {})
+            short_name = str(getattr(tool, "name", "") or "").casefold()
+            is_type = "type" in short_name
+            is_launch = "launch" in short_name
+            is_semantic_action = any(
+                token in short_name
+                for token in (
+                    "click",
+                    "type",
+                    "edit",
+                    "select",
+                    "key",
+                    "drag",
+                    "move",
+                    "scroll",
+                    "launch",
+                    "resize",
+                )
+            )
+            if is_semantic_action:
+                semantic_required = [
+                    "expected_app",
+                    "expected_region",
+                    "purpose",
+                    "semantic_intent",
+                    "phase",
+                ]
+                if not is_launch:
+                    semantic_required.append("ui_generation")
+                if is_type:
+                    semantic_required.append("text_owner")
+                properties["__ares"] = {
+                    "type": "object",
+                    "description": (
+                        "Ares-only semantic target metadata. It is validated locally and "
+                        "removed before the Windows MCP server call."
+                    ),
+                    "properties": {
+                        "expected_app": {
+                            "type": "string",
+                            "description": "App from the latest compact computer state.",
+                        },
+                        "expected_region": {
+                            "type": "string",
+                            "description": (
+                                "Semantic subtree such as global_search, message_composer, "
+                                "chat_header, navigation, editor, dialog, or active_window "
+                                "for a batch wholly scoped to the focused window. Use "
+                                "application only for a bootstrap Launch."
+                            ),
+                        },
+                        "purpose": {
+                            "type": "string",
+                            "description": "Why this exact UI action is needed.",
+                        },
+                        "semantic_intent": {
+                            "type": "string",
+                            "description": (
+                                "Stable intent used for loop detection, such as "
+                                "search_contact, select_contact, focus_composer, or type_message."
+                            ),
+                        },
+                        "phase": {
+                            "type": "string",
+                            "description": "Current phase from the compact computer state.",
+                        },
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity this action acts on, when applicable.",
+                        },
+                        "text_owner": {
+                            "type": "string",
+                            "description": (
+                                "For Type: semantic owner of text, exactly matching "
+                                "expected_region (for example global_search or message_composer)."
+                            ),
+                        },
+                        "ui_generation": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": (
+                                "Exact ui_generation from the latest compact computer state. "
+                                "Older generations are rejected."
+                            ),
+                        },
+                        "postcondition": {
+                            "type": "string",
+                            "description": "Observable state required after the action.",
+                        },
+                    },
+                    "required": semantic_required,
+                    "additionalProperties": True,
+                }
+                required = list(schema.get("required") or [])
+                if "__ares" not in required:
+                    required.append("__ares")
+                schema["required"] = required
             description = (
                 "For native Windows desktop apps, OS dialogs, and non-browser UI only. "
                 "Do not use for normal websites while Playwright MCP is available. "
+                + (
+                    "This action is guarded by app/region/purpose/UI-generation preconditions; "
+                    + (
+                        "for a bootstrap Launch use expected_region=application and phase=open_app. "
+                        if is_launch
+                        else "supply required __ares semantic metadata from the latest Snapshot. "
+                    )
+                    if is_semantic_action
+                    else ""
+                )
                 + description
             )
         return {
@@ -1249,9 +1358,11 @@ class MCPClientManager:
     ) -> tuple[str, bool, Any | None]:
         """Run one MCP call without replaying a request that has started."""
 
-        # A Windows snapshot is observational, so refreshing the local process
-        # after failure is safe.  The snapshot itself is *not* replayed here;
-        # callers can issue a new request after the reconnect completes.
+        # A Windows snapshot is observational. Transport exceptions can be
+        # recovered without replaying the snapshot, but a plain timeout often
+        # only means UI-tree traversal is slow. Restarting the whole Windows
+        # MCP synchronously on that path turns a 15s timeout into a 35s stall
+        # and prevents the Agent's fast Screenshot fallback.
         can_recover_windows_snapshot = (
             server_name == "windows" and mcp_tool.casefold() == "snapshot"
         )
@@ -1273,11 +1384,7 @@ class MCPClientManager:
                 )
             return rendered, False, self._result_payload(result)
         except asyncio.TimeoutError:
-            if can_recover_windows_snapshot:
-                await self._recover_windows_server(
-                    f"Snapshot timed out after {timeout:g}s"
-                )
-            else:
+            if not can_recover_windows_snapshot:
                 await self._mark_transport_disconnected(
                     server_name, f"Tool call timed out after {timeout:g}s."
                 )
@@ -1286,20 +1393,11 @@ class MCPClientManager:
                 True,
                 None,
             )
-        except asyncio.CancelledError as exc:
-            _clear_current_task_cancellation()
-            logger.warning(
-                "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
-            )
-            await self._mark_transport_disconnected(
-                server_name, f"Tool call was cancelled: {exc or 'cancelled'}"
-            )
-            return (
-                f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. "
-                "Check the MCP server logs or increase timeout_seconds.",
-                True,
-                None,
-            )
+        except asyncio.CancelledError:
+            # Cancellation is control flow owned by the caller (for example,
+            # Agent's shorter Snapshot deadline or CLI shutdown). Swallowing
+            # it defeats outer timeouts and leaves MCP tasks alive at exit.
+            raise
         except Exception as exc:
             if can_recover_windows_snapshot:
                 await self._recover_windows_server(str(exc) or exc.__class__.__name__)

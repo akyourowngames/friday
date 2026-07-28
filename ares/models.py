@@ -119,7 +119,11 @@ DEFAULT_MCP_SERVERS: list[dict] = [
         "name": "fetch",
         "transport": "stdio",
         "command": "uvx",
-        "args": ["mcp-server-fetch"],
+        # mcp-server-fetch 2026.7.10 currently declares no upper SDK bound,
+        # but still imports the v1 ``McpError`` symbol. Keep its isolated uvx
+        # environment on the supported v1 SDK until the server migrates.
+        "args": ["--with", "mcp<2", "mcp-server-fetch"],
+        "env": {"PYTHONIOENCODING": "utf-8"},
     },
     {
         "name": "windows",
@@ -636,6 +640,6 @@ class AppConfig(BaseModel):
     browser_cdp_port: int = Field(default=9222, ge=1, le=65535)
     browser_chrome_path: str = ""
     browser_extension_token: str = ""
-    windows_snapshot_timeout_seconds: float = Field(default=12.0, ge=2.0, le=90.0)
+    windows_snapshot_timeout_seconds: float = Field(default=10.0, ge=2.0, le=90.0)
     windows_snapshot_cache_seconds: float = Field(default=1.5, ge=0.0, le=10.0)
     block_session_context: bool = False  # Block previous session summary from flowing into new sessions
