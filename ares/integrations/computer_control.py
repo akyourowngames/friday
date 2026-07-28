@@ -28,7 +28,6 @@ _MUTATION_TOKENS = (
     "select",
     "key",
     "drag",
-    "move",
     "scroll",
     "launch",
     "resize",

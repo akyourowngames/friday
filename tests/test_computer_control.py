@@ -377,6 +377,36 @@ def test_empty_draft_without_outgoing_bubble_remains_in_verify_sent():
     assert "failed: composer_empty=True, outgoing_message_visible=False" in result
 
 
+def test_pointer_move_does_not_require_a_new_snapshot_before_click():
+    controller = ComputerTaskController()
+    begin_message_task(controller)
+    controller.after_snapshot(
+        "chat", telegram_snapshot(selected="", focused="global_search", overlay=True)
+    )
+
+    move_result = controller.after_action(
+        "chat",
+        "mcp__windows__Move",
+        {"loc": [250, 50]},
+        "Moved pointer successfully",
+    )
+    click_arguments = {
+        "loc": [250, 50],
+        "__ares": meta(
+            controller,
+            region="global_search",
+            intent="focus_search",
+        ),
+    }
+    click = controller.before_call(
+        "chat", "mcp__windows__Click", click_arguments
+    )
+
+    assert move_result == "Moved pointer successfully"
+    assert controller.state_for("chat").observation_required is False
+    assert click.allowed is True
+
+
 def test_semantic_loop_stops_third_equivalent_action_on_unchanged_ui():
     controller = ComputerTaskController()
     begin_message_task(controller)

@@ -1265,6 +1265,44 @@ class Agent:
         return accepted, tuple(dict.fromkeys(rejected))
 
     @staticmethod
+    def _serialize_windows_tool_calls(
+        tool_calls: Iterable[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """Keep at most one Windows MCP call from a model-planned batch.
+
+        Native desktop calls depend on UI state which can change after every
+        observation or action. Models sometimes emit Snapshot, App, and Click
+        together; executing that batch serially still leaves later calls based
+        on the pre-Snapshot generation. Defer those calls so the model observes
+        each result and resolves the next target from fresh state. A native
+        Windows batching tool remains one call and is unaffected.
+        """
+
+        accepted: list[dict[str, Any]] = []
+        deferred: list[str] = []
+        windows_seen = False
+        for raw_call in tool_calls:
+            call = dict(raw_call)
+            name = str((call.get("function") or {}).get("name") or "").strip()
+            if name.casefold().startswith("mcp__windows__"):
+                if windows_seen:
+                    deferred.append(name or "<unnamed>")
+                    continue
+                windows_seen = True
+            accepted.append(call)
+        return accepted, tuple(deferred)
+
+    @staticmethod
+    def _deferred_windows_tool_correction(deferred: Iterable[str]) -> str:
+        return (
+            "Runtime desktop sequencing correction: deferred stale same-turn Windows "
+            f"call(s): {', '.join(deferred)}. Inspect the completed Windows result, then "
+            "issue exactly one next Windows call using the current UI generation and phase. "
+            "Use a native Windows batch tool only when every operation is valid against the "
+            "same observed UI state."
+        )
+
+    @staticmethod
     def _unadvertised_tool_correction(
         rejected: Iterable[str],
         turn_tools: Iterable[dict[str, Any]],
@@ -1483,13 +1521,26 @@ class Agent:
                         if not screenshot_tool:
                             result = f"Error: Windows UI-tree Snapshot exceeded {timeout:.0f}s. Use the fast Windows Screenshot tool or retry Snapshot with use_ui_tree=false."
                         else:
-                            fast = await self.mcp_manager.call_tool(screenshot_tool, {"use_annotation": False})
-                            dispatched = True
-                            result = (
-                                f"Windows UI-tree Snapshot exceeded {timeout:.0f}s, so Ares automatically returned a fast screenshot-only capture. "
-                                "Use Snapshot again only if interactive element IDs are essential.\n\n"
-                                f"{fast}"
-                            )
+                            try:
+                                async with asyncio.timeout(min(5.0, max(2.0, timeout / 2))):
+                                    fast = await self.mcp_manager.call_tool(
+                                        screenshot_tool, {"use_annotation": False}
+                                    )
+                                    dispatched = True
+                            except TimeoutError:
+                                result = (
+                                    f"Error: Windows UI-tree Snapshot exceeded {timeout:.0f}s "
+                                    "and the fast Screenshot fallback also timed out. Wait for "
+                                    "the app to settle before observing again."
+                                )
+                            else:
+                                result = (
+                                    f"Windows UI-tree Snapshot exceeded {timeout:.0f}s, so Ares "
+                                    "automatically returned a fast screenshot-only capture. "
+                                    "Use Snapshot again only if interactive element IDs are "
+                                    "essential.\n\n"
+                                    f"{fast}"
+                                )
                     self._windows_snapshot_cache[cache_key] = (time.monotonic(), str(result), args_key)
                     if len(self._windows_snapshot_cache) > 64:
                         oldest = min(self._windows_snapshot_cache, key=lambda key: self._windows_snapshot_cache[key][0])
@@ -2500,6 +2551,14 @@ class Agent:
                     # Do not surface an authorization failure for a tool the
                     # model was never offered. Give it one clean routing retry.
                     continue
+                advertised_calls, deferred_calls = self._serialize_windows_tool_calls(
+                    advertised_calls
+                )
+                if deferred_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._deferred_windows_tool_correction(deferred_calls),
+                    })
                 response = dict(response)
                 response["tool_calls"] = advertised_calls
                 # Ensure every tool call has a non-empty id
@@ -2957,6 +3016,14 @@ class Agent:
                     # surface. Retry invisibly with an exclusive route instead
                     # of showing the user a failed/unauthorized tool card.
                     continue
+                formatted_calls, deferred_calls = self._serialize_windows_tool_calls(
+                    formatted_calls
+                )
+                if deferred_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._deferred_windows_tool_correction(deferred_calls),
+                    })
 
                 messages.append({
                     "role": "assistant",

@@ -1358,9 +1358,11 @@ class MCPClientManager:
     ) -> tuple[str, bool, Any | None]:
         """Run one MCP call without replaying a request that has started."""
 
-        # A Windows snapshot is observational, so refreshing the local process
-        # after failure is safe.  The snapshot itself is *not* replayed here;
-        # callers can issue a new request after the reconnect completes.
+        # A Windows snapshot is observational. Transport exceptions can be
+        # recovered without replaying the snapshot, but a plain timeout often
+        # only means UI-tree traversal is slow. Restarting the whole Windows
+        # MCP synchronously on that path turns a 15s timeout into a 35s stall
+        # and prevents the Agent's fast Screenshot fallback.
         can_recover_windows_snapshot = (
             server_name == "windows" and mcp_tool.casefold() == "snapshot"
         )
@@ -1382,11 +1384,7 @@ class MCPClientManager:
                 )
             return rendered, False, self._result_payload(result)
         except asyncio.TimeoutError:
-            if can_recover_windows_snapshot:
-                await self._recover_windows_server(
-                    f"Snapshot timed out after {timeout:g}s"
-                )
-            else:
+            if not can_recover_windows_snapshot:
                 await self._mark_transport_disconnected(
                     server_name, f"Tool call timed out after {timeout:g}s."
                 )
@@ -1395,20 +1393,11 @@ class MCPClientManager:
                 True,
                 None,
             )
-        except asyncio.CancelledError as exc:
-            _clear_current_task_cancellation()
-            logger.warning(
-                "MCP tool call cancelled for %s on %s: %s", mcp_tool, server_name, exc
-            )
-            await self._mark_transport_disconnected(
-                server_name, f"Tool call was cancelled: {exc or 'cancelled'}"
-            )
-            return (
-                f"Error: MCP tool '{mcp_tool}' on '{server_name}' was cancelled. "
-                "Check the MCP server logs or increase timeout_seconds.",
-                True,
-                None,
-            )
+        except asyncio.CancelledError:
+            # Cancellation is control flow owned by the caller (for example,
+            # Agent's shorter Snapshot deadline or CLI shutdown). Swallowing
+            # it defeats outer timeouts and leaves MCP tasks alive at exit.
+            raise
         except Exception as exc:
             if can_recover_windows_snapshot:
                 await self._recover_windows_server(str(exc) or exc.__class__.__name__)

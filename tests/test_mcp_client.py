@@ -48,6 +48,14 @@ def test_windows_mcp_is_restricted_to_desktop_interaction_tools():
     assert "MultiSelect" in allow_list
 
 
+def test_fetch_mcp_pins_the_compatible_sdk_major():
+    config = next(server for server in DEFAULT_MCP_SERVERS if server["name"] == "fetch")
+
+    assert config["command"] == "uvx"
+    assert config["args"][:3] == ["--with", "mcp<2", "mcp-server-fetch"]
+    assert config["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
 def test_existing_builtin_windows_mcp_gets_snapshot_compatibility_env():
     config = AppConfig()
     windows = next(server for server in config.mcp_servers if server["name"] == "windows")
@@ -282,7 +290,7 @@ def test_call_tool_routes_to_session_and_renders_text():
     assert result == "event one\nevent two"
 
 
-def test_windows_snapshot_uses_short_timeout_and_recovers_once(monkeypatch):
+def test_windows_snapshot_timeout_does_not_restart_healthy_transport(monkeypatch):
     class HungSession:
         async def call_tool(self, tool_name, arguments):
             await asyncio.sleep(3600)
@@ -306,7 +314,8 @@ def test_windows_snapshot_uses_short_timeout_and_recovers_once(monkeypatch):
     result = asyncio.run(manager.call_tool("mcp__windows__Snapshot", {}))
 
     assert "timed out after 15s" in result
-    assert len(recoveries) == 1
+    assert recoveries == []
+    assert "windows" in manager.sessions
 
 
 def test_readiness_report_uses_schema_cache():
@@ -733,7 +742,7 @@ def test_stdio_config_infers_transport_from_command():
     assert config.transport == "stdio"
 
 
-def test_call_tool_handles_cancelled_error_without_crashing():
+def test_call_tool_propagates_cancellation_to_caller():
     class FakeSession:
         async def call_tool(self, tool_name, arguments):
             raise asyncio.CancelledError("cancel scope")
@@ -743,9 +752,8 @@ def test_call_tool_handles_cancelled_error_without_crashing():
     )
     manager.sessions["calendar"] = FakeSession()
 
-    result = asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
-
-    assert "was cancelled" in result
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(manager.call_tool("mcp__calendar__list_events", {}))
 
 
 

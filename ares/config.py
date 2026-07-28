@@ -63,6 +63,7 @@ def _ensure_mcp_defaults(config: AppConfig) -> AppConfig:
     if configured_wake_words == legacy_wake_words:
         config.desktop.wake_words = ["hey jarvis", "jarvis"]
     _configure_playwright_mcp(config)
+    _configure_fetch_mcp(config)
     _configure_windows_mcp(config)
     return config
 
@@ -87,6 +88,24 @@ def _configure_playwright_mcp(config: AppConfig) -> None:
             server["env"] = environment
         else:
             server.pop("env", None)
+
+
+def _configure_fetch_mcp(config: AppConfig) -> None:
+    """Keep Ares' built-in Fetch MCP on its compatible Python SDK line."""
+
+    for server in config.mcp_servers:
+        if not isinstance(server, dict) or server.get("name") != "fetch":
+            continue
+        args = list(server.get("args") or [])
+        if server.get("command") != "uvx":
+            continue
+        if args in (["fetch"], ["mcp-server-fetch"]):
+            server["args"] = ["--with", "mcp<2", "mcp-server-fetch"]
+        elif args[:3] != ["--with", "mcp<2", "mcp-server-fetch"]:
+            continue
+        environment = dict(server.get("env") or {})
+        environment.setdefault("PYTHONIOENCODING", "utf-8")
+        server["env"] = environment
 
 
 def _configure_windows_mcp(config: AppConfig) -> None:

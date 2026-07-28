@@ -285,6 +285,58 @@ class TestAgent:
             "mcp__playwright__browser_snapshot",
         )
 
+    def test_windows_calls_are_replanned_one_step_at_a_time(self):
+        calls = [
+            {
+                "id": "snapshot",
+                "type": "function",
+                "function": {
+                    "name": "mcp__windows__Snapshot",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "id": "app",
+                "type": "function",
+                "function": {
+                    "name": "mcp__windows__App",
+                    "arguments": '{"mode":"switch","name":"Telegram"}',
+                },
+            },
+            {
+                "id": "click",
+                "type": "function",
+                "function": {
+                    "name": "mcp__windows__Click",
+                    "arguments": '{"loc":[100,100]}',
+                },
+            },
+        ]
+
+        accepted, deferred = Agent._serialize_windows_tool_calls(calls)
+
+        assert [call["id"] for call in accepted] == ["snapshot"]
+        assert deferred == ("mcp__windows__App", "mcp__windows__Click")
+        correction = Agent._deferred_windows_tool_correction(deferred)
+        assert "current UI generation and phase" in correction
+
+    def test_non_windows_calls_are_not_serialized(self):
+        calls = [
+            {
+                "id": "one",
+                "function": {"name": "read_file", "arguments": "{}"},
+            },
+            {
+                "id": "two",
+                "function": {"name": "web_search", "arguments": "{}"},
+            },
+        ]
+
+        accepted, deferred = Agent._serialize_windows_tool_calls(calls)
+
+        assert accepted == calls
+        assert deferred == ()
+
     def test_build_messages_uses_live_mcp_state_over_stale_history(self, agent):
         class FakeManager:
             tool_definitions = [{
