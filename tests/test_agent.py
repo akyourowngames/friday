@@ -224,6 +224,20 @@ class TestAgent:
         assert "Current local date:" in system
         assert "Timezone:" in system
 
+    def test_build_messages_starts_semantic_computer_task_for_desktop_turn(self, agent):
+        context = build_turn_execution_context(
+            'Send a Telegram message to Sujal Mankar saying "Call me at 6"'
+        )
+
+        with agent.turn_scope(context):
+            messages = agent.build_messages(context.user_input, [])
+
+        system = messages[0]["content"]
+        assert "## Live Computer Task" in system
+        assert "Immutable target: 'Sujal Mankar'" in system
+        assert "Immutable message: 'Call me at 6'" in system
+        assert "ui_generation" in system
+
     def test_build_messages_uses_live_mcp_state_over_stale_history(self, agent):
         class FakeManager:
             tool_definitions = [{

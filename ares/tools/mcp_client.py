@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import importlib
 import importlib.util
@@ -968,7 +969,7 @@ class MCPClientManager:
             raise asyncio.CancelledError
 
     def _to_openai_schema(self, server_name: str, tool: Any) -> dict[str, Any]:
-        schema = (
+        schema = copy.deepcopy(
             getattr(tool, "inputSchema", None)
             or getattr(tool, "input_schema", None)
             or {"type": "object", "properties": {}}
@@ -981,9 +982,117 @@ class MCPClientManager:
                 + description
             )
         elif server_name == "windows":
+            schema.setdefault("type", "object")
+            properties = schema.setdefault("properties", {})
+            short_name = str(getattr(tool, "name", "") or "").casefold()
+            is_type = "type" in short_name
+            is_launch = "launch" in short_name
+            is_semantic_action = any(
+                token in short_name
+                for token in (
+                    "click",
+                    "type",
+                    "edit",
+                    "select",
+                    "key",
+                    "drag",
+                    "move",
+                    "scroll",
+                    "launch",
+                    "resize",
+                )
+            )
+            if is_semantic_action:
+                semantic_required = [
+                    "expected_app",
+                    "expected_region",
+                    "purpose",
+                    "semantic_intent",
+                    "phase",
+                ]
+                if not is_launch:
+                    semantic_required.append("ui_generation")
+                if is_type:
+                    semantic_required.append("text_owner")
+                properties["__ares"] = {
+                    "type": "object",
+                    "description": (
+                        "Ares-only semantic target metadata. It is validated locally and "
+                        "removed before the Windows MCP server call."
+                    ),
+                    "properties": {
+                        "expected_app": {
+                            "type": "string",
+                            "description": "App from the latest compact computer state.",
+                        },
+                        "expected_region": {
+                            "type": "string",
+                            "description": (
+                                "Semantic subtree such as global_search, message_composer, "
+                                "chat_header, navigation, editor, dialog, or active_window "
+                                "for a batch wholly scoped to the focused window. Use "
+                                "application only for a bootstrap Launch."
+                            ),
+                        },
+                        "purpose": {
+                            "type": "string",
+                            "description": "Why this exact UI action is needed.",
+                        },
+                        "semantic_intent": {
+                            "type": "string",
+                            "description": (
+                                "Stable intent used for loop detection, such as "
+                                "search_contact, select_contact, focus_composer, or type_message."
+                            ),
+                        },
+                        "phase": {
+                            "type": "string",
+                            "description": "Current phase from the compact computer state.",
+                        },
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity this action acts on, when applicable.",
+                        },
+                        "text_owner": {
+                            "type": "string",
+                            "description": (
+                                "For Type: semantic owner of text, exactly matching "
+                                "expected_region (for example global_search or message_composer)."
+                            ),
+                        },
+                        "ui_generation": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": (
+                                "Exact ui_generation from the latest compact computer state. "
+                                "Older generations are rejected."
+                            ),
+                        },
+                        "postcondition": {
+                            "type": "string",
+                            "description": "Observable state required after the action.",
+                        },
+                    },
+                    "required": semantic_required,
+                    "additionalProperties": True,
+                }
+                required = list(schema.get("required") or [])
+                if "__ares" not in required:
+                    required.append("__ares")
+                schema["required"] = required
             description = (
                 "For native Windows desktop apps, OS dialogs, and non-browser UI only. "
                 "Do not use for normal websites while Playwright MCP is available. "
+                + (
+                    "This action is guarded by app/region/purpose/UI-generation preconditions; "
+                    + (
+                        "for a bootstrap Launch use expected_region=application and phase=open_app. "
+                        if is_launch
+                        else "supply required __ares semantic metadata from the latest Snapshot. "
+                    )
+                    if is_semantic_action
+                    else ""
+                )
                 + description
             )
         return {

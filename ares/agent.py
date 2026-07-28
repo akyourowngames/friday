@@ -17,6 +17,7 @@ from ares.context.discovery import ProjectContext
 from ares.context.user_context import build_user_context
 from ares.autonomy import AutonomousWorkflowRunner
 from ares.integrations.browser_control import BrowserTaskController
+from ares.integrations.computer_control import ComputerTaskController
 from ares.skills.followups import FollowUpStore
 from ares.memory import MemoryStore
 from ares.memory.retrieval import BuiltInMemoryProvider, MemoryRecallService
@@ -225,7 +226,9 @@ class Agent:
         tool_executor: ToolExecutor | None = None,
         llm_client: LLMClient | None = None,
         browser_controller: BrowserTaskController | None = None,
+        computer_controller: ComputerTaskController | None = None,
         playwright_tool_lock: asyncio.Lock | None = None,
+        windows_tool_lock: asyncio.Lock | None = None,
         skill_manager: SkillManager | None = None,
         system_prompt_override: str | None = None,
         tool_schema_filter: Callable[[list[dict]], list[dict]] | None = None,
@@ -266,9 +269,14 @@ class Agent:
         self._session_store = session_store or self.tool_executor.session_store
         self.mcp_manager = mcp_manager
         self.browser_controller = browser_controller or BrowserTaskController()
+        self.computer_controller = computer_controller or ComputerTaskController()
         # Browser pages are a single mutable surface. Other MCP servers, local
         # tools, and LLM turns can safely proceed in parallel across chats.
         self._playwright_tool_lock = playwright_tool_lock or asyncio.Lock()
+        # The visible Windows desktop is a separate mutable surface.  It must
+        # not contend with Playwright, but concurrent desktop conversations
+        # must not interleave clicks and keystrokes.
+        self._windows_tool_lock = windows_tool_lock or asyncio.Lock()
         self._windows_snapshot_cache: dict[str, tuple[float, str, str]] = {}
         self.system_prompt_override = system_prompt_override
         self._tool_schema_filter = tool_schema_filter
@@ -913,6 +921,23 @@ class Agent:
         )
         if browser_guidance:
             system_content += f"\n\n{browser_guidance}"
+        computer_controller = getattr(self, "computer_controller", None)
+        desktop_routing_text = (
+            active_turn.user_input
+            if active_turn is not None and active_turn.intent is TurnIntent.DESKTOP_INTERACTION
+            else ""
+        )
+        computer_guidance = (
+            computer_controller.begin_turn(
+                self.session_id,
+                user_input,
+                routing_text=desktop_routing_text,
+            )
+            if computer_controller is not None
+            else ""
+        )
+        if computer_guidance:
+            system_content += f"\n\n{computer_guidance}"
 
         turn_guard = (
             "## Current Turn Guard\n"
@@ -1331,7 +1356,7 @@ class Agent:
         return results
 
     async def _execute_external_tool(self, tool_name: str, args: dict) -> str:
-        """Execute one MCP call, serializing only the shared browser surface."""
+        """Execute one MCP call with separate browser and desktop surface locks."""
         resolved_args = self._resolve_external_person_arguments(tool_name, args)
         browser_controller = getattr(self, "browser_controller", None)
         if browser_controller is None:
@@ -1340,19 +1365,35 @@ class Agent:
             return await self.mcp_manager.call_tool(tool_name, resolved_args)
         from ares.multi_agent.policy import ToolResource, classify_tool
 
+        is_windows = str(tool_name).casefold().startswith("mcp__windows__")
         is_browser = (
-            browser_controller.is_playwright_tool(tool_name)
-            or classify_tool(tool_name) in {
-                ToolResource.BROWSER_READ,
-                ToolResource.BROWSER_INTERACTION,
-            }
+            not is_windows
+            and (
+                browser_controller.is_playwright_tool(tool_name)
+                or classify_tool(tool_name) in {
+                    ToolResource.BROWSER_READ,
+                    ToolResource.BROWSER_INTERACTION,
+                }
+            )
         )
 
         async def execute() -> str:
+            computer_controller = getattr(self, "computer_controller", None)
+            computer_preflight = (
+                computer_controller.before_call(
+                    self.session_id, tool_name, resolved_args
+                )
+                if computer_controller is not None and is_windows
+                else None
+            )
+            if computer_preflight is not None and not computer_preflight.allowed:
+                return computer_preflight.message
             preflight = browser_controller.before_call(
                 self.session_id, tool_name, resolved_args
             )
             used_cached_snapshot = preflight.cached_result is not None
+            used_windows_cache = False
+            dispatched = False
             if preflight.cached_result is not None:
                 result = preflight.cached_result
             elif not preflight.allowed:
@@ -1368,11 +1409,13 @@ class Agent:
                 cache_seconds = float(getattr(self.config, "windows_snapshot_cache_seconds", 1.5))
                 if is_windows_snapshot and cached and cached[2] == args_key and time.monotonic() - cached[0] <= cache_seconds:
                     result = cached[1]
+                    used_windows_cache = True
                 elif is_windows_snapshot:
                     timeout = float(getattr(self.config, "windows_snapshot_timeout_seconds", 12.0))
                     try:
                         async with asyncio.timeout(timeout):
                             result = await self.mcp_manager.call_tool(tool_name, resolved_args)
+                            dispatched = True
                     except TimeoutError:
                         screenshot_tool = next(
                             (
@@ -1387,6 +1430,7 @@ class Agent:
                             result = f"Error: Windows UI-tree Snapshot exceeded {timeout:.0f}s. Use the fast Windows Screenshot tool or retry Snapshot with use_ui_tree=false."
                         else:
                             fast = await self.mcp_manager.call_tool(screenshot_tool, {"use_annotation": False})
+                            dispatched = True
                             result = (
                                 f"Windows UI-tree Snapshot exceeded {timeout:.0f}s, so Ares automatically returned a fast screenshot-only capture. "
                                 "Use Snapshot again only if interactive element IDs are essential.\n\n"
@@ -1400,6 +1444,22 @@ class Agent:
                     if lowered.startswith("mcp__windows__"):
                         self._windows_snapshot_cache.pop(cache_key, None)
                     result = await self.mcp_manager.call_tool(tool_name, resolved_args)
+                    dispatched = True
+            if computer_controller is not None and is_windows:
+                if str(tool_name).casefold().endswith("__snapshot"):
+                    result = computer_controller.after_snapshot(
+                        self.session_id,
+                        str(result),
+                        cached=used_windows_cache,
+                    )
+                elif dispatched:
+                    result = computer_controller.after_action(
+                        self.session_id,
+                        tool_name,
+                        resolved_args,
+                        str(result),
+                        action=computer_preflight.action if computer_preflight else None,
+                    )
             if not used_cached_snapshot:
                 result = browser_controller.after_call(
                     self.session_id, tool_name, resolved_args, result
@@ -1432,6 +1492,9 @@ class Agent:
 
         if is_browser:
             async with self._playwright_tool_lock:
+                return await execute()
+        if is_windows:
+            async with self._windows_tool_lock:
                 return await execute()
         return await execute()
 
