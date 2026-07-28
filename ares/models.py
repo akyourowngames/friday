@@ -129,7 +129,7 @@ DEFAULT_MCP_SERVERS: list[dict] = [
             "windows-mcp",
             "serve",
             "--tools",
-            "Screenshot,Snapshot,Click,Type,Scroll,Move,Shortcut,Wait,WaitFor,App,Clipboard,Notification",
+            "Screenshot,Snapshot,Click,Type,Scroll,Move,Shortcut,Wait,WaitFor,App,Clipboard,Notification,MultiEdit,MultiSelect",
         ],
         "env": {
             "ANONYMIZED_TELEMETRY": "false",

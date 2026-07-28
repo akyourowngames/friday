@@ -548,6 +548,49 @@ class MCPClientManager:
         await self.maintain_connections_once()
         return self.readiness_report()
 
+    async def ensure_server_running(self, name: str) -> dict[str, Any]:
+        """Lazily connect one routed server without touching unrelated MCPs.
+
+        The reconnect deadline is a circuit breaker for unhealthy optional
+        servers. A request that needs an offline server fails fast during the
+        backoff window instead of paying the process-start timeout every turn.
+        """
+        self._start_reconnect_monitor()
+        if name not in self.servers:
+            return {
+                "name": name,
+                "ready": False,
+                "status": "offline",
+                "error": f"MCP server '{name}' is not configured.",
+            }
+        current = self.readiness_report()["servers"][name]
+        if current["ready"]:
+            return current
+        loop = asyncio.get_running_loop()
+        retry_at = self._next_reconnect_at.get(name, 0.0)
+        if loop.time() < retry_at:
+            current = dict(current)
+            current["status"] = "degraded"
+            current["retry_after_seconds"] = max(0.0, retry_at - loop.time())
+            return current
+
+        report = await self.reconnect_server(name, force=False)
+        if report.get("ready"):
+            self._reconnect_failures.pop(name, None)
+            self._next_reconnect_at.pop(name, None)
+            return report
+
+        failures = self._reconnect_failures.get(name, 0) + 1
+        self._reconnect_failures[name] = failures
+        delay = min(
+            MAX_MCP_RECONNECT_BACKOFF_SECONDS,
+            self._reconnect_interval_seconds * (2 ** min(failures - 1, 6)),
+        )
+        self._next_reconnect_at[name] = loop.time() + delay
+        report = dict(report)
+        report["retry_after_seconds"] = delay
+        return report
+
     async def maintain_connections_once(self) -> dict[str, Any]:
         """Reconnect every configured server that currently has no live session.
 
@@ -592,8 +635,16 @@ class MCPClientManager:
         )
         return self.readiness_report()
 
+    def _disable_server_tools(self, name: str) -> None:
+        """Remove a server namespace from the live model-facing catalog."""
+        prefix = f"mcp__{name}__"
+        self.tool_definitions = [
+            tool for tool in self.tool_definitions
+            if not tool.get("function", {}).get("name", "").startswith(prefix)
+        ]
+
     async def close_server(self, name: str, *, drop_schemas: bool = False) -> None:
-        """Close one transport while retaining cached schemas for recovery."""
+        """Close one transport; cached schemas remain diagnostic-only."""
         owner = self._owner_tasks.get(name)
         stop_event = self._owner_stop_events.get(name)
         if stop_event is not None:
@@ -617,17 +668,8 @@ class MCPClientManager:
         self.sessions.pop(name, None)
         self._owner_tasks.pop(name, None)
         self._owner_stop_events.pop(name, None)
-        prefix = f"mcp__{name}__"
-        self.tool_definitions = [
-            tool for tool in self.tool_definitions
-            if not tool.get("function", {}).get("name", "").startswith(prefix)
-        ]
-        if not drop_schemas:
-            # A disconnected server is still configured. Keeping its last
-            # known schemas advertised lets the next call reconnect on demand
-            # instead of making the integration disappear for the session.
-            self.tool_definitions.extend(self.schema_cache.get(name, ()))
-        else:
+        self._disable_server_tools(name)
+        if drop_schemas:
             self.schema_cache.pop(name, None)
         # A server restart can change even a read-only result. Clearing this
         # small in-memory cache is conservative and avoids stale projections.
@@ -900,6 +942,10 @@ class MCPClientManager:
             current = asyncio.current_task()
             if session is not None and self.sessions.get(name) is session:
                 self.sessions.pop(name, None)
+            # An owner can terminate without close_server() being the caller.
+            # In that case its schemas must disappear from the live registry
+            # immediately; schema_cache is retained for status diagnostics.
+            self._disable_server_tools(name)
             if self._exit_stacks.get(name) is stack:
                 self._exit_stacks.pop(name, None)
             if http_client is not None and self._http_clients.get(name) is http_client:

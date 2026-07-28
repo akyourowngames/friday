@@ -103,6 +103,19 @@ def _configure_windows_mcp(config: AppConfig) -> None:
         args = list(server.get("args") or [])
         if server.get("command") != "uvx" or args[:2] != ["windows-mcp", "serve"]:
             continue
+        if "--tools" in args:
+            tools_index = args.index("--tools") + 1
+            if tools_index < len(args):
+                configured_tools = [
+                    value.strip()
+                    for value in str(args[tools_index]).split(",")
+                    if value.strip()
+                ]
+                for batch_tool in ("MultiEdit", "MultiSelect"):
+                    if batch_tool not in configured_tools:
+                        configured_tools.append(batch_tool)
+                args[tools_index] = ",".join(configured_tools)
+                server["args"] = args
         environment = dict(server.get("env") or {})
         environment.setdefault("ARES_WINDOWS_MCP_COMPAT", "1")
         environment.setdefault("PYTHONPATH", str(Path(__file__).resolve().parent))

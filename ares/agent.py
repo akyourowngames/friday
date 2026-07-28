@@ -696,22 +696,47 @@ class Agent:
         self._root_tool_registry = RootToolRegistry(self.tools)
         self._root_tool_registry_source = (id(self.tools), len(self.tools))
 
-    async def _ensure_mcp_connections(self) -> None:
-        """Keep configured MCPs alive before every turn in every Ares mode."""
+    async def _ensure_mcp_connections(
+        self,
+        context: TurnExecutionContext | None = None,
+    ) -> None:
+        """Wake only the MCP namespaces required by the current request."""
         manager = getattr(self, "mcp_manager", None)
         if manager is None:
             return
-        ensure_running = getattr(manager, "ensure_running", None)
-        if not callable(ensure_running):
-            return
         try:
-            await ensure_running()
+            if context is None:
+                # Compatibility for explicit maintenance callers. Normal
+                # request paths always pass a classified context below.
+                ensure_running = getattr(manager, "ensure_running", None)
+                if callable(ensure_running):
+                    await ensure_running()
+            else:
+                configured = set(getattr(manager, "servers", {}) or {})
+                required: set[str] = set()
+                if context.intent is TurnIntent.BROWSER_INTERACTION:
+                    required.add("playwright")
+                elif context.intent is TurnIntent.DESKTOP_INTERACTION:
+                    required.add("windows")
+                lowered = context.user_input.casefold()
+                required.update(
+                    name
+                    for name in configured
+                    if re.search(rf"(?<![\w-]){re.escape(name.casefold())}(?![\w-])", lowered)
+                )
+                ensure_server = getattr(manager, "ensure_server_running", None)
+                if callable(ensure_server):
+                    await asyncio.gather(
+                        *(ensure_server(name) for name in sorted(required & configured)),
+                        return_exceptions=True,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.warning("MCP pre-turn recovery failed; background recovery will continue", exc_info=True)
+            logger.warning("Targeted MCP recovery failed; background recovery will continue", exc_info=True)
         finally:
-            # Reconnected servers can expose a refreshed schema catalog.
+            # Reconnected servers expose refreshed schemas; offline cached
+            # schemas remain absent from the live model-facing catalog.
             self.refresh_tools()
 
     def _tools_for_turn(
@@ -1411,8 +1436,20 @@ class Agent:
         return await execute()
 
     def _authorize_tool(self, tool_name: str, args: dict) -> None:
-        """No-op: all tool calls are authorized (guardrails removed)."""
-        return
+        """Enforce the immutable current-turn boundary before dispatch."""
+        context = self.turn_context
+        if context is None:
+            raise PermissionError(
+                "Tool execution requires an immutable current-turn context."
+            )
+        decision = authorize_turn_tool(
+            context,
+            tool_name,
+            args,
+            grant_uses=self._turn_grant_uses,
+        )
+        if not decision.allowed:
+            raise PermissionError(decision.reason)
 
     async def _dispatch_one_tool_async(
         self,
@@ -2197,7 +2234,6 @@ class Agent:
         """Run one request under immutable current-turn authority."""
         effective_request_id, latency = self._new_request_latency(request_id)
         try:
-            await self._ensure_mcp_connections()
             if self.reflection_service is not None:
                 # Tests and embedders sometimes replace ``agent.llm`` after
                 # construction. Reflection is a separate call, but it should use
@@ -2217,6 +2253,7 @@ class Agent:
                 request_id=effective_request_id,
                 confirmation_grants=confirmation_grants,
             )
+            await self._ensure_mcp_connections(turn_context)
             with self.turn_scope(turn_context):
                 if reference_error is not None:
                     self._set_execution_record(turn_context, {
@@ -2418,7 +2455,6 @@ class Agent:
         """Run streaming-first under immutable current-turn authority."""
         effective_request_id, latency = self._new_request_latency(request_id)
         try:
-            await self._ensure_mcp_connections()
             if self.reflection_service is not None:
                 self.reflection_service.llm = self.llm
                 self.reflection_service.reflector.llm = self.llm
@@ -2435,6 +2471,7 @@ class Agent:
                 request_id=effective_request_id,
                 confirmation_grants=confirmation_grants,
             )
+            await self._ensure_mcp_connections(turn_context)
             with self.turn_scope(turn_context):
                 if reference_error is not None:
                     self._set_execution_record(turn_context, {

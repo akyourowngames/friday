@@ -82,6 +82,33 @@ class TestAgent:
             for tool in agent.tools
         )
 
+    def test_pre_turn_mcp_recovery_only_wakes_the_routed_surface(self, agent):
+        class FakeManager:
+            def __init__(self):
+                self.servers = {
+                    "playwright": object(),
+                    "windows": object(),
+                    "github": object(),
+                }
+                self.tool_definitions = []
+                self.calls = []
+
+            async def ensure_server_running(self, name):
+                self.calls.append(name)
+                return {"name": name, "ready": True}
+
+        manager = FakeManager()
+        agent.set_mcp_manager(manager)
+
+        asyncio.run(agent._ensure_mcp_connections(
+            build_turn_execution_context("Click the search box on this website")
+        ))
+        asyncio.run(agent._ensure_mcp_connections(
+            build_turn_execution_context("Open Notepad and type a note")
+        ))
+
+        assert manager.calls == ["playwright", "windows"]
+
     def test_reflection_outcome_summary_uses_real_tool_results(self):
         payload = json.loads(Agent._reflection_outcome_summary(
             [

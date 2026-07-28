@@ -35,6 +35,7 @@ class TurnIntent(str, Enum):
     DELEGATION = "delegation"
     LOCAL_MUTATION = "local_mutation"
     BROWSER_INTERACTION = "browser_interaction"
+    DESKTOP_INTERACTION = "desktop_interaction"
     EXTERNAL_ACTION = "external_action"
     CONFIRMATION_RESPONSE = "confirmation_response"
 
@@ -45,6 +46,7 @@ class ToolEffect(str, Enum):
     LOCAL_MUTATION = "local_mutation"
     WORKFLOW_MUTATION = "workflow_mutation"
     BROWSER_INTERACTION = "browser_interaction"
+    DESKTOP_INTERACTION = "desktop_interaction"
     EXTERNAL_ACTION = "external_action"
 
 
@@ -398,6 +400,8 @@ def _extract_targets(text: str) -> tuple[str, ...]:
         targets.append("agents")
     if BROWSER_TARGET_RE.search(lowered):
         targets.append("browser")
+    if is_desktop_action_request(text):
+        targets.append("desktop")
     if re.search(r"\b(?:file|folder|directory|repo|repository|codebase)\b|(?:[A-Za-z]:[\\/]|/)[^\s]+", text):
         targets.append("filesystem")
     if re.search(r"\b(?:command|shell|python|script|code|test|tests|lint|build|implement|fix)\b", lowered):
@@ -447,8 +451,10 @@ def classify_turn_intent(text: str, *, has_confirmation_grants: bool = False) ->
         return TurnIntent.READ_ONLY
     if has_explicit_delegation_signal(value):
         return TurnIntent.DELEGATION
-    if is_browser_action_request(value) or is_desktop_action_request(value):
+    if is_browser_action_request(value):
         return TurnIntent.BROWSER_INTERACTION
+    if is_desktop_action_request(value):
+        return TurnIntent.DESKTOP_INTERACTION
     # Vision requests must take precedence over broad communication keywords
     # such as the noun "text".  Otherwise "read visible text on my screen"
     # is wrongly classified as an external SMS action and Vision tools are not
@@ -523,14 +529,20 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
     category = categorize_tool_name(name)
     if name in AGENT_INTROSPECTION_TOOL_NAMES or name == "list_agents":
         return ToolEffect.READ_ONLY
+    if category is ToolCategory.CORE_CONVERSATION:
+        return ToolEffect.READ_ONLY
+    if category is ToolCategory.SYSTEM:
+        return ToolEffect.LOCAL_MUTATION
     if name in DELEGATION_TOOL_NAMES:
         return ToolEffect.DELEGATION
     if name in _READ_ONLY_WORKFLOW_TOOLS:
         return ToolEffect.READ_ONLY
     if name in WORKFLOW_TOOL_NAMES:
         return ToolEffect.WORKFLOW_MUTATION
-    if category is ToolCategory.BROWSER:
+    if category is ToolCategory.BROWSER_DOM:
         return ToolEffect.BROWSER_INTERACTION
+    if category is ToolCategory.DESKTOP_UIA:
+        return ToolEffect.DESKTOP_INTERACTION
     if category is ToolCategory.COMMUNICATION:
         return ToolEffect.EXTERNAL_ACTION
     if category in {ToolCategory.PHONE, ToolCategory.TELEPHONY}:
@@ -570,8 +582,36 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
 
 
 def _intent_allows(effect: ToolEffect, intent: TurnIntent) -> bool:
-    """Always allow all tools regardless of intent (guardrails removed)."""
-    return True
+    """Apply the final effect/intent boundary immediately before execution."""
+    allowed_effects = {
+        TurnIntent.CONVERSATION: frozenset(),
+        TurnIntent.READ_ONLY: frozenset({ToolEffect.READ_ONLY}),
+        TurnIntent.DELEGATION: frozenset({
+            ToolEffect.READ_ONLY,
+            ToolEffect.DELEGATION,
+        }),
+        TurnIntent.LOCAL_MUTATION: frozenset({
+            ToolEffect.READ_ONLY,
+            ToolEffect.LOCAL_MUTATION,
+            ToolEffect.WORKFLOW_MUTATION,
+        }),
+        TurnIntent.BROWSER_INTERACTION: frozenset({
+            ToolEffect.READ_ONLY,
+            ToolEffect.BROWSER_INTERACTION,
+        }),
+        TurnIntent.DESKTOP_INTERACTION: frozenset({
+            ToolEffect.READ_ONLY,
+            ToolEffect.DESKTOP_INTERACTION,
+        }),
+        TurnIntent.EXTERNAL_ACTION: frozenset({
+            ToolEffect.READ_ONLY,
+            ToolEffect.EXTERNAL_ACTION,
+        }),
+        # A confirmation response has authority only through an exact,
+        # single-use ActionGrant handled above.
+        TurnIntent.CONFIRMATION_RESPONSE: frozenset(),
+    }
+    return effect in allowed_effects[intent]
 
 
 def authorize_turn_tool(

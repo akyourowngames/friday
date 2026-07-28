@@ -37,6 +37,9 @@ cannot access the target.
 - `App`: launch, focus, move, resize, or close an app window.
 - `Click`: use a fresh named label first. Use coordinates only when the UI tree does not expose the control, such as Notepad's editing surface.
 - `Type`: type the complete requested text in one call after the target field is focused. Clear existing text only when the user asked to replace it.
+- `MultiEdit` and `MultiSelect`: batch related fields or selections that all
+  come from the same fresh snapshot. Use one post-batch verification instead
+  of one MCP round trip per field or item.
 - `Shortcut`: prefer standard shortcuts for stable actions such as `Ctrl+S`, `Ctrl+A`, `Ctrl+L`, and `Alt+F4`; combine a known focus → type → save sequence without redundant observations.
 - `Wait` or `WaitFor`: use only for a known app-load or UI-appearance condition. Do not poll without a target condition.
 - `Clipboard`: use for short text transfer or independent verification when the normal UI does not expose typed text.
