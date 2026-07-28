@@ -11,7 +11,10 @@ from typing import Any
 import yaml
 
 from ares.infra.static_cache import FileSignature, file_signature
-from ares.integrations.turn_policy import is_browser_action_request
+from ares.integrations.turn_policy import (
+    is_browser_action_request,
+    is_desktop_action_request,
+)
 
 SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 WORD_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,}")
@@ -45,7 +48,11 @@ RECENCY_TOKENS = {
     "current", "latest", "news", "now", "recent", "recommendation",
     "recommendations", "today",
 }
-BUILTIN_SKILLS_DIR = Path(__file__).with_name("skills")
+# ``discovery.py`` already lives inside ``ares/skills``. Using
+# ``with_name("skills")`` accidentally pointed at ``ares/skills/skills`` and
+# made every bundled skill invisible, allowing loosely matching user-generated
+# skills to win by default.
+BUILTIN_SKILLS_DIR = Path(__file__).parent
 USER_SKILLS_DIR = Path("~/.ares/skills").expanduser()
 
 
@@ -299,6 +306,8 @@ class SkillManager:
         # competing with browser evidence and stale-reference recovery.
         browser_named = "browser-use" in query_l or "browser use" in query_l
         browser_request = browser_named or is_browser_action_request(user_input)
+        desktop_named = "computer-use" in query_l or "computer use" in query_l
+        desktop_request = desktop_named or is_desktop_action_request(user_input)
 
         all_skills = self.list_all()
         scored: list[tuple[int, Skill]] = []
@@ -327,6 +336,23 @@ class SkillManager:
                 # independently matches an explicit sub-task (form filling,
                 # drafting a reply, content review, etc.).
                 return self._select_compatible_skills(browser_skill, scored, query_l, bounded_limit)
+        if desktop_request:
+            computer_skill = next(
+                (
+                    skill
+                    for skill in all_skills
+                    if skill.model_invocable and skill.name == "computer-use"
+                ),
+                None,
+            )
+            if computer_skill is not None:
+                # An explicit native-desktop route is exclusive just like an
+                # explicit browser route. Delivery-channel words such as
+                # "send" or "telegram" must not replace it with an unrelated
+                # composite workflow.
+                return self._select_compatible_skills(
+                    computer_skill, scored, query_l, bounded_limit
+                )
 
         if not scored:
             return []
@@ -378,6 +404,8 @@ class SkillManager:
         name_hits, description_hits, example_hits = self._match_tokens(skill, query_tokens)
         if skill.name == "browser-use" and is_browser_action_request(user_input):
             return "matches a browser action request"
+        if skill.name == "computer-use" and is_desktop_action_request(user_input):
+            return "matches a desktop action request"
         if skill.name == "web-research" and self._is_web_research_request(query_l, query_tokens):
             return "matches a web research request"
         if skill.category.lower() == "automation" and query_tokens & AUTOMATION_ACTION_TOKENS:
@@ -484,10 +512,24 @@ class SkillManager:
 
         specific_name_hits = name_hits - AUTOLOAD_BROAD_TOKENS
         specific_description_hits = description_hits - AUTOLOAD_BROAD_TOKENS
+        category = skill.category.lower()
+        if category == "general":
+            # Generated composite workflows often share their destination
+            # ("telegram") and generic verbs ("search", "send") with many
+            # unrelated tasks. Require at least two name concepts for a
+            # multi-token general skill unless the user names it or an example
+            # matches. This prevents download-song-to-telegram from loading
+            # for an ordinary Telegram message.
+            specific_name_token_count = len(
+                self._tokens(skill.name.replace("-", " ")) - AUTOLOAD_BROAD_TOKENS
+            )
+            required_name_hits = 1 if specific_name_token_count <= 1 else 2
+            return bool(
+                len(specific_name_hits) >= required_name_hits or example_hits
+            )
         if specific_name_hits or len(specific_description_hits) >= 2 or example_hits:
             return True
 
-        category = skill.category.lower()
         if category == "automation":
             actions = query_tokens & AUTOMATION_ACTION_TOKENS
             targets = query_tokens - AUTOMATION_ACTION_TOKENS - AUTOLOAD_BROAD_TOKENS

@@ -238,6 +238,53 @@ class TestAgent:
         assert "Immutable message: 'Call me at 6'" in system
         assert "ui_generation" in system
 
+    def test_unadvertised_cross_surface_calls_are_dropped_before_execution(self):
+        turn_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__windows__Snapshot",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        calls = [
+            {
+                "id": "windows",
+                "type": "function",
+                "function": {
+                    "name": "mcp__windows__snapshot",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "id": "phone",
+                "type": "function",
+                "function": {
+                    "name": "phone_search_contact",
+                    "arguments": '{"name":"Sujal"}',
+                },
+            },
+            {
+                "id": "browser",
+                "type": "function",
+                "function": {
+                    "name": "mcp__playwright__browser_snapshot",
+                    "arguments": "{}",
+                },
+            },
+        ]
+
+        accepted, rejected = Agent._advertised_tool_calls(calls, turn_tools)
+
+        assert [call["function"]["name"] for call in accepted] == [
+            "mcp__windows__Snapshot"
+        ]
+        assert rejected == (
+            "phone_search_contact",
+            "mcp__playwright__browser_snapshot",
+        )
+
     def test_build_messages_uses_live_mcp_state_over_stale_history(self, agent):
         class FakeManager:
             tool_definitions = [{

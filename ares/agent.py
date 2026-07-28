@@ -1229,6 +1229,60 @@ class Agent:
                 arguments[key] = value
         return arguments
 
+    @staticmethod
+    def _advertised_tool_calls(
+        tool_calls: Iterable[dict[str, Any]],
+        turn_tools: Iterable[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """Keep only tools exposed for this turn and canonicalize their names.
+
+        Provider-side tool constraints are not universally reliable. Some
+        models can emit a remembered Windows, Playwright, or Phone function
+        even when that schema was deliberately omitted. Such calls are routing
+        mistakes, not authorization prompts, and must never reach execution or
+        appear as failed tool attempts in the UI.
+        """
+
+        advertised = {
+            str(schema.get("function", {}).get("name") or "").casefold():
+            str(schema.get("function", {}).get("name") or "")
+            for schema in turn_tools
+            if str(schema.get("function", {}).get("name") or "").strip()
+        }
+        accepted: list[dict[str, Any]] = []
+        rejected: list[str] = []
+        for raw_call in tool_calls:
+            call = dict(raw_call)
+            function = dict(call.get("function") or {})
+            supplied_name = str(function.get("name") or "").strip()
+            canonical_name = advertised.get(supplied_name.casefold())
+            if canonical_name is None:
+                rejected.append(supplied_name or "<unnamed>")
+                continue
+            function["name"] = canonical_name
+            call["function"] = function
+            accepted.append(call)
+        return accepted, tuple(dict.fromkeys(rejected))
+
+    @staticmethod
+    def _unadvertised_tool_correction(
+        rejected: Iterable[str],
+        turn_tools: Iterable[dict[str, Any]],
+        intent: TurnIntent,
+    ) -> str:
+        available = [
+            str(schema.get("function", {}).get("name") or "")
+            for schema in turn_tools
+            if str(schema.get("function", {}).get("name") or "").strip()
+        ]
+        return (
+            "Runtime routing correction: ignored unadvertised tool call(s): "
+            f"{', '.join(rejected)}. This is a {intent.value} turn. "
+            f"Use only the current surface tools: {', '.join(available) if available else 'none'}. "
+            "Do not try Playwright, Phone, communication connectors, or another fallback "
+            "surface unless the user explicitly requests that surface."
+        )
+
     @classmethod
     def _text_tool_calls_from_content(
         cls,
@@ -2432,6 +2486,22 @@ class Agent:
 
             # Check for tool calls
             if response.get("tool_calls"):
+                advertised_calls, rejected_calls = self._advertised_tool_calls(
+                    response["tool_calls"], turn_tools
+                )
+                if rejected_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._unadvertised_tool_correction(
+                            rejected_calls, turn_tools, turn_context.intent
+                        ),
+                    })
+                if not advertised_calls:
+                    # Do not surface an authorization failure for a tool the
+                    # model was never offered. Give it one clean routing retry.
+                    continue
+                response = dict(response)
+                response["tool_calls"] = advertised_calls
                 # Ensure every tool call has a non-empty id
                 for i, tc in enumerate(response["tool_calls"]):
                     if not tc.get("id"):
@@ -2651,7 +2721,10 @@ class Agent:
                 )
                 or bool(_EXECUTION_GUARD_SIGNAL_RE.search(turn_context.user_input))
                 or (
-                    turn_context.intent is TurnIntent.BROWSER_INTERACTION
+                    turn_context.intent in {
+                        TurnIntent.BROWSER_INTERACTION,
+                        TurnIntent.DESKTOP_INTERACTION,
+                    }
                     and bool(turn_tools)
                 )
             )
@@ -2869,6 +2942,21 @@ class Agent:
                             "arguments": call["arguments"],
                         },
                     })
+                formatted_calls, rejected_calls = self._advertised_tool_calls(
+                    formatted_calls, turn_tools
+                )
+                if rejected_calls:
+                    messages.append({
+                        "role": "system",
+                        "content": self._unadvertised_tool_correction(
+                            rejected_calls, turn_tools, turn_context.intent
+                        ),
+                    })
+                if not formatted_calls:
+                    # The provider hallucinated a function from another
+                    # surface. Retry invisibly with an exclusive route instead
+                    # of showing the user a failed/unauthorized tool card.
+                    continue
 
                 messages.append({
                     "role": "assistant",
