@@ -313,12 +313,12 @@ class TestAgent:
             },
         ]
 
-        accepted, deferred = Agent._serialize_windows_tool_calls(calls)
+        accepted, deferred = Agent._serialize_interactive_tool_calls(calls)
 
         assert [call["id"] for call in accepted] == ["snapshot"]
         assert deferred == ("mcp__windows__App", "mcp__windows__Click")
-        correction = Agent._deferred_windows_tool_correction(deferred)
-        assert "current UI generation and phase" in correction
+        correction = Agent._deferred_surface_tool_correction(deferred)
+        assert "Continue directly; no confirmation is needed" in correction
 
     def test_non_windows_calls_are_not_serialized(self):
         calls = [
@@ -332,10 +332,37 @@ class TestAgent:
             },
         ]
 
-        accepted, deferred = Agent._serialize_windows_tool_calls(calls)
+        accepted, deferred = Agent._serialize_interactive_tool_calls(calls)
 
         assert accepted == calls
         assert deferred == ()
+
+    def test_playwright_calls_are_replanned_one_step_at_a_time(self):
+        calls = [
+            {
+                "id": "navigate",
+                "function": {
+                    "name": "mcp__playwright__browser_navigate",
+                    "arguments": '{"url":"https://youtube.com"}',
+                },
+            },
+            {
+                "id": "snapshot",
+                "function": {
+                    "name": "mcp__playwright__browser_snapshot",
+                    "arguments": "{}",
+                },
+            },
+        ]
+
+        accepted, deferred = Agent._serialize_interactive_tool_calls(calls)
+
+        assert [call["id"] for call in accepted] == ["navigate"]
+        assert deferred == ("mcp__playwright__browser_snapshot",)
+
+    def test_default_agent_controllers_are_permissive(self, agent):
+        assert agent.browser_controller.enforce_guardrails is False
+        assert agent.computer_controller.enforce_guardrails is False
 
     def test_build_messages_uses_live_mcp_state_over_stale_history(self, agent):
         class FakeManager:

@@ -1,5 +1,6 @@
 """Core agent loop: LLM interaction, tool execution, context building."""
 
+import ast
 import asyncio
 import inspect
 import json
@@ -92,6 +93,9 @@ _BROWSER_CONTINUATION_RE = re.compile(
 _TEXT_TOOL_CALL_RE = re.compile(
     r"<(?P<name>[A-Za-z_][A-Za-z0-9_-]*)>\s*(?P<body>.*?)\s*</(?P=name)>",
     re.DOTALL,
+)
+_TEXT_FUNCTION_CALL_RE = re.compile(
+    r"(?m)^[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\((?P<body>[^\r\n]*)\)[ \t]*$"
 )
 # Some OpenAI-compatible models emit this intuitive but nonexistent name when
 # they mean ``list_watchers``. Keep the alias deliberately small and explicit.
@@ -268,8 +272,12 @@ class Agent:
         )
         self._session_store = session_store or self.tool_executor.session_store
         self.mcp_manager = mcp_manager
-        self.browser_controller = browser_controller or BrowserTaskController()
-        self.computer_controller = computer_controller or ComputerTaskController()
+        self.browser_controller = browser_controller or BrowserTaskController(
+            enforce_guardrails=False
+        )
+        self.computer_controller = computer_controller or ComputerTaskController(
+            enforce_guardrails=False
+        )
         # Browser pages are a single mutable surface. Other MCP servers, local
         # tools, and LLM turns can safely proceed in parallel across chats.
         self._playwright_tool_lock = playwright_tool_lock or asyncio.Lock()
@@ -1230,6 +1238,63 @@ class Agent:
         return arguments
 
     @staticmethod
+    def _parse_function_tool_arguments(raw_arguments: str) -> dict[str, Any]:
+        """Parse literal keyword arguments from ``tool(key=value)`` text."""
+
+        try:
+            expression = ast.parse(f"_tool_({raw_arguments})", mode="eval").body
+        except SyntaxError:
+            return {}
+        if not isinstance(expression, ast.Call) or expression.args:
+            return {}
+        arguments: dict[str, Any] = {}
+        for keyword in expression.keywords:
+            if keyword.arg is None:
+                return {}
+            try:
+                arguments[keyword.arg] = ast.literal_eval(keyword.value)
+            except (ValueError, TypeError):
+                return {}
+        return arguments
+
+    @staticmethod
+    def _resolve_text_tool_name(
+        source_name: str,
+        turn_tools: Iterable[dict[str, Any]],
+    ) -> str:
+        """Resolve common provider-written aliases to an advertised tool."""
+
+        available = {
+            str(schema.get("function", {}).get("name") or "").casefold():
+            str(schema.get("function", {}).get("name") or "")
+            for schema in turn_tools
+            if str(schema.get("function", {}).get("name") or "").strip()
+        }
+        source = str(source_name or "").casefold()
+        exact = available.get(_TEXT_TOOL_ALIASES.get(source, source))
+        if exact:
+            return exact
+
+        browser_action = ""
+        if source.startswith("playwright_"):
+            browser_action = source.removeprefix("playwright_")
+        elif source.startswith("browser_"):
+            browser_action = source.removeprefix("browser_")
+        if browser_action in {"get_title", "get_text", "content", "inspect"}:
+            browser_action = "snapshot"
+        if browser_action:
+            suffix = f"__browser_{browser_action}"
+            return next(
+                (
+                    canonical
+                    for lowered, canonical in available.items()
+                    if lowered.endswith(suffix)
+                ),
+                "",
+            )
+        return ""
+
+    @staticmethod
     def _advertised_tool_calls(
         tool_calls: Iterable[dict[str, Any]],
         turn_tools: Iterable[dict[str, Any]],
@@ -1265,41 +1330,44 @@ class Agent:
         return accepted, tuple(dict.fromkeys(rejected))
 
     @staticmethod
-    def _serialize_windows_tool_calls(
+    def _serialize_interactive_tool_calls(
         tool_calls: Iterable[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
-        """Keep at most one Windows MCP call from a model-planned batch.
+        """Keep at most one call per mutable UI surface from a planned batch.
 
-        Native desktop calls depend on UI state which can change after every
-        observation or action. Models sometimes emit Snapshot, App, and Click
-        together; executing that batch serially still leaves later calls based
-        on the pre-Snapshot generation. Defer those calls so the model observes
-        each result and resolves the next target from fresh state. A native
-        Windows batching tool remains one call and is unaffected.
+        Desktop and browser calls depend on state which can change after every
+        observation or action. Defer later same-surface calls so the model sees
+        the first live result and resolves the next step from current state.
         """
 
         accepted: list[dict[str, Any]] = []
         deferred: list[str] = []
-        windows_seen = False
+        surfaces_seen: set[str] = set()
         for raw_call in tool_calls:
             call = dict(raw_call)
             name = str((call.get("function") or {}).get("name") or "").strip()
-            if name.casefold().startswith("mcp__windows__"):
-                if windows_seen:
+            lowered = name.casefold()
+            surface = (
+                "windows"
+                if lowered.startswith("mcp__windows__")
+                else "playwright"
+                if lowered.startswith("mcp__playwright__browser_")
+                else ""
+            )
+            if surface:
+                if surface in surfaces_seen:
                     deferred.append(name or "<unnamed>")
                     continue
-                windows_seen = True
+                surfaces_seen.add(surface)
             accepted.append(call)
         return accepted, tuple(deferred)
 
     @staticmethod
-    def _deferred_windows_tool_correction(deferred: Iterable[str]) -> str:
+    def _deferred_surface_tool_correction(deferred: Iterable[str]) -> str:
         return (
-            "Runtime desktop sequencing correction: deferred stale same-turn Windows "
-            f"call(s): {', '.join(deferred)}. Inspect the completed Windows result, then "
-            "issue exactly one next Windows call using the current UI generation and phase. "
-            "Use a native Windows batch tool only when every operation is valid against the "
-            "same observed UI state."
+            "Runtime UI sequencing correction: deferred stale same-turn call(s): "
+            f"{', '.join(deferred)}. Inspect the completed live result, then issue exactly "
+            "one next call on that UI surface. Continue directly; no confirmation is needed."
         )
 
     @staticmethod
@@ -1333,29 +1401,35 @@ class Agent:
         Text tags embedded in prose remain text, preventing an answer that
         merely discusses a tag from becoming an unintended tool invocation.
         """
-        available = {
-            str(schema.get("function", {}).get("name") or "").casefold()
-            for schema in turn_tools
-        }
         calls: list[dict] = []
 
-        def replace(match: re.Match[str]) -> str:
-            line_start = content.rfind("\n", 0, match.start()) + 1
-            line_end = content.find("\n", match.end())
-            if line_end < 0:
-                line_end = len(content)
-            if content[line_start:match.start()].strip() or content[match.end():line_end].strip():
-                return match.group(0)
+        def append_call(match: re.Match[str], *, function_style: bool) -> str:
+            if not function_style:
+                line_start = content.rfind("\n", 0, match.start()) + 1
+                line_end = content.find("\n", match.end())
+                if line_end < 0:
+                    line_end = len(content)
+                if (
+                    content[line_start:match.start()].strip()
+                    or content[match.end():line_end].strip()
+                ):
+                    return match.group(0)
 
             source_name = match.group("name").casefold()
-            tool_name = _TEXT_TOOL_ALIASES.get(source_name, source_name)
-            if tool_name not in available:
+            tool_name = cls._resolve_text_tool_name(source_name, turn_tools)
+            if not tool_name:
                 return match.group(0)
 
-            arguments = cls._parse_text_tool_arguments(match.group("body"))
+            arguments = (
+                cls._parse_function_tool_arguments(match.group("body"))
+                if function_style
+                else cls._parse_text_tool_arguments(match.group("body"))
+            )
             if source_name == "search_watchers":
                 query = arguments.pop("query", arguments.pop("name", arguments.pop("watcher", "")))
                 arguments["query"] = str(query)
+            if tool_name.casefold().endswith("__browser_snapshot"):
+                arguments = {}
             calls.append({
                 "id": f"text_tool_{len(calls)}",
                 "type": "function",
@@ -1366,7 +1440,14 @@ class Agent:
             })
             return ""
 
-        cleaned = _TEXT_TOOL_CALL_RE.sub(replace, str(content or ""))
+        cleaned = _TEXT_TOOL_CALL_RE.sub(
+            lambda match: append_call(match, function_style=False),
+            str(content or ""),
+        )
+        cleaned = _TEXT_FUNCTION_CALL_RE.sub(
+            lambda match: append_call(match, function_style=True),
+            cleaned,
+        )
         return calls, re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     def _resolve_email_reference(self, value: Any) -> str:
@@ -2551,13 +2632,13 @@ class Agent:
                     # Do not surface an authorization failure for a tool the
                     # model was never offered. Give it one clean routing retry.
                     continue
-                advertised_calls, deferred_calls = self._serialize_windows_tool_calls(
+                advertised_calls, deferred_calls = self._serialize_interactive_tool_calls(
                     advertised_calls
                 )
                 if deferred_calls:
                     messages.append({
                         "role": "system",
-                        "content": self._deferred_windows_tool_correction(deferred_calls),
+                        "content": self._deferred_surface_tool_correction(deferred_calls),
                     })
                 response = dict(response)
                 response["tool_calls"] = advertised_calls
@@ -3016,13 +3097,13 @@ class Agent:
                     # surface. Retry invisibly with an exclusive route instead
                     # of showing the user a failed/unauthorized tool card.
                     continue
-                formatted_calls, deferred_calls = self._serialize_windows_tool_calls(
+                formatted_calls, deferred_calls = self._serialize_interactive_tool_calls(
                     formatted_calls
                 )
                 if deferred_calls:
                     messages.append({
                         "role": "system",
-                        "content": self._deferred_windows_tool_correction(deferred_calls),
+                        "content": self._deferred_surface_tool_correction(deferred_calls),
                     })
 
                 messages.append({

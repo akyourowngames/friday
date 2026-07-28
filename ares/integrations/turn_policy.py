@@ -52,12 +52,14 @@ class ToolEffect(str, Enum):
 
 BROWSER_ACTION_RE = re.compile(
     r"\b(?:open|click(?:ing)?|type|fill|navigate|visit|log\s*in|sign\s*in|submit|"
-    r"upload|download|press|select|inspect|operate|scroll|interact|go\s+to)\b",
+    r"upload|download|press|select|inspect|operate|scroll|interact|go\s+to|"
+    r"read|check|find|search|play|watch|stream)\b",
     re.IGNORECASE,
 )
 BROWSER_TARGET_RE = re.compile(
     r"\b(?:browser|chrome|website|web|web\s*page|webpage|web\s*app|page|site|portal|"
-    r"dashboard|form|tab|url|google|github|youtube|instagram|linkedin|twitter)\b|https?://",
+    r"dashboard|form|tab|url|pla(?:y)?wright|google|github|youtube|insta(?:gram)?|linkedin|twitter|"
+    r"inbox|dms?|direct\s+messages?)\b|https?://",
     re.IGNORECASE,
 )
 BROWSER_SESSION_REQUEST_RE = re.compile(
@@ -79,13 +81,23 @@ _EXPLICIT_WINDOWS_MCP_RE = re.compile(
 )
 _EXPLICIT_PLAYWRIGHT_RE = re.compile(
     r"\b(?:use|using|with|through|via)?\s*(?:the\s+)?"
-    r"(?:playwright|browser)\s+mcp\b|\b(?:use|using|via|through)\s+playwright\b",
+    r"(?:pla(?:y)?wright|browser)\s+mcp\b|\b(?:use|using|via|through)\s+pla(?:y)?wright\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_PLAYWRIGHT_INVOCATION_RE = re.compile(
+    r"\b(?:use|using|via|through)\s+(?:the\s+)?"
+    r"(?:pla(?:y)?wright|browser)(?:\s+mcp)?\b",
+    re.IGNORECASE,
+)
+_BROWSER_DISCUSSION_RE = re.compile(
+    r"^\s*(?:explain|how|why|what|did|does|is|are|compare)\b.*"
+    r"\b(?:browser|web|search|playwright|researcher)\b",
     re.IGNORECASE,
 )
 _EXPLICIT_SURFACE_ACTION_RE = re.compile(
     r"\b(?:open|click|type|fill|navigate|visit|login|log\s+in|sign\s+in|submit|"
     r"upload|download|press|select|inspect|operate|scroll|interact|search|find|"
-    r"send|message|msg|reply|read|look|capture|take|launch)\b",
+    r"send|message|msg|reply|read|look|capture|take|launch|play|watch|stream|check)\b",
     re.IGNORECASE,
 )
 
@@ -396,6 +408,10 @@ def is_browser_action_request(text: str) -> bool:
         and _EXPLICIT_SURFACE_ACTION_RE.search(lowered)
     ):
         return True
+    if _EXPLICIT_PLAYWRIGHT_INVOCATION_RE.search(lowered):
+        return True
+    if _BROWSER_DISCUSSION_RE.search(lowered):
+        return False
     if any(phrase in lowered for phrase in BROWSER_WINDOW_EXCEPTIONS):
         return False
     return bool(

@@ -897,12 +897,14 @@ class ComputerTaskController:
         adapters: tuple[AppAdapter, ...] | None = None,
         *,
         max_phase_failures: int = 3,
+        enforce_guardrails: bool = True,
     ) -> None:
         self.adapters = adapters or (
             TelegramDesktopAdapter(),
             GenericWindowsAdapter(),
         )
         self.max_phase_failures = max(1, int(max_phase_failures))
+        self.enforce_guardrails = bool(enforce_guardrails)
         self._states: dict[str, ComputerTaskState] = {}
         self._traces: deque[ComputerTrace] = deque(maxlen=256)
         self._lock = RLock()
@@ -1019,6 +1021,8 @@ class ComputerTaskController:
     ) -> ComputerPreflight:
         if not _is_windows(tool_name) or _is_snapshot(tool_name) or not _is_mutation(tool_name):
             return ComputerPreflight()
+        if not self.enforce_guardrails:
+            return ComputerPreflight(action=_semantic_action(tool_name, arguments))
         started = time.monotonic()
         action = _semantic_action(tool_name, arguments)
         with self._lock:
@@ -1262,6 +1266,8 @@ class ComputerTaskController:
         action: SemanticAction | None = None,
     ) -> str:
         if not _is_windows(tool_name) or not _is_mutation(tool_name):
+            return str(result)
+        if not self.enforce_guardrails:
             return str(result)
         with self._lock:
             state = self._state(session_id)

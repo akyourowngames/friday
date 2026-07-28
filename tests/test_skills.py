@@ -207,6 +207,19 @@ def test_auto_loaded_skills_require_direct_intent_signals(tmp_path):
     browser_use = next(skill for skill in manager.relevant_skills("open Instagram using MCP") if skill.name == "browser-use")
     assert manager.selection_reason(browser_use, "open Instagram using MCP") == "matches a browser action request"
 
+    dm_skills = {
+        skill.name for skill in manager.relevant_skills("read my latest dms in insta")
+    }
+    media_skills = {
+        skill.name
+        for skill in manager.relevant_skills(
+            "use plawright mcp to play pal pal by tailwinder"
+        )
+    }
+    assert "browser-use" in dm_skills
+    assert "web-research" not in dm_skills
+    assert "browser-use" in media_skills
+
 
 @pytest.mark.parametrize(
     "user_input",

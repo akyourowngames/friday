@@ -61,6 +61,15 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent("yeah new browser sessionn") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("restart playwright") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("start a new browser session") is TurnIntent.BROWSER_INTERACTION
+    assert classify_turn_intent("read my latest dms in insta") is TurnIntent.BROWSER_INTERACTION
+    assert (
+        classify_turn_intent("yeah pls use plawright mcp")
+        is TurnIntent.BROWSER_INTERACTION
+    )
+    assert (
+        classify_turn_intent("use plawright mcp to play pal pal by tailwinder")
+        is TurnIntent.BROWSER_INTERACTION
+    )
     assert classify_turn_intent("Explain how web search works") is TurnIntent.READ_ONLY
     assert classify_turn_intent(
         "ok launch researchers to research how much corruption is there in world"
@@ -193,6 +202,45 @@ def test_new_browser_session_exposes_playwright_tools_instead_of_zero_tools() ->
         )
     ]
     context = build_turn_execution_context("yeah new browser sessionn")
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(schemas).select_for_turn(context)
+    }
+
+    assert context.intent is TurnIntent.BROWSER_INTERACTION
+    assert names == {
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+    }
+
+
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        "read my latest dms in insta",
+        "yeah pls use plawright mcp",
+        "use plawright mcp to play pal pal by tailwinder",
+    ],
+)
+def test_browser_app_requests_expose_playwright_tools(user_input: str) -> None:
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "test tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in (
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_snapshot",
+            "list_watchers",
+            "mcp__windows__Snapshot",
+        )
+    ]
+
+    context = build_turn_execution_context(user_input)
     names = {
         item["function"]["name"]
         for item in RootToolRegistry(schemas).select_for_turn(context)
