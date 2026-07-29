@@ -181,7 +181,7 @@ def test_builtin_skills_and_tool_definitions_are_available(tmp_path):
         "code-review", "web-research", "daily-planner", "computer-use", "browser-use",
         "browser-form-workflow", "browser-content-review", "conversation-conduct",
     }.issubset(names)
-    assert "auto-load relevant skills silently" in manager.compact_index()
+    assert "Select by the meaning of the complete task" in manager.compact_index()
 
     relevant = manager.relevant_skills("Open Notepad, type a note, and save it on my desktop")
     assert "computer-use" in {skill.name for skill in relevant}

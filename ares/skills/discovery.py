@@ -659,7 +659,7 @@ class SkillManager:
             return index
         lines = [
             "## Available Skills",
-            "Ares may auto-load relevant skills silently. Full instructions load only when a skill matches the current task.",
+            "Select by the meaning of the complete task. Call load_skill for full instructions only when a skill genuinely fits.",
         ]
         lines.extend(skill.summary_line() for skill in skills)
         index = "\n".join(lines)

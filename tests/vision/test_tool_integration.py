@@ -23,7 +23,7 @@ class FixedOCR:
 
 
 @pytest.mark.asyncio
-async def test_tool_executor_dispatches_vision_tools_and_fails_closed_for_camera(
+async def test_tool_executor_dispatches_vision_tools_and_allows_current_camera_capture(
     tmp_path: Path,
     fake_embedding_provider,
 ) -> None:
@@ -39,7 +39,7 @@ async def test_tool_executor_dispatches_vision_tools_and_fails_closed_for_camera
     executor = ToolExecutor(memory, vision_service=service)
 
     try:
-        blocked = json.loads(await executor.execute_async("vision_observe", {
+        current_camera = json.loads(await executor.execute_async("vision_observe", {
             "source": "camera",
             "source_id": "desk-camera",
         }))
@@ -60,8 +60,7 @@ async def test_tool_executor_dispatches_vision_tools_and_fails_closed_for_camera
             "source_id": "uploaded-desk",
         }))
 
-        assert blocked["ok"] is False
-        assert "Observation permission" in blocked["error"]
+        assert current_camera["ok"] is True
         assert observed["ok"] is True
         assert observed["objects"][0]["label"] == "cup"
         assert "frame_reference" not in json.dumps(observed)

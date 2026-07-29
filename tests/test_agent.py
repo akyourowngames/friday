@@ -405,6 +405,19 @@ class TestAgent:
         assert "Current Turn Guard" in messages[-2]["content"]
         assert messages[-1] == {"role": "user", "content": "Hello"}
 
+    def test_build_messages_requires_fresh_capture_for_live_vision(self, agent):
+        request = "What can you see right now?"
+        context = build_turn_execution_context(request)
+
+        with agent.turn_scope(context):
+            messages = agent.build_messages(request, [])
+
+        system_text = "\n".join(message["content"] for message in messages if message["role"] == "system")
+        assert "Live Vision Task" in system_text
+        assert 'vision_observe with source="screen"' in system_text
+        assert "never as read-only history lookups" in system_text
+        assert "do not list old events first" in system_text
+
     def test_build_messages_includes_context(self, agent):
         """Messages include context when provided."""
         context = "## What I know about you:\n- prefers dark mode"
@@ -412,8 +425,8 @@ class TestAgent:
         all_content = " ".join(m["content"] for m in messages)
         assert "dark mode" in all_content
 
-    def test_build_messages_auto_loads_relevant_skill_in_system_context(self, agent, tmp_path):
-        """Relevant skills are hidden working instructions, not user-visible chatter."""
+    def test_build_messages_lets_model_select_relevant_skill(self, agent, tmp_path):
+        """The root model sees the index and loads full instructions only if needed."""
         skill_dir = tmp_path / "coding" / "review-diff"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -433,10 +446,11 @@ class TestAgent:
         messages = agent.build_messages("review my diff for risk", [])
         system = messages[0]["content"]
 
-        assert "## Auto-Loaded Skills" in system
-        assert "# Skill: review-diff" in system
-        assert "Always list serious findings first." in system
-        assert "Do not mention skill loading" in system
+        assert "## Model-Selected Skills" in system
+        assert "review-diff" in system
+        assert "Review git diffs and flag risky code changes" in system
+        assert "Always list serious findings first." not in system
+        assert "call load_skill" in system
 
     def test_build_messages_respects_skill_auto_suggest_flag(self, agent, tmp_path):
         skill_dir = tmp_path / "coding" / "review-diff"
@@ -450,7 +464,7 @@ class TestAgent:
 
         messages = agent.build_messages("review my diff for risk", [])
 
-        assert "## Auto-Loaded Skills" not in messages[0]["content"]
+        assert "## Model-Selected Skills" not in messages[0]["content"]
 
     def test_get_context_includes_soul_profile_memory(self, agent):
         """Full context includes proactive layers plus memories."""

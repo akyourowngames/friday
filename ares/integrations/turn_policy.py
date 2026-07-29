@@ -23,7 +23,9 @@ from typing import Any
 from ares.integrations.tool_registry import (
     AGENT_INTROSPECTION_TOOL_NAMES,
     DELEGATION_TOOL_NAMES,
+    SKILL_MUTATION_TOOL_NAMES,
     WORKFLOW_TOOL_NAMES,
+    VISION_LIVE_TOOL_NAMES,
     ToolCategory,
     categorize_tool_name,
 )
@@ -31,6 +33,7 @@ from ares.integrations.tool_registry import (
 
 class TurnIntent(str, Enum):
     CONVERSATION = "conversation"
+    MODEL_ROUTED = "model_routed"
     READ_ONLY = "read_only"
     DELEGATION = "delegation"
     LOCAL_MUTATION = "local_mutation"
@@ -162,28 +165,6 @@ _EXPLICIT_DELEGATION_PATTERNS = (
 _AGENT_MANAGEMENT_RE = re.compile(
     r"\b(?:cancel|stop|resume|continue)\s+(?:the\s+)?agent\s+run\b", re.I
 )
-_LOCAL_MUTATION_RE = re.compile(
-    r"\b(?:write|edit|modify|change|update|configure|create|delete|remove|rename|move|copy|append|"
-    r"remember|forget|store|"
-    r"install|uninstall|execute|run(?:\s+(?:the\s+)?(?:command|script|code|tests?))?|"
-    r"save|download|apply|patch|commit|snooze|dismiss|resolve|cancel|"
-    r"adb|kdeconnect|python|pip|npm|git|docker|node)\b",
-    re.IGNORECASE,
-)
-_EXTERNAL_ACTION_RE = re.compile(
-    r"\b(?:send|email|text|sms|call|publish|post|purchase|buy|pay|transfer|invite|"
-    r"share|deploy|merge|push|submit)\b",
-    re.IGNORECASE,
-)
-
-# Additional patterns for command execution requests
-_COMMAND_EXECUTION_RE = re.compile(
-    r"\b(?:run|execute|do|perform|carry|complete|finish|start|begin|launch|open|close|stop|kill|"
-    r"check|test|verify|validate|inspect|examine|analyze|process|handle|manage|"
-    r"fix|repair|debug|troubleshoot|resolve|solve|"
-    r"get|list|show|display|print|echo|cat|ls|dir|mkdir|cd|pwd|env|which|where)\b",
-    re.IGNORECASE,
-)
 _VISION_MUTATION_RE = re.compile(
     r"\b(?:stop\s+watching|stop\s+all\s+(?:cameras?|screens?|visual\s+sources?)|"
     r"cancel\s+(?:the\s+)?(?:visual\s+)?watch|"
@@ -204,9 +185,16 @@ _VISION_OBSERVATION_RE = re.compile(
     r"\bremember\s+where\b.{0,160}\b(?:placed|put|left|charger|object|cup|desk)\b",
     re.IGNORECASE,
 )
-_READ_ONLY_RE = re.compile(
-    r"\b(?:what|why|how|who|when|where|explain|compare|research|investigate|analy[sz]e|"
-    r"read|find|search|list|show|summarize|review|check|inspect|look\s+up|status)\b",
+_LIVE_VISION_RE = re.compile(
+    # Follow-up phrasing often omits the visual source entirely:
+    # "what can you see right now?" and "take a fresh live look".  Those are
+    # current capture requests, not questions about stored Vision history.
+    r"\b(?:see|look|view|observe)\b.{0,100}\b(?:now|right\s+now|currently|live|fresh|"
+    r"real[-\s]?time|rn)\b|"
+    r"\b(?:now|right\s+now|currently|live|fresh|real[-\s]?time|rn)\b.{0,100}"
+    r"\b(?:see|look|view|observe)\b|"
+    r"\b(?:what(?:'s|\s+is)|show\s+me)\b.{0,120}\b(?:screen|display|camera|webcam|"
+    r"visual|what\s+you\s+see)\b",
     re.IGNORECASE,
 )
 _CONTINUATION_RE = re.compile(r"\b(?:continue|resume)\b", re.IGNORECASE)
@@ -464,7 +452,7 @@ def _extract_targets(text: str) -> tuple[str, ...]:
     if re.search(
         r"\b(?:vision|camera|webcam|screen(?:\s+share|shot)?|visual|photo|image|object\s+watch|look\s+at)\b",
         lowered,
-    ) or _VISION_OBSERVATION_RE.search(lowered):
+    ) or _VISION_OBSERVATION_RE.search(lowered) or _LIVE_VISION_RE.search(lowered):
         targets.append("vision")
     if _VISION_MUTATION_RE.search(lowered):
         targets.append("vision")
@@ -510,19 +498,24 @@ def classify_turn_intent(text: str, *, has_confirmation_grants: bool = False) ->
         return TurnIntent.LOCAL_MUTATION
     if _VISION_OBSERVATION_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
-    if _EXTERNAL_ACTION_RE.search(value):
-        return TurnIntent.EXTERNAL_ACTION
-    if _LOCAL_MUTATION_RE.search(value):
-        return TurnIntent.LOCAL_MUTATION
-    if _COMMAND_EXECUTION_RE.search(value):
+    if _LIVE_VISION_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
     if _SPECIFIC_TASK_CONTINUE_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
     if _CONTINUATION_RE.search(value):
         return TurnIntent.READ_ONLY
-    if _READ_ONLY_RE.search(value) or value.endswith("?"):
+    if (
+        _BROWSER_DISCUSSION_RE.search(value)
+        or (
+            _EXPLICIT_WINDOWS_MCP_RE.search(value)
+            and not _EXPLICIT_SURFACE_ACTION_RE.search(value)
+        )
+    ):
         return TurnIntent.READ_ONLY
-    return TurnIntent.CONVERSATION
+    # Everything without an explicit surface or special protocol is routed by
+    # the same LLM that will execute it. This avoids treating English keyword
+    # overlap as authority and eliminates an extra classifier model call.
+    return TurnIntent.MODEL_ROUTED
 
 
 def build_turn_execution_context(
@@ -578,6 +571,12 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
         return ToolEffect.READ_ONLY
     if category is ToolCategory.CORE_CONVERSATION:
         return ToolEffect.READ_ONLY
+    if category is ToolCategory.SKILLS:
+        return (
+            ToolEffect.LOCAL_MUTATION
+            if name in SKILL_MUTATION_TOOL_NAMES
+            else ToolEffect.READ_ONLY
+        )
     if category is ToolCategory.SYSTEM:
         return ToolEffect.LOCAL_MUTATION
     if name in DELEGATION_TOOL_NAMES:
@@ -632,6 +631,15 @@ def _intent_allows(effect: ToolEffect, intent: TurnIntent) -> bool:
     """Apply the final effect/intent boundary immediately before execution."""
     allowed_effects = {
         TurnIntent.CONVERSATION: frozenset(),
+        TurnIntent.MODEL_ROUTED: frozenset({
+            ToolEffect.READ_ONLY,
+            ToolEffect.DELEGATION,
+            ToolEffect.LOCAL_MUTATION,
+            ToolEffect.WORKFLOW_MUTATION,
+            ToolEffect.BROWSER_INTERACTION,
+            ToolEffect.DESKTOP_INTERACTION,
+            ToolEffect.EXTERNAL_ACTION,
+        }),
         TurnIntent.READ_ONLY: frozenset({ToolEffect.READ_ONLY}),
         TurnIntent.DELEGATION: frozenset({
             ToolEffect.READ_ONLY,
@@ -709,6 +717,16 @@ def authorize_turn_tool(
             return TurnAuthorizationDecision(
                 False, "agent meta-questions may only inspect real agent run records", effect
             )
+    if (
+        context.intent is TurnIntent.READ_ONLY
+        and "vision" in context.explicit_targets
+        and tool_name in VISION_LIVE_TOOL_NAMES
+    ):
+        return TurnAuthorizationDecision(
+            True,
+            "explicit live Vision target authorizes current local capture",
+            effect,
+        )
     if "prior_task" in context.explicit_targets:
         continuation_tools = {
             "search_memory", "search_actions", "list_tasks", "get_task_status",
@@ -761,6 +779,16 @@ def authorize_turn_tool(
         return TurnAuthorizationDecision(
             False,
             f"current {context.intent.value} turn is exclusive to its requested UI surface",
+            effect,
+        )
+
+    if (
+        context.intent is TurnIntent.MODEL_ROUTED
+        and category is ToolCategory.UNKNOWN_CONSEQUENTIAL
+    ):
+        return TurnAuthorizationDecision(
+            False,
+            "model-routed turns may execute only registered capability categories",
             effect,
         )
 

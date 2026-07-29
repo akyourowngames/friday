@@ -907,9 +907,13 @@ class Agent:
         ):
             system_content += f"\n\n{skill_manager.compact_index()}"
             if getattr(self.config, "skill_auto_suggest", True):
-                skill_context = skill_manager.auto_context(user_input)
-                if skill_context:
-                    system_content += f"\n\n{skill_context}"
+                system_content += (
+                    "\n\n## Model-Selected Skills\n"
+                    "Choose skills by the meaning of the complete request, not keyword overlap. "
+                    "When a listed playbook is genuinely needed, call load_skill with its exact "
+                    "name and follow the returned instructions silently. Do not load a composite "
+                    "workflow merely because its destination or one action word matches."
+                )
         if context:
             system_content += f"\n\n## Current Context\n{context}"
         browser_controller = getattr(self, "browser_controller", None)
@@ -946,6 +950,21 @@ class Agent:
         )
         if computer_guidance:
             system_content += f"\n\n{computer_guidance}"
+
+        vision_guidance = ""
+        if active_turn is not None and "vision" in active_turn.explicit_targets:
+            vision_guidance = (
+                "## Live Vision Task\n"
+                "Treat requests containing now, current, live, fresh, real-time, or "
+                "\"what can you see\" as active local capture requests, never as read-only "
+                "history lookups. Call vision_observe with source=\"screen\" for the current "
+                "display or source=\"camera\" for the physical scene. vision_observe can "
+                "capture a transient current frame, so do not list old events first and do "
+                "not claim live access is unavailable while vision_observe is advertised. "
+                "Use vision_list_events only when the user explicitly asks about past or "
+                "stored observations."
+            )
+            system_content += f"\n\n{vision_guidance}"
 
         turn_guard = (
             "## Current Turn Guard\n"
