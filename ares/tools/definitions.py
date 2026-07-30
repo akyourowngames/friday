@@ -1699,4 +1699,19 @@ def get_tool_definitions() -> list[dict]:
                 },
             },
         ),
+        _tool(
+            "check_handoff",
+            "Check a hospital shift handoff transcript against actual patient records. Compares spoken claims about labs, medications, conditions, and plans against patient JSON files on disk. Returns a safety report flagging contradictions, wrong values, critical omissions, and critical lab values that were not mentioned. Use this when a doctor/nurse provides a voice or text handoff report.",
+            {
+                "transcript": {
+                    "type": "string",
+                    "description": "The handoff transcript text (from voice-to-text or direct input).",
+                },
+                "patient_identifier": {
+                    "type": "string",
+                    "description": "Optional patient bed number or name to check against. If not provided, the checker will try to identify the patient from the transcript.",
+                },
+            },
+            ["transcript"],
+        ),
     ]
