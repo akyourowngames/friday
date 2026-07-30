@@ -148,6 +148,14 @@ DEFAULT_MCP_SERVERS: list[dict] = [
         },
         "timeout_seconds": 90.0,
     },
+    {
+        "name": "ares-tools",
+        "transport": "stdio",
+        "command": "python",
+        "args": ["-m", "ares.tools.ares_mcp_server"],
+        "env": {"PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
+        "timeout_seconds": 120.0,
+    },
 ]
 
 
@@ -271,6 +279,59 @@ class TelegramConfig(BaseModel):
     audio_stt_backend: str = "auto"  # auto: local Whisper
     audio_stt_model: str = "small"
     max_audio_duration_seconds: int = Field(default=600, ge=1, le=7200)
+
+
+class TelegramBotConfig(BaseModel):
+    """Configuration for a single bot in multi-bot mode."""
+    name: str
+    bot_token: str
+    mention: str  # e.g. "@jarvis_bot"
+    model: str = ""  # Optional model override
+    system_prompt_suffix: str = ""  # Optional system prompt addition
+
+
+class TelegramMultiConfig(BaseModel):
+    """Configuration for running multiple Telegram bots in one group.
+
+    Each bot runs its own Ares agent instance with independent tools and
+    conversation history. Users @mention specific bots to interact with them.
+    Bots only respond when tagged in group chats, and process turns in
+    **parallel** — one bot never waits for another.
+
+    Live tool progress (Thinking → Using tool → Finished) mirrors the single
+    Telegram channel when ``show_tool_progress`` is true.
+
+    Example config.json:
+    {
+        "telegram_multi": {
+            "enabled": true,
+            "bots": [
+                {
+                    "name": "Jarvis",
+                    "bot_token": "BOT_TOKEN_1",
+                    "mention": "@jarvis_bot",
+                    "model": "gpt-4o"
+                },
+                {
+                    "name": "Friday",
+                    "bot_token": "BOT_TOKEN_2",
+                    "mention": "@friday_bot"
+                }
+            ],
+            "allowed_chat_ids": [-1001234567890],
+            "allow_group_chats": true,
+            "require_mention": true,
+            "show_tool_progress": true
+        }
+    }
+    """
+
+    enabled: bool = False
+    bots: list[TelegramBotConfig] = Field(default_factory=list)
+    allowed_chat_ids: list[int] = Field(default_factory=list)
+    allow_group_chats: bool = True
+    require_mention: bool = True  # Require @mention in group chats
+    show_tool_progress: bool = True  # Live "Using tool: …" status like single bot
 
 
 class WatcherDashboardConfig(BaseModel):
@@ -625,6 +686,7 @@ class AppConfig(BaseModel):
     phone: PhoneConfig = Field(default_factory=PhoneConfig)
     telephony: TelephonyConfig = Field(default_factory=TelephonyConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    telegram_multi: TelegramMultiConfig = Field(default_factory=TelegramMultiConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)

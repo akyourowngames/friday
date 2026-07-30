@@ -71,7 +71,7 @@ FILE_TOOL_NAMES = READ_ONLY_FILE_TOOL_NAMES | frozenset({
     "create_directory", "delete_file", "move_file", "copy_file", "batch_edit",
     "batch_file_ops", "glob_apply", "insert_line", "replace_lines", "delete_lines",
     "backup_file", "undo_last_edit", "append_to_file", "prepend_to_file",
-    "create_file_from_template", "generate_image", "resize_image", "convert_image", "crop_image",
+    "create_file_from_template", "generate_image", "generate_chart", "analyze_data", "convert_document", "resize_image", "convert_image", "crop_image",
 })
 CODE_TOOL_NAMES = frozenset({"run_command", "terminal_exec", "run_python", "run_code"})
 RESEARCH_TOOL_NAMES = frozenset({

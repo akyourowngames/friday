@@ -430,6 +430,8 @@ class ToolExecutor:
             "run_project_check": self._run_project_check,
             "generate_image": self._generate_image,
             "generate_chart": self._generate_chart,
+            "convert_document": self._convert_document,
+            "analyze_data": self._analyze_data,
             "image_info": self._image_info,
             "resize_image": self._resize_image,
             "convert_image": self._convert_image,
@@ -3827,6 +3829,99 @@ class ToolExecutor:
                 artifacts=[{"path": str(output_path), "media_type": "image/png", "description": title}],
             )
         return message
+
+    def _convert_document(self, args: dict) -> str:
+        """Convert documents using pandoc."""
+        import shutil
+        if not shutil.which("pandoc"):
+            return error_result("pandoc is not installed", code="conversion")
+        input_path = Path(str(args.get("input") or "")).expanduser().resolve()
+        if not input_path.is_file():
+            return error_result(f"input file not found: {input_path}", code="conversion")
+        output_format = str(args.get("output_format") or "pdf").lower()
+        format_ext = {"pdf": "pdf", "docx": "docx", "html": "html", "latex": "tex", "epub": "epub"}
+        ext = format_ext.get(output_format, output_format)
+        output = args.get("output")
+        if output:
+            output_path = Path(output).expanduser().resolve()
+        else:
+            output_path = input_path.with_suffix(f".{ext}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = ["pandoc", str(input_path), "-o", str(output_path)]
+        if output_format == "pdf":
+            cmd.extend(["--pdf-engine=xelatex"])
+        extra = args.get("extra_args")
+        if extra:
+            cmd.extend(str(extra).split())
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                return error_result(f"pandoc failed: {result.stderr.strip()}", code="conversion")
+        except subprocess.TimeoutExpired:
+            return error_result("pandoc timed out after 120s", code="conversion")
+        message = f"Converted {input_path.name} to {output_path}"
+        if wants_structured(args):
+            return structured_result(
+                message,
+                ok=True,
+                status="completed",
+                data={"input": str(input_path), "output": str(output_path), "format": output_format},
+                artifacts=[{"path": str(output_path), "media_type": f"application/{ext}", "description": f"Converted {output_format}"}],
+            )
+        return message
+
+    def _analyze_data(self, args: dict) -> str:
+        """Analyze CSV/TSV/text files with pandas and generate charts."""
+        from ares.tools.data_analysis import analyze_csv, analyze_text
+
+        file_path = str(args.get("file_path") or "")
+        if not file_path:
+            return error_result("file_path is required", code="data_analysis")
+
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file():
+            return error_result(f"file not found: {path}", code="data_analysis")
+
+        ext = path.suffix.lower()
+        if ext in (".csv", ".tsv", ".txt") and ext != ".txt":
+            focus = str(args.get("focus") or "summary").strip().lower()
+            generate = bool(args.get("charts", True))
+            output_dir = args.get("output_dir")
+            result = analyze_csv(
+                path,
+                focus=focus,
+                chart_output_dir=output_dir,
+                generate_charts=generate,
+            )
+        elif ext in (".txt", ".md", ".rst"):
+            result = analyze_text(path)
+        else:
+            # Default: try CSV first, fall back to text
+            result = analyze_csv(path, focus=str(args.get("focus") or "summary").strip().lower(),
+                                 chart_output_dir=args.get("output_dir"),
+                                 generate_charts=bool(args.get("charts", True)))
+            if not result.get("ok") and "failed to read" in str(result.get("error", "")):
+                result = analyze_text(path)
+
+        if not result.get("ok"):
+            return error_result(str(result.get("error", "analysis failed")), code="data_analysis")
+
+        if wants_structured(args):
+            chart_paths = result.get("chart_paths", [])
+            artifacts = [{"path": p, "media_type": "image/png", "description": "Analysis chart"} for p in chart_paths]
+            return structured_result(
+                f"Analyzed {path.name}: {result['summary'].get('rows', result['summary'].get('lines', '?'))} rows/lines.",
+                ok=True,
+                status="completed",
+                data=result,
+                artifacts=artifacts,
+                metrics={
+                    "rows": result["summary"].get("rows", result["summary"].get("lines", 0)),
+                    "insights_count": len(result.get("insights", [])),
+                    "chart_count": len(result.get("chart_paths", [])),
+                },
+            )
+        return json_result(result)
 
     def _image_info(self, args: dict) -> str:
         if wants_structured(args):

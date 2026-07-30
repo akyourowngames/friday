@@ -833,7 +833,13 @@ class TelegramChannel:
             "This is an active Ares Telegram channel with verified file upload support. Never say Telegram delivery "
             "is unavailable, ask for a BotFather token, or suggest setting up a Telegram bot. A later conversation "
             "entry beginning 'Telegram delivery verified' is authoritative evidence that its named file was uploaded. "
-            "A previous delivery failure applies only to that specific path; it does not mean the channel cannot send files."
+            "A previous delivery failure applies only to that specific path; it does not mean the channel cannot send files.\n\n"
+            "## File Discovery\n"
+            "When the user asks about files, charts, reports, or artifacts from past work, do NOT hallucinate or "
+            "claim to have sent files that are not in the conversation history. Instead, use `search_files` or "
+            "`list_directory` to find actual files on disk. Check `~/.ares/data/healthcare-reports/` and "
+            "`~/.ares/data/research/downloads/` for healthcare charts and reports. Only claim a file was sent if "
+            "there is a 'Telegram delivery verified' entry in the conversation history for that exact file path."
         )
 
         if self._file_delivery_requested(text):

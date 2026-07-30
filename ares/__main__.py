@@ -95,6 +95,33 @@ async def _run_telegram() -> None:
     await run_telegram_channel()
 
 
+async def _run_telegram_multi() -> None:
+    """Run multiple Telegram bots in a single group."""
+    from ares.channels.telegram_multi import MultiTelegramChannel
+    from ares.config import load_config
+    from ares.context.conversations import ConversationStore
+
+    config = load_config()
+    conversation_store = ConversationStore()
+
+    channel = MultiTelegramChannel(
+        config=config,
+        conversation_store=conversation_store,
+    )
+
+    print("Starting multi-bot Telegram channel...")
+    await channel.start()
+
+    try:
+        # Keep running until interrupted
+        while True:
+            await asyncio.sleep(1)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print("\nStopping all bots...")
+        await channel.stop()
+        print("All bots stopped.")
+
+
 def _run_telephony_webhook(host: str, port: int) -> None:
     from ares.telephony.webhook import run_twilio_webhook_server
 
@@ -143,6 +170,83 @@ def _setup_telegram() -> None:
     )
 
 
+def _setup_telegram_multi() -> None:
+    """Interactive setup for multi-bot Telegram configuration."""
+    from ares.models import TelegramBotConfig, TelegramMultiConfig
+
+    config = load_config()
+
+    print("=" * 60)
+    print("Ares Multi-Bot Telegram Setup")
+    print("=" * 60)
+    print("\nThis will configure multiple bots to run in a single Telegram group.")
+    print("Each bot will have its own Ares agent and respond when @mentioned.\n")
+
+    # Get chat ID
+    chat_id_input = input("Enter the Telegram group chat ID (negative number): ").strip()
+    try:
+        chat_id = int(chat_id_input)
+    except ValueError:
+        print("Invalid chat ID. Must be a number.")
+        return
+
+    # Get bot configurations
+    bots = []
+    while True:
+        print(f"\n--- Bot #{len(bots) + 1} ---")
+        name = input("Bot name (e.g., 'Jarvis'): ").strip()
+        if not name:
+            break
+
+        token = input(f"Bot token for {name}: ").strip()
+        if not token:
+            print("Token required. Skipping this bot.")
+            continue
+
+        mention = input(f"Bot mention for {name} (e.g., '@{name.lower()}_bot'): ").strip()
+        if not mention:
+            mention = f"@{name.lower()}_bot"
+
+        model = input(f"Model override for {name} (press Enter for default): ").strip()
+
+        bots.append(TelegramBotConfig(
+            name=name,
+            bot_token=token,
+            mention=mention,
+            model=model,
+        ))
+
+        add_more = input("\nAdd another bot? (y/n): ").strip().lower()
+        if add_more != 'y':
+            break
+
+    if not bots:
+        print("No bots configured. Exiting.")
+        return
+
+    # Configure multi-bot settings
+    config.telegram_multi = TelegramMultiConfig(
+        enabled=True,
+        bots=bots,
+        allowed_chat_ids=[chat_id],
+        allow_group_chats=True,
+        require_mention=True,
+    )
+
+    save_config(config)
+
+    print("\n" + "=" * 60)
+    print("Multi-bot Telegram configured!")
+    print("=" * 60)
+    print(f"\nBots configured: {len(bots)}")
+    for bot in bots:
+        print(f"  • {bot.name} ({bot.mention})")
+    print(f"\nGroup chat ID: {chat_id}")
+    print(f"\nTo start, run:")
+    print(f"  python -m ares --telegram-multi")
+    print(f"\nMake sure all bots are added to the Telegram group!")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ares personal AI assistant")
     parser.add_argument(
@@ -160,6 +264,16 @@ def main():
     parser.add_argument("--telegram-setup", action="store_true", help="Securely save Telegram channel setup")
     parser.add_argument("--telegram-authorize", type=int, metavar="CHAT_ID", help="Allow one Telegram chat ID")
     parser.add_argument("--telegram-revoke", type=int, metavar="CHAT_ID", help="Remove one Telegram chat ID")
+    parser.add_argument(
+        "--telegram-multi",
+        action="store_true",
+        help="Run multiple Telegram bots in one group (each responds when @mentioned)",
+    )
+    parser.add_argument(
+        "--telegram-multi-setup",
+        action="store_true",
+        help="Interactive setup for multi-bot Telegram configuration",
+    )
     parser.add_argument("--voice", action="store_true", help="Run continuous voice mode (always listening)")
     parser.add_argument(
         "--desktop",
@@ -201,6 +315,10 @@ def main():
             _authorize_telegram_chat(args.telegram_authorize)
         elif args.telegram_revoke is not None:
             _authorize_telegram_chat(args.telegram_revoke, revoke=True)
+        elif args.telegram_multi_setup:
+            _setup_telegram_multi()
+        elif args.telegram_multi:
+            _run_coro(_run_telegram_multi())
         elif args.all or args.server or args.telegram or args.watcher:
             if args.voice or args.telephony_webhook or args.telephony_media_gateway:
                 parser.error("Voice and telephony gateway processes cannot share the unified runtime process.")
