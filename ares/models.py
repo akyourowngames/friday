@@ -197,6 +197,7 @@ class DesktopConfig(BaseModel):
     hotkey_ptt: str = "ctrl+space"
     hotkey_mute: str = "ctrl+shift+m"
     hotkey_window: str = "ctrl+shift+h"
+    hotkey_stop: str = "escape"
     window_x: int = -1
     window_y: int = -1
     window_opacity: float = 0.85

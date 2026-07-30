@@ -175,12 +175,14 @@ class DesktopVoiceAgent:
                 hotkey_ptt=self.desktop_config.hotkey_ptt,
                 hotkey_mute=self.desktop_config.hotkey_mute,
                 hotkey_window=self.desktop_config.hotkey_window,
+                hotkey_stop=self.desktop_config.hotkey_stop,
             )
             self._hotkey.set_callbacks(
                 ptt=self._handle_ptt_press,
                 ptt_release=self._handle_ptt_release,
                 mute=self._handle_mute_toggle,
                 window=self._handle_window_toggle,
+                stop=self._handle_stop,
             )
             self._hotkey.start()
 
@@ -211,8 +213,9 @@ class DesktopVoiceAgent:
                 else ""
             )
             logger.info(
-                "Desktop voice agent started. Press %s to talk%s.",
+                "Desktop voice agent started. Press %s to talk, %s to stop%s.",
                 self.desktop_config.hotkey_ptt,
+                self.desktop_config.hotkey_stop,
                 wake_hint,
             )
             await self._stop_event.wait()
@@ -291,6 +294,51 @@ class DesktopVoiceAgent:
     def _handle_barge_toggle(self) -> None:
         if self._loop:
             asyncio.run_coroutine_threadsafe(self._toggle_barge_in(), self._loop)
+
+    def _handle_stop(self) -> None:
+        """Handle stop hotkey (ESC) - interrupt current task and return to idle."""
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(self._stop_current_task(), self._loop)
+
+    async def _stop_current_task(self) -> None:
+        """Stop the current task and return to idle state."""
+        # Stop TTS playback
+        stop = self._speech_stop_event
+        if stop is not None:
+            stop.set()
+
+        # Cancel the active turn task
+        task = self._active_turn_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        # Cancel any wake word transcription task
+        wake_task = self._wake_task
+        if wake_task is not None and not wake_task.done():
+            wake_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await wake_task
+            self._wake_transcribing = False
+            self._wake_task = None
+
+        # Reset processing state
+        self._processing = False
+        self._active_turn_task = None
+        self._speaking = False
+
+        # Reset wake word detector
+        self._reset_wake_detector()
+        self._wake_armed_until = 0.0
+
+        # Update UI to idle state
+        if self._window:
+            self._window.set_state(StatusState.IDLE, "Stopped — ready for commands")
+        if self._tray:
+            self._tray.set_state("idle")
+
+        logger.info("Current task stopped via hotkey")
 
     def _handle_new_session(self) -> None:
         self._conversation_history.clear()

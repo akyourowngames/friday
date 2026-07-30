@@ -45,10 +45,12 @@ class HotkeyListener:
         hotkey_ptt: str = "win+ctrl",
         hotkey_mute: str = "win+ctrl+m",
         hotkey_window: str = "win+ctrl+h",
+        hotkey_stop: str = "escape",
     ) -> None:
         self._hotkey_ptt = hotkey_ptt
         self._hotkey_mute = hotkey_mute
         self._hotkey_window = hotkey_window
+        self._hotkey_stop = hotkey_stop
 
         # Friendly key names for the PTT combo, e.g. ["win", "ctrl"].
         self._ptt_key_names: list[str] = HotkeyListener._parse_hotkey(hotkey_ptt)
@@ -58,6 +60,7 @@ class HotkeyListener:
         self.ptt_release_callback: Callable[[], None] | None = None
         self.mute_callback: Callable[[], None] | None = None
         self.window_callback: Callable[[], None] | None = None
+        self.stop_callback: Callable[[], None] | None = None
 
         # Runtime state
         self._current_pressed: Set[str] = set()
@@ -73,6 +76,7 @@ class HotkeyListener:
         ptt_release: Callable[[], None] | None = None,
         mute: Callable[[], None] | None = None,
         window: Callable[[], None] | None = None,
+        stop: Callable[[], None] | None = None,
     ) -> None:
         if ptt is not None:
             self.ptt_callback = ptt
@@ -82,6 +86,8 @@ class HotkeyListener:
             self.mute_callback = mute
         if window is not None:
             self.window_callback = window
+        if stop is not None:
+            self.stop_callback = stop
 
     def start(self) -> None:
         import pynput.keyboard
@@ -103,6 +109,8 @@ class HotkeyListener:
             toggle_hotkeys[self._convert_to_pynput_hotkey(self._hotkey_mute)] = self.mute_callback
         if self.window_callback:
             toggle_hotkeys[self._convert_to_pynput_hotkey(self._hotkey_window)] = self.window_callback
+        if self.stop_callback:
+            toggle_hotkeys[self._convert_to_pynput_hotkey(self._hotkey_stop)] = self.stop_callback
 
         if toggle_hotkeys:
             self._toggle_listener = pynput.keyboard.GlobalHotKeys(toggle_hotkeys)
