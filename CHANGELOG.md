@@ -2,6 +2,28 @@
 
 This changelog is summarized from repository history and grouped by user-facing feature area rather than raw commit messages. Dates use the repository's local commit date.
 
+## 2026-07-30
+
+### Healthcare Reporting Pipeline
+
+- Added complete healthcare reporting pipeline with source retrieval, summarization, trend extraction, and BI chart generation.
+- Implemented `healthcare-reporting`, `healthcare-retrieval`, and `healthcare-summarization` skills for end-to-end report generation.
+- Added report validation, markdown assembly, and optional PDF/DOCX conversion.
+- Created healthcare report directory structure under `~/.ares/data/healthcare-reports/`.
+
+### Semantic Computer Control
+
+- Added intelligent desktop automation with UI element recognition and context-aware actions.
+- Implemented multi-step message sending workflows for various applications.
+- Enhanced Windows MCP integration for reliable UI interaction and state management.
+- Added error recovery and workflow monitoring for complex desktop tasks.
+
+### Model Selection Improvements
+
+- Streamlined provider/model switching with automatic endpoint alignment.
+- Made interactive MCP control permissive for easier integration management.
+- Improved Windows MCP execution reliability and recovery.
+
 ## 2026-07-23
 
 ### MCP Reliability

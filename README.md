@@ -41,6 +41,9 @@ Ares is **local-first, not offline-only**. Its durable state lives under `~/.are
 - **Extensible tool plane:** built-in tools, reusable local skills, and stdio/SSE/Streamable HTTP MCP integrations.
 - **Remote surfaces:** an exact-chat allowlisted Telegram channel, Android bridge, and optional Twilio voice gateway.
 - **Resilient local storage:** SQLite WAL, busy timeouts, retrying writes, shared connections, and atomic configuration saves.
+- **Healthcare reporting pipeline:** end-to-end healthcare report generation with source retrieval, summarization, trend extraction, BI charts, and markdown/PDF output.
+- **Semantic computer control:** intelligent desktop automation with UI element recognition, context-aware actions, and Windows MCP integration.
+- **Model selection improvements:** streamlined provider/model switching with automatic endpoint alignment.
 
 ## Installation
 
@@ -170,6 +173,31 @@ python -m ares --voice --barge-in
 python -m ares --voice --no-barge-in
 ```
 
+### Semantic computer control
+
+Ares includes intelligent desktop automation capabilities that go beyond basic UI automation. The semantic computer control system understands application context, UI element relationships, and can execute complex multi-step workflows.
+
+**Features:**
+- **UI element recognition:** identifies buttons, text fields, menus, and other interactive elements
+- **Context-aware actions:** understands what application is active and what actions are appropriate
+- **Message sending workflows:** multi-step processes for sending messages through various applications
+- **Windows MCP integration:** uses Windows MCP for reliable UI interaction and state management
+- **Error recovery:** handles UI changes, element not found, and workflow interruptions
+
+**Example workflows:**
+
+```text
+Send a WhatsApp message to John saying "Meeting at 3pm tomorrow."
+Open Chrome and navigate to github.com/akyourowngames/friday.
+Copy the selected text and paste it into the active document.
+```
+
+**How it works:**
+1. Ares captures the current UI tree using Windows MCP
+2. The semantic controller identifies relevant elements and their context
+3. A multi-step workflow is planned and executed with error handling
+4. Progress is monitored and adjustments are made if UI state changes
+
 ## Runtime surfaces
 
 | Surface | Purpose | Command or address |
@@ -276,6 +304,45 @@ Configuration, lifecycle, failure behavior, safety, truthful counting, and opera
 
 > [!TIP]
 > Start in the terminal first. Use `/setup`, `/model`, `/context`, and `/help` to inspect the active configuration and available controls.
+
+---
+
+## Healthcare reporting pipeline
+
+Ares includes a complete healthcare reporting pipeline that can retrieve medical sources, summarize findings, extract trends, generate BI charts, and assemble professional markdown reports with optional PDF conversion.
+
+### Features
+
+- **Source retrieval:** pulls healthcare data from configured sources and validates source quality
+- **Intelligent summarization:** extracts key findings, trends, contradictions, and knowledge gaps
+- **BI chart generation:** automatically creates line, bar, or pie charts based on data shape
+- **Report assembly:** builds structured markdown reports with required sections (Summary, Key Findings, Sources)
+- **Validation:** ensures report completeness and chart artifact integrity
+- **Optional conversion:** PDF/DOCX output when pandoc is available
+
+### Usage
+
+```text
+Generate a healthcare report on diabetes trends with charts.
+Create a comprehensive report on cardiovascular disease statistics.
+Produce a healthcare analysis comparing treatment outcomes across regions.
+```
+
+### Output structure
+
+Reports are saved to `~/.ares/data/healthcare-reports/` with:
+- Structured markdown with required sections
+- Embedded or referenced chart images
+- Source citations and confidence levels
+- Trend analysis and uncertainty documentation
+
+### Healthcare skills
+
+| Skill | Purpose |
+|---|---|
+| `healthcare-reporting` | End-to-end report generation with charts |
+| `healthcare-retrieval` | Source discovery and validation |
+| `healthcare-summarization` | Findings extraction and trend analysis |
 
 ---
 
@@ -503,6 +570,14 @@ search_memory("Rohit Instagram")
     <td>Use Windows MCP for snapshots, screenshots, application/window control, mouse, keyboard, clipboard, and notifications.</td>
   </tr>
   <tr>
+    <td>🏥 Healthcare reporting</td>
+    <td>Generate end-to-end healthcare reports with source retrieval, summarization, trend extraction, BI charts, and markdown/PDF output.</td>
+  </tr>
+  <tr>
+    <td>🤖 Semantic computer control</td>
+    <td>Intelligent desktop automation with UI element recognition, context-aware actions, message sending workflows, and Windows MCP integration.</td>
+  </tr>
+  <tr>
     <td>🔌 Extensibility</td>
     <td>Discover local and community skills, search MCP registries, review additions, and reconnect integrations from the CLI or Telegram.</td>
   </tr>
@@ -520,6 +595,8 @@ search_memory("Rohit Instagram")
 | Runtime | `run_code`, `run_command`, `terminal_exec` |
 | Research & media | `web_search`, `fetch_url`, `generate_image`, `resize_image`, `convert_image`, `crop_image` |
 | Local Vision | `vision_observe`, `vision_watch`, `vision_compare`, `vision_verify`, `vision_remember`, `vision_start_source`, `vision_stop_source`, `vision_list_events` |
+| Healthcare reporting | `validate_report_output`, `build_report_bundle`, `ensure_report_directory`, `generate_chart` |
+| Semantic computer control | `send_message`, `navigate_ui`, `recognize_elements`, `execute_desktop_task` |
 | Scheduling & workflows | `create_cron_job`, `run_cron_job_now`, `create_task`, `get_task_status`, `run_task` |
 | Phone & device | `phone_status`, `phone_get_notifications`, `phone_search_contact`, `phone_send_sms`, `phone_call_number` |
 | Provider telephony | `telephony_call`, `telephony_hangup`, `telephony_mute`, `telephony_list_calls`, `telephony_list_contacts`, `telephony_save_contact`, `telephony_transfer` |
@@ -538,6 +615,7 @@ Skills are local `SKILL.md` playbooks. Ares discovers relevant instructions, loa
 | Automation | `browser-content-review`, `browser-form-workflow`, `browser-use`, `computer-use` |
 | Coding | `code-review`, `codebase-summary`, `project-init` |
 | Communication | `conversation-conduct`, `email-followup` |
+| Healthcare | `healthcare-reporting`, `healthcare-retrieval`, `healthcare-summarization` |
 | Productivity | `daily-planner`, `daily-standup`, `goal-management`, `goal-check-in` |
 | Research | `research-deep-dive`, `web-research` |
 | Utilities | `backup-snapshot`, `image-batch-processor`, `system-info` |
@@ -855,6 +933,7 @@ The default soul is warm, grounded, and naturally expressive while remaining hon
 │   ├── watchers.db             # Watchers, snapshots, incidents, checks, and notification attempts
 │   ├── telephony.key           # Local Fernet key for encrypted call-contact numbers
 │   ├── sessions/*.jsonl        # Append-only session archive with line provenance
+│   ├── healthcare-reports/     # Generated healthcare reports and charts
 │   ├── soul.md                 # Assistant personality
 │   ├── profile.md              # User profile
 │   ├── mcp_tokens/             # OAuth tokens for MCP servers
@@ -886,6 +965,7 @@ npm run build
 |---|---|
 | Memory, sessions, people, or tools | Focused tests plus `python -m pytest -q` |
 | Skill behavior | `python -m pytest tests/test_skills.py tests/test_prompts.py -q` |
+| Healthcare reporting | `python -m pytest tests/test_healthcare_reporting.py -q` |
 | CLI rendering | Relevant renderer tests |
 | Local API | `python -m pytest tests/test_server.py -q` |
 | Next.js power workspace | `npm run lint && npm run typecheck && npm run build` from `ares-workspace` |
@@ -911,6 +991,8 @@ Ares acts across local and remote surfaces (Telegram, phone, web, MCP servers, c
 - [Marketplace guide](docs/marketplace.md)
 - [Watcher service design](docs/superpowers/specs/2026-07-12-watcher-service-design.md)
 - [Watcher core implementation plan](docs/superpowers/plans/2026-07-12-watcher-core-infrastructure.md)
+- [Healthcare reporting pipeline](ares/skills/research/healthcare-reporting/SKILL.md)
+- [Semantic computer control](ares/integrations/computer_control.py)
 - [Contributing guide](CONTRIBUTING.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Changelog](CHANGELOG.md)
