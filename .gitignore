@@ -32,3 +32,8 @@ verification_result.txt
 test_terminal_loop.py
 .env
 uv.lock
+
+# Personal files
+blog_img.jpg
+essay_on_krish.md
+telephony.key
