@@ -315,6 +315,10 @@ class Agent:
         self.recent_latency_metrics: deque[dict[str, object]] = deque(
             maxlen=_RECENT_LATENCY_RECORDS
         )
+        # User-initiated cancellation: when set, the next tool execution
+        # check will abort the current turn loop.  The CLI sets this from
+        # a background thread when ESC is pressed.
+        self._user_cancel_event: asyncio.Event = asyncio.Event()
 
         kwargs = {}
         if api_key:
@@ -526,6 +530,8 @@ class Agent:
         request_id: str | None = None,
         confirmation_grants: Iterable[TurnActionGrant] = (),
     ) -> TurnExecutionContext:
+        # Clear any leftover cancellation from a previous turn.
+        self._user_cancel_event.clear()
         explicit = tuple(confirmation_grants)
         pending = tuple(getattr(self, "_pending_turn_grants", ()))
         grants = explicit or pending
@@ -1703,6 +1709,31 @@ class Agent:
                 return await execute()
         return await execute()
 
+    def request_user_cancel(self) -> None:
+        """Signal that the user wants to stop the current turn (e.g. ESC key).
+
+        Thread-safe: can be called from a background thread (keyboard listener).
+        """
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._user_cancel_event.set)
+        else:
+            self._user_cancel_event.set()
+
+    def clear_user_cancel(self) -> None:
+        """Reset the cancellation flag for a new turn."""
+        self._user_cancel_event.clear()
+
+    def _check_user_cancel(self) -> None:
+        """Raise if the user requested cancellation."""
+        if self._user_cancel_event.is_set():
+            self._user_cancel_event.clear()
+            raise asyncio.CancelledError("Cancelled by user (ESC)")
+
     def _authorize_tool(self, tool_name: str, args: dict) -> None:
         """Enforce the immutable current-turn boundary before dispatch."""
         context = self.turn_context
@@ -1792,6 +1823,7 @@ class Agent:
         progress_callback: ToolProgressCallback | None,
     ) -> tuple[int, bool, str]:
         tool_name = call.get("function", {}).get("name", "unknown")
+        self._check_user_cancel()
         try:
             args = self._tool_call_args(call)
             self._authorize_tool(tool_name, args)
@@ -1818,8 +1850,24 @@ class Agent:
                             )
 
             async def await_operation(dispatch: asyncio.Task[tuple[bool, str]]) -> tuple[bool, str]:
-                done, _pending = await asyncio.wait({dispatch}, timeout=timeout_seconds)
-                if not done:
+                # Poll for user cancellation every 0.3s while the tool runs,
+                # instead of blocking on a single long await.  This makes ESC
+                # responsive even during slow MCP calls (snapshots, browser).
+                deadline = time.monotonic() + timeout_seconds
+                while not dispatch.done():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(dispatch),
+                            timeout=min(0.3, remaining),
+                        )
+                        break  # dispatch completed
+                    except asyncio.TimeoutError:
+                        # Check for user cancellation between poll intervals
+                        self._check_user_cancel()
+                if not dispatch.done():
                     dispatch.cancel()
                     done, _pending = await asyncio.wait({dispatch}, timeout=cleanup_grace)
                     if not done:
@@ -1914,6 +1962,7 @@ class Agent:
             resources.append(call_resource(i, call, arguments))
         wave_plan = execution_waves(resources)
         for wave in wave_plan:
+            self._check_user_cancel()
             completed = await asyncio.gather(*(
                 self._execute_one_tool_async(i, tool_calls[i], progress_callback)
                 for i in wave
@@ -3147,6 +3196,7 @@ class Agent:
                             tool_name, detail = await asyncio.wait_for(
                                 progress.get(), timeout=0.25
                             )
+                            self._check_user_cancel()
                             if tool_name not in active_tools:
                                 active_tools[tool_name] = asyncio.get_running_loop().time()
                                 yield f"[tool_start:{tool_name}]"
@@ -3155,6 +3205,7 @@ class Agent:
                                 active_tools.pop(tool_name, None)
                                 reported_seconds.pop(tool_name, None)
                         except asyncio.TimeoutError:
+                            self._check_user_cancel()
                             now = asyncio.get_running_loop().time()
                             for tool_name, started_at in active_tools.items():
                                 elapsed = max(1, round(now - started_at))

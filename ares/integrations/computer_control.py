@@ -39,6 +39,23 @@ _SUCCESS_FAILURE_MARKERS = (
     "not found",
     "failed",
 )
+# Window titles belonging to Ares itself.  When the focused window matches
+# one of these, the UI tree contains Ares' own terminal elements which
+# should not be acted upon.
+_ARES_OWN_WINDOW_TITLES = (
+    "ares",
+    "friday",
+    "windows terminal",
+    "windowsterminal",
+    "cmd.exe",
+    "command prompt",
+    "powershell",
+    "pwsh",
+)
+_ARES_OWN_TITLE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(title) for title in _ARES_OWN_WINDOW_TITLES) + r")\b",
+    re.IGNORECASE,
+)
 _TREE_LINE_RE = re.compile(
     r'^(?P<prefix>[│ ]*)(?:├──|└──)\s+'
     r'(?:(?P<coords>\(-?\d+,-?\d+\))\s+)?'
@@ -1344,6 +1361,21 @@ class ComputerTaskController:
             state.pending_action = None
             state.observation_required = False
             self._advance_phase(state)
+
+            # Terminal-overlap detection: when the focused window belongs to
+            # Ares itself, the UI tree is contaminated with terminal elements
+            # that must not be acted upon.  Inject a recovery hint so the
+            # model switches focus to the target application.
+            terminal_overlap = bool(
+                parsed.window_title
+                and _ARES_OWN_TITLE_RE.search(parsed.window_title)
+            )
+            if terminal_overlap:
+                state.recovery_reason = (
+                    "Ares' own terminal window is focused; the UI tree contains "
+                    "Ares terminal elements that must not be targeted. Switch "
+                    "focus to the target application, then take a fresh Snapshot."
+                )
             transition = (
                 f"{old_phase.value}->{state.phase.value}"
                 if old_phase != state.phase
@@ -1370,11 +1402,22 @@ class ComputerTaskController:
                     "state_transition": transition,
                     "postcondition": postcondition or None,
                     "recovery_reason": state.recovery_reason or None,
+                    "terminal_overlap": terminal_overlap,
                 }
             )
+            header = "## Ares Compact Computer State (authoritative)"
+            warning = ""
+            if terminal_overlap:
+                warning = (
+                    "\n\n**⚠ Terminal overlap detected:** The focused window is Ares' own "
+                    f"terminal ({parsed.window_title!r}). The UI tree below contains "
+                    "Ares terminal elements that must NOT be targeted. Switch focus to "
+                    "the target application, then take a fresh Snapshot."
+                )
             return (
-                "## Ares Compact Computer State (authoritative)\n"
-                f"```json\n{json.dumps(projection, ensure_ascii=False, indent=2)}\n```\n\n"
+                f"{header}\n"
+                f"```json\n{json.dumps(projection, ensure_ascii=False, indent=2)}\n```\n"
+                f"{warning}\n\n"
                 "The UI tree below is actuator evidence. Use only elements whose app, ancestry, "
                 "region, and generation agree with the compact state.\n\n"
                 f"{snapshot}"

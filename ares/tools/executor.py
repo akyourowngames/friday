@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 import zipfile
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -17,6 +18,15 @@ from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import urlparse
 
 from PIL import Image
+
+try:  # matplotlib is optional at import time; chart generation degrades gracefully.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _MATPLOTLIB_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency.
+    plt = None  # type: ignore[assignment]
+    _MATPLOTLIB_AVAILABLE = False
 
 if TYPE_CHECKING:
     from ares.context.conversations import ConversationStore
@@ -419,6 +429,7 @@ class ToolExecutor:
             "run_command": self._run_command,
             "run_project_check": self._run_project_check,
             "generate_image": self._generate_image,
+            "generate_chart": self._generate_chart,
             "image_info": self._image_info,
             "resize_image": self._resize_image,
             "convert_image": self._convert_image,
@@ -3753,6 +3764,69 @@ class ToolExecutor:
                 metrics={"requested": len(manifest["variants"]), "completed": completed, "attempts": len(attempts)},
             )
         return generate_image(prompt, width=width, height=height, model=model, seed=seed)
+
+    def _generate_chart(self, args: dict) -> str:
+        if not _MATPLOTLIB_AVAILABLE:
+            return error_result("chart generation is unavailable: matplotlib is not installed", code="chart_generation")
+        chart_type = str(args.get("chart_type") or "line").strip().lower()
+        title = str(args.get("title") or "Chart").strip() or "Chart"
+        raw_labels = args.get("labels") or []
+        raw_values = args.get("values") or []
+        if not isinstance(raw_labels, list) or not isinstance(raw_values, list):
+            return error_result("labels and values must be arrays", code="chart_generation")
+        if not raw_labels or not raw_values:
+            return error_result("labels and values cannot be empty", code="chart_generation")
+        labels = [str(item) for item in raw_labels][: len(raw_values) or len(raw_labels)]
+        values = []
+        for item in raw_values[: len(labels) or len(raw_values)]:
+            try:
+                values.append(float(item))
+            except (TypeError, ValueError):
+                return error_result("values must be numeric", code="chart_generation")
+        if not values:
+            return error_result("values must be numeric", code="chart_generation")
+        width = int(args.get("width") or 1200)
+        height = int(args.get("height") or 750)
+        output = args.get("output")
+        try:
+            output_path = Path(output).expanduser() if output else Path(tempfile.gettempdir()) / f"ares-chart-{uuid.uuid4().hex[:12]}.png"
+        except Exception as exc:
+            return error_result(f"invalid output path: {exc}", code="chart_generation")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            figure, axes = plt.subplots(figsize=(width / 150, height / 150), dpi=150)
+            if chart_type == "pie":
+                axes.pie(values[: len(labels)], labels=labels[: len(values)], autopct="%1.1f%%", startangle=140)
+                axes.set_title(title)
+            elif chart_type == "bar":
+                axes.bar(labels[: len(values)], values[: len(labels)])
+                axes.set_title(title)
+                axes.set_xlabel("Category")
+                axes.set_ylabel("Value")
+                axes.grid(True, axis="y", linestyle="--", alpha=0.4)
+                if len(labels) <= 20:
+                    axes.bar_label(axes.containers[0], fmt="%.2g")
+            else:
+                axes.plot(labels[: len(values)], values[: len(labels)], marker="o")
+                axes.set_title(title)
+                axes.set_xlabel("Period")
+                axes.set_ylabel("Value")
+                axes.grid(True, linestyle="--", alpha=0.4)
+            figure.tight_layout()
+            figure.savefig(output_path)
+            plt.close(figure)
+        except Exception as exc:
+            return error_result(f"chart generation failed: {exc}", code="chart_generation")
+        message = f"Chart saved to {output_path}"
+        if wants_structured(args):
+            return structured_result(
+                message,
+                ok=True,
+                status="completed",
+                data={"path": str(output_path), "chart_type": chart_type, "title": title},
+                artifacts=[{"path": str(output_path), "media_type": "image/png", "description": title}],
+            )
+        return message
 
     def _image_info(self, args: dict) -> str:
         if wants_structured(args):

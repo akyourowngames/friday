@@ -33,6 +33,18 @@ MODEL_REGISTRY = {
             {"id": "big-pickle", "label": "Big Pickle", "provider": "OpenCode"},
         ],
     },
+    "kilo": {
+        "label": "Kilo Gateway",
+        "models": [
+            {"id": "stepfun/step-3.7-flash:free", "label": "StepFun Step 3.7 Flash (free)", "provider": "StepFun"},
+            {"id": "cohere/north-mini-code:free", "label": "Cohere North Mini Code (free)", "provider": "Cohere"},
+            {"id": "inclusionai/ling-3.0-flash:free", "label": "Ling 3.0 Flash (free)", "provider": "InclusionAI"},
+            {"id": "poolside/laguna-s-2.1:free", "label": "Poolside Laguna S 2.1 (free)", "provider": "Poolside"},
+            {"id": "nvidia/nemotron-3-super-120b-a12b:free", "label": "NVIDIA Nemotron 3 Super (free)", "provider": "NVIDIA"},
+            {"id": "openrouter/free", "label": "OpenRouter Free Models Router", "provider": "OpenRouter"},
+            {"id": "kilo-auto/free", "label": "Kilo Auto Free", "provider": "Kilo"},
+        ],
+    },
     "claude": {
         "label": "Claude",
         "models": [
@@ -121,7 +133,7 @@ FREE_MODELS = [m["id"] for m in MODEL_REGISTRY["free"]["models"]]
 # Zen is an API gateway: model families such as Claude and DeepSeek still use
 # the OpenCode endpoint. NVIDIA NIM is the only separately routed catalogue.
 _MODEL_BACKENDS = {
-    group_key: "nim" if group_key == "nvidia" else "copilot" if group_key == "copilot" else "opencode"
+    group_key: "nim" if group_key == "nvidia" else "copilot" if group_key == "copilot" else "kilo" if group_key == "kilo" else "opencode"
     for group_key in MODEL_REGISTRY
 }
 
@@ -129,6 +141,7 @@ PROVIDER_BASE_URLS = {
     "opencode": "https://opencode.ai/zen/v1",
     "nim": "https://integrate.api.nvidia.com/v1",
     "copilot": "",
+    "kilo": "https://api.kilo.ai/api/gateway",
 }
 
 PROVIDER_ALIASES = {"nvidia": "nim"}
@@ -200,6 +213,7 @@ def configured_provider_api_key(
         "opencode": ("OPENCODE_API_KEY",),
         "nim": ("NIM_API_KEY", "NVIDIA_API_KEY"),
         "copilot": ("COPILOT_GITHUB_TOKEN",),
+        "kilo": ("KILO_API_KEY",),
     }
     for name in environment_names.get(normalized_provider, ()):
         if os.environ.get(name):

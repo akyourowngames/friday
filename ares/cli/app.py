@@ -97,7 +97,7 @@ class InteractiveCLICompleter(Completer):
             prefix = model_match.group(1)
             for group_key, group in MODEL_REGISTRY.items():
                 endpoint = "NVIDIA NIM" if group_key == "nvidia" else (
-                    "GitHub Copilot" if group_key == "copilot" else "OpenCode Zen"
+                    "Kilo Gateway" if group_key == "kilo" else "GitHub Copilot" if group_key == "copilot" else "OpenCode Zen"
                 )
                 for item in group["models"]:
                     model_id = item["id"]
@@ -2735,6 +2735,27 @@ class AresCLI(MarketplaceCommandMixin):
                 if not expected_session or not event_session or event_session == expected_session:
                     self._print_agent_event(event, agent_event_seen)
             agent_unsubscribe = runtime.subscribe(handle_agent_event)
+        # ESC-to-cancel: start a background thread that watches for ESC key
+        # and signals the agent to stop the current turn.
+        # Uses GetAsyncKeyState (works in Windows Terminal, PowerShell, cmd.exe)
+        # instead of msvcrt which only works in legacy cmd.exe.
+        cancel_listener = None
+        if sys.platform == "win32":
+            import threading as _threading
+            import ctypes as _ctypes
+            _user32 = _ctypes.windll.user32
+            _VK_ESCAPE = 0x1B
+            _stop_event = _threading.Event()
+            def _esc_listener() -> None:
+                while not _stop_event.is_set():
+                    # GetAsyncKeyState works across all Windows terminals
+                    if _user32.GetAsyncKeyState(_VK_ESCAPE) & 0x8000:
+                        self.agent.request_user_cancel()
+                        _stop_event.set()
+                        return
+                    _stop_event.wait(0.05)
+            cancel_listener = _threading.Thread(target=_esc_listener, daemon=True)
+            cancel_listener.start()
         try:
             with status_context as live_status:
                 if selected_skills:
@@ -2774,11 +2795,18 @@ class AresCLI(MarketplaceCommandMixin):
                                     tool_renderables.append(render_generic_tool(tool_content))
                         else:
                             full_response += token
+                except asyncio.CancelledError:
+                    if activity_visible:
+                        self.console.print(self._activity_line("done", "Request", "Stopped by ESC"))
+                    full_response = ""
                 except Exception as e:
                     if activity_visible:
                         self.console.print(self._activity_line("failed", "Request", str(e)))
                     full_response = f"Error: {e}"
         finally:
+            if cancel_listener is not None:
+                _stop_event.set()
+                cancel_listener.join(timeout=0.5)
             if agent_unsubscribe is not None:
                 agent_unsubscribe()
 

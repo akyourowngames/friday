@@ -25,8 +25,9 @@ Edit `C:\Users\anime\.ares\config.json` and append these entries to `mcp_servers
   "name": "pandoc",
   "transport": "stdio",
   "command": "uvx",
-  "args": ["mcp-pandoc"],
-  "timeout_seconds": 120.0
+  "args": ["--from", "mcp-pandoc", "--with", "mcp==1.8.1", "mcp-pandoc"],
+  "timeout_seconds": 120.0,
+  "max_timeout_seconds": 300.0
 },
 {
   "name": "chart-antv",

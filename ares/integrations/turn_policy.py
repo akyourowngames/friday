@@ -198,6 +198,18 @@ _LIVE_VISION_RE = re.compile(
     re.IGNORECASE,
 )
 _CONTINUATION_RE = re.compile(r"\b(?:continue|resume)\b", re.IGNORECASE)
+# When "continue" or "resume" appears alongside an explicit tool/platform
+# reference (e.g. "continue using playwright mcp"), treat it as a fresh
+# action rather than a prior-task resumption.  Without this, the "continue"
+# keyword triggers prior_task routing which blocks all tool execution.
+_TOOL_CONTINUATION_EXCEPTION_RE = re.compile(
+    r"\b(?:continue|resume)\b.{0,40}\b(?:"
+    r"use|using|via|through|with|open|start|launch"
+    r")\b.{0,40}\b(?:"
+    r"pla(?:y)?wright|browser|mcp"
+    r")\b",
+    re.IGNORECASE,
+)
 _SPECIFIC_TASK_CONTINUE_RE = re.compile(
     r"\b(?:continue|resume)\s+(?:task\s+)?(?P<task_id>[a-z0-9][a-z0-9_-]*-[0-9a-f]{8})\b",
     re.IGNORECASE,
@@ -462,7 +474,7 @@ def _extract_targets(text: str) -> tuple[str, ...]:
         targets.append("config")
     if re.search(r"\b(?:email|sms|text|telegram|phone|call)\b", lowered):
         targets.append("communication")
-    if _CONTINUATION_RE.search(lowered):
+    if _CONTINUATION_RE.search(lowered) and not _TOOL_CONTINUATION_EXCEPTION_RE.search(text):
         targets.append("prior_task")
     specific_task = _SPECIFIC_TASK_CONTINUE_RE.search(text)
     if specific_task:
@@ -502,7 +514,13 @@ def classify_turn_intent(text: str, *, has_confirmation_grants: bool = False) ->
         return TurnIntent.LOCAL_MUTATION
     if _SPECIFIC_TASK_CONTINUE_RE.search(value):
         return TurnIntent.LOCAL_MUTATION
-    if _CONTINUATION_RE.search(value):
+    # "continue using playwright mcp" etc. — the user wants a fresh browser
+    # action, not a prior-task resume.  Fall through to MODEL_ROUTED so the
+    # LLM can issue Playwright tools without the prior_task block.
+    if (
+        _CONTINUATION_RE.search(value)
+        and not _TOOL_CONTINUATION_EXCEPTION_RE.search(value)
+    ):
         return TurnIntent.READ_ONLY
     if (
         _BROWSER_DISCUSSION_RE.search(value)
