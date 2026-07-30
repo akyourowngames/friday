@@ -210,6 +210,7 @@ Copy the selected text and paste it into the active document.
 | Power workspace | Local operational web UI | `http://127.0.0.1:8766` |
 | Watcher console | Fleet, checks, incidents, and delivery telemetry | `http://127.0.0.1:8080` |
 | Telegram | Remote allowlisted chat within the unified runtime | `python -m ares --all` |
+| Telegram multi-bot | Multiple bots in one group, @mention routing | `python -m ares --telegram-multi` |
 | Twilio webhook | Signed inbound Voice/status callbacks | `python -m ares --telephony-webhook` |
 | Twilio media gateway | Bidirectional Media Streams over a published WSS endpoint | `python -m ares --telephony-media-gateway` |
 
@@ -420,6 +421,81 @@ Watcher configuration is stored under the shared `watcher` object in `~/.ares/co
 ```
 
 Keep `allow_mutating_tool_steps` off for normal monitoring. Enabling a consequential workflow also requires `"allow_mutating_tools": true` on that specific watcher, and should only be used for an explicitly reviewed automation. Respect the monitored service’s permissions and terms.
+
+---
+
+## Multi-bot Telegram
+
+Run multiple Ares bots in a single Telegram group. Each bot has its own agent, conversation history, and responds only when @mentioned.
+
+### Setup
+
+```bash
+# Interactive setup
+python -m ares --telegram-multi-setup
+
+# Or configure manually in ~/.ares/config.json
+```
+
+### Configuration
+
+```json
+{
+  "telegram_multi": {
+    "enabled": true,
+    "bots": [
+      {
+        "name": "Jarvis",
+        "bot_token": "BOT_TOKEN_1",
+        "mention": "@jarvis_bot",
+        "model": "gpt-4o",
+        "system_prompt_suffix": "You are Jarvis, a helpful AI assistant."
+      },
+      {
+        "name": "Friday",
+        "bot_token": "BOT_TOKEN_2",
+        "mention": "@friday_bot"
+      }
+    ],
+    "allowed_chat_ids": [-1001234567890],
+    "allow_group_chats": true,
+    "require_mention": true,
+    "show_tool_progress": true
+  }
+}
+```
+
+Bots run **in parallel**: each has its own poll loop, agent, tools, and
+conversation. Tagging `@jarvis_bot` and `@friday_bot` at the same time starts
+both turns immediately — neither waits for the other. While a bot works it
+posts live status like the single Telegram channel (`Thinking` → `Using tool:
+…` → `Finished tool: …` → `Done`).
+
+### Running
+
+```bash
+# Standalone multi-bot mode
+python -m ares --telegram-multi
+
+# Or as part of unified runtime (--all starts both single and multi-bot)
+python -m ares --all
+```
+
+### Usage
+
+In your Telegram group:
+
+```
+@jarvis_bot What’s the weather today?
+@friday_bot Summarize the latest news
+@jarvis_bot Help me write a Python script
+```
+
+Each bot:
+- Only responds when @mentioned in group chats
+- Has its own conversation history
+- Can use a different model (optional)
+- Can have a custom system prompt suffix (optional)
 
 ---
 

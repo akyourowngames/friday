@@ -1148,6 +1148,29 @@ def get_tool_definitions() -> list[dict]:
             ["chart_type", "title", "labels", "values"],
         ),
         _tool(
+            "convert_document",
+            "Convert a document from one format to another using pandoc. Supports markdown to PDF, DOCX, HTML, LaTeX, and EPUB.",
+            {
+                "input": {"type": "string", "description": "Path to the input file."},
+                "output_format": {"type": "string", "enum": ["pdf", "docx", "html", "latex", "epub"], "description": "Target format."},
+                "output": {"type": "string", "description": "Optional output path. If omitted, derives from input name."},
+                "extra_args": {"type": "string", "description": "Optional extra pandoc arguments."},
+            },
+            ["input", "output_format"],
+        ),
+        _tool(
+            "analyze_data",
+            "Analyze a CSV, TSV, or text file using pandas. Extracts summary statistics, trends, outliers, correlations, and auto-generates charts. Use for patient data, survey data, or any tabular data. Pass focus='urgent' or focus='patients' to highlight critical cases.",
+            {
+                "file_path": {"type": "string", "description": "Path to the CSV, TSV, or text file."},
+                "focus": {"type": "string", "enum": ["summary", "urgent", "patients", "trends", "correlations"], "default": "summary", "description": "Analysis focus."},
+                "charts": {"type": "boolean", "default": True, "description": "Generate charts."},
+                "output_dir": {"type": "string", "description": "Directory for chart output. Defaults to ~/.ares/data/analysis/."},
+                "response_format": {"type": "string", "enum": ["legacy", "structured"], "default": "legacy"},
+            },
+            ["file_path"],
+        ),
+        _tool(
             "generate_image",
             "Generate an image from a text prompt using Pollinations.ai (free, no API key). Returns saved file path and records an asset manifest row with dimensions, format, checksum, and generation history.",
             {

@@ -4,6 +4,18 @@ This changelog is summarized from repository history and grouped by user-facing 
 
 ## 2026-07-30
 
+### Multi-Bot Telegram
+
+- Added support for running multiple Telegram bots in a single group.
+- Each bot has its own Ares agent instance and conversation history.
+- Implemented @mention-based routing so bots only respond when tagged.
+- Added `TelegramBotConfig` and `TelegramMultiConfig` models for multi-bot configuration.
+- Created `MultiTelegramChannel` class to manage multiple bot instances.
+- Added `--telegram-multi` CLI command to run multi-bot mode.
+- Added `--telegram-multi-setup` for interactive multi-bot configuration.
+- Integrated multi-bot support into unified runtime (`--all`).
+- Added optional model override and system prompt suffix per bot.
+
 ### Healthcare Reporting Pipeline
 
 - Added complete healthcare reporting pipeline with source retrieval, summarization, trend extraction, and BI chart generation.

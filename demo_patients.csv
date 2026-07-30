@@ -1,0 +1,51 @@
+patient_id,name,age,gender,disease,severity,blood_pressure_systolic,blood_pressure_diastolic,heart_rate,temperature,oxygen_saturation,blood_glucose,status,priority,admission_date,ward,attending_physician
+PT001,John Smith,67,M,Diabetes Type 2,Severe,158,95,92,99.1,94,245,Critical,1,2026-07-01,ICU,Dr. Patel
+PT002,Maria Garcia,45,F,Hypertension,Moderate,142,88,78,98.6,97,110,Stable,3,2026-07-03,Cardiology,Dr. Lee
+PT003,Robert Johnson,72,M,Congestive Heart Failure,Severe,165,102,105,100.2,91,180,Critical,1,2026-06-28,ICU,Dr. Patel
+PT004,Sarah Williams,34,F,Asthma,Mild,118,72,68,98.4,98,95,Stable,4,2026-07-10,General,Dr. Chen
+PT005,James Brown,58,M,COPD,Severe,148,90,96,99.8,88,165,Critical,1,2026-07-02,Pulmonary,Dr. Singh
+PT006,Emma Davis,29,F,Pneumonia,Moderate,130,82,88,101.5,95,102,Urgent,2,2026-07-08,General,Dr. Lee
+PT007,Michael Wilson,81,M,Acute Kidney Injury,Critical,172,108,110,102.8,89,280,Critical,1,2026-06-30,Nephrology,Dr. Patel
+PT008,Jennifer Taylor,55,F,Hypothyroidism,Mild,125,78,72,98.2,99,98,Stable,4,2026-07-12,Endocrine,Dr. Kim
+PT009,David Anderson,63,M,Acute Myocardial Infarction,Critical,185,115,120,101.0,87,220,Critical,1,2026-07-05,ICU,Dr. Patel
+PT010,Lisa Thomas,48,F,Rheumatoid Arthritis,Moderate,135,85,76,98.8,96,105,Stable,3,2026-07-06,Rheumatology,Dr. Chen
+PT011,William Martinez,76,M,Stroke,Critical,190,112,108,103.2,85,260,Critical,1,2026-07-04,Neurology,Dr. Singh
+PT012,Jennifer Robinson,38,F,Type 1 Diabetes,Moderate,128,80,74,98.5,97,280,Urgent,2,2026-07-09,Endocrine,Dr. Kim
+PT013,Christopher Clark,52,M,Sepsis,Critical,88,55,125,104.0,82,45,Critical,1,2026-07-07,ICU,Dr. Patel
+PT014,Amanda Rodriguez,41,F,Migraine,Mild,122,76,66,98.3,99,90,Stable,5,2026-07-14,Neurology,Dr. Singh
+PT015,Daniel Lewis,70,M,Pulmonary Embolism,Critical,155,98,115,102.5,84,140,Critical,1,2026-07-03,Pulmonary,Dr. Lee
+PT016,Jessica Lee,60,F,Chronic Liver Disease,Severe,110,70,88,99.5,93,190,Urgent,2,2026-07-01,Hepatology,Dr. Chen
+PT017,Matthew Walker,44,M,Gastroenteritis,Mild,120,75,70,99.0,97,100,Stable,4,2026-07-13,General,Dr. Kim
+PT018,Ashley Hall,56,F,Osteoporosis,Moderate,132,82,74,98.4,96,95,Stable,3,2026-07-11,Orthopedics,Dr. Singh
+PT019,Andrew Allen,37,M,Appendicitis,Moderate,138,86,90,100.8,96,115,Urgent,2,2026-07-09,Surgery,Dr. Lee
+PT020,Stephanie Young,65,F,Alzheimer Disease,Severe,145,88,82,98.6,95,110,Urgent,2,2026-06-29,Neurology,Dr. Patel
+PT021,Kevin Hernandez,49,M,Cirrhosis,Severe,105,68,92,100.0,90,200,Critical,1,2026-07-02,Hepatology,Dr. Chen
+PT022,Michelle King,31,F,Bronchitis,Mild,115,72,64,98.7,98,88,Stable,5,2026-07-15,Pulmonary,Dr. Kim
+PT023,Brian Wright,74,M,Diabetes Type 1,Severe,152,94,88,99.6,93,310,Critical,1,2026-07-04,Endocrine,Dr. Patel
+PT024,Amanda Scott,43,F,Anemia,Moderate,108,68,90,98.2,96,75,Urgent,2,2026-07-08,Hematology,Dr. Lee
+PT025,Steven Green,59,M,Pancreatitis,Severe,140,88,100,101.8,91,185,Urgent,2,2026-07-06,Gastro,Dr. Singh
+PT026,Emily Adams,27,F,Gallstones,Mild,120,74,72,98.5,98,92,Stable,4,2026-07-14,Surgery,Dr. Kim
+PT027,Jason Nelson,68,M,Pneumonia,Severe,148,92,98,102.0,88,155,Critical,1,2026-07-05,Pulmonary,Dr. Lee
+PT028,Rachel Carter,50,F,Hypertension,Moderate,155,96,80,98.8,96,125,Urgent,2,2026-07-07,Cardiology,Dr. Patel
+PT029,Tyler Mitchell,36,M,Asthma,Mild,118,70,66,98.3,97,94,Stable,5,2026-07-12,Pulmonary,Dr. Kim
+PT030,Lauren Perez,62,F,Atrial Fibrillation,Severe,135,85,115,99.2,94,130,Urgent,2,2026-07-03,Cardiology,Dr. Lee
+PT031,Brandon Roberts,47,M,Deep Vein Thrombosis,Moderate,140,86,84,99.0,95,115,Stable,3,2026-07-10,Vascular,Dr. Singh
+PT032,Samantha Turner,53,F,Osteoarthritis,Mild,130,80,70,98.4,97,100,Stable,4,2026-07-11,Orthopedics,Dr. Chen
+PT033,Justin Phillips,71,M,Chronic Kidney Disease,Severe,160,100,94,99.8,90,230,Critical,1,2026-07-01,Nephrology,Dr. Patel
+PT034,Nicole Campbell,39,F,Lupus,Moderate,128,78,76,98.6,96,105,Urgent,2,2026-07-09,Rheumatology,Dr. Chen
+PT035,Jason Parker,66,M,Ischemic Heart Disease,Severe,155,96,102,100.5,89,195,Critical,1,2026-07-04,Cardiology,Dr. Lee
+PT036,Christine Evans,42,F,Fibromyalgia,Mild,122,74,68,98.3,98,92,Stable,5,2026-07-13,Pain Clinic,Dr. Kim
+PT037,Patrick Edwards,78,M,Alzheimer Disease,Severe,140,85,78,98.5,94,115,Urgent,2,2026-06-28,Neurology,Dr. Patel
+PT038,Victoria Collins,57,F,COPD,Moderate,138,86,82,99.4,92,120,Urgent,2,2026-07-06,Pulmonary,Dr. Singh
+PT039,George Stewart,40,M,Type 2 Diabetes,Moderate,145,90,80,98.9,95,220,Urgent,2,2026-07-08,Endocrine,Dr. Kim
+PT040,Carol Morris,69,F,Heart Valve Disease,Severe,150,92,90,99.7,91,145,Urgent,2,2026-07-02,Cardiology,Dr. Lee
+PT041,Ronald Murphy,54,M,GERD,Mild,132,82,72,98.4,97,100,Stable,4,2026-07-12,Gastro,Dr. Chen
+PT042,Dorothy Rivera,83,F,CHF,Severe,170,105,108,101.2,86,210,Critical,1,2026-06-30,ICU,Dr. Patel
+PT043,Paul Cook,46,M,Deep Vein Thrombosis,Moderate,138,84,82,99.1,95,110,Stable,3,2026-07-10,Vascular,Dr. Singh
+PT044,Deborah Morgan,61,F,Osteoporosis,Mild,128,78,70,98.3,96,94,Stable,4,2026-07-11,Orthopedics,Dr. Kim
+PT045,Roger Bell,73,M,Sepsis,Critical,82,52,130,104.5,80,38,Critical,1,2026-07-05,ICU,Dr. Patel
+PT046,Sharon Bailey,35,F,Anemia,Mild,110,70,88,98.2,97,80,Stable,4,2026-07-14,Hematology,Dr. Chen
+PT047,Raymond Rivera,51,M,Acute Pancreatitis,Severe,142,90,104,102.2,89,175,Urgent,2,2026-07-07,Gastro,Dr. Lee
+PT048,Emma Cooper,28,F,Pneumonia,Mild,118,72,74,100.0,96,98,Stable,4,2026-07-13,Pulmonary,Dr. Kim
+PT049,Harold Richardson,77,M,Acute Kidney Injury,Severe,158,98,96,101.5,88,265,Critical,1,2026-07-03,Nephrology,Dr. Patel
+PT050,Betty Cox,44,F,Hypothyroidism,Mild,125,76,68,98.3,98,96,Stable,5,2026-07-15,Endocrine,Dr. Kim

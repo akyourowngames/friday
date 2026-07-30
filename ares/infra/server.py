@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover
 from ares.agent import Agent
 from ares.attachments import AttachmentInspection, build_attachment_context, inspect_attachment
 from ares.channels.telegram import TelegramChannel
+from ares.channels.telegram_multi import MultiTelegramChannel
 from ares.config import CONFIG_PATH, load_config, save_config
 from ares.context.manager import ContextManager
 from ares.context.conversations import ConversationStore
@@ -232,6 +233,19 @@ class AresServer:
                 # unavailable. The channel logs a precise setup error instead.
                 print(f"Ares Telegram channel was not started: {exc}")
 
+        # Multi-bot Telegram channel
+        self.telegram_multi_channel: MultiTelegramChannel | None = None
+        multi_config = getattr(self.config, "telegram_multi", None)
+        if multi_config is not None and getattr(multi_config, "enabled", False):
+            try:
+                self.telegram_multi_channel = MultiTelegramChannel(
+                    config=self.config,
+                    conversation_store=self.conversation_store,
+                    config_provider=load_config,
+                )
+            except Exception as exc:
+                print(f"Ares multi-bot Telegram channel was not started: {exc}")
+
         # Wire terminal display callback to ToolExecutor
         if hasattr(self.agent, "tool_executor"):
             self.agent.tool_executor._terminal_display_callback = self._terminal_display_only
@@ -298,6 +312,8 @@ class AresServer:
                 self._launch_workspace()
             if self.telegram_channel is not None:
                 await self.telegram_channel.start()
+            if self.telegram_multi_channel is not None:
+                await self.telegram_multi_channel.start()
             if self.proactive_service is not None:
                 await self.proactive_service.start()
             if self.config.watcher.enabled:
