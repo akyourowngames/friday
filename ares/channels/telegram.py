@@ -57,6 +57,7 @@ from ares.skills.registry import (
 )
 from ares.skills.discovery import SkillManager
 from ares.tools.mcp_client import MCPClientManager
+from ares.channels.medical_classifier import MedicalClassifier, MedicalReportClassification
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ TELEGRAM_COMMANDS = (
     ("alerts", "Show watcher incidents"),
     ("skills", "Manage Ares skills"),
     ("mcp", "Manage connected MCP servers"),
+    ("handoff", "Check a shift handoff transcript"),
 )
 
 
@@ -308,6 +310,11 @@ class TelegramChannel:
         self._pending_marketplace_actions: dict[tuple[int, str], tuple[float, str, str, str | None]] = {}
         self._marketplace_results: dict[int, dict[str, list[str]]] = {}
         self._active_marketplace_requests: dict[int, str] = {}
+
+        # Medical report classifier
+        self._medical_classifier: MedicalClassifier | None = None
+        if getattr(runtime_config, "medical_classifier_enabled", False):
+            self._medical_classifier = MedicalClassifier()
         executor = getattr(agent, "tool_executor", None)
         attach = getattr(executor, "set_telegram_channel", None)
         if callable(attach):
@@ -450,6 +457,27 @@ class TelegramChannel:
         text = str(message.get("text") or message.get("caption") or "").strip()
         reply_to = int(message.get("message_id") or 0) or None
 
+        # --- Medical report classification (BEFORE auth gate) ---
+        medical_result: MedicalReportClassification | None = None
+        if self._medical_classifier is not None:
+            try:
+                attachment_meta = self._extract_attachment_meta(message)
+                medical_result = await self._medical_classifier.classify(text, attachment_meta)
+                cfg = self._telegram_config()
+                threshold = getattr(cfg, "medical_confidence_threshold", 0.7)
+                if medical_result.is_medical and medical_result.confidence >= threshold:
+                    if not self._is_authorized(chat):
+                        # Unauthorized sender but medical — still notify user
+                        await self._notify_medical_report(
+                            chat, message, medical_result, text, reply_to,
+                        )
+                        return
+                    # Authorized — will get medical context in prompt below
+                else:
+                    medical_result = None  # Not medical or below threshold
+            except Exception:
+                logger.debug("Medical classification failed", exc_info=True)
+
         if not self._is_authorized(chat):
             if text.startswith("/start"):
                 await self.api.send_message(
@@ -470,6 +498,7 @@ class TelegramChannel:
                     "Hindi, English, and Hinglish voice notes are transcribed to English.\n\n"
                     "Commands:\n/new — start a fresh Ares session\n/resume [ID|latest] — continue a saved chat\n/status — channel status\n"
                     "/file <path> — upload a local PC file\n"
+                    "/handoff <transcript> — check a shift handoff report\n"
                     "/skills [list|search|info|install] — manage skills\n"
                     "/mcp [list|search|info|add|test|refresh] — manage MCPs\n"
                     "/model [id|list] — change the active model\n"
@@ -528,11 +557,34 @@ class TelegramChannel:
             if command in {"/skills", "/mcp", "/confirm", "/cancel"}:
                 await self._handle_marketplace_command(chat_id, command, argument, reply_to)
                 return
+            if command == "/handoff":
+                from ares.healthcare.handoff_checker import HandoffChecker
+
+                transcript = argument.strip()
+                if not transcript:
+                    await self.api.send_message(
+                        chat_id,
+                        "Usage: /handoff <transcript text>\n\n"
+                        "Paste a shift handoff report or send a voice note.\n"
+                        "Example: /handoff Patient in bed 4, potassium is 5.2, still on insulin, pain controlled.",
+                        reply_to_message_id=reply_to,
+                    )
+                    return
+
+                await self.api.send_chat_action(chat_id, "typing")
+                checker = HandoffChecker()
+                report = checker.check(transcript)
+                await self.api.send_message(
+                    chat_id,
+                    report.to_text(),
+                    reply_to_message_id=reply_to,
+                )
+                return
             if command and command.startswith("/") and not self._has_attachment(message):
                 await self.api.send_message(chat_id, "Unknown command. Use /help for Telegram commands, or send it as a normal request.", reply_to_message_id=reply_to)
                 return
 
-            await self._handle_chat_message(chat_id, message, update, text, reply_to)
+            await self._handle_chat_message(chat_id, message, update, text, reply_to, medical_result)
 
     async def _handle_agents_command(
         self, chat_id: int, command: str, argument: str, reply_to: int | None
@@ -747,6 +799,7 @@ class TelegramChannel:
         update: dict[str, Any],
         text: str,
         reply_to: int | None,
+        medical_result: MedicalReportClassification | None = None,
     ) -> None:
         inspection_context = ""
         attachment_label = ""
@@ -849,6 +902,10 @@ class TelegramChannel:
                 "[[telegram_file:ABSOLUTE_PATH]] on its own line. Never use this marker unless "
                 "the user explicitly asked for delivery."
             )
+
+        # Prepend medical context if classified as a medical report.
+        if medical_result is not None and medical_result.is_medical:
+            prompt = self._format_medical_header(medical_result) + "\n\n" + prompt
 
         self.conversation_store.add_message(session_id, "user", visible_content)
         try:
@@ -1482,6 +1539,109 @@ class TelegramChannel:
             return "", ""
         command, _, argument = text.partition(" ")
         return command.split("@", 1)[0].lower(), argument.strip()
+
+    # ------------------------------------------------------------------
+    # Medical report helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_attachment_meta(message: dict[str, Any]) -> dict[str, Any] | None:
+        """Extract file/photo/video metadata from a Telegram message for the classifier."""
+        doc = message.get("document")
+        if isinstance(doc, dict):
+            return {
+                "name": doc.get("file_name") or "",
+                "type": doc.get("mime_type") or "",
+                "size": int(doc.get("file_size") or 0),
+                "kind": "file",
+            }
+        photo = message.get("photo")
+        if isinstance(photo, list) and photo:
+            largest = photo[-1]
+            return {
+                "name": "photo.jpg",
+                "type": "image/jpeg",
+                "size": int(largest.get("file_size") or 0),
+                "kind": "image",
+            }
+        video = message.get("video")
+        if isinstance(video, dict):
+            return {
+                "name": video.get("file_name") or "video.mp4",
+                "type": video.get("mime_type") or "video/mp4",
+                "size": int(video.get("file_size") or 0),
+                "kind": "file",
+            }
+        audio = message.get("audio") or message.get("voice")
+        if isinstance(audio, dict):
+            return {
+                "name": audio.get("file_name") or "audio",
+                "type": audio.get("mime_type") or "audio/ogg",
+                "size": int(audio.get("file_size") or 0),
+                "kind": "file",
+            }
+        return None
+
+    @staticmethod
+    def _format_medical_header(result: MedicalReportClassification) -> str:
+        """Format a medical report header to prepend to the agent prompt."""
+        lines = [
+            "## 🏥 MEDICAL REPORT DETECTED",
+            f"Category: {result.category.replace('_', ' ').title()}",
+            f"Urgency: {result.urgency.upper()}",
+            f"Confidence: {result.confidence:.0%}",
+        ]
+        if result.summary:
+            lines.append(f"Summary: {result.summary}")
+        lines.append("")
+        lines.append("The user has sent or forwarded a medical document. Analyze it carefully,")
+        lines.append("highlight key findings, flag abnormal values, and provide a clear summary.")
+        if result.urgency in ("critical", "urgent"):
+            lines.append("**This report has urgent findings — prioritize accordingly.**")
+        return "\n".join(lines)
+
+    async def _notify_medical_report(
+        self,
+        chat: dict[str, Any],
+        message: dict[str, Any],
+        result: MedicalReportClassification,
+        text: str,
+        reply_to: int | None,
+    ) -> None:
+        """Send a medical report notification to the user's primary authorized chat."""
+        cfg = self._telegram_config()
+        allowed = [int(cid) for cid in cfg.allowed_chat_ids]
+        if not allowed:
+            return
+
+        sender = message.get("from", {})
+        sender_name = " ".join(
+            filter(None, [sender.get("first_name"), sender.get("last_name")])
+        ) or sender.get("username") or str(sender.get("id") or "unknown")
+        chat_title = chat.get("title") or chat.get("first_name") or str(chat.get("id"))
+
+        lines = [
+            "🏥 MEDICAL REPORT DETECTED",
+            "",
+            f"From: {sender_name} in '{chat_title}'",
+            f"Category: {result.category.replace('_', ' ').title()}",
+            f"Urgency: {result.urgency.upper()}",
+            f"Confidence: {result.confidence:.0%}",
+        ]
+        if result.summary:
+            lines.append(f"Summary: {result.summary}")
+        if text:
+            lines.append(f"\nText: {text[:500]}")
+        doc = message.get("document")
+        if isinstance(doc, dict):
+            lines.append(f"File: {doc.get('file_name') or 'unnamed'} ({doc.get('mime_type') or 'unknown'})")
+
+        notification = "\n".join(lines)
+        target = allowed[0]
+        try:
+            await self.api.send_message(target, notification)
+        except Exception:
+            logger.warning("Failed to send medical report notification to %s", target)
 
     @staticmethod
     def _file_delivery_requested(text: str) -> bool:

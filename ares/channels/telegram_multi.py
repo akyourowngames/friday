@@ -70,6 +70,7 @@ from ares.memory import MemoryStore
 from ares.models import AppConfig, TelegramMultiConfig, TelegramBotConfig
 from ares.tools.mcp_client import MCPClientManager
 from ares.skills.discovery import SkillManager
+from ares.channels.medical_classifier import MedicalClassifier, MedicalReportClassification
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +296,11 @@ class MultiTelegramChannel:
         db_path = get_db_path(Path(config.data_dir).expanduser())
         self.state_store = ChannelStore(Path(db_path))
 
+        # Medical report classifier — shared across all bots.
+        self._medical_classifier: MedicalClassifier | None = None
+        if getattr(multi_config, "medical_classifier_enabled", False):
+            self._medical_classifier = MedicalClassifier()
+
     def _telegram_multi_config(self) -> TelegramMultiConfig:
         candidate = self._config_provider()
         return getattr(candidate, "telegram_multi", self._multi_config)
@@ -413,6 +419,7 @@ class MultiTelegramChannel:
                     ("help", "Show commands"),
                     ("new", "New session"),
                     ("status", "Bot status"),
+                    ("handoff", "Check a shift handoff transcript"),
                 ))
 
         logger.info(
@@ -478,6 +485,115 @@ class MultiTelegramChannel:
             if mention in text_lower:
                 return self._bots[mention]
         return None
+
+    # ------------------------------------------------------------------
+    # Medical report helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_attachment_meta(message: dict[str, Any]) -> dict[str, Any] | None:
+        """Extract file/photo/video metadata from a Telegram message for the classifier."""
+        doc = message.get("document")
+        if isinstance(doc, dict):
+            return {
+                "name": doc.get("file_name") or "",
+                "type": doc.get("mime_type") or "",
+                "size": int(doc.get("file_size") or 0),
+                "kind": "file",
+            }
+        photo = message.get("photo")
+        if isinstance(photo, list) and photo:
+            largest = photo[-1]
+            return {
+                "name": "photo.jpg",
+                "type": "image/jpeg",
+                "size": int(largest.get("file_size") or 0),
+                "kind": "image",
+            }
+        video = message.get("video")
+        if isinstance(video, dict):
+            return {
+                "name": video.get("file_name") or "video.mp4",
+                "type": video.get("mime_type") or "video/mp4",
+                "size": int(video.get("file_size") or 0),
+                "kind": "file",
+            }
+        audio = message.get("audio") or message.get("voice")
+        if isinstance(audio, dict):
+            return {
+                "name": audio.get("file_name") or "audio",
+                "type": audio.get("mime_type") or "audio/ogg",
+                "size": int(audio.get("file_size") or 0),
+                "kind": "file",
+            }
+        return None
+
+    @staticmethod
+    def _format_medical_header(result: MedicalReportClassification) -> str:
+        """Format a medical report header to prepend to the agent prompt."""
+        lines = [
+            "## 🏥 MEDICAL REPORT DETECTED",
+            f"Category: {result.category.replace('_', ' ').title()}",
+            f"Urgency: {result.urgency.upper()}",
+            f"Confidence: {result.confidence:.0%}",
+        ]
+        if result.summary:
+            lines.append(f"Summary: {result.summary}")
+        lines.append("")
+        lines.append("The user has sent or forwarded a medical document. Analyze it carefully,")
+        lines.append("highlight key findings, flag abnormal values, and provide a clear summary.")
+        if result.urgency in ("critical", "urgent"):
+            lines.append("**This report has urgent findings — prioritize accordingly.**")
+        return "\n".join(lines)
+
+    async def _notify_medical_report(
+        self,
+        instance: BotInstance,
+        chat: dict[str, Any],
+        message: dict[str, Any],
+        result: MedicalReportClassification,
+        text: str,
+        reply_to: int | None,
+    ) -> None:
+        """Send a medical report notification to the user's primary authorized chat."""
+        cfg = self._telegram_multi_config()
+        allowed = [int(cid) for cid in cfg.allowed_chat_ids]
+        if not allowed:
+            return
+
+        sender = message.get("from", {})
+        sender_name = " ".join(
+            filter(None, [sender.get("first_name"), sender.get("last_name")])
+        ) or sender.get("username") or str(sender.get("id") or "unknown")
+        chat_title = chat.get("title") or chat.get("first_name") or str(chat.get("id"))
+
+        lines = [
+            "🏥 MEDICAL REPORT DETECTED",
+            "",
+            f"From: {sender_name} in '{chat_title}'",
+            f"Via: {instance.config.name}",
+            f"Category: {result.category.replace('_', ' ').title()}",
+            f"Urgency: {result.urgency.upper()}",
+            f"Confidence: {result.confidence:.0%}",
+        ]
+        if result.summary:
+            lines.append(f"Summary: {result.summary}")
+        if text:
+            lines.append(f"\nText: {text[:500]}")
+        doc = message.get("document")
+        if isinstance(doc, dict):
+            lines.append(f"File: {doc.get('file_name') or 'unnamed'} ({doc.get('mime_type') or 'unknown'})")
+
+        notification = "\n".join(lines)
+
+        # Send to the first allowed chat (user's primary chat).
+        target = allowed[0]
+        logger.info("MEDICAL DEBUG: sending notification to %s (allowed=%s)", target, allowed)
+        try:
+            await instance.api.send_message(target, notification)
+            logger.info("MEDICAL DEBUG: notification sent successfully")
+        except Exception:
+            logger.exception("Failed to send medical report notification to %s", target)
 
     def _is_this_bot_mentioned(self, text: str, instance: BotInstance) -> bool:
         text_lower = text.lower()
@@ -632,6 +748,30 @@ class MultiTelegramChannel:
 
         cfg = self._telegram_multi_config()
 
+        # --- Medical report classification (BEFORE auth gate) ---
+        medical_result: MedicalReportClassification | None = None
+        if self._medical_classifier is not None:
+            try:
+                attachment_meta = self._extract_attachment_meta(message)
+                logger.info("MEDICAL DEBUG: text=%r attachment=%s", text, attachment_meta)
+                medical_result = await self._medical_classifier.classify(text, attachment_meta)
+                logger.info("MEDICAL DEBUG: result=%s is_medical=%s conf=%s", medical_result, medical_result.is_medical, medical_result.confidence)
+                threshold = getattr(cfg, "medical_confidence_threshold", 0.7)
+                if medical_result.is_medical and medical_result.confidence >= threshold:
+                    logger.info("MEDICAL DEBUG: classified as medical, authorized=%s", self._is_authorized(chat, cfg))
+                    if not self._is_authorized(chat, cfg):
+                        # Unauthorized sender but medical — still notify user
+                        logger.info("MEDICAL DEBUG: unauthorized medical — notifying user")
+                        await self._notify_medical_report(
+                            instance, chat, message, medical_result, text, reply_to,
+                        )
+                        return
+                    # Authorized — will get medical context in prompt below
+                else:
+                    medical_result = None  # Not medical or below threshold
+            except Exception:
+                logger.exception("Medical classification failed")
+
         if not self._is_authorized(chat, cfg):
             if text.startswith("/start"):
                 await instance.api.send_message(
@@ -667,6 +807,7 @@ class MultiTelegramChannel:
                     "Commands:\n"
                     "/new — start fresh session\n"
                     "/status — bot status\n"
+                    "/handoff — check a shift handoff transcript\n"
                     "/help — this message",
                     reply_to_message_id=reply_to,
                 )
@@ -705,10 +846,34 @@ class MultiTelegramChannel:
                 )
                 return
 
+            if command == "/handoff":
+                from ares.healthcare.handoff_checker import HandoffChecker
+
+                transcript = argument.strip()
+                if not transcript:
+                    await instance.api.send_message(
+                        chat_id,
+                        "Usage: /handoff <transcript text>\n\n"
+                        "Paste a shift handoff report or send a voice note.\n"
+                        "Example: /handoff Patient in bed 4, potassium is 5.2, still on insulin, pain controlled.",
+                        reply_to_message_id=reply_to,
+                    )
+                    return
+
+                await instance.api.send_chat_action(chat_id, "typing")
+                checker = HandoffChecker()
+                report = checker.check(transcript)
+                await instance.api.send_message(
+                    chat_id,
+                    report.to_text(),
+                    reply_to_message_id=reply_to,
+                )
+                return
+
             if not text:
                 return
 
-            await self._handle_chat_message(instance, chat_id, text, reply_to)
+            await self._handle_chat_message(instance, chat_id, text, reply_to, medical_result)
 
     def _parse_command(self, text: str) -> tuple[str, str]:
         cleaned = re.sub(r"@\w+\s*", "", text).strip()
@@ -725,6 +890,7 @@ class MultiTelegramChannel:
         chat_id: int,
         text: str,
         reply_to: int | None,
+        medical_result: MedicalReportClassification | None = None,
     ) -> None:
         """Process a regular chat message with live tool progress."""
         clean_text = self._strip_mention(text, instance)
@@ -754,6 +920,10 @@ class MultiTelegramChannel:
         )
         if instance.config.system_prompt_suffix:
             prompt += f"\n\n{instance.config.system_prompt_suffix}"
+
+        # Prepend medical context if classified as a medical report.
+        if medical_result is not None and medical_result.is_medical:
+            prompt = self._format_medical_header(medical_result) + "\n\n" + prompt
 
         if FILE_REQUEST_RE.search(text):
             prompt += (

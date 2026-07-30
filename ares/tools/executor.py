@@ -519,6 +519,7 @@ class ToolExecutor:
             "telephony_transfer": self._telephony_transfer,
             "update_config": self._update_config,
             "get_current_datetime": self._get_current_datetime,
+            "check_handoff": self._check_handoff,
         }
         try:
             handler = handlers[tool_name]
@@ -4802,3 +4803,17 @@ class ToolExecutor:
         import json
         result = _get_current_datetime_impl(timezone_name=args.get("timezone"))
         return json.dumps(result, indent=2)
+
+    def _check_handoff(self, args: dict) -> str:
+        """Check a hospital handoff transcript against patient records."""
+        from ares.healthcare.handoff_checker import HandoffChecker
+
+        checker = HandoffChecker()
+        transcript = str(args.get("transcript", "")).strip()
+        patient_id = args.get("patient_identifier") or None
+
+        if not transcript:
+            return json.dumps({"ok": False, "error": "transcript is required"})
+
+        report = checker.check(transcript, patient_identifier=patient_id)
+        return report.to_text()
