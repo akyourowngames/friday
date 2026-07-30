@@ -585,6 +585,38 @@ def test_text_tool_markup_maps_search_watchers_to_advertised_watcher_query():
     }]
 
 
+def test_textual_playwright_python_calls_map_to_real_advertised_tools():
+    calls, cleaned = Agent._text_tool_calls_from_content(
+        (
+            "Opening it now.\n"
+            'playwright_navigate(url="https://www.youtube.com/results?search_query=Pal+Pal")\n'
+            "playwright_get_title()\n"
+            'playwright_get_text(selector="body")'
+        ),
+        [
+            {
+                "type": "function",
+                "function": {"name": "mcp__playwright__browser_navigate"},
+            },
+            {
+                "type": "function",
+                "function": {"name": "mcp__playwright__browser_snapshot"},
+            },
+        ],
+    )
+
+    assert [call["function"]["name"] for call in calls] == [
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_snapshot",
+    ]
+    assert json.loads(calls[0]["function"]["arguments"]) == {
+        "url": "https://www.youtube.com/results?search_query=Pal+Pal"
+    }
+    assert json.loads(calls[1]["function"]["arguments"]) == {}
+    assert cleaned == "Opening it now."
+
+
 @pytest.mark.asyncio
 async def test_agent_run_stream_executes_text_tool_markup_without_showing_it(
     tmp_path, fake_embedding_provider

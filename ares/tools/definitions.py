@@ -1133,6 +1133,21 @@ def get_tool_definitions() -> list[dict]:
             required=["check"],
         ),
         _tool(
+            "generate_chart",
+            "Generate a chart image from dataset and style instructions and save it to a local PNG path. Use this for healthcare-report BI charts.",
+            {
+                "chart_type": {"type": "string", "enum": ["line", "bar", "pie"], "default": "line"},
+                "title": {"type": "string", "description": "Chart title."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Category or period labels."},
+                "values": {"type": "array", "items": {"type": "number"}, "description": "Numeric values aligned to labels."},
+                "output": {"type": "string", "description": "Optional PNG output path."},
+                "width": {"type": "integer", "default": 1200},
+                "height": {"type": "integer", "default": 750},
+                "response_format": {"type": "string", "enum": ["legacy", "structured"], "default": "legacy"},
+            },
+            ["chart_type", "title", "labels", "values"],
+        ),
+        _tool(
             "generate_image",
             "Generate an image from a text prompt using Pollinations.ai (free, no API key). Returns saved file path and records an asset manifest row with dimensions, format, checksum, and generation history.",
             {

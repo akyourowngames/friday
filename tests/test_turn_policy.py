@@ -53,7 +53,7 @@ def test_hermes_review_turn_exposes_only_review_tools() -> None:
 
 
 def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() -> None:
-    assert classify_turn_intent("Remember blue as my favorite color") is TurnIntent.LOCAL_MUTATION
+    assert classify_turn_intent("Remember blue as my favorite color") is TurnIntent.MODEL_ROUTED
     assert classify_turn_intent("How many agents did you use for the parallel search?") is TurnIntent.READ_ONLY
     assert classify_turn_intent("Use separate researchers to compare these") is TurnIntent.DELEGATION
     assert classify_turn_intent("Search this website by clicking the search box") is TurnIntent.BROWSER_INTERACTION
@@ -61,6 +61,15 @@ def test_turn_intent_distinguishes_memory_meta_delegation_and_browser_actions() 
     assert classify_turn_intent("yeah new browser sessionn") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("restart playwright") is TurnIntent.BROWSER_INTERACTION
     assert classify_turn_intent("start a new browser session") is TurnIntent.BROWSER_INTERACTION
+    assert classify_turn_intent("read my latest dms in insta") is TurnIntent.BROWSER_INTERACTION
+    assert (
+        classify_turn_intent("yeah pls use plawright mcp")
+        is TurnIntent.BROWSER_INTERACTION
+    )
+    assert (
+        classify_turn_intent("use plawright mcp to play pal pal by tailwinder")
+        is TurnIntent.BROWSER_INTERACTION
+    )
     assert classify_turn_intent("Explain how web search works") is TurnIntent.READ_ONLY
     assert classify_turn_intent(
         "ok launch researchers to research how much corruption is there in world"
@@ -205,6 +214,45 @@ def test_new_browser_session_exposes_playwright_tools_instead_of_zero_tools() ->
     }
 
 
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        "read my latest dms in insta",
+        "yeah pls use plawright mcp",
+        "use plawright mcp to play pal pal by tailwinder",
+    ],
+)
+def test_browser_app_requests_expose_playwright_tools(user_input: str) -> None:
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "test tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in (
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_snapshot",
+            "list_watchers",
+            "mcp__windows__Snapshot",
+        )
+    ]
+
+    context = build_turn_execution_context(user_input)
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(schemas).select_for_turn(context)
+    }
+
+    assert context.intent is TurnIntent.BROWSER_INTERACTION
+    assert names == {
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+    }
+
+
 def test_new_browser_session_does_not_send_the_full_playwright_schema_catalog() -> None:
     tool_names = [
         "mcp__playwright__browser_navigate",
@@ -265,9 +313,59 @@ def test_vision_v1_requests_are_routed_to_the_local_vision_tool_surface(
     registry = RootToolRegistry(get_tool_definitions())
     names = {item["function"]["name"] for item in registry.select_for_turn(context)}
 
-    assert context.intent is TurnIntent.LOCAL_MUTATION
+    assert context.intent in {TurnIntent.LOCAL_MUTATION, TurnIntent.MODEL_ROUTED}
     assert "vision" in context.explicit_targets
     assert expected_tool in names
+
+
+@pytest.mark.parametrize(
+    "user_request",
+    [
+        "What can you see right now?",
+        "Can you take a fresh live look?",
+        "What's on my screen now?",
+        "Show me what you see now.",
+    ],
+)
+def test_terse_live_vision_requests_never_fall_back_to_read_only_history(
+    user_request: str,
+) -> None:
+    context = build_turn_execution_context(user_request)
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(get_tool_definitions()).select_for_turn(context)
+    }
+
+    assert context.intent is TurnIntent.LOCAL_MUTATION
+    assert "vision" in context.explicit_targets
+    assert "vision_observe" in names
+
+
+def test_explicit_vision_target_can_capture_even_if_grammar_is_read_only() -> None:
+    context = TurnExecutionContext(
+        request_id="req-live-vision-fallback",
+        session_id="session-live-vision",
+        user_input="What is visible?",
+        intent=TurnIntent.READ_ONLY,
+        explicit_targets=("vision",),
+    )
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(get_tool_definitions()).select_for_turn(context)
+    }
+
+    assert "vision_observe" in names
+    assert "vision_start_source" in names
+    assert authorize_turn_tool(
+        context,
+        "vision_observe",
+        {"source": "screen"},
+    ).allowed
+    assert not authorize_turn_tool(
+        context,
+        "vision_delete_event",
+        {"event_id": "old-event"},
+    ).allowed
 
 
 def test_screen_read_request_does_not_expose_desktop_control_tools() -> None:
@@ -312,6 +410,42 @@ def test_unknown_local_tool_is_consequential_and_denied_until_registered() -> No
     assert not authorize_turn_tool(context, "future_plugin_tool", {}).allowed
 
 
+def test_ambiguous_tasks_are_semantically_routed_by_the_root_model() -> None:
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"Use {name} when it semantically fits the request.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in (
+            "read_file",
+            "run_command",
+            "vision_observe",
+            "mcp__windows__Snapshot",
+            "mcp__playwright__browser_snapshot",
+            "load_skill",
+        )
+    ]
+    context = build_turn_execution_context(
+        "Please handle the thing I described without guessing a surface."
+    )
+    names = {
+        item["function"]["name"]
+        for item in RootToolRegistry(schemas).select_for_turn(context)
+    }
+
+    assert context.intent is TurnIntent.MODEL_ROUTED
+    assert names == {item["function"]["name"] for item in schemas}
+    assert authorize_turn_tool(context, "run_command", {"command": "pytest"}).allowed
+    assert authorize_turn_tool(context, "mcp__windows__Snapshot", {}).allowed
+    assert authorize_turn_tool(
+        context, "mcp__playwright__browser_snapshot", {}
+    ).allowed
+
+
 def test_registered_core_and_system_tools_cross_the_runtime_guard() -> None:
     read_context = build_turn_execution_context(
         "What time is it?",
@@ -330,11 +464,12 @@ def test_registered_core_and_system_tools_cross_the_runtime_guard() -> None:
     ).allowed
 
 
-def test_read_only_and_agent_meta_turns_have_narrow_authority() -> None:
+def test_model_routed_and_agent_meta_turns_have_expected_authority() -> None:
     read_context = build_turn_execution_context("Read README.md and explain it", request_id="req-read")
+    assert read_context.intent is TurnIntent.MODEL_ROUTED
     assert authorize_turn_tool(read_context, "read_file", {"path": "README.md"}).allowed
-    assert not authorize_turn_tool(read_context, "write_file", {"path": "README.md", "content": "x"}).allowed
-    assert not authorize_turn_tool(read_context, "mcp__playwright__browser_click", {"ref": "e1"}).allowed
+    assert authorize_turn_tool(read_context, "write_file", {"path": "README.md", "content": "x"}).allowed
+    assert authorize_turn_tool(read_context, "mcp__playwright__browser_click", {"ref": "e1"}).allowed
 
     meta = build_turn_execution_context(
         "How many agents did you use for the parallel search?", request_id="req-meta"

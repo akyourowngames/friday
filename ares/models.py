@@ -568,13 +568,13 @@ class AppConfig(BaseModel):
     # Every Ares surface reads this shared file, so completing setup once
     # never triggers another first-run flow.
     onboarding_completed: bool = False
-    provider: str = "opencode"
+    provider: str = "kilo"
     provider_api_keys: dict[str, str] = Field(default_factory=dict)
-    model: str = "deepseek-v4-flash-free"
+    model: str = "stepfun/step-3.7-flash:free"
     fast_conversation_enabled: bool = True
-    fast_conversation_model: str = "mimo-v2.5-free"
+    fast_conversation_model: str = "stepfun/step-3.7-flash:free"
     api_key: str = ""
-    api_base_url: str = "https://opencode.ai/zen/v1"
+    api_base_url: str = "https://api.kilo.ai/api/gateway"
     copilot_github_token: str = ""
     copilot_oauth_client_id: str = ""
     copilot_oauth_callback_url: str = "http://127.0.0.1:8765/copilot/oauth/callback"

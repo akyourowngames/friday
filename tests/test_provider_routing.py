@@ -16,6 +16,7 @@ from ares.models import AppConfig
 def test_registered_models_select_their_actual_transport_provider():
     assert provider_for_model("mimo-v2.5-free") == "opencode"
     assert provider_for_model("deepseek-ai/deepseek-v4-flash") == "nim"
+    assert provider_for_model("stepfun/step-3.7-flash:free") == "kilo"
     assert provider_for_model("custom/local-model") is None
 
 

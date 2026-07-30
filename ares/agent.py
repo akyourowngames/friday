@@ -1,5 +1,6 @@
 """Core agent loop: LLM interaction, tool execution, context building."""
 
+import ast
 import asyncio
 import inspect
 import json
@@ -92,6 +93,9 @@ _BROWSER_CONTINUATION_RE = re.compile(
 _TEXT_TOOL_CALL_RE = re.compile(
     r"<(?P<name>[A-Za-z_][A-Za-z0-9_-]*)>\s*(?P<body>.*?)\s*</(?P=name)>",
     re.DOTALL,
+)
+_TEXT_FUNCTION_CALL_RE = re.compile(
+    r"(?m)^[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\((?P<body>[^\r\n]*)\)[ \t]*$"
 )
 # Some OpenAI-compatible models emit this intuitive but nonexistent name when
 # they mean ``list_watchers``. Keep the alias deliberately small and explicit.
@@ -268,8 +272,12 @@ class Agent:
         )
         self._session_store = session_store or self.tool_executor.session_store
         self.mcp_manager = mcp_manager
-        self.browser_controller = browser_controller or BrowserTaskController()
-        self.computer_controller = computer_controller or ComputerTaskController()
+        self.browser_controller = browser_controller or BrowserTaskController(
+            enforce_guardrails=False
+        )
+        self.computer_controller = computer_controller or ComputerTaskController(
+            enforce_guardrails=False
+        )
         # Browser pages are a single mutable surface. Other MCP servers, local
         # tools, and LLM turns can safely proceed in parallel across chats.
         self._playwright_tool_lock = playwright_tool_lock or asyncio.Lock()
@@ -307,6 +315,10 @@ class Agent:
         self.recent_latency_metrics: deque[dict[str, object]] = deque(
             maxlen=_RECENT_LATENCY_RECORDS
         )
+        # User-initiated cancellation: when set, the next tool execution
+        # check will abort the current turn loop.  The CLI sets this from
+        # a background thread when ESC is pressed.
+        self._user_cancel_event: asyncio.Event = asyncio.Event()
 
         kwargs = {}
         if api_key:
@@ -518,6 +530,8 @@ class Agent:
         request_id: str | None = None,
         confirmation_grants: Iterable[TurnActionGrant] = (),
     ) -> TurnExecutionContext:
+        # Clear any leftover cancellation from a previous turn.
+        self._user_cancel_event.clear()
         explicit = tuple(confirmation_grants)
         pending = tuple(getattr(self, "_pending_turn_grants", ()))
         grants = explicit or pending
@@ -899,9 +913,13 @@ class Agent:
         ):
             system_content += f"\n\n{skill_manager.compact_index()}"
             if getattr(self.config, "skill_auto_suggest", True):
-                skill_context = skill_manager.auto_context(user_input)
-                if skill_context:
-                    system_content += f"\n\n{skill_context}"
+                system_content += (
+                    "\n\n## Model-Selected Skills\n"
+                    "Choose skills by the meaning of the complete request, not keyword overlap. "
+                    "When a listed playbook is genuinely needed, call load_skill with its exact "
+                    "name and follow the returned instructions silently. Do not load a composite "
+                    "workflow merely because its destination or one action word matches."
+                )
         if context:
             system_content += f"\n\n## Current Context\n{context}"
         browser_controller = getattr(self, "browser_controller", None)
@@ -938,6 +956,21 @@ class Agent:
         )
         if computer_guidance:
             system_content += f"\n\n{computer_guidance}"
+
+        vision_guidance = ""
+        if active_turn is not None and "vision" in active_turn.explicit_targets:
+            vision_guidance = (
+                "## Live Vision Task\n"
+                "Treat requests containing now, current, live, fresh, real-time, or "
+                "\"what can you see\" as active local capture requests, never as read-only "
+                "history lookups. Call vision_observe with source=\"screen\" for the current "
+                "display or source=\"camera\" for the physical scene. vision_observe can "
+                "capture a transient current frame, so do not list old events first and do "
+                "not claim live access is unavailable while vision_observe is advertised. "
+                "Use vision_list_events only when the user explicitly asks about past or "
+                "stored observations."
+            )
+            system_content += f"\n\n{vision_guidance}"
 
         turn_guard = (
             "## Current Turn Guard\n"
@@ -1230,6 +1263,63 @@ class Agent:
         return arguments
 
     @staticmethod
+    def _parse_function_tool_arguments(raw_arguments: str) -> dict[str, Any]:
+        """Parse literal keyword arguments from ``tool(key=value)`` text."""
+
+        try:
+            expression = ast.parse(f"_tool_({raw_arguments})", mode="eval").body
+        except SyntaxError:
+            return {}
+        if not isinstance(expression, ast.Call) or expression.args:
+            return {}
+        arguments: dict[str, Any] = {}
+        for keyword in expression.keywords:
+            if keyword.arg is None:
+                return {}
+            try:
+                arguments[keyword.arg] = ast.literal_eval(keyword.value)
+            except (ValueError, TypeError):
+                return {}
+        return arguments
+
+    @staticmethod
+    def _resolve_text_tool_name(
+        source_name: str,
+        turn_tools: Iterable[dict[str, Any]],
+    ) -> str:
+        """Resolve common provider-written aliases to an advertised tool."""
+
+        available = {
+            str(schema.get("function", {}).get("name") or "").casefold():
+            str(schema.get("function", {}).get("name") or "")
+            for schema in turn_tools
+            if str(schema.get("function", {}).get("name") or "").strip()
+        }
+        source = str(source_name or "").casefold()
+        exact = available.get(_TEXT_TOOL_ALIASES.get(source, source))
+        if exact:
+            return exact
+
+        browser_action = ""
+        if source.startswith("playwright_"):
+            browser_action = source.removeprefix("playwright_")
+        elif source.startswith("browser_"):
+            browser_action = source.removeprefix("browser_")
+        if browser_action in {"get_title", "get_text", "content", "inspect"}:
+            browser_action = "snapshot"
+        if browser_action:
+            suffix = f"__browser_{browser_action}"
+            return next(
+                (
+                    canonical
+                    for lowered, canonical in available.items()
+                    if lowered.endswith(suffix)
+                ),
+                "",
+            )
+        return ""
+
+    @staticmethod
     def _advertised_tool_calls(
         tool_calls: Iterable[dict[str, Any]],
         turn_tools: Iterable[dict[str, Any]],
@@ -1265,41 +1355,44 @@ class Agent:
         return accepted, tuple(dict.fromkeys(rejected))
 
     @staticmethod
-    def _serialize_windows_tool_calls(
+    def _serialize_interactive_tool_calls(
         tool_calls: Iterable[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
-        """Keep at most one Windows MCP call from a model-planned batch.
+        """Keep at most one call per mutable UI surface from a planned batch.
 
-        Native desktop calls depend on UI state which can change after every
-        observation or action. Models sometimes emit Snapshot, App, and Click
-        together; executing that batch serially still leaves later calls based
-        on the pre-Snapshot generation. Defer those calls so the model observes
-        each result and resolves the next target from fresh state. A native
-        Windows batching tool remains one call and is unaffected.
+        Desktop and browser calls depend on state which can change after every
+        observation or action. Defer later same-surface calls so the model sees
+        the first live result and resolves the next step from current state.
         """
 
         accepted: list[dict[str, Any]] = []
         deferred: list[str] = []
-        windows_seen = False
+        surfaces_seen: set[str] = set()
         for raw_call in tool_calls:
             call = dict(raw_call)
             name = str((call.get("function") or {}).get("name") or "").strip()
-            if name.casefold().startswith("mcp__windows__"):
-                if windows_seen:
+            lowered = name.casefold()
+            surface = (
+                "windows"
+                if lowered.startswith("mcp__windows__")
+                else "playwright"
+                if lowered.startswith("mcp__playwright__browser_")
+                else ""
+            )
+            if surface:
+                if surface in surfaces_seen:
                     deferred.append(name or "<unnamed>")
                     continue
-                windows_seen = True
+                surfaces_seen.add(surface)
             accepted.append(call)
         return accepted, tuple(deferred)
 
     @staticmethod
-    def _deferred_windows_tool_correction(deferred: Iterable[str]) -> str:
+    def _deferred_surface_tool_correction(deferred: Iterable[str]) -> str:
         return (
-            "Runtime desktop sequencing correction: deferred stale same-turn Windows "
-            f"call(s): {', '.join(deferred)}. Inspect the completed Windows result, then "
-            "issue exactly one next Windows call using the current UI generation and phase. "
-            "Use a native Windows batch tool only when every operation is valid against the "
-            "same observed UI state."
+            "Runtime UI sequencing correction: deferred stale same-turn call(s): "
+            f"{', '.join(deferred)}. Inspect the completed live result, then issue exactly "
+            "one next call on that UI surface. Continue directly; no confirmation is needed."
         )
 
     @staticmethod
@@ -1333,29 +1426,35 @@ class Agent:
         Text tags embedded in prose remain text, preventing an answer that
         merely discusses a tag from becoming an unintended tool invocation.
         """
-        available = {
-            str(schema.get("function", {}).get("name") or "").casefold()
-            for schema in turn_tools
-        }
         calls: list[dict] = []
 
-        def replace(match: re.Match[str]) -> str:
-            line_start = content.rfind("\n", 0, match.start()) + 1
-            line_end = content.find("\n", match.end())
-            if line_end < 0:
-                line_end = len(content)
-            if content[line_start:match.start()].strip() or content[match.end():line_end].strip():
-                return match.group(0)
+        def append_call(match: re.Match[str], *, function_style: bool) -> str:
+            if not function_style:
+                line_start = content.rfind("\n", 0, match.start()) + 1
+                line_end = content.find("\n", match.end())
+                if line_end < 0:
+                    line_end = len(content)
+                if (
+                    content[line_start:match.start()].strip()
+                    or content[match.end():line_end].strip()
+                ):
+                    return match.group(0)
 
             source_name = match.group("name").casefold()
-            tool_name = _TEXT_TOOL_ALIASES.get(source_name, source_name)
-            if tool_name not in available:
+            tool_name = cls._resolve_text_tool_name(source_name, turn_tools)
+            if not tool_name:
                 return match.group(0)
 
-            arguments = cls._parse_text_tool_arguments(match.group("body"))
+            arguments = (
+                cls._parse_function_tool_arguments(match.group("body"))
+                if function_style
+                else cls._parse_text_tool_arguments(match.group("body"))
+            )
             if source_name == "search_watchers":
                 query = arguments.pop("query", arguments.pop("name", arguments.pop("watcher", "")))
                 arguments["query"] = str(query)
+            if tool_name.casefold().endswith("__browser_snapshot"):
+                arguments = {}
             calls.append({
                 "id": f"text_tool_{len(calls)}",
                 "type": "function",
@@ -1366,7 +1465,14 @@ class Agent:
             })
             return ""
 
-        cleaned = _TEXT_TOOL_CALL_RE.sub(replace, str(content or ""))
+        cleaned = _TEXT_TOOL_CALL_RE.sub(
+            lambda match: append_call(match, function_style=False),
+            str(content or ""),
+        )
+        cleaned = _TEXT_FUNCTION_CALL_RE.sub(
+            lambda match: append_call(match, function_style=True),
+            cleaned,
+        )
         return calls, re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     def _resolve_email_reference(self, value: Any) -> str:
@@ -1603,6 +1709,31 @@ class Agent:
                 return await execute()
         return await execute()
 
+    def request_user_cancel(self) -> None:
+        """Signal that the user wants to stop the current turn (e.g. ESC key).
+
+        Thread-safe: can be called from a background thread (keyboard listener).
+        """
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._user_cancel_event.set)
+        else:
+            self._user_cancel_event.set()
+
+    def clear_user_cancel(self) -> None:
+        """Reset the cancellation flag for a new turn."""
+        self._user_cancel_event.clear()
+
+    def _check_user_cancel(self) -> None:
+        """Raise if the user requested cancellation."""
+        if self._user_cancel_event.is_set():
+            self._user_cancel_event.clear()
+            raise asyncio.CancelledError("Cancelled by user (ESC)")
+
     def _authorize_tool(self, tool_name: str, args: dict) -> None:
         """Enforce the immutable current-turn boundary before dispatch."""
         context = self.turn_context
@@ -1692,6 +1823,7 @@ class Agent:
         progress_callback: ToolProgressCallback | None,
     ) -> tuple[int, bool, str]:
         tool_name = call.get("function", {}).get("name", "unknown")
+        self._check_user_cancel()
         try:
             args = self._tool_call_args(call)
             self._authorize_tool(tool_name, args)
@@ -1718,8 +1850,24 @@ class Agent:
                             )
 
             async def await_operation(dispatch: asyncio.Task[tuple[bool, str]]) -> tuple[bool, str]:
-                done, _pending = await asyncio.wait({dispatch}, timeout=timeout_seconds)
-                if not done:
+                # Poll for user cancellation every 0.3s while the tool runs,
+                # instead of blocking on a single long await.  This makes ESC
+                # responsive even during slow MCP calls (snapshots, browser).
+                deadline = time.monotonic() + timeout_seconds
+                while not dispatch.done():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(dispatch),
+                            timeout=min(0.3, remaining),
+                        )
+                        break  # dispatch completed
+                    except asyncio.TimeoutError:
+                        # Check for user cancellation between poll intervals
+                        self._check_user_cancel()
+                if not dispatch.done():
                     dispatch.cancel()
                     done, _pending = await asyncio.wait({dispatch}, timeout=cleanup_grace)
                     if not done:
@@ -1814,6 +1962,7 @@ class Agent:
             resources.append(call_resource(i, call, arguments))
         wave_plan = execution_waves(resources)
         for wave in wave_plan:
+            self._check_user_cancel()
             completed = await asyncio.gather(*(
                 self._execute_one_tool_async(i, tool_calls[i], progress_callback)
                 for i in wave
@@ -2551,13 +2700,13 @@ class Agent:
                     # Do not surface an authorization failure for a tool the
                     # model was never offered. Give it one clean routing retry.
                     continue
-                advertised_calls, deferred_calls = self._serialize_windows_tool_calls(
+                advertised_calls, deferred_calls = self._serialize_interactive_tool_calls(
                     advertised_calls
                 )
                 if deferred_calls:
                     messages.append({
                         "role": "system",
-                        "content": self._deferred_windows_tool_correction(deferred_calls),
+                        "content": self._deferred_surface_tool_correction(deferred_calls),
                     })
                 response = dict(response)
                 response["tool_calls"] = advertised_calls
@@ -3016,13 +3165,13 @@ class Agent:
                     # surface. Retry invisibly with an exclusive route instead
                     # of showing the user a failed/unauthorized tool card.
                     continue
-                formatted_calls, deferred_calls = self._serialize_windows_tool_calls(
+                formatted_calls, deferred_calls = self._serialize_interactive_tool_calls(
                     formatted_calls
                 )
                 if deferred_calls:
                     messages.append({
                         "role": "system",
-                        "content": self._deferred_windows_tool_correction(deferred_calls),
+                        "content": self._deferred_surface_tool_correction(deferred_calls),
                     })
 
                 messages.append({
@@ -3047,6 +3196,7 @@ class Agent:
                             tool_name, detail = await asyncio.wait_for(
                                 progress.get(), timeout=0.25
                             )
+                            self._check_user_cancel()
                             if tool_name not in active_tools:
                                 active_tools[tool_name] = asyncio.get_running_loop().time()
                                 yield f"[tool_start:{tool_name}]"
@@ -3055,6 +3205,7 @@ class Agent:
                                 active_tools.pop(tool_name, None)
                                 reported_seconds.pop(tool_name, None)
                         except asyncio.TimeoutError:
+                            self._check_user_cancel()
                             now = asyncio.get_running_loop().time()
                             for tool_name, started_at in active_tools.items():
                                 elapsed = max(1, round(now - started_at))

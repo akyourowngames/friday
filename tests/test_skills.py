@@ -181,7 +181,7 @@ def test_builtin_skills_and_tool_definitions_are_available(tmp_path):
         "code-review", "web-research", "daily-planner", "computer-use", "browser-use",
         "browser-form-workflow", "browser-content-review", "conversation-conduct",
     }.issubset(names)
-    assert "auto-load relevant skills silently" in manager.compact_index()
+    assert "Select by the meaning of the complete task" in manager.compact_index()
 
     relevant = manager.relevant_skills("Open Notepad, type a note, and save it on my desktop")
     assert "computer-use" in {skill.name for skill in relevant}
@@ -206,6 +206,19 @@ def test_auto_loaded_skills_require_direct_intent_signals(tmp_path):
     assert "computer-use" not in browser_skills
     browser_use = next(skill for skill in manager.relevant_skills("open Instagram using MCP") if skill.name == "browser-use")
     assert manager.selection_reason(browser_use, "open Instagram using MCP") == "matches a browser action request"
+
+    dm_skills = {
+        skill.name for skill in manager.relevant_skills("read my latest dms in insta")
+    }
+    media_skills = {
+        skill.name
+        for skill in manager.relevant_skills(
+            "use plawright mcp to play pal pal by tailwinder"
+        )
+    }
+    assert "browser-use" in dm_skills
+    assert "web-research" not in dm_skills
+    assert "browser-use" in media_skills
 
 
 @pytest.mark.parametrize(

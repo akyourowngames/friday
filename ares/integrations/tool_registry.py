@@ -17,6 +17,7 @@ from typing import Any
 
 class ToolCategory(str, Enum):
     CORE_CONVERSATION = "core_conversation"
+    SKILLS = "skills"
     RECALL = "recall"
     DELEGATION = "delegation"
     WORKFLOWS = "workflows"
@@ -82,9 +83,18 @@ COMMUNICATION_TOOL_NAMES = frozenset({
 })
 CORE_TOOL_NAMES = frozenset({"get_current_datetime"})
 SYSTEM_MUTATION_TOOL_NAMES = frozenset({"update_config"})
+SKILL_ROUTING_TOOL_NAMES = frozenset({
+    "list_skills", "load_skill", "search_skill_marketplace",
+})
+SKILL_MUTATION_TOOL_NAMES = frozenset({
+    "create_skill", "install_marketplace_skill", "uninstall_skill",
+})
 VISION_READ_TOOL_NAMES = frozenset({
     "vision_compare", "vision_list_watches",
     "vision_list_events", "vision_list_sources",
+})
+VISION_LIVE_TOOL_NAMES = frozenset({
+    "vision_observe", "vision_start_source",
 })
 _BROWSER_SESSION_TURN_RE = re.compile(
     r"\b(?:new|fresh)\s+(?:playwright|browser|chrome)(?:\s+session+)?\b|"
@@ -115,6 +125,8 @@ def categorize_tool_name(name: str) -> ToolCategory:
         return ToolCategory.DELEGATION
     if normalized in CORE_TOOL_NAMES:
         return ToolCategory.CORE_CONVERSATION
+    if normalized in SKILL_ROUTING_TOOL_NAMES or normalized in SKILL_MUTATION_TOOL_NAMES:
+        return ToolCategory.SKILLS
     if normalized in SYSTEM_MUTATION_TOOL_NAMES:
         return ToolCategory.SYSTEM
     if normalized in WORKFLOW_TOOL_NAMES:
@@ -162,6 +174,8 @@ def is_harmless_read_tool(name: str) -> bool:
     lowered = normalized.casefold()
     category = categorize_tool_name(normalized)
     if normalized in AGENT_INTROSPECTION_TOOL_NAMES:
+        return True
+    if normalized in SKILL_ROUTING_TOOL_NAMES:
         return True
     if normalized in READ_ONLY_FILE_TOOL_NAMES or normalized in RECALL_TOOL_NAMES:
         return True
@@ -277,6 +291,16 @@ class RootToolRegistry:
         if intent in {"conversation", "confirmation_response"}:
             return self._schemas_named(grant_names)
 
+        # The normal root model is itself the semantic router. Ambiguous
+        # natural-language tasks receive the live catalog once, then native
+        # tool calling chooses the capability from descriptions instead of a
+        # growing list of English keyword rules.
+        if intent == "model_routed":
+            return [
+                copy.deepcopy(dict(tool.schema))
+                for tool in self._tools.values()
+            ]
+
         if intent == "browser_interaction" and _BROWSER_SESSION_TURN_RE.search(text):
             browser_session_names = {
                 tool.name
@@ -285,7 +309,10 @@ class RootToolRegistry:
                 and tool.name.casefold().endswith(_BROWSER_SESSION_TOOL_SUFFIXES)
             }
             return self._schemas_named(
-                browser_session_names | set(CORE_TOOL_NAMES) | grant_names
+                browser_session_names
+                | set(CORE_TOOL_NAMES)
+                | set(SKILL_ROUTING_TOOL_NAMES)
+                | grant_names
             )
 
         if "prior_task" in targets and intent == "local_mutation":
@@ -306,6 +333,14 @@ class RootToolRegistry:
                 if tool.name in grant_names:
                     selected_reads.append(copy.deepcopy(dict(tool.schema)))
                     continue
+                # A terse live visual request can still arrive with a
+                # read-only grammatical shape ("what can you see now?").
+                # Keep current capture available whenever Vision is the
+                # explicit surface instead of forcing the model to inspect
+                # yesterday's event history.
+                if "vision" in targets and tool.name in VISION_LIVE_TOOL_NAMES:
+                    selected_reads.append(copy.deepcopy(dict(tool.schema)))
+                    continue
                 if not is_harmless_read_tool(tool.name):
                     continue
                 if tool.category is ToolCategory.MCP:
@@ -317,7 +352,9 @@ class RootToolRegistry:
             return selected_reads
 
         allowed_categories: set[ToolCategory] = {ToolCategory.CORE_CONVERSATION}
-        allowed_names: set[str] = set(CORE_TOOL_NAMES) | grant_names
+        allowed_names: set[str] = (
+            set(CORE_TOOL_NAMES) | set(SKILL_ROUTING_TOOL_NAMES) | grant_names
+        )
         if intent == "local_mutation":
             if "recall" in targets:
                 allowed_categories.add(ToolCategory.RECALL)

@@ -63,8 +63,14 @@ class BrowserTaskState:
 class BrowserTaskController:
     """Coordinate fast, safe browser use across concurrent Ares conversations."""
 
-    def __init__(self, *, snapshot_ttl_seconds: float = 4.0) -> None:
+    def __init__(
+        self,
+        *,
+        snapshot_ttl_seconds: float = 4.0,
+        enforce_guardrails: bool = True,
+    ) -> None:
         self.snapshot_ttl_seconds = snapshot_ttl_seconds
+        self.enforce_guardrails = bool(enforce_guardrails)
         self._states: dict[str, BrowserTaskState] = {}
         self._generation = 0
         self._lock = RLock()
@@ -185,7 +191,9 @@ class BrowserTaskController:
         with self._lock:
             state = self._state(session_id)
             state.goal = text[:800]
-            state.browser_active = any(hint in lowered for hint in _BROWSER_HINTS)
+            state.browser_active = bool(str(routing_text or "").strip()) or any(
+                hint in lowered for hint in _BROWSER_HINTS
+            )
             state.authority = "observe" if any(
                 phrase in lowered for phrase in ("inspect", "read", "look at", "show me", "what is", "find")
             ) else "work"
@@ -205,6 +213,14 @@ class BrowserTaskController:
     def guidance(self, session_id: str | None) -> str:
         with self._lock:
             state = self._state(session_id)
+            if not self.enforce_guardrails:
+                return (
+                    "## Live Browser Task\n"
+                    f"Goal: {state.goal or 'continue the current browser task'}\n"
+                    "Playwright is in permissive mode. Call the advertised Playwright MCP "
+                    "tools directly and continue from their live results. Do not substitute "
+                    "Watcher, Windows, Phone, or textual pseudo-tool calls."
+                )
             verification = "required after the next/current mutation" if state.verification_required else "not pending"
             return (
                 "## Live Browser Task\n"
@@ -233,6 +249,8 @@ class BrowserTaskController:
                 )
                 if fresh:
                     return BrowserPreflight(cached_result=state.snapshot)
+                return BrowserPreflight()
+            if not self.enforce_guardrails:
                 return BrowserPreflight()
 
             signature = self._signature(tool_name, arguments)
@@ -299,6 +317,9 @@ class BrowserTaskController:
                 self._generation += 1
                 state.snapshot = None
                 state.snapshot_generation = -1
+                if not self.enforce_guardrails:
+                    state.verification_required = False
+                    return text
                 state.verification_required = True
                 return (
                     f"{text}\n\nBrowser controller: page state may have changed. "
