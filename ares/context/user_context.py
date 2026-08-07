@@ -88,6 +88,7 @@ def build_user_context(
     config: Any,
     soul_manager: Any,
     profile_manager: Any,
+    user_model_manager: Any | None = None,
     project_context: Any,
     memory_store: Any,
     conversation_store: Any | None = None,
@@ -118,6 +119,12 @@ def build_user_context(
     project_budget = max(400, token_budget // 5)
     soul_context = soul_manager.get_context(token_budget=soul_budget)
     profile_context = profile_manager.get_context(token_budget=profile_budget)
+    user_model_budget = max(300, token_budget // 8)
+    user_model_context = (
+        user_model_manager.get_context(token_budget=user_model_budget)
+        if user_model_manager is not None
+        else ""
+    )
     project_text = ""
     if getattr(config, "project_context_enabled", False):
         project_text = project_context.get_context(token_budget=project_budget)
@@ -331,6 +338,7 @@ def build_user_context(
     prepared = build_context_prompt(
         soul_context=soul_context,
         profile_context=profile_context,
+        user_model_context=user_model_context,
         project_context=project_text,
         memories=memories,
         people=people,

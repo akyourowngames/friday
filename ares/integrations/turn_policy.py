@@ -628,6 +628,8 @@ def classify_tool_effect(tool_name: str) -> ToolEffect:
         return ToolEffect.READ_ONLY if name in _READ_ONLY_VISION_TOOLS else ToolEffect.LOCAL_MUTATION
     if category in {ToolCategory.GOALS, ToolCategory.WATCHERS}:
         return ToolEffect.READ_ONLY if lowered.startswith(_READ_VERBS) else ToolEffect.LOCAL_MUTATION
+    if category is ToolCategory.CRON:
+        return ToolEffect.READ_ONLY if name in {"list_cron_jobs", "get_cron_job"} else ToolEffect.LOCAL_MUTATION
     if category is ToolCategory.MCP:
         operation = lowered.split("__")[-1]
         if operation.startswith(_EXTERNAL_VERBS):

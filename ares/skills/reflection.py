@@ -25,6 +25,7 @@ from ares.memory.lifecycle import (
     explicit_memory_request,
 )
 from ares.skills.self_improvement import SelfImprovementStore
+from ares.user_model import UserModelReflector
 
 
 def utc_now() -> str:
@@ -906,6 +907,7 @@ class ReflectionService:
         llm_client: Any | None = None,
         follow_up_store: FollowUpStore | None = None,
         memory_config: Any | None = None,
+        user_model_manager: Any | None = None,
     ) -> None:
         self.config = config
         self.memory_config = memory_config
@@ -955,6 +957,10 @@ class ReflectionService:
         self.goal_store = goal_store
         self.commitment_store = commitment_store
         self.profile_manager = profile_manager
+        self.user_model_manager = user_model_manager
+        self.user_model_reflector = (
+            UserModelReflector(self.llm, config) if user_model_manager is not None else None
+        )
         self._tasks: set[asyncio.Task] = set()
         self._scope_tasks: dict[str, asyncio.Task] = {}
         self._apply_lock = asyncio.Lock()
@@ -1066,6 +1072,32 @@ class ReflectionService:
             ))
         return result
 
+    async def _maybe_update_user_model(self, job: dict[str, Any]) -> None:
+        """Distill stable user facts into the always-on user model between turns.
+
+        Runs only when configured and when the exchange carries durable signal
+        (non-trivial user text that is not a bare greeting), keeping the extra
+        background LLM call cheap and relevant.
+        """
+        if self.user_model_manager is None or self.user_model_reflector is None:
+            return
+        if not bool(getattr(self.config, "user_model_enabled", True)):
+            return
+        user_text = str(job.get("user_text") or "").strip()
+        if len(user_text) < 20:
+            return
+        if user_text.casefold() in {
+            "hi", "hello", "hey", "ok", "okay", "thanks", "thank you",
+            "yep", "yes", "no", "nice", "cool", "got it", "sure",
+        }:
+            return
+        facts = await self.user_model_reflector.extract(
+            user_text=user_text,
+            assistant_text=str(job.get("assistant_text") or ""),
+        )
+        if facts:
+            self.user_model_manager.merge_facts(facts)
+
     async def _process_job(self, job: dict[str, Any]) -> str:
         """Run one already-claimed job and return its queue outcome.
 
@@ -1111,6 +1143,13 @@ class ReflectionService:
                 self.store.finish_compaction(
                     job.get("compaction_checkpoint"), status="completed"
                 )
+            # User-model distillation is best-effort and must never affect the
+            # durable reflection outcome above: a failure here cannot retry or
+            # flunk the memory/goal/profile work that already completed.
+            try:
+                await self._maybe_update_user_model(job)
+            except Exception:
+                pass
             return "completed"
         except (ValidationError, ValueError, json.JSONDecodeError, asyncio.TimeoutError) as exc:
             attempts = int((self.store.get(reflection_id) or {}).get("attempts", 1))

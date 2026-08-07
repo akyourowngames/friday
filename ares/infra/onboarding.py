@@ -269,7 +269,15 @@ class OnboardingWizard:
         }
 
     def _ask_model(self, re_run: bool) -> str:
-        return self._pick_model_table(FREE_MODELS, self.config.model)
+        from ares.integrations.llm import get_models_sync
+
+        live = get_models_sync(self.config.provider)
+        models = [m["id"] for m in live] or list(FREE_MODELS)
+        # Always offer the configured default (e.g. tencent/hy3:free) so it is
+        # selectable even before a provider key enables the live catalogue.
+        if self.config.model and self.config.model not in models:
+            models.insert(0, self.config.model)
+        return self._pick_model_table(models, self.config.model)
 
     def _ask_personality(self, re_run: bool) -> str:
         table = Table(title="Personality presets", border_style="magenta")

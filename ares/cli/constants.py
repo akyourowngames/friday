@@ -18,7 +18,7 @@ COMPLETER = WordCompleter(
         "/help", "/menu", "/memory", "/memory clean", "/memory learning", "/memory learning pending", "/memory learning active", "/memory learning approve", "/memory learning reject", "/memory explain", "/latency", "/model", "/provider", "/copilot", "/copilot login", "/copilot token", "/copilot status", "/clear",
         "/goals", "/goals search", "/goals show", "/goals due", "/goals signals",
         "/forget", "/export", "/import", "/reset", "/exit",
-        "/soul", "/profile", "/context",
+        "/soul", "/profile", "/user_model", "/context",
         "/skills", "/skills list", "/skills search", "/skills install", "/skills create",
         "/skills info", "/skills update", "/skills remove", "/skills publish",
         "/skills login", "/skills whoami", "/skills categories", "/skills load",

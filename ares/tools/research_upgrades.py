@@ -395,15 +395,28 @@ def _extract_one(workspace: ResearchWorkspace, spec: dict[str, Any], args: dict[
     resolved = Path(path).expanduser().resolve(strict=True)
     suffix = resolved.suffix.casefold()
     if suffix == ".pdf" and args.get("pages"):
-        from pypdf import PdfReader
-        reader = PdfReader(str(resolved))
-        chunks = []
-        citations = []
-        for page_number in _parse_pages(args.get("pages"), len(reader.pages)):
-            text = reader.pages[page_number - 1].extract_text() or ""
-            chunks.append(f"## Page {page_number}\n{text}")
-            citations.append({"page": page_number, "citation": f"[{resolved.name}#page={page_number}]"})
-        result = {"path": str(resolved), "name": resolved.name, "kind": "pdf", "content": "\n\n".join(chunks), "page_citations": citations}
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            # pypdf is an optional dependency; fall back to the regex extractor
+            # used by the basic path so the request still succeeds (without the
+            # precise page range).
+            from ares.tools.web import _extract_pdf_text
+            text, _ = _extract_pdf_text(resolved.read_bytes(), 200_000)
+            result = {
+                "path": str(resolved), "name": resolved.name, "kind": "pdf",
+                "content": text,
+                "note": "pypdf not installed; extracted the whole document (page range ignored).",
+            }
+        else:
+            reader = PdfReader(str(resolved))
+            chunks = []
+            citations = []
+            for page_number in _parse_pages(args.get("pages"), len(reader.pages)):
+                text = reader.pages[page_number - 1].extract_text() or ""
+                chunks.append(f"## Page {page_number}\n{text}")
+                citations.append({"page": page_number, "citation": f"[{resolved.name}#page={page_number}]"})
+            result = {"path": str(resolved), "name": resolved.name, "kind": "pdf", "content": "\n\n".join(chunks), "page_citations": citations}
     elif suffix in {".zip", ".jar", ".whl"}:
         with zipfile.ZipFile(resolved) as archive:
             members = archive.infolist()
@@ -412,7 +425,10 @@ def _extract_one(workspace: ResearchWorkspace, spec: dict[str, Any], args: dict[
                 raise ValueError("Archive expansion limits exceeded")
             result = {"path": str(resolved), "name": resolved.name, "kind": "archive", "content": "", "archive_entries": [{"name": item.filename, "bytes": item.file_size, "compressed_bytes": item.compress_size} for item in members[:2_000]]}
     elif suffix == ".xlsx" and (args.get("sheet") or args.get("range")):
-        from openpyxl import load_workbook
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            raise ValueError("Reading specific sheets requires openpyxl (pip install openpyxl).")
         workbook = load_workbook(resolved, read_only=True, data_only=True)
         sheet = workbook[str(args.get("sheet") or workbook.sheetnames[0])]
         cells = sheet[str(args.get("range") or sheet.calculate_dimension())]

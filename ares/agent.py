@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Iterator
 
 from ares.context.discovery import ProjectContext
 from ares.context.user_context import build_user_context
+from ares.user_model import UserModelManager
 from ares.autonomy import AutonomousWorkflowRunner
 from ares.integrations.browser_control import BrowserTaskController
 from ares.integrations.computer_control import ComputerTaskController
@@ -382,12 +383,14 @@ class Agent:
         data_dir.mkdir(parents=True, exist_ok=True)
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
         self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=self.config.profile_path)
+        self.user_model_manager = UserModelManager(data_dir=data_dir, user_model_path=self.config.user_model_path)
         self.project_context = ProjectContext(
             enabled=self.config.project_context_enabled,
             max_files=self.config.project_context_max_files,
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        self.user_model_manager.ensure_exists()
         self.reflection_service: ReflectionService | None = None
         if (
             not self.is_cron_session
@@ -406,6 +409,7 @@ class Agent:
                 profile_manager=self.profile_manager,
                 config=getattr(self.config, "reflection", self.config),
                 llm_client=self.llm,
+                user_model_manager=self.user_model_manager,
                 memory_config=getattr(self.config, "memory", None),
             )
             self.tool_executor.self_improvement_store = (
@@ -777,7 +781,21 @@ class Agent:
             registry = RootToolRegistry(self.tools)
             self._root_tool_registry = registry
             self._root_tool_registry_source = source
-        return registry.select_for_turn(context, delegation_decision=delegation_decision)
+        # Full LLM routing by default: the answering model picks the capability
+        # from the live catalog. Fall back to the deterministic regex classifier
+        # if routing mode is disabled or the LLM path raises.
+        routing_mode = str(getattr(getattr(self, "config", None), "routing_mode", "llm") or "llm").strip().casefold()
+        if routing_mode not in ("llm", "regex"):
+            routing_mode = "llm"
+        try:
+            return registry.select_for_turn(
+                context, delegation_decision=delegation_decision, routing_mode=routing_mode
+            )
+        except Exception:
+            logger.warning("LLM tool routing failed; using regex fallback", exc_info=True)
+            return registry.select_for_turn(
+                context, delegation_decision=delegation_decision, routing_mode="regex"
+            )
 
     def _model_for_turn(
         self,
@@ -1035,6 +1053,7 @@ class Agent:
             config=self.config,
             soul_manager=self.soul_manager,
             profile_manager=self.profile_manager,
+            user_model_manager=self.user_model_manager,
             project_context=self.project_context,
             memory_store=self.memory_store,
             conversation_store=self.conversation_store,
@@ -1173,6 +1192,16 @@ class Agent:
         if self.soul_manager.soul_path != soul_path:
             self.soul_manager = SoulManager(data_dir=data_dir, soul_path=config.soul_path)
             self.soul_manager.ensure_exists()
+        user_model_path = (
+            Path(config.user_model_path).expanduser()
+            if config.user_model_path
+            else data_dir / "user_model.md"
+        )
+        if self.user_model_manager.user_model_path != user_model_path:
+            self.user_model_manager = UserModelManager(data_dir=data_dir, user_model_path=config.user_model_path)
+            self.user_model_manager.ensure_exists()
+            if self.reflection_service is not None:
+                self.reflection_service.user_model_manager = self.user_model_manager
         self.project_context.enabled = config.project_context_enabled
         self.project_context.max_files = max(0, int(config.project_context_max_files))
         if self.reflection_service is not None:
@@ -1219,6 +1248,7 @@ class Agent:
         """
         self.profile_manager.ensure_exists()
         self.soul_manager.ensure_exists()
+        self.user_model_manager.ensure_exists()
         skill_dirs = list(self.config.skill_dirs or [])
         self.skill_manager = SkillManager(skill_dirs=skill_dirs or None)
         self.tool_executor.skill_manager = self.skill_manager

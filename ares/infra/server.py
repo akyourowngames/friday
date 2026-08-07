@@ -43,6 +43,7 @@ from ares.skills.proactive import ProactiveService
 from ares.skills.reminders import DesktopNotifier
 from ares.soul import SoulManager
 from ares.tools.mcp_client import MCPClientManager, MCPServerConfig, redact_mcp_text
+from ares.user_model import UserModelManager
 from ares.workspace.settings import render_profile, render_soul, workspace_settings
 from ares.workspace.uploads import WorkspaceUploadStore
 
@@ -208,8 +209,13 @@ class AresServer:
             data_dir=data_dir,
             profile_path=self.config.profile_path,
         )
+        self.user_model_manager = UserModelManager(
+            data_dir=data_dir,
+            user_model_path=self.config.user_model_path,
+        )
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
         self.profile_manager.ensure_exists()
+        self.user_model_manager.ensure_exists()
         self.soul_manager.ensure_exists()
         self.workspace_uploads = WorkspaceUploadStore(data_dir)
         self._terminal_output_buffer: dict[str, str] = {}
@@ -2641,8 +2647,10 @@ class AresServer:
         self.context_manager.truncator.max_chars = latest.tool_output_max_chars
         data_dir = latest.data_dir
         self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=latest.profile_path)
+        self.user_model_manager = UserModelManager(data_dir=data_dir, user_model_path=latest.user_model_path)
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=latest.soul_path)
         self.profile_manager.ensure_exists()
+        self.user_model_manager.ensure_exists()
         self.soul_manager.ensure_exists()
         self.workspace_uploads = WorkspaceUploadStore(data_dir)
         self._apply_config_to_agent()
@@ -2781,6 +2789,7 @@ class AresServer:
     def _personal_settings(self) -> dict[str, Any]:
         self.profile_manager.ensure_exists()
         self.soul_manager.ensure_exists()
+        self.user_model_manager.ensure_exists()
         return {
             "type": "personal_settings",
             "settings": {
@@ -2791,6 +2800,10 @@ class AresServer:
                 "soul": {
                     "path": str(self.soul_manager.soul_path),
                     "content": self.soul_manager.read(),
+                },
+                "user_model": {
+                    "path": str(self.user_model_manager.user_model_path),
+                    "content": self.user_model_manager.read(),
                 },
             },
         }

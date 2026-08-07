@@ -8,6 +8,7 @@ import json
 import mimetypes
 import re
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,12 @@ DEFAULT_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
 MAX_REDIRECTS = 5
+# aria2c-style parallel/resume tuning.  A file is only parallelized when the
+# server advertises Range support AND the declared size clears the minimum, so
+# tiny files never pay the overhead of spawning connections.
+_PARALLEL_MIN_BYTES = 1 * 1024 * 1024
+_PARALLEL_MAX_CONNECTIONS = 16
+_PARALLEL_CHUNK_BYTES = 256 * 1024
 _SAFE_FILE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
@@ -90,14 +97,36 @@ class ResearchWorkspace:
         filename: str = "",
         max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
         timeout: float = 30.0,
+        query: str = "",
+        resolve: bool = True,
+        parallel: bool = True,
+        connections: int = 8,
     ) -> dict[str, Any]:
         requested_url = validate_public_remote_url(url)
         limit = _bounded_bytes(max_bytes)
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
-        current_url = requested_url
         content_type = "application/octet-stream"
-        final_url = current_url
         temp_path: Path | None = None
+        current_url = requested_url
+        resolved_once = False
+
+        def _result(target: Path, final_url: str, content_type: str, total: int,
+                    sha: str, *, resumed: bool, parallel_used: bool, conns: int) -> dict[str, Any]:
+            return {
+                "url": requested_url,
+                "final_url": final_url,
+                "path": str(target.resolve()),
+                "name": target.name,
+                "content_type": content_type,
+                "bytes": total,
+                "sha256": sha,
+                "redirected": final_url != requested_url,
+                "resolved": resolved_once,
+                "resumed": resumed,
+                "parallel": parallel_used,
+                "connections": conns,
+                "downloaded_at": datetime.now(timezone.utc).isoformat(),
+            }
 
         try:
             with httpx.Client(
@@ -114,49 +143,203 @@ class ResearchWorkspace:
                                 raise ValueError("Redirect response did not include a location.")
                             current_url = str(httpx.URL(current_url).join(location))
                             continue
-                        response.raise_for_status()
-                        declared = response.headers.get("content-length")
-                        if declared and int(declared) > limit:
-                            raise ValueError(f"Remote file is larger than the {limit // (1024 * 1024)} MB download limit.")
-                        content_type = str(response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0].strip().lower()
-                        final_url = str(response.url)
-                        proposed = _safe_filename(filename, "") if filename else _filename_from_response(final_url, response.headers)
-                        if not Path(proposed).suffix:
-                            guessed = mimetypes.guess_extension(content_type) or ""
-                            proposed += guessed
-                        stem = Path(proposed).stem or "download"
-                        suffix = Path(proposed).suffix
-                        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-                        target = self.downloads_dir / f"{stamp}-{_safe_filename(stem, 'download')}{suffix}"
-                        temp_path = target.with_suffix(target.suffix + ".part")
-                        digest = hashlib.sha256()
-                        total = 0
-                        with temp_path.open("wb") as output:
-                            for chunk in response.iter_bytes(chunk_size=DOWNLOAD_CHUNK_BYTES):
-                                if not chunk:
-                                    continue
-                                total += len(chunk)
-                                if total > limit:
-                                    raise ValueError(f"Remote file exceeded the {limit // (1024 * 1024)} MB download limit.")
-                                digest.update(chunk)
-                                output.write(chunk)
-                        temp_path.replace(target)
-                        return {
-                            "url": requested_url,
-                            "final_url": final_url,
-                            "path": str(target.resolve()),
-                            "name": target.name,
-                            "content_type": content_type,
-                            "bytes": total,
-                            "sha256": digest.hexdigest(),
-                            "redirected": final_url != requested_url,
-                            "downloaded_at": datetime.now(timezone.utc).isoformat(),
-                        }
+                        if 200 <= response.status_code < 300:
+                            declared = response.headers.get("content-length")
+                            size = int(declared) if (declared and declared.isdigit()) else None
+                            if size and size > limit:
+                                raise ValueError(f"Remote file is larger than the {limit // (1024 * 1024)} MB download limit.")
+                            content_type = str(response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0].strip().lower()
+                            final_url = str(response.url)
+                            proposed = _safe_filename(filename, "") if filename else _filename_from_response(final_url, response.headers)
+                            if not Path(proposed).suffix:
+                                guessed = mimetypes.guess_extension(content_type) or ""
+                                proposed += guessed
+                            stem = Path(proposed).stem or "download"
+                            suffix = Path(proposed).suffix
+                            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                            target = self.downloads_dir / f"{stamp}-{_safe_filename(stem, 'download')}{suffix}"
+                            temp_path = target.with_suffix(target.suffix + ".part")
+                            chunks_path = target.with_suffix(target.suffix + ".chunks")
+                            accept_ranges = (response.headers.get("accept-ranges") or "").lower()
+                            can_parallel = (
+                                parallel
+                                and bool(size)
+                                and size >= _PARALLEL_MIN_BYTES
+                                and "bytes" in accept_ranges
+                            )
+                            # Resume an interrupted single-stream download via Range.
+                            if temp_path.exists():
+                                for _ in response.iter_bytes():
+                                    pass
+                                return _result(
+                                    target, final_url, content_type,
+                                    *self._download_single(client, current_url, limit, temp_path, target),
+                                    resumed=True, parallel_used=False, conns=1,
+                                )
+                            if can_parallel:
+                                # Drain the probe body, then verify Range support
+                                # with a 1-byte request before fanning out.
+                                for _ in response.iter_bytes():
+                                    pass
+                                supports, real_size = self._probe_range(client, current_url)
+                                if supports and real_size and real_size <= limit:
+                                    try:
+                                        return _result(
+                                            target, final_url, content_type,
+                                            *self._download_parallel(
+                                                client, current_url, real_size, limit,
+                                                chunks_path, target, connections,
+                                            ),
+                                            resumed=False, parallel_used=True, conns=connections,
+                                        )
+                                    except Exception:
+                                        chunks_path.unlink(missing_ok=True)
+                                # Range support lied / failed: fall back to single stream.
+                                return _result(
+                                    target, final_url, content_type,
+                                    *self._download_single(client, current_url, limit, temp_path, target),
+                                    resumed=False, parallel_used=False, conns=1,
+                                )
+                            # Default: read the already-open stream directly.
+                            digest = hashlib.sha256()
+                            total = 0
+                            with temp_path.open("wb") as output:
+                                for chunk in response.iter_bytes(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                                    if not chunk:
+                                        continue
+                                    total += len(chunk)
+                                    if total > limit:
+                                        raise ValueError(f"Remote file exceeded the {limit // (1024 * 1024)} MB download limit.")
+                                    digest.update(chunk)
+                                    output.write(chunk)
+                            temp_path.replace(target)
+                            return _result(target, final_url, content_type, total, digest.hexdigest(),
+                                           resumed=False, parallel_used=False, conns=1)
+                        # Non-2xx, non-redirect. If the resource is gone (404/410)
+                        # or forbidden, try to rediscover the current link once.
+                        if resolve and not resolved_once and response.status_code in (400, 403, 404, 410):
+                            candidate = _resolve_download_url(requested_url, query)
+                            if candidate and candidate != current_url:
+                                current_url = candidate
+                                resolved_once = True
+                                continue
+                        raise ValueError(
+                            f"Download failed: HTTP {response.status_code} for {current_url}. "
+                            "The URL may be retired or incorrect — try web_search to find the current link."
+                        )
                 raise ValueError(f"Too many redirects (more than {MAX_REDIRECTS}).")
         except Exception:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
             raise
+
+    def _probe_range(self, client: httpx.Client, url: str) -> tuple[bool, int | None]:
+        """Confirm the server honors Range requests; return (supported, total_size)."""
+        try:
+            with client.stream("GET", url, headers={"Range": "bytes=0-0"}) as resp:
+                if resp.status_code == 206:
+                    content_range = resp.headers.get("content-range", "")
+                    match = re.search(r"/(\d+)\s*$", content_range)
+                    size = int(match.group(1)) if match else None
+                    for _ in resp.iter_bytes():
+                        pass
+                    return True, size
+                for _ in resp.iter_bytes():
+                    pass
+                return False, None
+        except Exception:
+            return False, None
+
+    def _download_single(
+        self, client: httpx.Client, url: str, limit: int, temp_path: Path, target: Path
+    ) -> tuple[int, str]:
+        """Single-stream download with resume support (aria2c -c style).
+
+        Returns ``(bytes_written, sha256_hex)``.  If a ``.part`` file already
+        exists, requests the remaining bytes via ``Range`` and appends; if the
+        server ignores the Range header it restarts cleanly.
+        """
+        resume_pos = temp_path.stat().st_size if temp_path.exists() else 0
+        headers = {"Range": f"bytes={resume_pos}-"} if resume_pos > 0 else {}
+        with client.stream("GET", url, headers=headers) as resp:
+            if resume_pos > 0:
+                if resp.status_code == 206:
+                    pass
+                elif resp.status_code == 200:
+                    temp_path.unlink(missing_ok=True)
+                    resume_pos = 0
+                else:
+                    resp.raise_for_status()
+            elif resp.status_code != 200:
+                resp.raise_for_status()
+            digest = hashlib.sha256()
+            if resume_pos > 0:
+                with temp_path.open("rb") as prior:
+                    for block in iter(lambda: prior.read(1024 * 1024), b""):
+                        digest.update(block)
+            total = resume_pos
+            mode = "ab" if resume_pos > 0 else "wb"
+            with temp_path.open(mode) as output:
+                for chunk in resp.iter_bytes(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > limit:
+                        raise ValueError(f"Remote file exceeded the {limit // (1024 * 1024)} MB download limit.")
+                    digest.update(chunk)
+                    output.write(chunk)
+            temp_path.replace(target)
+            return total, digest.hexdigest()
+
+    def _download_parallel(
+        self, client: httpx.Client, url: str, size: int, limit: int,
+        temp_path: Path, target: Path, connections: int,
+    ) -> tuple[int, str]:
+        """aria2c -x style: split one file into N Range requests, write in place.
+
+        Returns ``(bytes_written, sha256_hex)``.  On any failure the ``.chunks``
+        temp file is left for the caller to remove; this method never emits a
+        silently-corrupt (holey) file because it verifies the final size.
+        """
+        connections = max(1, min(int(connections), _PARALLEL_MAX_CONNECTIONS))
+        chunk_size = max(_PARALLEL_CHUNK_BYTES, (size + connections - 1) // connections)
+        ranges: list[tuple[int, int]] = []
+        start = 0
+        while start < size:
+            end = min(start + chunk_size, size) - 1
+            ranges.append((start, end))
+            start = end + 1
+
+        with temp_path.open("w+b") as handle:
+            handle.truncate(size)
+
+        def _fetch_range(span: tuple[int, int]) -> None:
+            begin, end = span
+            with client.stream("GET", url, headers={"Range": f"bytes={begin}-{end}"}) as resp:
+                resp.raise_for_status()
+                with temp_path.open("r+b") as fh:
+                    fh.seek(begin)
+                    for chunk in resp.iter_bytes(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                        if not chunk:
+                            continue
+                        fh.write(chunk)
+
+        with ThreadPoolExecutor(max_workers=connections) as pool:
+            list(pool.map(_fetch_range, ranges))
+
+        actual = temp_path.stat().st_size
+        if actual != size:
+            raise ValueError(f"Downloaded size {actual} did not match expected {size}.")
+        digest = hashlib.sha256()
+        written = 0
+        with temp_path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+                written += len(block)
+        temp_path.replace(target)
+        return written, digest.hexdigest()
+
+
 
     def extract_document(
         self,
@@ -281,3 +464,28 @@ class ResearchWorkspace:
 
 def json_result(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _resolve_download_url(original_url: str, query: str = "") -> str | None:
+    """Rediscover a working download URL via web search (best effort).
+
+    Direct fetches often 404 because the document moved (e.g. OWASP retired its
+    2021 PDF).  Returns a validated public URL, or None if nothing usable is
+    found.  Used once by :meth:`ResearchWorkspace.download` on a 404/410.
+    """
+    if not query:
+        stem = Path(urlparse(original_url).path).stem or original_url
+        query = f"{stem} official download"
+    try:
+        payload = web_search_payload(query, max_results=5, search_mode="web")
+    except Exception:
+        return None
+    for result in payload.get("results", []):
+        candidate = str(result.get("url") or "")
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        try:
+            return validate_public_remote_url(candidate)
+        except ValueError:
+            continue
+    return None

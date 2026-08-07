@@ -44,6 +44,7 @@ from ares.integrations.llm import (
     activate_provider_config,
     configured_provider_api_key,
     default_model_for_provider,
+    get_models_sync,
     normalize_provider,
     provider_for_model,
 )
@@ -702,19 +703,25 @@ class TelegramChannel:
             return
 
         # command == "/model"
+        if arg and arg.casefold() == "refresh":
+            get_models_sync(self.config.provider, refresh=True)
+            await self.api.send_message(
+                chat_id, "Refreshed model list from provider.", reply_to_message_id=reply_to
+            )
+            arg = "list"
         if not arg or arg.casefold() == "list":
-            lines = ["Ares models"]
-            for group_key, group in MODEL_REGISTRY.items():
-                for m in group["models"]:
-                    backend = provider_for_model(m["id"])
-                    endpoint = (
-                        "NVIDIA NIM" if backend == "nim"
-                        else "GitHub Copilot" if backend == "copilot"
-                        else "OpenCode Zen"
-                    )
-                    status = "current" if m["id"] == self.config.model else "available"
-                    lines.append(f"• {m['id']} — {endpoint} · {status}")
-            lines.append("\nUsage: /model <id>  (e.g. /model gpt-oss-120b)")
+            lines = ["Ares models (live where available, otherwise built-in fallback)"]
+            for item in get_models_sync(self.config.provider):
+                backend = provider_for_model(item["id"]) or normalize_provider(self.config.provider)
+                endpoint = (
+                    "NVIDIA NIM" if backend == "nim"
+                    else "GitHub Copilot" if backend == "copilot"
+                    else "Kilo" if backend == "kilo"
+                    else "OpenCode Zen"
+                )
+                status = "current" if item["id"] == self.config.model else "available"
+                lines.append(f"• {item['id']} — {endpoint} · {status}")
+            lines.append("\nUsage: /model <id>  (e.g. /model tencent/hy3:free)")
             await self.api.send_message(chat_id, _telegram_trim("\n".join(lines)), reply_to_message_id=reply_to)
             return
         selected_provider = provider_for_model(arg)
