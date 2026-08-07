@@ -148,9 +148,21 @@ class UserModelManager:
             return []
 
         body = list(existing_body)
-        total = len(body) + len(added)
-        if total > self._max_facts:
-            body = body[total - self._max_facts :]
+        # Only bullet lines count toward the cap. Non-bullet lines (manual prose
+        # or blank separators, which the docstring promises never to erase) are
+        # always kept; only the oldest auto-managed bullets are trimmed.
+        bullet_count = sum(1 for line in body if line.strip().startswith("-"))
+        total_bullets = bullet_count + len(added)
+        if total_bullets > self._max_facts:
+            excess = total_bullets - self._max_facts
+            trimmed = 0
+            kept: list[str] = []
+            for line in body:
+                if line.strip().startswith("-") and trimmed < excess:
+                    trimmed += 1
+                    continue
+                kept.append(line)
+            body = kept
         new_lines = lines[: heading_index + 1] + body + added
         self.write("\n".join(new_lines).strip() + "\n")
         return added

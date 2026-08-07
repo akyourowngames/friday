@@ -482,7 +482,15 @@ async def _name_search(pattern: str, path: Path, max_results: int = MAX_SEARCH_R
     if _has_ripgrep():
         try:
             proc = await asyncio.create_subprocess_exec(
-                "rg", "--files", "-g", pattern or "*", "--max-depth", "30",
+                "rg", "--files", "--hidden",
+                "-g", pattern or "*",
+                # Mirror the Python fallback's always-skipped noisy dirs so the
+                # two paths return the same set (the fallback never consults
+                # .gitignore for these). rg still respects .gitignore/.ignore and
+                # always excludes .git on its own.
+                "--glob", "!node_modules", "--glob", "!.venv", "--glob", "!venv",
+                "--glob", "!__pycache__", "--glob", "!.pytest_cache",
+                "--max-depth", "30",
                 str(path),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )

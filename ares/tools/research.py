@@ -169,18 +169,16 @@ class ResearchWorkspace:
                             )
                             # Resume an interrupted single-stream download via Range.
                             if temp_path.exists():
-                                for _ in response.iter_bytes():
-                                    pass
                                 return _result(
                                     target, final_url, content_type,
                                     *self._download_single(client, current_url, limit, temp_path, target),
                                     resumed=True, parallel_used=False, conns=1,
                                 )
                             if can_parallel:
-                                # Drain the probe body, then verify Range support
-                                # with a 1-byte request before fanning out.
-                                for _ in response.iter_bytes():
-                                    pass
+                                # Verify Range support with a 1-byte probe before
+                                # fanning out. The open GET body is left unread;
+                                # httpx serves the probe from a fresh pooled
+                                # connection and the original stream closes on exit.
                                 supports, real_size = self._probe_range(client, current_url)
                                 if supports and real_size and real_size <= limit:
                                     try:
@@ -315,14 +313,27 @@ class ResearchWorkspace:
 
         def _fetch_range(span: tuple[int, int]) -> None:
             begin, end = span
+            expected = end - begin + 1
             with client.stream("GET", url, headers={"Range": f"bytes={begin}-{end}"}) as resp:
-                resp.raise_for_status()
+                # A server that ignores Range answers 200 with the full body;
+                # writing that at our offset would shred the file, so reject it.
+                if resp.status_code != 206:
+                    raise ValueError(
+                        f"Server did not honor Range for bytes={begin}-{end} "
+                        f"(status {resp.status_code}); cannot download in parallel."
+                    )
+                written = 0
                 with temp_path.open("r+b") as fh:
                     fh.seek(begin)
                     for chunk in resp.iter_bytes(chunk_size=DOWNLOAD_CHUNK_BYTES):
                         if not chunk:
                             continue
                         fh.write(chunk)
+                        written += len(chunk)
+                if written != expected:
+                    raise ValueError(
+                        f"Range bytes={begin}-{end} returned {written} bytes, expected {expected}."
+                    )
 
         with ThreadPoolExecutor(max_workers=connections) as pool:
             list(pool.map(_fetch_range, ranges))

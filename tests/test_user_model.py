@@ -54,8 +54,8 @@ def test_merge_facts_dedupes_similar_and_ignores_blanks():
 def test_merge_facts_refuses_secrets():
     mgr = _manager()
     added = mgr.merge_facts([
-        "API key is sk-1234567890abcdef1234567890abcdef",
-        "Password: hunter2hunter2hunter2xy",
+        "API key is CHANGEME-not-a-real-key-0000000000",
+        "Password: CHANGEME-not-a-real-password",
         "Likes dark mode.",
     ])
     assert "Likes dark mode." in mgr.read()
