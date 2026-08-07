@@ -47,6 +47,7 @@ from ares.skills.reminders import DesktopNotifier
 from ares.tools.renders import get_renderer, render_generic_tool
 from ares.soul import SoulManager, SOUL_TEMPLATE
 from ares.config import _ensure_mcp_defaults, load_config, save_config
+from ares.user_model import UserModelManager
 from ares.integrations.llm import (
     MODEL_REGISTRY,
     PROVIDER_BASE_URLS,
@@ -54,6 +55,7 @@ from ares.integrations.llm import (
     activate_provider_config,
     configured_provider_api_key,
     default_model_for_provider,
+    get_models_sync,
     normalize_provider,
     provider_for_model,
 )
@@ -277,12 +279,14 @@ class AresCLI(MarketplaceCommandMixin):
         data_dir = Path(self.config.data_dir).expanduser()
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=self.config.soul_path)
         self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=self.config.profile_path)
+        self.user_model_manager = UserModelManager(data_dir=data_dir, user_model_path=self.config.user_model_path)
         self.project_context = ProjectContext(
             enabled=self.config.project_context_enabled,
             max_files=self.config.project_context_max_files,
         )
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        self.user_model_manager.ensure_exists()
         if (
             sys.stdin.isatty()
             and sys.stdout.isatty()
@@ -474,8 +478,10 @@ class AresCLI(MarketplaceCommandMixin):
         data_dir = Path(latest.data_dir).expanduser()
         self.soul_manager = SoulManager(data_dir=data_dir, soul_path=latest.soul_path)
         self.profile_manager = ProfileManager(data_dir=data_dir, profile_path=latest.profile_path)
+        self.user_model_manager = UserModelManager(data_dir=data_dir, user_model_path=latest.user_model_path)
         self.soul_manager.ensure_exists()
         self.profile_manager.ensure_exists()
+        self.user_model_manager.ensure_exists()
         self.browser_manager = BrowserManager(self.config)
         self.project_context = ProjectContext(
             enabled=latest.project_context_enabled,
@@ -603,14 +609,13 @@ class AresCLI(MarketplaceCommandMixin):
             return
 
     def _interactive_model_choices(self) -> list[tuple[str, str]]:
-        choices = []
-        for group_key, group in MODEL_REGISTRY.items():
-            endpoint = "NVIDIA NIM" if group_key == "nvidia" else (
-                "GitHub Copilot" if group_key == "copilot" else "OpenCode Zen"
-            )
-            for item in group["models"]:
-                choices.append((item["id"], f"{item['id']}  —  {endpoint}"))
-        return choices
+        self.console.print("[dim]Fetching models from provider…[/dim]")
+        provider = normalize_provider(self.config.provider)
+        models = get_models_sync(provider)
+        endpoint = "NVIDIA NIM" if provider == "nim" else (
+            "GitHub Copilot" if provider == "copilot" else "Kilo" if provider == "kilo" else "OpenCode Zen"
+        )
+        return [(item["id"], f"{item['id']}  —  {endpoint}") for item in models]
 
     def _interactive_provider_choices(self) -> list[tuple[str, str]]:
         current = normalize_provider(self.config.provider)
@@ -680,8 +685,12 @@ class AresCLI(MarketplaceCommandMixin):
             )
             return f"/tools {selected}" if selected else None
 
-        if command in {"/profile", "/soul"} and not argument:
-            label = "Profile" if command == "/profile" else "Ares personality"
+        if command in {"/profile", "/soul", "/user_model"} and not argument:
+            label = (
+                "Profile" if command == "/profile"
+                else "Ares personality" if command == "/soul"
+                else "User model"
+            )
             action = await self._select_interactive_option(
                 title=label,
                 text="Choose an action.",
@@ -689,7 +698,11 @@ class AresCLI(MarketplaceCommandMixin):
                 default="show",
             )
             if action == "show":
-                manager = self.profile_manager if command == "/profile" else self.soul_manager
+                manager = (
+                    self.profile_manager if command == "/profile"
+                    else self.soul_manager if command == "/soul"
+                    else self.user_model_manager
+                )
                 content = manager.read().strip() or f"No {label.lower()} has been created yet."
                 await self._show_interactive_message(title=label, text=content[:12_000])
                 return None
@@ -800,20 +813,32 @@ class AresCLI(MarketplaceCommandMixin):
         table.add_column("Endpoint", style="dim")
         table.add_column("Status", no_wrap=True)
         rows = []
-        for group_key, group in MODEL_REGISTRY.items():
-            for m in group["models"]:
-                backend = provider_for_model(m["id"])
+        # No provider given -> aggregate every HTTP-backed transport so the
+        # list shows everything, matching the previous all-groups behaviour.
+        if provider:
+            providers = [normalize_provider(provider)]
+        else:
+            providers = ["opencode", "kilo", "nim"]
+        seen: set[str] = set()
+        for target in providers:
+            for item in get_models_sync(target):
+                if item["id"] in seen:
+                    continue
+                backend = provider_for_model(item["id"]) or target
                 if provider and backend != normalize_provider(provider):
                     continue
-                status = "[green]current[/green]" if m["id"] == self.config.model else "available"
-                endpoint = "NVIDIA NIM" if backend == "nim" else "GitHub Copilot" if backend == "copilot" else "OpenCode Zen"
-                rows.append((m["id"], endpoint, status))
+                seen.add(item["id"])
+                status = "[green]current[/green]" if item["id"] == self.config.model else "available"
+                endpoint = "NVIDIA NIM" if backend == "nim" else "GitHub Copilot" if backend == "copilot" else "Kilo" if backend == "kilo" else "OpenCode Zen"
+                rows.append((item["id"], endpoint, status))
         for model_id, endpoint, status in rows:
             table.add_row(model_id, endpoint, status)
         if not rows:
             self.console.print("[dim]No models available for this provider.[/dim]")
             return
         self.console.print(table)
+        self.console.print("[dim]List is live from each provider where available, "
+                           "otherwise the built-in fallback. Use /model refresh to re-fetch.[/dim]")
 
     def _show_provider_list(self) -> None:
         table = Table(title="Providers", border_style="bright_cyan", box=self._ui_box())
@@ -1872,6 +1897,7 @@ class AresCLI(MarketplaceCommandMixin):
             table.add_row("/resume [ID|latest]", "List or restore a saved conversation")
             table.add_row("/soul [show|edit]", "View or edit Ares' personality")
             table.add_row("/profile [show|edit]", "View or edit your profile")
+            table.add_row("/user_model [show|edit]", "View or edit Ares' auto-maintained facts about you")
             table.add_row("/context", "Show active context for this session")
             table.add_row("/skills [search|install|create|update|publish]", "Manage local and marketplace skills")
             table.add_row("/setup", "Run the onboarding wizard again")
@@ -2197,7 +2223,11 @@ class AresCLI(MarketplaceCommandMixin):
                 self.console.print("[red]Usage: /agents [run REQUEST|doctor|smoke-test|status|active|roles|runs [LIMIT]|show RUN_ID|cancel RUN_ID|resume RUN_ID|on|off][/red]")
 
         elif command == "/model":
-            if not arg or arg == "list":
+            if arg == "refresh":
+                get_models_sync(self.config.provider, refresh=True)
+                self.console.print("[green]Refreshed model list from provider.[/green]")
+                self._show_model_list()
+            elif not arg or arg == "list":
                 self._show_model_list()
             else:
                 selected_provider = provider_for_model(arg)
@@ -2476,10 +2506,23 @@ class AresCLI(MarketplaceCommandMixin):
             else:
                 self.console.print("[red]Usage: /profile [show|edit][/red]")
 
+        elif command == "/user_model":
+            if not arg or arg == "show":
+                content = self.user_model_manager.read()
+                if content:
+                    self._print_markdown_section("User Model", content, "Auto-maintained facts about you")
+                else:
+                    self.console.print("[dim]No user model file found. Use /user_model edit to create one.[/dim]")
+            elif arg == "edit":
+                self._edit_file(self.user_model_manager.user_model_path, "user_model")
+            else:
+                self.console.print("[red]Usage: /user_model [show|edit][/red]")
+
         elif command == "/context":
             context_str = build_context_prompt(
                 soul_context=self.soul_manager.get_context(),
                 profile_context=self.profile_manager.get_context(),
+                user_model_context=self.user_model_manager.get_context(),
                 project_context=self.project_context.get_context()
                 if self.config.project_context_enabled else "",
                 memories=self.memory_store.get_recent(limit=5),

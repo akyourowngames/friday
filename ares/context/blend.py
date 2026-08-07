@@ -478,6 +478,7 @@ def _append_section(sections: list[str], section: str, remaining: int) -> int:
 def build_context_prompt(
     soul_context: str = "",
     profile_context: str = "",
+    user_model_context: str = "",
     project_context: str = "",
     memories: list[dict] | None = None,
     people: list[dict] | None = None,
@@ -506,6 +507,7 @@ def build_context_prompt(
 
     remaining = _append_section(sections, soul_context, remaining)
     remaining = _append_section(sections, profile_context, remaining)
+    remaining = _append_section(sections, user_model_context, remaining)
     remaining = _append_section(sections, project_context, remaining)
 
     # FIX: Inject memory recall context for "do you remember" style queries

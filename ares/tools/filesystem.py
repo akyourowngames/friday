@@ -7,15 +7,56 @@ import fnmatch
 import hashlib
 import os
 import re
-import threading
-import tempfile
 import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 MAX_READ_LINES = 2000
 MAX_SEARCH_RESULTS = 100
 MAX_RESULT_EXCERPT = 500
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".pytest_cache"}
+
+# Hard ceilings so a misbehaving search can never hang the assistant for
+# minutes the way an unbounded os.walk into a Windows junction (node_modules,
+# OneDrive, openwiki, …) used to.  These bound the *fallback* Python walker;
+# ripgrep runs under its own timeout instead.
+_SEARCH_MAX_DEPTH = 40
+_SEARCH_MAX_FILES = 200_000
+_SEARCH_MAX_SECONDS = 20
+_RG_TIMEOUT_SECONDS = 30
+
+
+def _has_ripgrep() -> bool:
+    """Cache whether the fast ripgrep ('rg') binary is on PATH."""
+    cached = getattr(_has_ripgrep, "_cache", None)
+    if cached is None:
+        cached = shutil.which("rg") is not None
+        _has_ripgrep._cache = cached  # type: ignore[attr-defined]
+    return cached
+
+
+def _is_junction(path: Path) -> bool:
+    """True for Windows reparse points (junctions, but also symlinks).
+
+    Python's ``os.walk`` only skips *symlinks* via ``followlinks=False``; it
+    happily recurses into junctions, which is what made ``~\Downloads\Telegram
+    Desktop`` scans take 100s+.  Detect them explicitly so we never descend.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        return path.is_junction()
+    except (OSError, NotImplementedError, AttributeError):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return False
+        # FILE_ATTRIBUTE_REPARSE_POINT == 0x400
+        return bool(getattr(st, "st_file_attributes", 0) & 0x400)
 
 
 def _allowed_roots() -> list[Path]:
@@ -333,6 +374,8 @@ async def _content_search_ripgrep(
         str(MAX_RESULT_EXCERPT),
         "--max-count",
         "3",
+        "--max-depth",
+        "30",
         "-i",
     ]
     if name_pattern:
@@ -345,8 +388,8 @@ async def _content_search_ripgrep(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _stderr = await proc.communicate()
-    except FileNotFoundError:
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=_RG_TIMEOUT_SECONDS)
+    except (FileNotFoundError, asyncio.TimeoutError):
         return []
 
     if proc.returncode not in (0, 1):
@@ -354,15 +397,33 @@ async def _content_search_ripgrep(
     return _attach_context(_parse_ripgrep_output(stdout.decode(errors="replace")), path)
 
 
-def _iter_files(root: Path, name_pattern: str = ""):
-    """Yield files under root while skipping noisy directories."""
+def _iter_files(root: Path, name_pattern: str = "", *, max_depth: int = _SEARCH_MAX_DEPTH):
+    """Yield files under root while skipping noisy + junction directories.
+
+    Bounded by depth, total file count, and wall-clock time so a recursive walk
+    can never hang the assistant — an unbounded os.walk into a Windows junction
+    (node_modules, OneDrive, openwiki, …) previously ran for 100s+.
+    """
     ignore_patterns = _load_ignore_patterns(root)
-    for current_root, dirs, files in os.walk(root):
-        current = Path(current_root)
-        dirs[:] = [
-            d for d in dirs
-            if not _is_ignored(current / d, root, ignore_patterns)
-        ]
+    root_len = len(str(root))
+    deadline = time.monotonic() + _SEARCH_MAX_SECONDS
+    yielded = 0
+    for current_root, dirs, files in os.walk(root, followlinks=False):
+        depth = current_root[root_len:].count(os.sep)
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+        kept = []
+        for d in dirs:
+            child = Path(current_root) / d
+            if _is_junction(child):
+                continue
+            if _is_ignored(child, root, ignore_patterns):
+                continue
+            kept.append(d)
+        dirs[:] = kept
+        if time.monotonic() > deadline:
+            break
         for filename in files:
             file_path = Path(current_root) / filename
             if _is_ignored(file_path, root, ignore_patterns):
@@ -370,6 +431,9 @@ def _iter_files(root: Path, name_pattern: str = ""):
             if name_pattern and not fnmatch.fnmatch(filename, name_pattern):
                 continue
             yield file_path
+            yielded += 1
+            if yielded >= _SEARCH_MAX_FILES:
+                return
 
 
 async def _content_search_python(
@@ -414,9 +478,34 @@ async def _content_search(query: str, path: Path, name_pattern: str = "") -> lis
 
 
 async def _name_search(pattern: str, path: Path, max_results: int = MAX_SEARCH_RESULTS) -> list[dict]:
-    """Search files by glob name."""
+    """Search files by glob name, preferring ripgrep when available."""
+    if _has_ripgrep():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "rg", "--files", "--hidden",
+                "-g", pattern or "*",
+                # Mirror the Python fallback's always-skipped noisy dirs so the
+                # two paths return the same set (the fallback never consults
+                # .gitignore for these). rg still respects .gitignore/.ignore and
+                # always excludes .git on its own.
+                "--glob", "!node_modules", "--glob", "!.venv", "--glob", "!venv",
+                "--glob", "!__pycache__", "--glob", "!.pytest_cache",
+                "--max-depth", "30",
+                str(path),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=_RG_TIMEOUT_SECONDS)
+            if proc.returncode in (0, 1):
+                lines = stdout.decode(errors="replace").splitlines()
+                if lines:
+                    return [
+                        {"path": line, "line": 0, "excerpt": "", "match_type": "name"}
+                        for line in lines[:max_results]
+                    ]
+        except (OSError, asyncio.TimeoutError):
+            pass
     results = []
-    for file_path in _iter_files(path, pattern):
+    for file_path in _iter_files(path, pattern, max_depth=30):
         results.append({
             "path": str(file_path),
             "line": 0,
@@ -619,8 +708,8 @@ def get_file_info(path: str) -> str:
     return "\n".join(lines)
 
 
-def glob_pattern(pattern: str, path: str = ".", max_results: int = 50) -> str:
-    """Find files matching a glob pattern."""
+def glob_pattern(pattern: str, path: str = ".", max_results: int = 50, max_depth: int = 8) -> str:
+    """Find files matching a glob pattern (ripgrep when available)."""
     root = resolve_path(path)
     if not root.exists():
         return f"Directory not found: {path}"
@@ -628,18 +717,33 @@ def glob_pattern(pattern: str, path: str = ".", max_results: int = 50) -> str:
         return f"Not a directory: {path}"
 
     bounded_max = max(1, min(int(max_results), 500))
-    matches = []
+    matches: list[Path] = []
 
-    try:
-        for match in root.rglob(pattern):
-            # Skip ignored directories
+    if _has_ripgrep():
+        try:
+            proc = subprocess.run(
+                ["rg", "--files", "-g", pattern, "--max-depth", str(max_depth), str(root)],
+                capture_output=True, text=True, timeout=_RG_TIMEOUT_SECONDS,
+            )
+            if proc.returncode in (0, 1):
+                for line in proc.stdout.splitlines():
+                    p = Path(line)
+                    if _is_ignored(p, root):
+                        continue
+                    matches.append(p)
+                    if len(matches) >= bounded_max:
+                        break
+        except (OSError, subprocess.TimeoutExpired):
+            matches = []
+
+    if not matches:
+        # Bounded, junction-safe Python fallback.
+        for match in _iter_files(root, pattern, max_depth=max_depth):
             if _is_ignored(match, root):
                 continue
             matches.append(match)
             if len(matches) >= bounded_max:
                 break
-    except (OSError, PermissionError) as e:
-        return f"Error searching: {e}"
 
     if not matches:
         return f"No matches for '{pattern}' in {_display_path(root)}"
@@ -1080,6 +1184,8 @@ def file_tree(path: str = ".", max_depth: int = 3, show_files: bool = True) -> s
             child_prefix = "    " if is_last else "│   "
 
             if item.is_dir():
+                if _is_junction(item):
+                    continue
                 name = item.name + "/"
                 lines.append(f"{prefix}{connector}{name}")
                 if current_depth < depth:

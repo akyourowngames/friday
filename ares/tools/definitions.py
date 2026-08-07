@@ -522,14 +522,14 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "web_search",
-            "Search the web or build a resumable, source-scored research graph with claims, conflicts, clusters, and follow-up questions. Legacy web/news behavior remains the default.",
+            "Search the web or build a resumable, source-scored research graph with claims, conflicts, clusters, and follow-up questions. Legacy web/news behavior remains the default. Every call automatically fetches and extracts the full page content of the top results (via Fetch MCP when available, otherwise the built-in fetcher) and returns it in the 'fetched' field — you do NOT need to call fetch_url separately. Synthesize your answer directly from 'results' and 'fetched'; only call fetch_url if you need a result outside the fetched set.",
             {
                 "query": {"type": "string", "description": "The web search query. Optional only when continuing a research_id."},
                 "max_results": {"type": "integer", "default": 5},
                 "fetch_top": {
                     "type": "integer",
-                    "default": 3,
-                    "description": "How many top results to automatically fetch full content for (0 to skip fetching).",
+                    "default": 5,
+                    "description": "How many top results to automatically fetch and extract full content for (0 to skip fetching). The extracted text is returned in 'fetched' so no separate fetch step is needed.",
                 },
                 "max_fetch_chars": {
                     "type": "integer",
@@ -629,6 +629,25 @@ def get_tool_definitions() -> list[dict]:
                     "type": "integer",
                     "default": 20971520,
                     "description": "Maximum download size in bytes (1 MB to 50 MB; default 20 MB).",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional search query used to rediscover the file if the URL 404s or is retired (e.g. 'OWASP Top 10 2025 official PDF').",
+                },
+                "resolve": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "When true (default), if the direct URL fails with 404/410 the downloader web-searches for the current link and retries once.",
+                },
+                "parallel": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "When true (default) and the server supports HTTP Range, large files are split into parallel chunked requests (aria2c -x style) for faster download; falls back to a single stream otherwise.",
+                },
+                "connections": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "Number of parallel connections to use when parallel is enabled (capped at 16).",
                 },
             },
             ["url"],
@@ -731,7 +750,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "list_directory",
-            "List a local directory with file sizes and subdirectories.",
+            "List the files and subdirectories of a folder on the local filesystem (e.g. the Desktop) with sizes and metadata. Use this to list or enumerate files in a directory.",
             {
                 "path": {"type": "string", "description": "Directory path.", "default": "."},
                 "max_items": {"type": "integer", "default": 30},
@@ -747,7 +766,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "get_file_info",
-            "Get metadata about a file or directory: type, size, timestamps, binary status.",
+            "Get metadata about a file or folder on disk: type, size, creation/modified timestamps, binary status. Use this to inspect a specific path.",
             {
                 "path": {"type": "string", "description": "File or directory path."},
             },
@@ -755,7 +774,7 @@ def get_tool_definitions() -> list[dict]:
         ),
         _tool(
             "glob_pattern",
-            "Find files matching a glob pattern (e.g. **/*.py, src/**/*.ts).",
+            "Find files on the local filesystem matching a glob pattern (e.g. **/*.py, src/**/*.ts, Desktop/*). Use this to locate files by name/path.",
             {
                 "pattern": {"type": "string", "description": "Glob pattern."},
                 "path": {"type": "string", "default": ".", "description": "Directory to search from."},

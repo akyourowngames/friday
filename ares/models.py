@@ -461,6 +461,7 @@ class ReflectionConfig(BaseModel):
     """Background conversation-to-state extraction controls."""
 
     enabled: bool = True
+    user_model_enabled: bool = True
     model: str = "mimo-v2.5-free"
     min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     completion_min_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
@@ -632,9 +633,13 @@ class AppConfig(BaseModel):
     onboarding_completed: bool = False
     provider: str = "kilo"
     provider_api_keys: dict[str, str] = Field(default_factory=dict)
-    model: str = "stepfun/step-3.7-flash:free"
+    model: str = "tencent/hy3:free"
     fast_conversation_enabled: bool = True
-    fast_conversation_model: str = "stepfun/step-3.7-flash:free"
+    fast_conversation_model: str = "tencent/hy3:free"
+    # "llm" lets the answering model route tool selection from the live catalog
+    # (Full LLM routing); "regex" falls back to the deterministic intent/target
+    # classifier. The hardened authorize_turn_tool gate applies in both modes.
+    routing_mode: str = "llm"
     api_key: str = ""
     api_base_url: str = "https://api.kilo.ai/api/gateway"
     copilot_github_token: str = ""
@@ -658,6 +663,7 @@ class AppConfig(BaseModel):
     tavily_search_depth: str = "basic"
     soul_path: str = ""
     profile_path: str = ""
+    user_model_path: str = ""
     project_context_enabled: bool = True
     context_token_budget: int = 2000
     project_context_max_files: int = 2

@@ -2829,7 +2829,7 @@ class ToolExecutor:
                     "subquery_count": len(state.get("subqueries", [])),
                 },
             )
-        payload = self._research_search_payload(args, fetch_top=int(args.get("fetch_top", 3)))
+        payload = self._research_search_payload(args, fetch_top=int(args.get("fetch_top", 5)))
         if wants_structured(args):
             return structured_result(
                 f"Found {len(payload.get('results', []))} web result(s).",
@@ -2898,7 +2898,7 @@ class ToolExecutor:
         fetcher = str(args.get("fetcher", "auto") or "auto").lower()
         if fetcher not in {"auto", "mcp", "local"}:
             fetcher = "auto"
-        fetch_top = int(args.get("fetch_top", 3))
+        fetch_top = int(args.get("fetch_top", 5))
         max_fetch_chars = int(args.get("max_fetch_chars", 8000))
 
         if fetcher == "local" or fetch_top <= 0:
@@ -3021,6 +3021,10 @@ class ToolExecutor:
             str(args["url"]),
             filename=str(args.get("filename") or ""),
             max_bytes=int(args.get("max_bytes", 20 * 1024 * 1024)),
+            query=str(args.get("query") or ""),
+            resolve=args.get("resolve", True),
+            parallel=args.get("parallel", True),
+            connections=int(args.get("connections", 8)),
         ))
 
     def _extract_document(self, args: dict) -> str:

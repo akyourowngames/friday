@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import time
 from typing import Any, AsyncIterator
 
 import httpx
@@ -36,6 +37,7 @@ MODEL_REGISTRY = {
     "kilo": {
         "label": "Kilo Gateway",
         "models": [
+            {"id": "tencent/hy3:free", "label": "Tencent Hy3 (free)", "provider": "Tencent"},
             {"id": "stepfun/step-3.7-flash:free", "label": "StepFun Step 3.7 Flash (free)", "provider": "StepFun"},
             {"id": "cohere/north-mini-code:free", "label": "Cohere North Mini Code (free)", "provider": "Cohere"},
             {"id": "inclusionai/ling-3.0-flash:free", "label": "Ling 3.0 Flash (free)", "provider": "InclusionAI"},
@@ -148,6 +150,143 @@ PROVIDER_ALIASES = {"nvidia": "nim"}
 SUPPORTED_PROVIDERS = tuple(PROVIDER_BASE_URLS)
 
 
+# ---------------------------------------------------------------------------
+# Live model discovery
+#
+# ``MODEL_REGISTRY`` above is only a static fallback. Providers actually expose
+# their real catalogue over the OpenAI-compatible ``GET /models`` endpoint, which
+# evolves faster than a hand-maintained list. These helpers fetch that catalogue
+# on demand, cache it per provider, and fall back to the registry when the
+# network or API key is unavailable.
+# ---------------------------------------------------------------------------
+
+LIVE_MODELS_TTL_SECONDS = 300
+
+_LIVE_MODELS: dict[str, list[dict]] = {}
+_LIVE_FETCHED_AT: dict[str, float] = {}
+_LIVE_CACHE_LOCK: Any = None  # lazily created to keep import cheap
+
+
+def _live_cache_lock() -> Any:
+    """Return a per-process lock guarding the shared live-model cache."""
+    global _LIVE_CACHE_LOCK
+    if _LIVE_CACHE_LOCK is None:
+        import threading
+
+        _LIVE_CACHE_LOCK = threading.Lock()
+    return _LIVE_CACHE_LOCK
+
+
+async def fetch_live_models(
+    provider: str | None, config: Any | None = None
+) -> list[dict] | None:
+    """Fetch the live model catalogue for one transport provider.
+
+    Returns a list of ``{"id", "label", "provider"}`` dicts, or ``None`` when the
+    catalogue cannot be retrieved (no key, network error, unsupported provider).
+    """
+    target = normalize_provider(provider)
+    if target == "copilot":
+        # GitHub Copilot has no simple OpenAI-compatible /models endpoint.
+        return None
+    if config is None:
+        config = _load_config()
+    base_url = resolve_provider_base_url(target)
+    api_key = configured_provider_api_key(config, target)
+    if not api_key:
+        return None
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                url, headers={"Authorization": f"Bearer {api_key}"}
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    models: list[dict] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        if not model_id:
+            continue
+        models.append(
+            {
+                "id": str(model_id),
+                "label": str(entry.get("label") or model_id),
+                "provider": target,
+            }
+        )
+    return models
+
+
+def _merge_with_registry(provider: str, live: list[dict]) -> list[dict]:
+    """Return live models first, then any registry-only models (e.g. routers)."""
+    seen = {m["id"] for m in live}
+    merged = list(live)
+    for entry in models_for_provider(provider):
+        if entry["id"] not in seen:
+            merged.append(entry)
+            seen.add(entry["id"])
+    return merged
+
+
+async def get_models_async(
+    provider: str | None, *, refresh: bool = False
+) -> list[dict]:
+    """Return available models for a provider, preferring the live catalogue.
+
+    Falls back to the static ``MODEL_REGISTRY`` when the live fetch fails or the
+    provider exposes no catalogue. Results are cached per provider for
+    ``LIVE_MODELS_TTL_SECONDS`` unless ``refresh`` is set.
+    """
+    target = normalize_provider(provider)
+    with _live_cache_lock():
+        fresh = (
+            not refresh
+            and target in _LIVE_MODELS
+            and time.time() - _LIVE_FETCHED_AT.get(target, 0) < LIVE_MODELS_TTL_SECONDS
+        )
+        if fresh:
+            return _LIVE_MODELS[target]
+    live = await fetch_live_models(target)
+    if not live:
+        # No live catalogue available: use the curated fallback.
+        with _live_cache_lock():
+            _LIVE_MODELS[target] = models_for_provider(target)
+            _LIVE_FETCHED_AT[target] = time.time()
+        return _LIVE_MODELS[target]
+    merged = _merge_with_registry(target, live)
+    with _live_cache_lock():
+        _LIVE_MODELS[target] = merged
+        _LIVE_FETCHED_AT[target] = time.time()
+    return merged
+
+
+def get_models_sync(provider: str | None, *, refresh: bool = False) -> list[dict]:
+    """Synchronous, call-site-safe wrapper around :func:`get_models_async`.
+
+    Safe from both synchronous code and inside a running event loop: when a loop
+    is active we run the coroutine in a worker thread so we never hit
+    "asyncio.run() cannot be called from a running event loop".
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(get_models_async(provider, refresh=refresh))
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(
+            lambda: asyncio.run(get_models_async(provider, refresh=refresh))
+        ).result()
+
+
 def normalize_provider(provider: str | None) -> str:
     """Return the canonical transport-provider name."""
     name = str(provider or "opencode").strip().lower()
@@ -159,6 +298,10 @@ def provider_for_model(model: str | None) -> str | None:
     for group_key, group in MODEL_REGISTRY.items():
         if any(item["id"] == model for item in group["models"]):
             return _MODEL_BACKENDS[group_key]
+    # Also resolve models discovered live from a provider's catalogue.
+    for provider, models in _LIVE_MODELS.items():
+        if any(item["id"] == model for item in models):
+            return provider
     return None
 
 
@@ -180,7 +323,7 @@ def default_model_for_provider(provider: str | None) -> str:
         return "deepseek-ai/deepseek-v4-flash"
     if target == "copilot":
         return "auto"
-    models = models_for_provider(target)
+    models = get_models_sync(target) or models_for_provider(target)
     if not models:
         raise ValueError(f"Unsupported provider: {provider}")
     return models[0]["id"]

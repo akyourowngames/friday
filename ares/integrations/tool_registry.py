@@ -37,6 +37,7 @@ class ToolCategory(str, Enum):
     PHONE = "phone"
     TELEPHONY = "telephony"
     MCP = "mcp"
+    CRON = "cron"
     UNKNOWN_CONSEQUENTIAL = "unknown_consequential"
 
 
@@ -56,6 +57,10 @@ AGENT_INTROSPECTION_TOOL_NAMES = frozenset({
 WORKFLOW_TOOL_NAMES = frozenset({
     "create_task", "list_tasks", "get_task_status", "update_task", "cancel_task", "run_task",
     "create_workflow_task", "run_workflow_task",
+})
+CRON_TOOL_NAMES = frozenset({
+    "create_cron_job", "list_cron_jobs", "get_cron_job", "update_cron_job",
+    "delete_cron_job", "run_cron_job_now", "get_cron_logs",
 })
 RECALL_TOOL_NAMES = frozenset({
     "search_memory", "search_actions", "search_person", "list_memories", "get_memory",
@@ -131,6 +136,8 @@ def categorize_tool_name(name: str) -> ToolCategory:
         return ToolCategory.SYSTEM
     if normalized in WORKFLOW_TOOL_NAMES:
         return ToolCategory.WORKFLOWS
+    if normalized in CRON_TOOL_NAMES:
+        return ToolCategory.CRON
     if normalized in RECALL_TOOL_NAMES or lowered.startswith((
         "store_memory", "update_memory", "delete_memory", "remember_person", "update_person", "forget_person",
         "review_learning",
@@ -184,6 +191,8 @@ def is_harmless_read_tool(name: str) -> bool:
     if normalized in CORE_TOOL_NAMES:
         return True
     if normalized in VISION_READ_TOOL_NAMES:
+        return True
+    if normalized in {"list_cron_jobs", "get_cron_job"}:
         return True
     read_verbs = ("get", "list", "read", "search", "find", "fetch", "inspect", "snapshot", "status", "show")
     if category in {ToolCategory.GOALS, ToolCategory.WATCHERS, ToolCategory.PHONE, ToolCategory.TELEPHONY}:
@@ -253,8 +262,27 @@ class RootToolRegistry:
         context: Any,
         *,
         delegation_decision: Any | None = None,
+        routing_mode: str = "regex",
     ) -> list[dict[str, Any]]:
-        """Return the narrow schema set appropriate for the current turn."""
+        """Return the schema set appropriate for the current turn.
+
+        ``routing_mode="regex"`` (the fallback) runs the deterministic
+        intent/target classifier and narrows the catalog accordingly.
+        ``routing_mode="llm"`` hands the live catalog to the answering model
+        and lets it route: no regex narrows the set, the model chooses the
+        capability from the descriptions. The deterministic
+        :func:`ares.integrations.turn_policy.authorize_turn_tool` safety gate
+        still applies at execution time regardless of mode.
+        """
+        if routing_mode == "llm":
+            # Full LLM routing: advertise the complete live catalog and let the
+            # model pick. Replicating the regex classifier here would defeat the
+            # purpose; the classifier is only a fallback for when the model
+            # cannot route.
+            return [
+                copy.deepcopy(dict(tool.schema))
+                for tool in self._tools.values()
+            ]
         intent = self._intent_value(context)
         mode = self._decision_mode(delegation_decision)
         should_delegate = bool(getattr(delegation_decision, "should_delegate", False))
@@ -413,10 +441,11 @@ def select_root_tools(
     context: Any,
     *,
     delegation_decision: Any | None = None,
+    routing_mode: str = "regex",
 ) -> list[dict[str, Any]]:
     """Convenience wrapper for callers that rebuild MCP schemas each turn."""
     return RootToolRegistry(schemas).select_for_turn(
-        context, delegation_decision=delegation_decision
+        context, delegation_decision=delegation_decision, routing_mode=routing_mode
     )
 
 
