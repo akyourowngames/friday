@@ -1,14 +1,20 @@
 name: update-readme
 
-# Keeps README.md in sync with code changes. Whenever commits land on `ares`
-# (excluding README-only pushes), opencode reviews the diff and rewrites any
-# sections whose underlying behavior changed, then commits the update back.
+# Keeps README.md in sync with code changes on `ares`.
+#
+# The opencode GitHub App action only supports comment/PR/schedule/workflow_dispatch
+# triggers — it hard-rejects `push` with "Unsupported event type: push". So we bridge
+# it: a `push` to `ares` (excluding README-only pushes) dispatches a `workflow_dispatch`
+# run of THIS workflow, and that run lets opencode review the diff and rewrite any
+# README sections whose behavior changed, then commit the update back.
+#
+# Why the bridge works: the `push` event simply calls `gh workflow run` to start a
+# `workflow_dispatch` run, which is in the action's supported event list.
 #
 # Loop prevention (defense in depth):
 #   1. `paths-ignore: ['README.md']` means a push that only touches README.md
-#      (including opencode's own commit) does not re-trigger this workflow.
-#   2. `if: github.actor != 'github-actions[bot]'` skips runs caused by the
-#      bot's own push via GITHUB_TOKEN.
+#      (including opencode's own commit) does not re-trigger this workflow at all.
+#   2. The push-triggered `trigger` job only runs for non-bot actors.
 #   3. The prompt forces a `[skip ci]` commit message, which makes GitHub skip
 #      all workflow runs for that commit regardless.
 
@@ -17,14 +23,25 @@ on:
     branches: [ares]
     paths-ignore:
       - 'README.md'
+  workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   id-token: write
 
 jobs:
-  update-readme:
-    if: github.actor != 'github-actions[bot]'
+  trigger:
+    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch README update run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run update-readme.yml --ref ares
+
+  update:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -41,10 +58,10 @@ jobs:
           model: opencode/deepseek-v4-flash-free
           use_github_token: true
           prompt: |
-            A push just landed on the `ares` branch. Review the changes in this
-            push (compare the pushed commits against the previous state of the
-            branch) and update README.md so its prose and sections accurately
-            reflect what actually changed.
+            The `ares` branch just received new commits. Review the most recent
+            commit(s) on this branch (compare HEAD against the previous state)
+            and update README.md so its prose and sections accurately reflect
+            what actually changed.
 
             Rules:
             - Only modify README.md. Never touch other files.
