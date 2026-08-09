@@ -1,18 +1,101 @@
 <div align="center">
 
-# Ares
+<p>
+  <img src="friday-banner.svg" alt="Ares — local-first personal AI assistant" width="100%" />
+</p>
 
 ### A local-first personal AI assistant for terminal, desktop voice, web workspace, phone, and remote chat
 
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![Protocol](https://img.shields.io/badge/Integrations-MCP-6C47FF)](docs/mcp.md)
-[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
-
 **Remember context. Work through tools. Speak naturally. Keep durable data under your control.**
 
-[Overview](#overview) · [Installation](#installation) · [Desktop voice](#desktop-voice) · [Runtime surfaces](#runtime-surfaces) · [Capabilities](#capability-map) · [Architecture](#architecture) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) · [Development](#development-and-verification)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/akyourowngames/friday?style=social)](https://github.com/akyourowngames/friday/stargazers)
+[![Issues](https://img.shields.io/github/issues/akyourowngames/friday)](https://github.com/akyourowngames/friday/issues)
+[![Last commit](https://img.shields.io/github/last-commit/akyourowngames/friday)](https://github.com/akyourowngames/friday/commits/ares)
+[![Integrations: MCP](https://img.shields.io/badge/Integrations-MCP-6C47FF)](docs/mcp.md)
+[![Built with Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-CC0000?logo=anthropic&logoColor=white)](#)
+
+<p>
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-highlights">Highlights</a> ·
+  <a href="#-screenshots">Screenshots</a> ·
+  <a href="#capability-map">Capabilities</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#-support--feedback">Support</a>
+</p>
 
 </div>
+
+---
+
+## 🚀 Why Ares?
+
+> **One tool-using agent. Six surfaces. Your data stays yours.**
+
+Ares is a **local-first** personal AI assistant that unifies memory, tools, skills, and safety rules across every surface you use — terminal, desktop voice, web, phone, Telegram, and telephony. It is **not offline-only**: durable state lives under `~/.ares`, while model calls, web research, and integrations talk to external services *only when you configure them*.
+
+**The three pillars:**
+
+- 🧠 **Recall** — search durable facts, people, conversations, actions, and session history *with provenance*.
+- ⚡ **Act** — files, code, shell, research, goals, watchers, images, vision, phones, and connected services.
+- ✦ **Extend** — drop in instruction-only `SKILL.md` playbooks and MCP servers *without touching the core agent*.
+
+---
+
+## ⚡ Highlights
+
+| | | |
+|---|---|---|
+| 🖥️ **Desktop voice assistant** | 💻 **Terminal command center** | 🔎 **Explainable local memory** |
+| Say "Hey Jarvis", hold `Ctrl+Space`, interrupt by voice, inspect results in an activity panel. | Slash completion, arrow-key menus, provider-aware model switching, searchable saved chats. | Hybrid retrieval across facts, people, conversations, actions, and sessions with source IDs. |
+| 🧩 **Power workspace** | 🤖 **Native specialists** | 🔔 **Proactive operations** |
+| Local Next.js chat, uploads, skills, MCP, watchers, and structured tool traces. | Bounded research / analysis / implementation / review runs with durable manifests. | Goals, cron, durable workflows, watchers, incidents, evidence-based progress. |
+| 🔌 **Extensible tool plane** | 📱 **Remote surfaces** | 🏥 **Healthcare pipeline** |
+| Built-in tools + reusable skills + stdio/SSE/HTTP MCP. | Allowlisted Telegram bot, Android bridge, Twilio voice gateway. | End-to-end report generation: retrieval, summarization, BI charts, PDF. |
+| 👁️ **Local vision** | 🖱️ **Semantic computer control** | 🎛️ **Model selection** |
+| OCR, object/scene detection, comparisons, verified watches (opt-in). | UI element recognition + Windows MCP for reliable desktop automation. | Streamlined provider/model switching with automatic endpoint alignment. |
+
+---
+
+## 📸 Screenshots
+
+<p align="center">
+  <img src="desktop.png" alt="Ares desktop voice assistant" width="46%" />
+  <img src="desktop_check.png" alt="Ares desktop control panel" width="46%" />
+</p>
+<p align="center"><sub>Left: desktop voice assistant · Right: desktop control panel with tool activity</sub></p>
+
+> 💡 Want richer visuals? Record a short GIF of "Hey Jarvis" in action and open a PR — it makes the project far more compelling to newcomers.
+
+---
+
+## 🏁 Quick Start
+
+```bash
+git clone https://github.com/akyourowngames/friday.git
+cd friday
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1        # Windows PowerShell
+# source .venv/bin/activate         # macOS / Linux
+pip install -e .
+python -m ares
+```
+
+First run launches `/setup` — pick a provider (OpenCode Zen, NVIDIA NIM, or GitHub Copilot) and a model. Reopen anytime with `/setup`, switch with `/provider` and `/model`.
+
+**Optional feature sets**
+
+| Extra | Install | Adds |
+|---|---|---|
+| Voice | `pip install -e ".[voice]"` | Edge TTS, wake-word, VAD, faster-whisper |
+| Desktop UI | `pip install -e ".[voice,desktop]"` | Tray, CustomTkinter UI, global hotkeys |
+| Vision | `pip install -e ".[vision]"` | Camera/screen capture, YOLO, OCR |
+| Telephony | `pip install -e ".[telephony]"` | Twilio voice-session deps |
+| Dev | `pip install -e ".[dev]"` | Pytest + asyncio test support |
+
+---
 
 ---
 
@@ -1072,6 +1155,35 @@ Ares acts across local and remote surfaces (Telegram, phone, web, MCP servers, c
 - [Contributing guide](CONTRIBUTING.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Changelog](CHANGELOG.md)
+
+---
+
+## 📈 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=akyourowngames/friday&type=Date)](https://www.star-history.com/#akyourowngames/friday&Date)
+
+If Ares is useful to you, a ⭐ is the easiest way to help others discover it.
+
+---
+
+## 💬 Support & Feedback
+
+- **Found a bug or have a feature idea?** Open an [issue](https://github.com/akyourowngames/friday/issues).
+- **Questions?** Start a [discussion](https://github.com/akyourowngames/friday/discussions) or ping me on [Telegram](https://github.com/akyourowngames).
+- **Want to contribute?** See [CONTRIBUTING.md](CONTRIBUTING.md) — small PRs welcome.
+- **Built something cool on top of Ares?** I'd love to see it — drop a link in an issue.
+
+> Made with ☕ and curiosity by [@akyourowngames](https://github.com/akyourowngames). Local-first, always learning.
+
+---
+
+## 🔗 More from the same author
+
+- [A.N.K.I.T.A](https://github.com/akyourowngames/A.N.K.I.T.A) — Python personal AI assistant with voice, memory, Telegram.
+- [AniKai](https://github.com/akyourowngames/AniKai) — anime discovery web app (Next.js + Vercel).
+- [echo89](https://github.com/akyourowngames/echo89) — local-first cinematic music player.
+
+---
 
 ## License
 
