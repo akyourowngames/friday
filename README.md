@@ -8,6 +8,9 @@
 
 **Remember context. Work through tools. Speak naturally. Keep durable data under your control.**
 
+> 🛰️ **Local-first, not offline-only.** Your durable state lives under `~/.ares` on *this* machine. When you configure a model provider, web research, or an integration, those calls reach external/cloud services — and only then. You decide what leaves the box; the agent never assumes a capability runs locally just because it's "local-first."
+
+
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/akyourowngames/friday?style=social)](https://github.com/akyourowngames/friday/stargazers)
