@@ -188,7 +188,7 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	if (!opts.prompt) {
+	if (!opts.prompt && !opts.repl) {
 		printHelp();
 		process.exit(0);
 	}
