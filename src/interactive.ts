@@ -207,10 +207,16 @@ export async function setupProvider(
 	// Resolve model
 	let model = options.modelOverride ?? config.providers[provider.id]?.lastModel ?? provider.defaultModel;
 
-	if (!options.skipModelPicker && !options.modelOverride) {
-		// Try to fetch models and let user pick
+	// Skip the interactive picker when: the provider points at a custom gateway
+	// (non-canonical base URL — e.g. a local proxy that exposes hundreds of
+	// models), or when the fetched list is too large to be usefully picked from.
+	const isCustomGateway =
+		!!baseUrl && !!provider.defaultBaseUrl && baseUrl !== provider.defaultBaseUrl;
+	const MAX_PICKABLE_MODELS = 60;
+
+	if (!options.skipModelPicker && !options.modelOverride && !isCustomGateway) {
 		const models = await listModelsForProvider(provider, apiKey, baseUrl);
-		if (models.length > 1) {
+		if (models.length > 1 && models.length <= MAX_PICKABLE_MODELS) {
 			model = await pickModel(models, {
 				lastModel: config.providers[provider.id]?.lastModel,
 				defaultModel: provider.defaultModel,

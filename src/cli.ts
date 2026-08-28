@@ -247,7 +247,7 @@ async function main(): Promise<void> {
 		toolExecution: "sequential",
 	});
 
-	const renderer = new ConsoleRenderer({ showThinking: true });
+	const renderer = new ConsoleRenderer({ showThinking: false });
 	agent.subscribe((event) => renderer.render(event));
 
 	await agent.prompt(opts.prompt);

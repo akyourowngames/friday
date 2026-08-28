@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ConsoleRenderer } from "../src/console-renderer.ts";
+import { ConsoleRenderer, wrapToWidth } from "../src/console-renderer.ts";
 import { Agent } from "../src/agent.ts";
 import { registerFauxProvider, createFauxStreamFn, fauxText } from "../src/provider-faux.ts";
 import type { AgentEvent } from "../src/types.ts";
@@ -57,7 +57,37 @@ describe("ConsoleRenderer", () => {
 		renderer.render({ type: "message_update", message: msgWithThinking, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "...", partial: msgWithThinking } });
 
 		const finalOutput = output.join("");
-		expect(finalOutput).toContain("[thinking:");
+		expect(finalOutput).toContain("(thinking)");
+	});
+
+	it("rewinds and clears before rewriting (no carriage-return-only duplication)", () => {
+		const output: string[] = [];
+		const renderer = new ConsoleRenderer({ out: (text) => output.push(text) });
+
+		const base = makeBaseMessage();
+		renderer.render({ type: "message_start", message: base });
+		renderer.render({ type: "message_update", message: { ...base, content: [{ type: "text", text: "short" }] }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "short", partial: base } });
+		output.length = 0;
+		renderer.render({ type: "message_update", message: { ...base, content: [{ type: "text", text: "short and now longer" }] }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "er", partial: base } });
+
+		const screen = output.join("");
+		// The fix rewinds + clears to end-of-screen (instead of a bare \r), which
+		// is what prevents wrapped text from being duplicated.
+		expect(screen).toContain("\x1b[J");
+		expect(screen).toContain("short and now longer");
+	});
+
+	it("does not repaint identical text (idempotent)", () => {
+		const output: string[] = [];
+		const renderer = new ConsoleRenderer({ out: (text) => output.push(text) });
+
+		const base = makeBaseMessage();
+		renderer.render({ type: "message_start", message: base });
+		renderer.render({ type: "message_update", message: { ...base, content: [{ type: "text", text: "same" }] }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "same", partial: base } });
+		output.length = 0;
+		renderer.render({ type: "message_update", message: { ...base, content: [{ type: "text", text: "same" }] }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "", partial: base } });
+
+		expect(output.join("")).toBe("");
 	});
 
 	it("should hide thinking blocks when showThinking is false", () => {
@@ -116,5 +146,17 @@ describe("attachConsoleRenderer", () => {
 
 		expect(output.length).toBeGreaterThan(0);
 		expect(output.join("")).toContain("Hello");
+	});
+});
+
+describe("wrapToWidth", () => {
+	it("wraps long single-line text onto multiple rows", () => {
+		const lines = wrapToWidth("the quick brown fox jumps over the lazy dog", 10);
+		expect(lines.length).toBeGreaterThan(1);
+		for (const l of lines) expect(l.length).toBeLessThanOrEqual(10);
+	});
+
+	it("preserves explicit newlines", () => {
+		expect(wrapToWidth("a\nb", 10)).toEqual(["a", "b"]);
 	});
 });
