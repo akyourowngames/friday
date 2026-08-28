@@ -1,9 +1,17 @@
 /**
- * OpenAI provider adapter for friday-ng.
+ * OpenAI-compatible provider.
  *
- * Wraps the official `openai` npm package and converts its streaming
- * SSE events into the assistant-message event-stream protocol used by
- * the Pi agent harness.
+ * One adapter that handles any provider speaking the OpenAI Chat Completions API:
+ *   - OpenAI (real)
+ *   - Groq
+ *   - OpenRouter
+ *   - DeepSeek
+ *   - Mistral
+ *   - Together AI
+ *   - Ollama (with /v1 baseUrl)
+ *   - any other OpenAI-compatible endpoint
+ *
+ * Maps `ChatCompletionChunk` deltas → `AssistantMessageEvent`.
  */
 import OpenAI from "openai";
 import type {
@@ -16,34 +24,44 @@ import type {
 	TextContent,
 	ToolCall,
 	Usage,
-} from "./types.ts";
-import { AssistantMessageEventStream as EventStreamClass } from "./event-stream.ts";
+} from "../types.ts";
+import { AssistantMessageEventStream as EventStreamClass } from "../event-stream.ts";
+import { registerModel } from "../model.ts";
+import { getProvider } from "./registry.ts";
 
-export interface OpenAIStreamConfig {
+export interface OpenAICompatConfig {
 	model: string;
-	apiKey: string;
+	apiKey?: string;
 	baseUrl?: string;
 }
 
-/**
- * Create a `StreamFn` backed by the official OpenAI SDK.
- *
- * Each delta chunk from the OpenAI stream is pushed as a
- * `text_delta` / `thinking_delta` / `toolcall_delta` event, so
- * tokens appear instantly — no buffering.
- */
-export function createOpenAIStreamFn(config: OpenAIStreamConfig): StreamFn {
+/** Create a StreamFn backed by the `openai` SDK pointed at any OpenAI-compatible endpoint. */
+export function createOpenAICompatStreamFn(config: OpenAICompatConfig): StreamFn {
 	const client = new OpenAI({
-		apiKey: config.apiKey,
-		baseURL: config.baseUrl,
+		apiKey: config.apiKey || "no-key-required",
+		// Pass undefined when no baseUrl is configured so the SDK uses its own default
+		baseURL: config.baseUrl || undefined,
+		dangerouslyAllowBrowser: true,
+	});
+
+	// Register the model so the agent loop can resolve it
+	registerModel({
+		id: config.model,
+		name: config.model,
+		api: "openai" as Api,
+		provider: "openai" as Api,
+		baseUrl: config.baseUrl ?? "https://api.openai.com/v1",
+		reasoning: false,
+		contextWindow: 8192,
+		maxTokens: 4096,
 	});
 
 	return (model: Model<Api>, context, options?: StreamOptions) => {
-		return createOpenAIStream(client, config.model, model, context, options ?? {});
+		return openAICompatToStream(client, config.model, model, context, options ?? {});
 	};
 }
 
-function createOpenAIStream(
+function openAICompatToStream(
 	client: OpenAI,
 	modelId: string,
 	model: Model<Api>,
@@ -53,7 +71,7 @@ function createOpenAIStream(
 	const stream = new EventStreamClass();
 	const abortSignal = options.signal;
 
-	// Build the messages array for the OpenAI API.
+	// Translate messages
 	const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
 	if (context.systemPrompt) {
 		messages.push({ role: "system", content: context.systemPrompt });
@@ -80,6 +98,7 @@ function createOpenAIStream(
 		}
 	}
 
+	// Translate tools (if any)
 	const tools = context.tools?.map((t) => ({
 		type: "function" as const,
 		function: {
@@ -94,22 +113,19 @@ function createOpenAIStream(
 		messages,
 		stream: true,
 		...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
-		...(options.temperature ? { temperature: options.temperature } : {}),
-		...(tools ? { tools } : {}),
+		...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+		...(tools && tools.length > 0 ? { tools } : {}),
 	};
 
-	// Spawn the async consumer — it pushes events into the stream as OpenAI
-	// yields chunks, ensuring tokens appear instantly.
-	void openaiToStream();
+	void runStream();
 
-	async function openaiToStream(): Promise<void> {
+	async function runStream(): Promise<void> {
 		try {
-			let lastChunk: OpenAI.Chat.Completions.ChatCompletionChunk | undefined;
 			const openaiStream = await client.chat.completions.create(params, {
 				signal: abortSignal,
 			});
 			if (!openaiStream || typeof (openaiStream as any)[Symbol.asyncIterator] !== "function") {
-				throw new Error("OpenAI did not return a streaming response");
+				throw new Error("Provider did not return a streaming response");
 			}
 
 			let partialMessage: AssistantMessage = {
@@ -125,6 +141,7 @@ function createOpenAIStream(
 
 			stream.push({ type: "start", partial: partialMessage });
 
+			let lastChunk: OpenAI.Chat.Completions.ChatCompletionChunk | undefined;
 			for await (const chunk of openaiStream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>) {
 				const delta = chunk.choices[0]?.delta;
 				lastChunk = chunk;
@@ -132,20 +149,13 @@ function createOpenAIStream(
 
 				if (delta.content) {
 					for (const contentPart of delta.content) {
-						if (typeof contentPart === "string") {
-							partialMessage = pushTextDelta(partialMessage, contentPart);
+						const text = typeof contentPart === "string" ? contentPart : (contentPart as any).text;
+						if (text) {
+							partialMessage = pushTextDelta(partialMessage, text);
 							stream.push({
 								type: "text_delta",
 								contentIndex: 0,
-								delta: contentPart,
-								partial: partialMessage,
-							});
-						} else if ((contentPart as any).type === "text" && (contentPart as any).text) {
-							partialMessage = pushTextDelta(partialMessage, (contentPart as any).text);
-							stream.push({
-								type: "text_delta",
-								contentIndex: 0,
-								delta: (contentPart as any).text,
+								delta: text,
 								partial: partialMessage,
 							});
 						}
@@ -175,11 +185,7 @@ function createOpenAIStream(
 			const stopReason = mapFinishReason(finishReason);
 			partialMessage.stopReason = stopReason === "error" ? "error" : (stopReason as "stop" | "length" | "toolUse");
 			if (stopReason === "error") {
-				stream.push({
-					type: "error",
-					reason: "error",
-					error: partialMessage,
-				});
+				stream.push({ type: "error", reason: "error", error: partialMessage });
 			} else {
 				stream.push({
 					type: "done",
@@ -200,11 +206,7 @@ function createOpenAIStream(
 				errorMessage: error instanceof Error ? error.message : String(error),
 				timestamp: Date.now(),
 			};
-			stream.push({
-				type: "error",
-				reason: "error",
-				error: errMessage,
-			});
+			stream.push({ type: "error", reason: "error", error: errMessage });
 			stream.end(errMessage);
 		}
 	}
@@ -233,25 +235,27 @@ function pushToolCallDelta(message: AssistantMessage, delta: any): AssistantMess
 			break;
 		}
 	}
-	if (existing && delta.id) {
-		existing.id = delta.id;
-	}
-	if (existing && delta.function?.name) {
-		existing.name = delta.function.name;
-	}
+	if (existing && delta.id) existing.id = delta.id;
+	if (existing && delta.function?.name) existing.name = delta.function.name;
 	if (existing && delta.function?.arguments) {
 		try {
 			const parsed = JSON.parse(delta.function.arguments);
 			existing.arguments = { ...existing.arguments, ...parsed };
 		} catch {
+			// accumulate raw if not parseable
 			existing.arguments = { ...existing.arguments, [delta.function.arguments]: undefined };
 		}
 	} else if (!existing) {
+		let args: any = {};
+		if (delta.function?.arguments) {
+			try { args = JSON.parse(delta.function.arguments); }
+			catch { args = { raw: delta.function.arguments }; }
+		}
 		const newToolCall: ToolCall = {
 			type: "toolCall",
 			id: delta.id ?? "",
 			name: delta.function?.name ?? "",
-			arguments: delta.function?.arguments ? (() => { try { return JSON.parse(delta.function.arguments); } catch { return { raw: delta.function.arguments }; } })() : {},
+			arguments: args,
 		};
 		content.push(newToolCall);
 	}
@@ -290,5 +294,23 @@ function mapFinishReason(reason: string | null | undefined): "stop" | "length" |
 			return "toolUse";
 		default:
 			return "error";
+	}
+}
+
+/** Fetch available models from any OpenAI-compatible /v1/models endpoint. */
+export async function listOpenAICompatModels(config: { apiKey?: string; baseUrl?: string }): Promise<string[]> {
+	const client = new OpenAI({
+		apiKey: config.apiKey || "no-key-required",
+		baseURL: config.baseUrl,
+	});
+	try {
+		const list = await client.models.list();
+		const models: string[] = [];
+		for await (const m of list as any) {
+			if (m?.id) models.push(m.id);
+		}
+		return models.sort();
+	} catch {
+		return [];
 	}
 }

@@ -6,67 +6,116 @@
  * Usage:
  *   friday-ng "Hello, what is 2+2?"
  *   friday-ng "Write a haiku" --provider openai
+ *   friday-ng "Hello" --provider ollama
  *
- * By default, uses a built-in "faux" provider that simulates streaming
- * responses without needing API keys. With --provider openai, requires
- * the OPENAI_API_KEY env var.
+ * First run with a real provider: paste your API key, pick a model, and it's saved.
+ * Subsequent runs auto-detect and use your saved key + model.
  */
 import { Agent } from "./agent.ts";
 import { ConsoleRenderer } from "./console-renderer.ts";
-import { registerFauxProvider, createFauxStreamFn, fauxText, fauxToolCall } from "./provider-faux.ts";
-import type { AgentEvent, AgentMessage, AgentTool } from "./types.ts";
+import { loadConfig } from "./config.ts";
+import { setupProvider, listModelsForProvider } from "./interactive.ts";
+import { findProvider, listProviders, resolveApiKey } from "./providers/registry.ts";
+import { isOllamaRunning } from "./providers/ollama.ts";
+import type { Model } from "./types.ts";
 
 interface CliOptions {
 	prompt: string;
-	provider: "faux" | "openai";
-	model: string;
+	provider?: string;
+	model?: string;
+	apiKey?: string;
+	listProviders: boolean;
+	listModels: boolean;
 	help: boolean;
+	noConfig: boolean;
+	forceKey: boolean;
 }
 
 function parseArgs(argv: string[]): CliOptions {
-	const opts: CliOptions = { prompt: "", provider: "faux", model: "faux-1", help: false };
+	const opts: CliOptions = {
+		prompt: "",
+		listProviders: false,
+		listModels: false,
+		help: false,
+		noConfig: false,
+		forceKey: false,
+	};
 	const positional: string[] = [];
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
-		if (arg === "--help" || arg === "-h") {
-			opts.help = true;
-		} else if (arg === "--provider") {
-			opts.provider = argv[++i] as "faux" | "openai";
-		} else if (arg === "--model") {
-			opts.model = argv[++i]!;
-		} else if (arg === "--thinking") {
-			opts.provider = opts.provider; // no-op placeholder
-		} else if (!arg.startsWith("--")) {
-			positional.push(arg);
-		}
+		if (arg === "--help" || arg === "-h") opts.help = true;
+		else if (arg === "--provider") opts.provider = argv[++i];
+		else if (arg === "--model") opts.model = argv[++i];
+		else if (arg === "--api-key") opts.apiKey = argv[++i];
+		else if (arg === "--list-providers") opts.listProviders = true;
+		else if (arg === "--list-models") opts.listModels = true;
+		else if (arg === "--no-config") opts.noConfig = true;
+		else if (arg === "--force-key") opts.forceKey = true;
+		else if (!arg?.startsWith("--")) positional.push(arg ?? "");
 	}
 
-	opts.prompt = positional.join(" ");
+	opts.prompt = positional.join(" ").trim();
 	return opts;
 }
 
 function printHelp(): void {
+	const providers = listProviders()
+		.map((p) => `  ${p.id.padEnd(12)} — ${p.name}: ${p.description}`)
+		.join("\n");
+
 	console.log(`friday-ng — next-gen AI assistant with instant token streaming
 
 USAGE:
   friday-ng <prompt> [options]
 
 OPTIONS:
-  --provider <name>   LLM provider: "faux" (default, no API key needed) or "openai"
-  --model <name>      Model name (default: faux-1)
+  --provider <id>     Provider to use (default: openai, or saved from last run)
+  --model <name>      Model name (skip picker, use this directly)
+  --api-key <key>     API key (skip prompt, don't save to config)
+  --list-providers    Print all supported providers and exit
+  --list-models       Print available models for the selected provider
+  --no-config         Don't save API key or model to config
+  --force-key         Re-prompt for API key even if one is saved
   --help, -h          Show this help
 
-EXAMPLES:
-  friday-ng "What is 2+2?"
-  friday-ng "Write a haiku" --provider openai --model gpt-4o-mini
+PROVIDERS:
+${providers}
 
-By default uses a mock provider that simulates streaming. The mock provider
-responds to tool calls with "calculator" and "websearch" tools.`);
+EXAMPLES:
+  friday-ng "What is 2+2?"                              # first run: paste key, pick model
+  friday-ng "Hello" --provider ollama                    # local Ollama, no key needed
+  friday-ng "What is 2+2?" --provider openai             # OpenAI, uses saved key
+  friday-ng "Tell me a joke" --provider anthropic         # Claude
+  friday-ng "Explain gravity" --provider google             # Gemini
+  friday-ng "Hello" --provider kilo                        # Kilo.ai gateway
+  KILO_BASE_URL=https://api.kilo.ai/api/openrouter friday-ng "Hi" --provider kilo
+
+API keys are stored in ~/.friday-ng/config.json (mode 0600).
+For non-canonical providers, set <PROVIDER>_BASE_URL env var before running.`);
+}
+
+async function listAvailableModels(providerId: string, apiKey?: string): Promise<void> {
+	const provider = findProvider(providerId);
+	if (!provider) {
+		console.error(`Unknown provider: ${providerId}`);
+		process.exit(1);
+	}
+	const config = await loadConfig();
+	const key = apiKey ?? resolveApiKey(providerId) ?? config.providers[providerId]?.apiKey ?? "";
+	const baseUrl = config.providers[providerId]?.baseUrl ?? provider.defaultBaseUrl;
+
+	const models = await listModelsForProvider(provider, key, baseUrl);
+	if (models.length === 0) {
+		console.log(`(Could not fetch model list from ${provider.name})`);
+		console.log(`Default: ${provider.defaultModel}`);
+	} else {
+		for (const m of models) console.log(m);
+	}
 }
 
 /** Built-in tools for the CLI. */
-const cliTools: AgentTool[] = [
+const cliTools = [
 	{
 		name: "calculator",
 		description: "Evaluate a simple arithmetic expression and return the result.",
@@ -76,7 +125,7 @@ const cliTools: AgentTool[] = [
 				expression: { type: "string" as const, description: "The arithmetic expression to evaluate" },
 			},
 			required: ["expression"],
-		} as any,
+		},
 		execute: async (_id: string, params: any) => {
 			try {
 				const result = Function(`"use strict"; return (${params.expression})`)() as number;
@@ -102,9 +151,8 @@ const cliTools: AgentTool[] = [
 				query: { type: "string" as const, description: "Search query" },
 			},
 			required: ["query"],
-		} as any,
+		},
 		execute: async (_id: string, params: any) => {
-			// Placeholder — returns a simulated result
 			return {
 				content: [{ type: "text" as const, text: `Search results for: ${params.query}` }],
 				details: { simulated: true },
@@ -113,72 +161,89 @@ const cliTools: AgentTool[] = [
 	},
 ];
 
-/** Set up the faux provider with a scripted response based on the prompt. */
-function setupFauxProvider(prompt: string) {
-	const registration = registerFauxProvider({ tokensPerSecond: 100 });
-
-	// Script a response: if the prompt mentions "calculate" or a math question,
-	// simulate a tool call. Otherwise just return a text answer.
-	const lowerPrompt = prompt.toLowerCase();
-	if (lowerPrompt.includes("calculator") || /what.*is.*\d/.test(lowerPrompt)) {
-		registration.setResponses([
-			[
-				fauxToolCall("calculator", { expression: "2 + 2" }),
-				fauxText("The answer is 4."),
-			],
-		]);
-	} else {
-		registration.setResponses([[fauxText(`I'm friday-ng, built on the Pi Agent Harness streaming architecture. You said: ${prompt}`)]]);
-	}
-
-	return createFauxStreamFn(registration);
-}
-
 async function main(): Promise<void> {
 	const opts = parseArgs(process.argv.slice(2));
 
-	if (opts.help || !opts.prompt) {
+	if (opts.help) {
 		printHelp();
-		process.exit(opts.prompt ? 0 : 0);
 		return;
 	}
 
-	let streamFunction: any;
+	if (opts.listProviders) {
+		for (const p of listProviders()) {
+			console.log(`${p.id}\t${p.name}\t${p.requiresKey ? "key" : "no-key"}`);
+		}
+		return;
+	}
 
-	if (opts.provider === "openai") {
-		const { OPENAI_API_KEY } = process.env;
-		if (!OPENAI_API_KEY) {
-			console.error("Error: --provider openai requires OPENAI_API_KEY env var.\nSet it or use the default 'faux' provider.");
+	if (opts.listModels) {
+		const providerId = opts.provider ?? "openai";
+		await listAvailableModels(providerId, opts.apiKey);
+		return;
+	}
+
+	if (!opts.prompt) {
+		printHelp();
+		process.exit(0);
+	}
+
+	// Resolve provider: explicit flag → saved config → "openai" → "faux"
+	let providerId = opts.provider;
+	if (!providerId) {
+		const config = await loadConfig();
+		providerId = config.lastProvider ?? "openai";
+	}
+
+	// Pre-flight: if Ollama, check if it's running
+	if (providerId === "ollama") {
+		const running = await isOllamaRunning();
+		if (!running) {
+			console.error(
+				"✗ Ollama is not running. Start it with: ollama serve\n" +
+					"  Or use a different provider: --provider openai, --provider anthropic, etc.",
+			);
 			process.exit(1);
 		}
-		// Lazy-load the OpenAI provider only when needed
-		const { createOpenAIStreamFn } = await import("./provider-openai.ts");
-		streamFunction = createOpenAIStreamFn({ model: opts.model, apiKey: OPENAI_API_KEY });
-	} else {
-		streamFunction = setupFauxProvider(opts.prompt);
 	}
+
+	// Auto-setup: prompt for key if needed, pick model if needed
+	const setup = await setupProvider(providerId, {
+		modelOverride: opts.model,
+		noConfig: opts.noConfig,
+		forceKeyPrompt: opts.forceKey,
+	});
+
+	// Build the model object for the agent
+	const providerMeta = findProvider(providerId)!;
+	const model: Model = {
+		id: setup.model,
+		name: setup.model,
+		api: providerMeta.id as any,
+		provider: providerMeta.id as any,
+		baseUrl: providerMeta.defaultBaseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		contextWindow: 8192,
+		maxTokens: 4096,
+	};
 
 	const agent = new Agent({
 		initialState: {
-			systemPrompt: "You are friday-ng, a next-generation AI assistant with instant token streaming. Be helpful, concise, and friendly.",
-			tools: cliTools,
+			systemPrompt: `You are friday-ng, a next-generation AI assistant with instant token streaming. Current model: ${setup.model}. Be helpful, concise, and friendly.`,
+			tools: cliTools as any,
+			model,
 		},
-		streamFunction,
+		streamFunction: setup.streamFn,
 		toolExecution: "sequential",
 	});
 
 	const renderer = new ConsoleRenderer({ showThinking: true });
-	agent.subscribe(listenerForRenderer(renderer));
+	agent.subscribe((event) => renderer.render(event));
 
 	await agent.prompt(opts.prompt);
 	await agent.waitForIdle();
 }
-
-	function listenerForRenderer(renderer: ConsoleRenderer) {
-		return (event: AgentEvent, _signal: AbortSignal | undefined) => {
-			renderer.render(event);
-		};
-	}
 
 void main().catch((err) => {
 	console.error("Fatal error:", err);

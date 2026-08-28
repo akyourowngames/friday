@@ -103,7 +103,24 @@ describe("agentLoop", () => {
 		stream.push({ type: "start", partial: { ...msg, content: [] } });
 		stream.push({ type: "done", reason: "toolUse", message: msg });
 
-		const streamFn = vi.fn().mockReturnValue(stream);
+		// After the tool executes, the loop calls streamFn again for the next
+		// turn. Serve a fresh, terminating "stop" response — reusing the same
+		// (exhausted) stream would replay the toolUse message forever.
+		const followUpMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "All done!" }],
+			api: "faux",
+			provider: "faux",
+			model: "faux-1",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const followUpStream = new AssistantMessageEventStream();
+		followUpStream.push({ type: "start", partial: { ...followUpMsg, content: [] } });
+		followUpStream.push({ type: "done", reason: "stop", message: followUpMsg });
+
+		const streamFn = vi.fn().mockReturnValueOnce(stream).mockReturnValueOnce(followUpStream);
 		const config = makeConfig(streamFn);
 		const context = makeContext();
 
@@ -126,6 +143,23 @@ describe("agentLoop", () => {
 	it("should abort streaming on abort signal", async () => {
 		const controller = new AbortController();
 		const stream = new AssistantMessageEventStream();
+
+		// Simulate a well-behaved provider: when the signal aborts, it pushes an
+		// aborted error event and terminates the stream (like provider-faux.ts).
+		controller.signal.addEventListener("abort", () => {
+			const aborted: AssistantMessage = {
+				role: "assistant",
+				content: [],
+				api: "faux",
+				provider: "faux",
+				model: "faux-1",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				stopReason: "aborted",
+				errorMessage: "Request was aborted",
+				timestamp: Date.now(),
+			};
+			stream.push({ type: "error", reason: "aborted", error: aborted });
+		});
 
 		const streamFn = vi.fn().mockReturnValue(stream);
 		const config = makeConfig(streamFn);

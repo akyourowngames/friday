@@ -15,7 +15,8 @@ export {
 
 export { EventStream, AssistantMessageEventStream, createAssistantMessageEventStream } from "./event-stream.ts";
 
-export { validateToolArguments } from "./validate.ts";
+export { validateToolArguments, validateToolArgumentsOrThrow } from "./validate.ts";
+export type { ValidationResult } from "./validate.ts";
 
 export { registerModel, getModel, listModels, clearModels } from "./model.ts";
 
@@ -26,7 +27,48 @@ export {
 	fauxThinking,
 	fauxToolCall,
 	fauxAssistantMessage,
+	clearFauxProviderState,
 } from "./provider-faux.ts";
+
+// Universal OpenAI-compatible provider (OpenAI, Groq, OpenRouter, DeepSeek, Mistral, Together, Ollama)
+export {
+	createOpenAICompatStreamFn,
+	listOpenAICompatModels,
+} from "./providers/openai-compat.ts";
+
+// Anthropic, Google, Ollama
+export { createAnthropicStreamFn, listAnthropicModels } from "./providers/anthropic.ts";
+export { createGoogleStreamFn, listGoogleModels } from "./providers/google.ts";
+export { createOllamaStreamFn, listOllamaModels, isOllamaRunning } from "./providers/ollama.ts";
+
+// Provider catalog
+export {
+	getProvider,
+	findProvider,
+	listProviders,
+	resolveApiKey,
+	resolveBaseUrl,
+} from "./providers/registry.ts";
+export type { ProviderMeta, ApiStyle } from "./providers/registry.ts";
+
+// Config + interactive
+export {
+	loadConfig,
+	saveConfig,
+	getConfigFilePath,
+	getApiKey,
+	getBaseUrl,
+	getLastModel,
+	withApiKey,
+	withBaseUrl,
+	withLastModel,
+	withLastProvider,
+	resetConfig,
+} from "./config.ts";
+export type { FridConfig, ProviderConfig } from "./config.ts";
+
+export { setupProvider, readSecret, readLine, pickModel, listModelsForProvider } from "./interactive.ts";
+export type { SetupResult, SetupOptions } from "./interactive.ts";
 
 export { setDefaultStreamFn, getDefaultStreamFn } from "./stream-fn.ts";
 
