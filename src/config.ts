@@ -18,6 +18,9 @@ export interface ProviderConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	lastModel?: string;
+	/** Optional bearer token (some gateways authenticate via Authorization:
+	 *  Bearer instead of / in addition to x-api-key). */
+	authToken?: string;
 }
 
 /** Root config schema. */
@@ -123,6 +126,20 @@ export function withBaseUrl(config: FridConfig, providerId: string, baseUrl: str
 			[providerId]: {
 				...config.providers[providerId],
 				baseUrl,
+			},
+		},
+	};
+}
+
+/** Update the config with a new auth token and return the updated config. */
+export function withAuthToken(config: FridConfig, providerId: string, authToken: string): FridConfig {
+	return {
+		...config,
+		providers: {
+			...config.providers,
+			[providerId]: {
+				...config.providers[providerId],
+				authToken,
 			},
 		},
 	};

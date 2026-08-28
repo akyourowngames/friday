@@ -29,7 +29,8 @@
 		"test:watch": "vitest",
 		"test:coverage": "vitest --coverage",
 		"dev": "tsx watch src/cli.ts",
-		"start": "node dist/cli.js",
+		"start": "node dist/cli.js --provider claude -i",
+		"chat": "npm start",
 		"prepublishOnly": "npm run clean && npm run build && npm run check"
 	},
 	"engines": {

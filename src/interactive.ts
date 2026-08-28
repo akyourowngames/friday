@@ -12,6 +12,7 @@ import {
 	loadConfig,
 	saveConfig,
 	withApiKey,
+	withAuthToken,
 	withBaseUrl,
 	withLastModel,
 	withLastProvider,
@@ -204,6 +205,13 @@ export async function setupProvider(
 		? process.env[provider.baseUrlEnvVar] ?? config.providers[provider.id]?.baseUrl ?? provider.defaultBaseUrl
 		: config.providers[provider.id]?.baseUrl ?? provider.defaultBaseUrl;
 
+	// Resolve auth token (some gateways authenticate via `Authorization: Bearer`
+	// instead of / in addition to `x-api-key`). Prefer env, then saved config.
+	const authToken =
+		provider.apiStyle === "anthropic"
+			? process.env.ANTHROPIC_AUTH_TOKEN ?? config.providers[provider.id]?.authToken
+			: undefined;
+
 	// Resolve model
 	let model = options.modelOverride ?? config.providers[provider.id]?.lastModel ?? provider.defaultModel;
 
@@ -224,14 +232,14 @@ export async function setupProvider(
 		}
 	}
 
-	// Save last-selected model + provider
+	// Save last-selected model + provider + credentials so subsequent runs need
+	// no env vars or re-prompting.
 	if (!options.noConfig) {
-		const updated = withLastModel(withLastProvider(config, provider.id), provider.id, model);
-		if (config.providers[provider.id]?.baseUrl !== baseUrl && baseUrl !== provider.defaultBaseUrl) {
-			await saveConfig(withBaseUrl(updated, provider.id, baseUrl));
-		} else {
-			await saveConfig(updated);
-		}
+		let updated = withLastModel(withLastProvider(config, provider.id), provider.id, model);
+		updated = withBaseUrl(updated, provider.id, baseUrl);
+		updated = withApiKey(updated, provider.id, apiKey);
+		if (authToken) updated = withAuthToken(updated, provider.id, authToken);
+		await saveConfig(updated);
 	}
 
 	// Build the stream function for this provider
@@ -239,6 +247,7 @@ export async function setupProvider(
 		model,
 		apiKey,
 		baseUrl,
+		authToken,
 	});
 
 	return { streamFn, model, apiKey: provider.requiresKey ? apiKey : undefined };
@@ -246,7 +255,7 @@ export async function setupProvider(
 
 async function buildStreamFunction(
 	providerId: string,
-	config: { model: string; apiKey: string; baseUrl?: string },
+	config: { model: string; apiKey: string; baseUrl?: string; authToken?: string },
 ): Promise<StreamFn> {
 	switch (providerId) {
 		case "faux": {
@@ -265,7 +274,7 @@ async function buildStreamFunction(
 				apiKey: config.apiKey,
 				// Some gateways (e.g. local proxies) authenticate via
 				// `Authorization: Bearer` instead of / in addition to `x-api-key`.
-				authToken: process.env.ANTHROPIC_AUTH_TOKEN,
+				authToken: config.authToken,
 				baseUrl: config.baseUrl,
 			});
 		case "google":
