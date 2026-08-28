@@ -305,26 +305,66 @@ function emptyUsage(): Usage {
 
 /** Fetch available Anthropic models (from the models.list endpoint). */
 export async function listAnthropicModels(config: { apiKey: string; authToken?: string; baseUrl?: string }): Promise<string[]> {
+	const base = (config.baseUrl ?? "https://api.anthropic.com").replace(/\/+$/, "");
+	const url = `${base}/v1/models`;
+	// Only custom (non-Anthropic) bases may need an admin bearer token injected
+	// below; never mutate auth for the real Anthropic API.
+	const isCustom = base !== "https://api.anthropic.com";
+
+	const tryFetch = async (bearer?: string): Promise<string[] | null> => {
+		const headers: Record<string, string> = {
+			"x-api-key": config.apiKey,
+			"anthropic-version": "2023-06-01",
+		};
+		if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
+		try {
+			const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+			if (!res.ok) return null;
+			const json = (await res.json()) as { data?: Array<{ id?: string }> | undefined };
+			const ids = (json.data ?? [])
+				.map((m) => m?.id)
+				.filter((id): id is string => typeof id === "string" && id.length > 0);
+			return ids.length ? ids : null;
+		} catch {
+			return null;
+		}
+	};
+
+	// 1) Try the configured auth token. Some gateways expose /v1/models only
+	//    behind a fixed admin bearer (e.g. the local `freecc` proxy accepts
+	//    `Bearer <apiKey>` but rejects the per-user `sk-…` stream token).
+	let ids = await tryFetch(config.authToken);
+	// 2) For custom bases, retry using the apiKey as the bearer. This matches
+	//    the gateway's admin token without hard-coding it (the config's apiKey
+	//    already is the gateway token). Skipped for the real Anthropic API.
+	if (!ids && isCustom) ids = await tryFetch(config.apiKey);
+	if (ids) return ids.sort();
+
+	// 3) Fallback: the SDK's models.list() (works against the real Anthropic API).
 	try {
 		const Anthropic = (await import("@anthropic-ai/sdk" as any)).default;
-		const client = new Anthropic({ apiKey: config.apiKey, ...(config.authToken ? { authToken: config.authToken } : {}), baseURL: config.baseUrl });
+		const client = new Anthropic({
+			apiKey: config.apiKey,
+			...(config.authToken ? { authToken: config.authToken } : {}),
+			baseURL: config.baseUrl,
+		});
 		const result = await client.models.list();
-		const list = result?.data ?? result ?? [];
-		const ids: string[] = [];
-		for (const m of list) {
-			if (m?.id) ids.push(m.id);
-		}
-		return ids.sort();
+		const list = (result as any)?.data ?? result ?? [];
+		const sdkIds: string[] = [];
+		for (const m of list) if (m?.id) sdkIds.push(m.id);
+		if (sdkIds.length) return sdkIds.sort();
 	} catch {
-		// Fallback: hard-coded common Claude models
-		return [
-			"claude-3-5-sonnet-latest",
-			"claude-3-5-haiku-latest",
-			"claude-3-opus-latest",
-			"claude-3-sonnet-20240229",
-			"claude-3-haiku-20240307",
-		];
+		// ignore
 	}
+
+	// 4) Last resort: hard-coded common Claude models.
+	return [
+		"claude-3-5-sonnet-latest",
+		"claude-3-5-haiku-latest",
+		"claude-3-opus-latest",
+		"claude-3-sonnet-20240229",
+		"claude-3-haiku-20240307",
+	];
 }
 
 // Silences unused-import warning for ANTHROPIC_VERSION / ANTHROPIC_BETA

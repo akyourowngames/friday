@@ -167,6 +167,11 @@ export async function listModelsForProvider(
 	apiKey: string,
 	baseUrl?: string,
 ): Promise<string[]> {
+	// For gateways that authenticate via a bearer token, prefer the saved
+	// config token over (and falling back to) the env var. `npm start` runs with
+	// no env vars, so the config is the source of truth.
+	const config = await loadConfig();
+	const authToken = process.env.ANTHROPIC_AUTH_TOKEN ?? config.providers[provider.id]?.authToken;
 	try {
 		switch (provider.apiStyle) {
 			case "openai":
@@ -174,7 +179,7 @@ export async function listModelsForProvider(
 			case "ollama":
 				return await listOllamaModels({ baseUrl });
 			case "anthropic":
-				return await listAnthropicModels({ apiKey, baseUrl, authToken: process.env.ANTHROPIC_AUTH_TOKEN });
+				return await listAnthropicModels({ apiKey, baseUrl, authToken });
 			case "gemini":
 				return await listGoogleModels({ apiKey, baseUrl });
 			case "faux":
