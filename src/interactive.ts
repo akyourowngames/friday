@@ -169,7 +169,7 @@ export async function listModelsForProvider(
 			case "ollama":
 				return await listOllamaModels({ baseUrl });
 			case "anthropic":
-				return await listAnthropicModels({ apiKey, baseUrl });
+				return await listAnthropicModels({ apiKey, baseUrl, authToken: process.env.ANTHROPIC_AUTH_TOKEN });
 			case "gemini":
 				return await listGoogleModels({ apiKey, baseUrl });
 			case "faux":
@@ -253,7 +253,14 @@ async function buildStreamFunction(
 		case "ollama":
 			return createOllamaStreamFn({ model: config.model, baseUrl: config.baseUrl });
 		case "anthropic":
-			return createAnthropicStreamFn({ model: config.model, apiKey: config.apiKey, baseUrl: config.baseUrl });
+			return createAnthropicStreamFn({
+				model: config.model,
+				apiKey: config.apiKey,
+				// Some gateways (e.g. local proxies) authenticate via
+				// `Authorization: Bearer` instead of / in addition to `x-api-key`.
+				authToken: process.env.ANTHROPIC_AUTH_TOKEN,
+				baseUrl: config.baseUrl,
+			});
 		case "google":
 			return createGoogleStreamFn({ model: config.model, apiKey: config.apiKey, baseUrl: config.baseUrl });
 		case "openai":

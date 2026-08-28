@@ -288,51 +288,104 @@ async function streamAssistantResponse(
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
+	let aborted = false;
 
-	for await (const event of response) {
-		switch (event.type) {
-			case "start":
-				partialMessage = event.partial;
-				context.messages.push(partialMessage);
-				addedPartial = true;
-				await emit({ type: "message_start", message: { ...partialMessage } });
+	const onAbort = () => {
+		aborted = true;
+	};
+	signal?.addEventListener("abort", onAbort);
+
+	try {
+		const iterator = response[Symbol.asyncIterator]();
+		while (true) {
+			if (signal?.aborted) {
+				aborted = true;
 				break;
-
-			case "text_start":
-			case "text_delta":
-			case "text_end":
-			case "thinking_start":
-			case "thinking_delta":
-			case "thinking_end":
-			case "toolcall_start":
-			case "toolcall_delta":
-			case "toolcall_end":
-				if (partialMessage) {
+			}
+			// Race the next event against the abort signal so an aborted stream
+			// that never emits a terminal event can still unwind promptly.
+			const next = await Promise.race([
+				iterator.next(),
+				new Promise<IteratorResult<AssistantMessageEvent>>((resolve) => {
+					const handler = () => resolve({ value: undefined as any, done: true });
+					signal?.addEventListener("abort", handler, { once: true });
+				}),
+			]);
+			if (next.done) break;
+			const event = next.value;
+			switch (event.type) {
+				case "start":
 					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					await emit({
-						type: "message_update",
-						assistantMessageEvent: event,
-						message: { ...partialMessage },
-					});
-				}
-				break;
+					context.messages.push(partialMessage);
+					addedPartial = true;
+					await emit({ type: "message_start", message: { ...partialMessage } });
+					break;
 
-			case "done":
-			case "error": {
-				const finalMessage = await response.result();
-				if (addedPartial) {
-					context.messages[context.messages.length - 1] = finalMessage;
-				} else {
-					context.messages.push(finalMessage);
+				case "text_start":
+				case "text_delta":
+				case "text_end":
+				case "thinking_start":
+				case "thinking_delta":
+				case "thinking_end":
+				case "toolcall_start":
+				case "toolcall_delta":
+				case "toolcall_end":
+					if (partialMessage) {
+						partialMessage = event.partial;
+						context.messages[context.messages.length - 1] = partialMessage;
+						await emit({
+							type: "message_update",
+							assistantMessageEvent: event,
+							message: { ...partialMessage },
+						});
+					}
+					break;
+
+				case "done":
+				case "error": {
+					const finalMessage = await response.result();
+					if (addedPartial) {
+						context.messages[context.messages.length - 1] = finalMessage;
+					} else {
+						context.messages.push(finalMessage);
+					}
+					if (!addedPartial) {
+						await emit({ type: "message_start", message: { ...finalMessage } });
+					}
+					await emit({ type: "message_end", message: finalMessage });
+					return finalMessage;
 				}
-				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
-				}
-				await emit({ type: "message_end", message: finalMessage });
-				return finalMessage;
 			}
 		}
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+
+	// If the signal aborted before a terminal event arrived, synthesize an
+	// aborted message so the loop can unwind cleanly (mirrors Pi's behavior).
+	if (aborted) {
+		const abortedMessage: AssistantMessage = partialMessage ?? {
+			role: "assistant",
+			content: [],
+			api: config.model.api,
+			provider: config.model.provider,
+			model: config.model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			timestamp: Date.now(),
+		};
+		if (!addedPartial) {
+			await emit({ type: "message_start", message: { ...abortedMessage } });
+		}
+		await emit({ type: "message_end", message: abortedMessage });
+		return abortedMessage;
 	}
 
 	const finalMessage = await response.result();

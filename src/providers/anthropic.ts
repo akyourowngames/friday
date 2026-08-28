@@ -23,6 +23,10 @@ import { registerModel } from "../model.ts";
 export interface AnthropicConfig {
 	model: string;
 	apiKey: string;
+	/** Optional bearer token sent as `Authorization: Bearer <token>` (some
+	 *  gateways require it in addition to `x-api-key`). Falls back to the
+	 *  ANTHROPIC_AUTH_TOKEN env var via the SDK. */
+	authToken?: string;
 	baseUrl?: string;
 }
 
@@ -68,6 +72,7 @@ async function anthropicToStream(
 
 	const client = new Anthropic({
 		apiKey: config.apiKey,
+		...(config.authToken ? { authToken: config.authToken } : {}),
 		baseURL: config.baseUrl,
 	});
 
@@ -299,10 +304,10 @@ function emptyUsage(): Usage {
 }
 
 /** Fetch available Anthropic models (from the models.list endpoint). */
-export async function listAnthropicModels(config: { apiKey: string; baseUrl?: string }): Promise<string[]> {
+export async function listAnthropicModels(config: { apiKey: string; authToken?: string; baseUrl?: string }): Promise<string[]> {
 	try {
 		const Anthropic = (await import("@anthropic-ai/sdk" as any)).default;
-		const client = new Anthropic({ apiKey: config.apiKey, baseURL: config.baseUrl });
+		const client = new Anthropic({ apiKey: config.apiKey, ...(config.authToken ? { authToken: config.authToken } : {}), baseURL: config.baseUrl });
 		const result = await client.models.list();
 		const list = result?.data ?? result ?? [];
 		const ids: string[] = [];
