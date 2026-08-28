@@ -38,6 +38,10 @@ export interface SetupResult {
 	streamFn: StreamFn;
 	model: string;
 	apiKey?: string;
+	/** Base URL used (resolved env → config → provider default). */
+	baseUrl?: string;
+	/** Bearer auth token, if the provider/gateway uses one. */
+	authToken?: string;
 }
 
 /** Read a secret from stdin with hidden characters. */
@@ -250,10 +254,10 @@ export async function setupProvider(
 		authToken,
 	});
 
-	return { streamFn, model, apiKey: provider.requiresKey ? apiKey : undefined };
+	return { streamFn, model, apiKey: provider.requiresKey ? apiKey : undefined, baseUrl, authToken };
 }
 
-async function buildStreamFunction(
+export async function buildStreamFunction(
 	providerId: string,
 	config: { model: string; apiKey: string; baseUrl?: string; authToken?: string },
 ): Promise<StreamFn> {

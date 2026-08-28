@@ -131,7 +131,7 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	public readonly streamFunction: StreamFn;
+	public streamFunction: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
 	public prepareNextTurn?: (
@@ -165,6 +165,16 @@ export class Agent {
 	subscribe(listener: (event: AgentEvent, signal: AbortSignal | undefined) => Promise<void> | void): () => void {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
+	}
+
+	/**
+	 * Swap the active model + stream function at runtime (e.g. when the TUI's
+	 * `/model` command picks a new model). Takes effect on the next prompt — the
+	 * agent loop reads `state.model` and `streamFunction` at prompt time.
+	 */
+	useModel(model: Model, streamFn: StreamFn): void {
+		this._state.model = model;
+		this.streamFunction = streamFn;
 	}
 
 	get state(): AgentState {

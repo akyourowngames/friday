@@ -10,6 +10,8 @@ const {
 	visibleWidth,
 	computeContentLines,
 	diffFrame,
+	filterModels,
+	visibleSelector,
 	Tui,
 } = await import("../src/tui.ts");
 
@@ -17,6 +19,49 @@ describe("visibleWidth", () => {
 	it("ignores ANSI escape sequences", () => {
 		expect(visibleWidth("\x1b[36myou› \x1b[0m")).toBe(5);
 		expect(visibleWidth("plain")).toBe(5);
+	});
+});
+
+describe("filterModels", () => {
+	it("returns the whole list for an empty query", () => {
+		const all = ["alpha", "beta", "gamma"];
+		expect(filterModels(all, "")).toEqual(all);
+		expect(filterModels(all, "   ")).toEqual(all);
+	});
+
+	it("matches case-insensitively on substring", () => {
+		const all = ["claude-3-5-sonnet", "CLAUDE-OPUS", "gpt-4o"];
+		expect(filterModels(all, "claude")).toEqual(["claude-3-5-sonnet", "CLAUDE-OPUS"]);
+		expect(filterModels(all, "SONNET")).toEqual(["claude-3-5-sonnet"]);
+	});
+
+	it("returns an empty array when nothing matches", () => {
+		expect(filterModels(["a", "b"], "zzz")).toEqual([]);
+	});
+});
+
+describe("visibleSelector", () => {
+	it("returns all rows when the list fits", () => {
+		const { lines, cursorLine } = visibleSelector(["a", "b", "c"], 0, 10);
+		expect(lines.length).toBe(3);
+		expect(cursorLine).toBe(0);
+		expect(lines[0]).toContain("a");
+		expect(lines[0]).toContain("▶");
+	});
+
+	it("windows a large list around the cursor", () => {
+		const big = Array.from({ length: 100 }, (_, i) => `m${i}`);
+		const { lines } = visibleSelector(big, 50, 10);
+		expect(lines.length).toBe(10);
+		expect(lines.some((l) => l.includes("m50"))).toBe(true);
+		// Cursor row is within the window.
+		expect(lines.some((l) => l.includes("▶"))).toBe(true);
+	});
+
+	it("returns no lines for an empty list", () => {
+		const { lines, cursorLine } = visibleSelector([], 0, 10);
+		expect(lines).toEqual([]);
+		expect(cursorLine).toBe(-1);
 	});
 });
 
@@ -156,5 +201,73 @@ describe("Tui (headless)", () => {
 		tui.repaint();
 		// A clean repaint clears the screen first.
 		expect(writes[0]).toContain("\x1b[2J");
+	});
+});
+
+describe("Tui /model selector (headless)", () => {
+	const MODELS = ["claude-3-5-sonnet", "claude-3-opus", "gpt-4o", "gemini-2.0-flash"];
+
+	async function makeSelectorTui() {
+		const writes: string[] = [];
+		const selected: string[] = [];
+		const tui: any = new Tui({
+			out: (t: string) => writes.push(t),
+			getSize: () => [40, 10],
+			model: "claude-3-5-sonnet",
+			provider: "claude",
+			onSubmit: vi.fn(),
+			onListModels: async () => MODELS,
+			onSelectModel: async (id: string) => {
+				selected.push(id);
+				tui.setModel(id);
+			},
+		});
+		return { tui, writes, selected };
+	}
+
+	it("opens the selector on /model, filters, and selects via Enter", async () => {
+		const { tui, writes, selected } = await makeSelectorTui();
+
+		// Open via the slash command.
+		tui.inputBuffer = "/model";
+		await tui.submit();
+		expect(tui.mode).toBe("selector");
+		// The live list is loaded and shown.
+		expect(writes.join("").length).toBeGreaterThan(0);
+
+		// Type a filter to narrow to the two claude models.
+		tui.handleSelectorInput("claude");
+		expect(tui.selectorFiltered.length).toBe(2);
+		expect(tui.selectorFiltered).toEqual(["claude-3-5-sonnet", "claude-3-opus"]);
+
+		// Arrow down to the second match, then confirm.
+		tui.handleSelectorInput("\x1b[B");
+		expect(tui.selectorCursor).toBe(1);
+		tui.handleSelectorInput("\r");
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(selected).toEqual(["claude-3-opus"]);
+		expect(tui.mode).toBe("chat");
+		expect(tui.model).toBe("claude-3-opus");
+	});
+
+	it("cancels the selector on Esc without changing the model", async () => {
+		const { tui, selected } = await makeSelectorTui();
+		tui.inputBuffer = "/model";
+		await tui.submit();
+		expect(tui.mode).toBe("selector");
+		tui.handleSelectorInput("\x1b"); // Esc cancels
+		expect(tui.mode).toBe("chat");
+		expect(selected).toEqual([]);
+		expect(tui.model).toBe("claude-3-5-sonnet");
+	});
+
+	it("/clear wipes history", async () => {
+		const { tui } = await makeSelectorTui();
+		tui.handleEvent({ type: "message_start", message: { role: "user", content: "hi", timestamp: 0 } } as any);
+		expect(tui.history.length).toBeGreaterThan(0);
+		tui.inputBuffer = "/clear";
+		await tui.submit();
+		expect(tui.history.length).toBe(0);
 	});
 });

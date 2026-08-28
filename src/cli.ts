@@ -14,9 +14,9 @@
 import { Agent } from "./agent.ts";
 import { ConsoleRenderer } from "./console-renderer.ts";
 import { Tui } from "./tui.ts";
-import { loadConfig } from "./config.ts";
-import { setupProvider, listModelsForProvider } from "./interactive.ts";
-import { findProvider, listProviders, resolveApiKey } from "./providers/registry.ts";
+import { loadConfig, saveConfig, withLastModel } from "./config.ts";
+import { setupProvider, listModelsForProvider, buildStreamFunction } from "./interactive.ts";
+import { findProvider, listProviders, resolveApiKey, type ProviderMeta } from "./providers/registry.ts";
 import { isOllamaRunning } from "./providers/ollama.ts";
 import type { Model } from "./types.ts";
 
@@ -221,18 +221,7 @@ async function main(): Promise<void> {
 
 	// Build the model object for the agent
 	const providerMeta = findProvider(providerId)!;
-	const model: Model = {
-		id: setup.model,
-		name: setup.model,
-		api: providerMeta.id as any,
-		provider: providerMeta.id as any,
-		baseUrl: providerMeta.defaultBaseUrl,
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		contextWindow: 8192,
-		maxTokens: 4096,
-	};
+	const model = buildModelObject(providerMeta, setup.model);
 
 	if (opts.repl) {
 		await runRepl(opts, setup, providerId, model);
@@ -256,6 +245,22 @@ async function main(): Promise<void> {
 	await agent.waitForIdle();
 }
 
+/** Build the `Model` object the Agent loop needs from provider meta + id. */
+function buildModelObject(provider: ProviderMeta, modelId: string): Model {
+	return {
+		id: modelId,
+		name: modelId,
+		api: provider.id as any,
+		provider: provider.id as any,
+		baseUrl: provider.defaultBaseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		contextWindow: 8192,
+		maxTokens: 4096,
+	};
+}
+
 /** Interactive REPL mode: a living Pi-style TUI instead of one-shot. */
 async function runRepl(
 	opts: CliOptions,
@@ -263,6 +268,7 @@ async function runRepl(
 	providerId: string,
 	model: Model,
 ): Promise<void> {
+	const providerMeta = findProvider(providerId)!;
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: `You are friday-ng, a next-generation AI assistant with instant token streaming. Current model: ${setup.model}. Be helpful, concise, and friendly.`,
@@ -281,6 +287,28 @@ async function runRepl(
 			await agent.waitForIdle();
 		},
 		onQuit: () => agent.abort(),
+		onListModels: async () => {
+			const config = await loadConfig();
+			const baseUrl = config.providers[providerId]?.baseUrl ?? providerMeta.defaultBaseUrl;
+			const apiKey = config.providers[providerId]?.apiKey ?? "";
+			try {
+				return await listModelsForProvider(providerMeta, apiKey, baseUrl);
+			} catch {
+				return [];
+			}
+		},
+		onSelectModel: async (id: string) => {
+			const streamFn = await buildStreamFunction(providerId, {
+				model: id,
+				apiKey: setup.apiKey ?? "",
+				baseUrl: setup.baseUrl,
+				authToken: setup.authToken,
+			});
+			agent.useModel(buildModelObject(providerMeta, id), streamFn);
+			tui.setModel(id);
+			const config = await loadConfig();
+			await saveConfig(withLastModel(config, providerId, id));
+		},
 	});
 
 	agent.subscribe((event) => tui.handleEvent(event));

@@ -24,6 +24,7 @@ const DIM = `${ESC}[2m`;
 const CYAN = `${ESC}[36m`;
 const MAGENTA = `${ESC}[35m`;
 const YELLOW = `${ESC}[33m`;
+const REVERSE = `${ESC}[7m`;
 
 const USER_PREFIX = `${CYAN}you› ${RESET}`;
 const USER_PREFIX_VW = 5; // visible width of "you› "
@@ -91,6 +92,42 @@ export function wrapText(text: string, width: number, prefix: string, reset: str
 	return out;
 }
 
+/**
+ * Case-insensitive substring filter over a model list. Empty query returns the
+ * whole list (so the selector shows everything until the user types).
+ */
+export function filterModels(all: string[], query: string): string[] {
+	const q = query.trim().toLowerCase();
+	if (!q) return all;
+	return all.filter((m) => m.toLowerCase().includes(q));
+}
+
+/**
+ * Window a (possibly huge) model list around the cursor so only `rows` fit on
+ * screen, marking the cursor row with a reverse-video `▶`. Returns the drawn
+ * lines plus the index of the cursor row within them (-1 if empty).
+ */
+export function visibleSelector(
+	list: string[],
+	cursor: number,
+	rows: number,
+): { lines: string[]; cursorLine: number } {
+	const count = list.length;
+	if (count === 0) return { lines: [], cursorLine: -1 };
+	const start = Math.max(0, Math.min(cursor - Math.floor(rows / 2), Math.max(0, count - rows)));
+	const end = Math.min(count, start + Math.max(1, rows));
+	const lines: string[] = [];
+	let cursorLine = -1;
+	for (let i = start; i < end; i++) {
+		const isCursor = i === cursor;
+		const marker = isCursor ? `${REVERSE}▶ ${RESET}` : "  ";
+		const text = (list[i] ?? "").slice(0, Math.max(0, 200));
+		lines.push(`${marker}${text}${RESET}`);
+		if (isCursor) cursorLine = lines.length - 1;
+	}
+	return { lines, cursorLine };
+}
+
 /** Visible (printed) width of a string, ignoring ANSI escape sequences. */
 export function visibleWidth(s: string): number {
 	let width = 0;
@@ -109,7 +146,6 @@ export function visibleWidth(s: string): number {
 	}
 	return width;
 }
-
 /** Compute the scrollback + streaming content lines (everything above the
  *  status/input reserved rows). Pure and testable. */
 export function computeContentLines(
@@ -166,6 +202,12 @@ export interface TuiOptions {
 	onSubmit: (text: string) => Promise<void> | void;
 	onQuit?: () => void;
 	showThinking?: boolean;
+	/** Returns the live model list (CLI wires this to the gateway). */
+	onListModels?: () => Promise<string[]>;
+	/** Called when the user picks a model in the `/model` selector. */
+	onSelectModel?: (id: string) => Promise<void> | void;
+	/** Called by the `/clear` command (optional; history is always wiped). */
+	onClear?: () => void;
 }
 
 export class Tui {
@@ -176,6 +218,9 @@ export class Tui {
 	private provider: string;
 	private onSubmit: (text: string) => Promise<void> | void;
 	private onQuit?: () => void;
+	private onListModels?: () => Promise<string[]>;
+	private onSelectModel?: (id: string) => Promise<void> | void;
+	private onClear?: () => void;
 	private showThinking: boolean;
 
 	private history: TuiHistoryEntry[] = [];
@@ -183,6 +228,14 @@ export class Tui {
 	private inputBuffer = "";
 	private status = "";
 	private busy = false;
+
+	/** "chat" = normal input; "selector" = the `/model` picker overlay. */
+	private mode: "chat" | "selector" = "chat";
+	private selectorAll: string[] = [];
+	private selectorFiltered: string[] = [];
+	private selectorFilter = "";
+	private selectorCursor = 0;
+	private selectorLoading = false;
 
 	/** User scroll offset (negative = scrolled up into history). */
 	private userScroll = 0;
@@ -199,6 +252,9 @@ export class Tui {
 		this.provider = options.provider;
 		this.onSubmit = options.onSubmit;
 		this.onQuit = options.onQuit;
+		this.onListModels = options.onListModels;
+		this.onSelectModel = options.onSelectModel;
+		this.onClear = options.onClear;
 		this.showThinking = options.showThinking ?? false;
 	}
 
@@ -306,6 +362,10 @@ export class Tui {
 
 	private handleInput(chunk: Buffer): void {
 		const s = chunk.toString();
+		if (this.mode === "selector") {
+			this.handleSelectorInput(s);
+			return;
+		}
 		if (s === "\x03" || s === "\x1b") {
 			this.quit();
 			return;
@@ -334,6 +394,102 @@ export class Tui {
 		}
 	}
 
+	/** Input handling while the `/model` selector overlay is open. */
+	private handleSelectorInput(s: string): void {
+		if (s === "\x1b" || s === "\x03") {
+			this.closeSelector(); // Esc / Ctrl+C cancels without changing model
+			return;
+		}
+		if (this.selectorLoading) {
+			// Ignore everything except cancel while the list loads.
+			return;
+		}
+		if (s === "\r" || s === "\n") {
+			void this.confirmSelector();
+			return;
+		}
+		if (s === "\x7f" || s === "\b") {
+			this.selectorFilter = this.selectorFilter.slice(0, -1);
+			this.selectorCursor = 0;
+			this.recomputeFiltered();
+			this.render();
+			return;
+		}
+		if (s === "\x1b[A") {
+			this.moveCursor(-1);
+			return;
+		}
+		if (s === "\x1b[B") {
+			this.moveCursor(1);
+			return;
+		}
+		if (s.startsWith("\x1b[")) return; // ignore other escape sequences
+		if (s >= " ") {
+			this.selectorFilter += s;
+			this.selectorCursor = 0;
+			this.recomputeFiltered();
+			this.render();
+		}
+	}
+
+	private recomputeFiltered(): void {
+		this.selectorFiltered = filterModels(this.selectorAll, this.selectorFilter);
+		if (this.selectorCursor >= this.selectorFiltered.length) {
+			this.selectorCursor = Math.max(0, this.selectorFiltered.length - 1);
+		}
+	}
+
+	private moveCursor(delta: number): void {
+		if (this.selectorFiltered.length === 0) return;
+		this.selectorCursor = Math.max(
+			0,
+			Math.min(this.selectorFiltered.length - 1, this.selectorCursor + delta),
+		);
+		this.render();
+	}
+
+	private async openSelector(): Promise<void> {
+		this.mode = "selector";
+		this.selectorAll = [];
+		this.selectorFiltered = [];
+		this.selectorFilter = "";
+		this.selectorCursor = 0;
+		this.selectorLoading = true;
+		this.render();
+		try {
+			this.selectorAll = (await this.onListModels?.()) ?? [];
+		} catch {
+			this.selectorAll = [];
+		}
+		this.selectorLoading = false;
+		this.recomputeFiltered();
+		this.render();
+	}
+
+	private closeSelector(): void {
+		this.mode = "chat";
+		this.selectorAll = [];
+		this.selectorFiltered = [];
+		this.selectorFilter = "";
+		this.selectorCursor = 0;
+		this.selectorLoading = false;
+		this.render();
+	}
+
+	private async confirmSelector(): Promise<void> {
+		const id = this.selectorFiltered[this.selectorCursor];
+		this.closeSelector();
+		if (!id) return;
+		try {
+			await this.onSelectModel?.(id);
+		} catch (err) {
+			this.appendHistory({
+				role: "system",
+				text: `[error] ${err instanceof Error ? err.message : String(err)}`,
+			});
+		}
+	}
+
 	private scroll(direction: number): void {
 		const [cols, rows] = this.getSize();
 		const content = computeContentLines(this.history, this.streamingText, cols);
@@ -351,6 +507,21 @@ export class Tui {
 			return;
 		}
 		this.inputBuffer = "";
+
+		// Slash commands (only when not busy). Unknown `/x` falls through as a
+		// normal message below.
+		if (text === "/model") {
+			this.render();
+			void this.openSelector();
+			return;
+		}
+		if (text === "/clear") {
+			this.history = [];
+			this.render();
+			this.onClear?.();
+			return;
+		}
+
 		this.busy = true;
 		this.status = "thinking…";
 		this.render();
@@ -380,6 +551,14 @@ export class Tui {
 	}
 
 	private render(): void {
+		if (this.mode === "selector") {
+			this.renderSelector();
+			return;
+		}
+		this.renderChat();
+	}
+
+	private renderChat(): void {
 		const [cols, rows] = this.getSize();
 		const reserved = 2; // status line + input line
 		const usable = Math.max(1, rows - reserved);
@@ -396,7 +575,29 @@ export class Tui {
 		this.writeFrame(frame, cols, rows);
 	}
 
-	private writeFrame(frame: string[], _cols: number, rows: number): void {
+	/** Draw the `/model` selector: filter box on top, windowed list, hint at bottom. */
+	private renderSelector(): void {
+		const [cols, rows] = this.getSize();
+		const hintLine = `${DIM}↑↓ move • Enter select • Esc cancel${RESET}`;
+		const filterLine = `${YELLOW}/model › ${RESET}${this.selectorFilter}${RESET}`;
+		const usable = Math.max(1, rows - 2); // minus filter + hint
+
+		let listLines: string[];
+		if (this.selectorLoading) {
+			listLines = [`${DIM}loading models…${RESET}`];
+		} else if (this.selectorFiltered.length === 0) {
+			listLines = [`${DIM}(no models match "${this.selectorFilter}")${RESET}`];
+		} else {
+			listLines = visibleSelector(this.selectorFiltered, this.selectorCursor, usable).lines;
+		}
+
+		const frame = [filterLine, ...listLines, hintLine];
+		// Cursor sits at the end of the filter line (row 1).
+		const cursorCol = 1 + visibleWidth("/model › ") + visibleWidth(this.selectorFilter);
+		this.writeFrame(frame, cols, rows, 1, cursorCol);
+	}
+
+	private writeFrame(frame: string[], _cols: number, rows: number, cursorRow?: number, cursorCol?: number): void {
 		if (!this.prevFrame) {
 			this.write(`${ESC}[2J`); // first paint: clear screen
 		}
@@ -408,12 +609,22 @@ export class Tui {
 			this.write(`${ESC}[${i + 1};1H${ESC}[2K`);
 		}
 
-		// Position the hardware cursor at the end of the input line.
-		const inputRow = Math.min(frame.length, rows);
-		const col = 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer);
-		this.write(`${ESC}[${inputRow};${col}H${ESC}[?25h`);
+		// Position the hardware cursor. In chat mode it tracks the input line;
+		// callers may override (e.g. the selector puts it on the filter box).
+		const row = cursorRow ?? Math.min(frame.length, rows);
+		const col = cursorCol ?? 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer);
+		this.write(`${ESC}[${row};${col}H${ESC}[?25h`);
 
 		this.prevFrame = frame;
+	}
+
+	/** Update the displayed model (called after a `/model` selection). */
+	setModel(modelId: string): void {
+		this.model = modelId;
+		if (this.history[0]?.role === "system") {
+			this.history[0].text = `friday-ng • ${this.provider}/${this.model} • type a message, Ctrl+C or Esc to quit`;
+		}
+		this.render();
 	}
 }
 
