@@ -13,6 +13,7 @@
  */
 import { Agent } from "./agent.ts";
 import { ConsoleRenderer } from "./console-renderer.ts";
+import { Tui } from "./tui.ts";
 import { loadConfig } from "./config.ts";
 import { setupProvider, listModelsForProvider } from "./interactive.ts";
 import { findProvider, listProviders, resolveApiKey } from "./providers/registry.ts";
@@ -29,6 +30,7 @@ interface CliOptions {
 	help: boolean;
 	noConfig: boolean;
 	forceKey: boolean;
+	repl: boolean;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -39,6 +41,7 @@ function parseArgs(argv: string[]): CliOptions {
 		help: false,
 		noConfig: false,
 		forceKey: false,
+		repl: false,
 	};
 	const positional: string[] = [];
 
@@ -50,6 +53,7 @@ function parseArgs(argv: string[]): CliOptions {
 		else if (arg === "--api-key") opts.apiKey = argv[++i];
 		else if (arg === "--list-providers") opts.listProviders = true;
 		else if (arg === "--list-models") opts.listModels = true;
+		else if (arg === "--repl" || arg === "-i") opts.repl = true;
 		else if (arg === "--no-config") opts.noConfig = true;
 		else if (arg === "--force-key") opts.forceKey = true;
 		else if (!arg?.startsWith("--")) positional.push(arg ?? "");
@@ -228,6 +232,11 @@ async function main(): Promise<void> {
 		maxTokens: 4096,
 	};
 
+	if (opts.repl) {
+		await runRepl(opts, setup, providerId, model);
+		return;
+	}
+
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: `You are friday-ng, a next-generation AI assistant with instant token streaming. Current model: ${setup.model}. Be helpful, concise, and friendly.`,
@@ -243,6 +252,37 @@ async function main(): Promise<void> {
 
 	await agent.prompt(opts.prompt);
 	await agent.waitForIdle();
+}
+
+/** Interactive REPL mode: a living Pi-style TUI instead of one-shot. */
+async function runRepl(
+	opts: CliOptions,
+	setup: Awaited<ReturnType<typeof setupProvider>>,
+	providerId: string,
+	model: Model,
+): Promise<void> {
+	const agent = new Agent({
+		initialState: {
+			systemPrompt: `You are friday-ng, a next-generation AI assistant with instant token streaming. Current model: ${setup.model}. Be helpful, concise, and friendly.`,
+			tools: cliTools as any,
+			model,
+		},
+		streamFunction: setup.streamFn,
+		toolExecution: "sequential",
+	});
+
+	const tui = new Tui({
+		model: setup.model,
+		provider: providerId,
+		onSubmit: async (text: string) => {
+			await agent.prompt(text);
+			await agent.waitForIdle();
+		},
+		onQuit: () => agent.abort(),
+	});
+
+	agent.subscribe((event) => tui.handleEvent(event));
+	await tui.run(opts.prompt);
 }
 
 void main().catch((err) => {
