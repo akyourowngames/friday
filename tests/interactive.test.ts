@@ -16,7 +16,7 @@ vi.mock("node:readline/promises", () => ({
   }),
 }));
 
-const { pickModel, ensureApiKey, listModelsForProvider } = await import(
+const { pickModel, ensureApiKey, listModelsForProvider, setupProvider } = await import(
   "../src/interactive.ts"
 );
 const { findProvider } = await import("../src/providers/registry.ts");
@@ -107,7 +107,31 @@ describe("ensureApiKey", () => {
   });
 });
 
+describe("claude alias routing", () => {
+  it("setupProvider('claude') builds an Anthropic stream function", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test-claude-alias";
+    try {
+      const result = await setupProvider("claude", {
+        modelOverride: "claude-3-5-sonnet-latest",
+        skipModelPicker: true,
+        noConfig: true,
+      });
+      expect(typeof result.streamFn).toBe("function");
+      expect(result.model).toBe("claude-3-5-sonnet-latest");
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+});
+
 describe("listModelsForProvider", () => {
+  it("exposes a `claude` alias that routes to the Anthropic adapter", () => {
+    const claude = findProvider("claude");
+    expect(claude).toBeDefined();
+    expect(claude!.apiStyle).toBe("anthropic");
+    expect(claude!.apiKeyEnvVars).toContain("ANTHROPIC_API_KEY");
+  });
+
   it("returns a canned list for the faux provider", async () => {
     const faux = findProvider("faux");
     expect(await listModelsForProvider(faux, "")).toEqual(["faux-1"]);

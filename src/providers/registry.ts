@@ -75,6 +75,19 @@ const PROVIDERS: ProviderMeta[] = [
 		description: "Anthropic's Claude 3.5 Sonnet, Haiku, and Opus models.",
 	},
 	{
+		// Alias for the Anthropic provider — same adapter, invoked as `claude`.
+		id: "claude",
+		name: "Claude (Anthropic)",
+		apiKeyEnvVars: ["ANTHROPIC_API_KEY"],
+		baseUrlEnvVar: "ANTHROPIC_BASE_URL",
+		defaultBaseUrl: "https://api.anthropic.com",
+		defaultModel: "claude-3-5-sonnet-latest",
+		apiStyle: "anthropic",
+		requiresKey: true,
+		keyUrl: "https://console.anthropic.com/settings/keys",
+		description: "Anthropic's Claude models (alias for `anthropic`).",
+	},
+	{
 		id: "google",
 		name: "Google Gemini",
 		apiKeyEnvVars: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],

@@ -253,6 +253,7 @@ async function buildStreamFunction(
 		case "ollama":
 			return createOllamaStreamFn({ model: config.model, baseUrl: config.baseUrl });
 		case "anthropic":
+		case "claude":
 			return createAnthropicStreamFn({
 				model: config.model,
 				apiKey: config.apiKey,
