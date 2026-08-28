@@ -81,6 +81,7 @@ OPTIONS:
   --list-models       Print available models for the selected provider
   --no-config         Don't save API key or model to config
   --force-key         Re-prompt for API key even if one is saved
+  --repl, -i          Interactive TUI (Pi-style chat) instead of one-shot
   --help, -h          Show this help
 
 PROVIDERS:
@@ -91,6 +92,7 @@ EXAMPLES:
   friday-ng "Hello" --provider ollama                    # local Ollama, no key needed
   friday-ng "What is 2+2?" --provider openai             # OpenAI, uses saved key
   friday-ng "Tell me a joke" --provider anthropic         # Claude
+  friday-ng --provider claude -i                           # interactive Pi-style chat (TUI)
   friday-ng "Explain gravity" --provider google             # Gemini
   friday-ng "Hello" --provider kilo                        # Kilo.ai gateway
   KILO_BASE_URL=https://api.kilo.ai/api/openrouter friday-ng "Hi" --provider kilo
