@@ -23,6 +23,7 @@ import { createAnthropicStreamFn, listAnthropicModels } from "./providers/anthro
 import { createGoogleStreamFn, listGoogleModels } from "./providers/google.ts";
 import { createOllamaStreamFn, listOllamaModels, isOllamaRunning } from "./providers/ollama.ts";
 import { createFauxStreamFn, registerFauxProvider, fauxText } from "./provider-faux.ts";
+import { createFreeccStreamFn, listFreeccModels } from "./providers/freecc.ts";
 import type { StreamFn } from "./types.ts";
 
 export interface SetupOptions {
@@ -46,18 +47,53 @@ export interface SetupResult {
 
 /** Read a secret from stdin with hidden characters. */
 export async function readSecret(prompt: string): Promise<string> {
-	// Try to disable echo if possible
-	const wasRaw = input.isRaw;
+	// If we're in a TTY with raw mode available, hide keystrokes by
+	// intercepting each character.  Otherwise fall back to the readline
+	// mock-friendly path (used in tests and non-TTY environments).
+	if (typeof input.setRawMode === "function" && input.isTTY) {
+		const wasRaw = input.isRaw;
+		const chunks: string[] = [];
+		try {
+			output.write(prompt);
+			input.setRawMode(true);
+			input.resume();
+			const answer = await new Promise<string>((resolve) => {
+				const onData = (chunk: Buffer) => {
+					const s = chunk.toString();
+					for (const ch of s) {
+						if (ch === "\r" || ch === "\n") {
+							input.removeListener("data", onData);
+							output.write("\n");
+							resolve(chunks.join(""));
+							return;
+						}
+						if (ch === "\x7f" || ch === "\b") {
+							if (chunks.length > 0) {
+								chunks.pop();
+								output.write("\b \b"); // erase last asterisk
+							}
+						} else if (ch >= " ") {
+							chunks.push(ch);
+							output.write("*"); // show asterisk instead of the char
+						}
+				}
+			};
+			input.on("data", onData);
+			});
+			return answer.trim();
+		} finally {
+			if (wasRaw !== undefined) input.setRawMode(wasRaw);
+		}
+	}
+	// Fallback: readline-based prompt (mock-friendly, non-TTY).
+	const rl = readline.createInterface({ input, output });
 	try {
-		// Use Node's readline
-		const rl = readline.createInterface({ input, output });
 		output.write(prompt);
 		const answer = await rl.question("");
-		rl.close();
 		output.write("\n");
 		return answer.trim();
 	} finally {
-		if (wasRaw !== undefined) input.setRawMode(wasRaw);
+		rl.close();
 	}
 }
 
@@ -180,6 +216,8 @@ export async function listModelsForProvider(
 				return await listOllamaModels({ baseUrl });
 			case "anthropic":
 				return await listAnthropicModels({ apiKey, baseUrl, authToken });
+			case "freecc":
+				return await listFreeccModels({ apiKey, baseUrl });
 			case "gemini":
 				return await listGoogleModels({ apiKey, baseUrl });
 			case "faux":
@@ -296,6 +334,8 @@ export async function buildStreamFunction(
 		case "together":
 		case "kilo":
 			return createOpenAICompatStreamFn({ model: config.model, apiKey: config.apiKey, baseUrl: config.baseUrl });
+		case "freecc":
+			return createFreeccStreamFn({ model: config.model, apiKey: config.apiKey, baseUrl: config.baseUrl });
 		default:
 			throw new Error(`No implementation for provider: ${providerId}`);
 	}

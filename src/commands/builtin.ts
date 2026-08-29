@@ -1,0 +1,329 @@
+/**
+ * Built-in slash commands for friday-ng.
+ *
+ * Modeled after Pi Coding Agent's slash-commands.ts. Each command is a
+ * standalone function `make<Name>Command()` that closes over the deps it
+ * needs (the host / agent / settings store) and returns a `SlashCommand`.
+ *
+ * Commands live in a separate module from the registry so tests can register
+ * and unregister them without touching the registry file.
+ */
+import {
+	getSlashCommand,
+	listSlashCommands,
+	registerSlashCommand,
+	type SlashCommand,
+	type SlashCommandContext,
+	type SlashCommandResult,
+} from "../slash-commands.ts";
+import type { Agent } from "../agent.ts";
+import type { SettingsStore } from "../settings.ts";
+
+/** `/help` — list every registered command with its description. */
+export function makeHelpCommand(): SlashCommand {
+	return {
+		name: "/help",
+		description: "Show this list of commands.",
+		usage: "[command]",
+		run: ({ args, tui }: SlashCommandContext): SlashCommandResult => {
+			const trimmed = args.trim();
+			if (trimmed) {
+				const cmd = getSlashCommand(trimmed.startsWith("/") ? trimmed : `/${trimmed}`);
+				if (!cmd) {
+					return { message: `Unknown command: ${trimmed}` };
+				}
+				const usage = cmd.usage ? ` ${cmd.usage}` : "";
+				const out = `/${cmd.name.replace(/^\//, "")}${usage}\n  ${cmd.description}`;
+				return { message: out };
+			}
+			const all = listSlashCommands();
+			const longest = all.reduce((m, c) => Math.max(m, c.name.length), 0);
+			const lines = all.map((c) => {
+				const usage = c.usage ? ` ${c.usage}` : "";
+				return `  ${c.name.padEnd(longest + 2)}${usage.padEnd(0)}\n    ${c.description}`;
+			});
+			tui.appendSystemLine(`Available commands:\n${lines.join("\n")}`);
+			return { message: "(see above)" };
+		},
+	};
+}
+
+/** `/exit`, `/quit` — leave the TUI. */
+export function makeExitCommand(): SlashCommand {
+	return {
+		name: "/exit",
+		description: "Quit friday-ng.",
+		run: ({ tui }: SlashCommandContext): SlashCommandResult => {
+			tui.quitTui();
+			return { quit: true };
+		},
+	};
+}
+
+export function makeQuitCommand(): SlashCommand {
+	return {
+		name: "/quit",
+		description: "Alias for /exit.",
+		run: ({ tui }: SlashCommandContext): SlashCommandResult => {
+			tui.quitTui();
+			return { quit: true };
+		},
+	};
+}
+
+/** `/clear` — wipe the in-memory chat history. */
+export function makeClearCommand(): SlashCommand {
+	return {
+		name: "/clear",
+		description: "Clear the current chat history.",
+		run: ({ tui }: SlashCommandContext): SlashCommandResult => {
+			tui.clearHistory();
+			return { clearHistory: true };
+		},
+	};
+}
+
+/**
+ * `/model` — interactive model picker. The TUI already has a built-in
+ * /model selector; this command is a thin wrapper for the case where the
+ * slash registry is used outside the TUI's special case.
+ */
+export function makeModelCommand(deps: { listModels: () => Promise<string[]>; onSelect: (id: string) => Promise<void> | void }): SlashCommand {
+	return {
+		name: "/model",
+		description: "Pick a different model.",
+		run: async (): Promise<SlashCommandResult> => {
+			const models = await deps.listModels();
+			if (models.length === 0) {
+				return { message: "No models available." };
+			}
+			// Defer to the TUI's built-in selector if present, otherwise just
+			// pick the first one. The TUI's own /model handler short-circuits
+			// before this command runs, so in normal use this path is rarely
+			// taken.
+			await deps.onSelect(models[0]!);
+			return { message: `Switched to ${models[0]!}` };
+		},
+	};
+}
+
+/** `/cost` — print cumulative token + cost stats from the agent. */
+export function makeCostCommand(): SlashCommand {
+	return {
+		name: "/cost",
+		description: "Show token usage so far for this session.",
+		run: ({ agent, tui }: SlashCommandContext): SlashCommandResult => {
+			const totals = computeUsageTotals(agent);
+			const msg = formatUsageTotals(totals);
+			tui.appendSystemLine(msg);
+			return { message: "(see above)" };
+		},
+	};
+}
+
+/** `/usage` — alias for /cost. */
+export function makeUsageCommand(): SlashCommand {
+	return {
+		name: "/usage",
+		description: "Alias for /cost.",
+		run: ({ agent, tui }: SlashCommandContext): SlashCommandResult => {
+			const totals = computeUsageTotals(agent);
+			tui.appendSystemLine(formatUsageTotals(totals));
+			return { message: "(see above)" };
+		},
+	};
+}
+
+/** `/settings` — open the settings editor (the TUI handles the actual UI). */
+export function makeSettingsCommand(deps: { onOpenSettings: () => Promise<void> | void }): SlashCommand {
+	return {
+		name: "/settings",
+		description: "Edit user settings.",
+		run: async (): Promise<SlashCommandResult> => {
+			await deps.onOpenSettings();
+			return {};
+		},
+	};
+}
+
+/** `/reload` — re-read config and re-instantiate the active provider. */
+export function makeReloadCommand(deps: { onReload: () => Promise<void> | void }): SlashCommand {
+	return {
+		name: "/reload",
+		description: "Reload the config and re-instantiate the active provider.",
+		run: async (): Promise<SlashCommandResult> => {
+			await deps.onReload();
+			return { message: "Config reloaded." };
+		},
+	};
+}
+
+/** `/provider` — show / switch the active provider. */
+export function makeProviderCommand(deps: { onSwitch: (id: string) => Promise<void> | void; currentProvider: string; listProviders: () => string[] }): SlashCommand {
+	return {
+		name: "/provider",
+		description: "Show or switch the active provider.",
+		usage: "[provider-id]",
+		run: ({ args }): SlashCommandResult | Promise<SlashCommandResult> => {
+			const trimmed = args.trim();
+			if (!trimmed) {
+				const all = deps.listProviders();
+				return { message: `Current: ${deps.currentProvider}\nAvailable: ${all.join(", ")}` };
+			}
+			return Promise.resolve(deps.onSwitch(trimmed)).then(() => ({
+				message: `Switched to provider: ${trimmed}`,
+			}));
+		},
+	};
+}
+
+/** `/tools` — list the registered tools the agent can call. */
+export function makeToolsCommand(deps: { onList: () => string[] }): SlashCommand {
+	return {
+		name: "/tools",
+		description: "List registered tools.",
+		run: (): SlashCommandResult => {
+			const tools = deps.onList();
+			if (tools.length === 0) return { message: "(no tools registered)" };
+			return { message: `Tools:\n${tools.map((t) => `  - ${t}`).join("\n")}` };
+		},
+	};
+}
+
+/** `/compact` — ask the host to compact the session. */
+export function makeCompactCommand(deps: { onCompact: () => Promise<void> | void }): SlashCommand {
+	return {
+		name: "/compact",
+		description: "Compact the session (summarize old messages).",
+		run: async (): Promise<SlashCommandResult> => {
+			await deps.onCompact();
+			return { message: "Session compacted." };
+		},
+	};
+}
+
+/** `/sessions` — list saved sessions. */
+export function makeSessionsCommand(deps: { onList: () => Promise<string[]> }): SlashCommand {
+	return {
+		name: "/sessions",
+		description: "List saved sessions.",
+		run: async (): Promise<SlashCommandResult> => {
+			const sessions = await deps.onList();
+			if (sessions.length === 0) return { message: "(no saved sessions)" };
+			return { message: `Saved sessions:\n${sessions.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}` };
+		},
+	};
+}
+
+/** `/resume` — resume a saved session. */
+export function makeResumeCommand(deps: { onResume: (id: string) => Promise<void> | void; listSessions: () => Promise<string[]> }): SlashCommand {
+	return {
+		name: "/resume",
+		description: "Resume a saved session by id (or omit to pick).",
+		usage: "[session-id]",
+		run: async ({ args }): Promise<SlashCommandResult> => {
+			const trimmed = args.trim();
+			if (!trimmed) {
+				const all = await deps.listSessions();
+				if (all.length === 0) return { message: "(no saved sessions)" };
+				return { message: `Pick one: ${all.join(", ")}` };
+			}
+			await deps.onResume(trimmed);
+			return { message: `Resumed ${trimmed}` };
+		},
+	};
+}
+
+/** Aggregate token usage from the agent's message log. */
+export interface UsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	turns: number;
+	toolCalls: number;
+}
+
+export function computeUsageTotals(agent: Agent): UsageTotals {
+	const totals: UsageTotals = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		turns: 0,
+		toolCalls: 0,
+	};
+	for (const msg of agent.state.messages) {
+		if (msg.role === "assistant") {
+			totals.input += msg.usage.input;
+			totals.output += msg.usage.output;
+			totals.cacheRead += msg.usage.cacheRead;
+			totals.cacheWrite += msg.usage.cacheWrite;
+			totals.totalTokens += msg.usage.totalTokens;
+			totals.turns += 1;
+			for (const c of msg.content) {
+				if (c.type === "toolCall") totals.toolCalls += 1;
+			}
+		}
+	}
+	return totals;
+}
+
+export function formatUsageTotals(totals: UsageTotals): string {
+	return [
+		"Usage:",
+		`  Turns:      ${totals.turns}`,
+		`  Tool calls: ${totals.toolCalls}`,
+		`  Input tok:  ${totals.input.toLocaleString()}`,
+		`  Output tok: ${totals.output.toLocaleString()}`,
+		`  Cache rd:   ${totals.cacheRead.toLocaleString()}`,
+		`  Cache wr:   ${totals.cacheWrite.toLocaleString()}`,
+		`  Total tok:  ${totals.totalTokens.toLocaleString()}`,
+	].join("\n");
+}
+
+/** Register all built-in commands. Idempotent. */
+export function registerBuiltinCommands(deps: {
+	settings: SettingsStore;
+	listModels: () => Promise<string[]>;
+	onSelectModel: (id: string) => Promise<void> | void;
+	onOpenSettings: () => Promise<void> | void;
+	onReload: () => Promise<void> | void;
+	onSwitchProvider: (id: string) => Promise<void> | void;
+	currentProvider: string;
+	listProviders: () => string[];
+	listTools: () => string[];
+	onCompact: () => Promise<void> | void;
+	listSessions: () => Promise<string[]>;
+	onResumeSession: (id: string) => Promise<void> | void;
+}): void {
+	const tryRegister = (cmd: SlashCommand) => {
+		try {
+			registerSlashCommand(cmd);
+		} catch {
+			// already registered — ignore
+		}
+	};
+	tryRegister(makeHelpCommand());
+	tryRegister(makeExitCommand());
+	tryRegister(makeQuitCommand());
+	tryRegister(makeClearCommand());
+	tryRegister(makeModelCommand({ listModels: deps.listModels, onSelect: deps.onSelectModel }));
+	tryRegister(makeCostCommand());
+	tryRegister(makeUsageCommand());
+	tryRegister(makeSettingsCommand({ onOpenSettings: deps.onOpenSettings }));
+	tryRegister(makeReloadCommand({ onReload: deps.onReload }));
+	tryRegister(
+		makeProviderCommand({
+			onSwitch: deps.onSwitchProvider,
+			currentProvider: deps.currentProvider,
+			listProviders: deps.listProviders,
+		}),
+	);
+	tryRegister(makeToolsCommand({ onList: deps.listTools }));
+	tryRegister(makeCompactCommand({ onCompact: deps.onCompact }));
+	tryRegister(makeSessionsCommand({ onList: deps.listSessions }));
+	tryRegister(makeResumeCommand({ listSessions: deps.listSessions, onResume: deps.onResumeSession }));
+}

@@ -29,7 +29,7 @@
 		"test:watch": "vitest",
 		"test:coverage": "vitest --coverage",
 		"dev": "tsx watch src/cli.ts",
-		"start": "node dist/cli.js --provider claude -i",
+		"start": "node --max-old-space-size=4096 dist/cli.js --provider kilo -i",
 		"chat": "npm start",
 		"prepublishOnly": "npm run clean && npm run build && npm run check"
 	},

@@ -1,0 +1,172 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { promises as fs } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { bashTool, readTool, writeTool, editTool, globTool, grepTool, builtinTools } from "../src/tools/shell.ts";
+import { isPathInside, resolveSafePath } from "../src/tools/path-safety.ts";
+
+let tmp: string;
+beforeEach(async () => {
+	tmp = path.join(os.tmpdir(), `friday-ng-tools-${Date.now()}-${Math.random()}`);
+	await fs.mkdir(tmp, { recursive: true });
+});
+afterEach(async () => {
+	await fs.rm(tmp, { recursive: true, force: true });
+});
+
+describe("path-safety", () => {
+	it("isPathInside returns true for descendant paths", () => {
+		const root = path.resolve("/a");
+		const child = path.join(root, "b", "c");
+		expect(isPathInside(root, child)).toBe(true);
+		expect(isPathInside(root, root)).toBe(true);
+	});
+	it("isPathInside returns false for ascendant or unrelated paths", () => {
+		const root = path.resolve("/a");
+		expect(isPathInside(root, path.resolve("/b"))).toBe(false);
+		// Sibling dir that starts with the same prefix
+		const sibling = path.resolve(path.dirname(root), path.basename(root) + "-b", "c");
+		expect(isPathInside(root, sibling)).toBe(false);
+	});
+	it("resolveSafePath joins relative paths under root", () => {
+		const root = path.resolve("/root");
+		expect(resolveSafePath(root, "foo.txt")).toBe(path.join(root, "foo.txt"));
+	});
+	it("resolveSafePath returns absolute paths as-is", () => {
+		const abs = path.resolve("/etc/passwd");
+		expect(resolveSafePath(path.resolve("/root"), abs)).toBe(abs);
+	});
+});
+
+describe("bashTool", () => {
+	it("runs a simple command and returns exit code 0", async () => {
+		const result = await bashTool.execute("t1", { command: process.platform === "win32" ? "echo hi" : "echo hi" });
+		expect(result.isError).toBeFalsy();
+		const text = (result.content[0] as any).text;
+		expect(text).toContain("hi");
+		expect(text).toContain("exit code 0");
+	});
+	it("rejects obviously dangerous commands", async () => {
+		const r = await bashTool.execute("t1", { command: "rm -rf /" });
+		expect(r.isError).toBe(true);
+	});
+	it("captures non-zero exit codes without isError", async () => {
+		const cmd = process.platform === "win32" ? "exit 7" : "exit 7";
+		const r = await bashTool.execute("t1", { command: cmd });
+		expect(r.isError).toBeFalsy();
+		const text = (r.content[0] as any).text;
+		// Either "code 7" or "(command exited with code 7 and no output)"
+		expect(text).toMatch(/code 7/);
+	});
+});
+
+describe("readTool / writeTool / editTool", () => {
+	it("write + read round-trip", async () => {
+		const file = path.join(tmp, "hello.txt");
+		const w = await writeTool.execute("t1", { path: file, content: "hi there", root: tmp });
+		expect(w.isError).toBeFalsy();
+		const r = await readTool.execute("t1", { path: file, root: tmp });
+		expect((r.content[0] as any).text).toContain("hi there");
+	});
+	it("read rejects paths outside the root", async () => {
+		const r = await readTool.execute("t1", { path: "../escape.txt", root: tmp });
+		expect(r.isError).toBe(true);
+	});
+	it("edit replaces a unique occurrence", async () => {
+		const file = path.join(tmp, "a.txt");
+		await writeTool.execute("t1", { path: file, content: "hello world\n", root: tmp });
+		const r = await editTool.execute("t1", { path: file, oldText: "hello", newText: "goodbye", root: tmp });
+		expect(r.isError).toBeFalsy();
+		const after = await fs.readFile(file, "utf8");
+		expect(after).toBe("goodbye world\n");
+	});
+	it("edit fails when oldText is not found", async () => {
+		const file = path.join(tmp, "b.txt");
+		await writeTool.execute("t1", { path: file, content: "x\n", root: tmp });
+		const r = await editTool.execute("t1", { path: file, oldText: "missing", newText: "x", root: tmp });
+		expect(r.isError).toBe(true);
+	});
+	it("edit fails when oldText is ambiguous", async () => {
+		const file = path.join(tmp, "c.txt");
+		await writeTool.execute("t1", { path: file, content: "aaa\n", root: tmp });
+		const r = await editTool.execute("t1", { path: file, oldText: "a", newText: "b", root: tmp });
+		expect(r.isError).toBe(true);
+		expect((r.content[0] as any).text).toContain("3 times");
+	});
+	it("read with line range returns numbered lines", async () => {
+		const file = path.join(tmp, "lines.txt");
+		await fs.writeFile(file, "one\ntwo\nthree\nfour\n", "utf8");
+		const r = await readTool.execute("t1", { path: file, startLine: 2, endLine: 3, root: tmp });
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("two");
+		expect(text).toContain("three");
+		expect(text).not.toContain("one");
+		expect(text).not.toContain("four");
+	});
+});
+
+describe("globTool", () => {
+	beforeEach(async () => {
+		await fs.writeFile(path.join(tmp, "a.ts"), "");
+		await fs.writeFile(path.join(tmp, "b.ts"), "");
+		await fs.writeFile(path.join(tmp, "c.txt"), "");
+		await fs.mkdir(path.join(tmp, "sub"));
+		await fs.writeFile(path.join(tmp, "sub", "d.ts"), "");
+	});
+	it("matches simple patterns", async () => {
+		const r = await globTool.execute("t1", { pattern: "*.ts", root: tmp });
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("a.ts");
+		expect(text).toContain("b.ts");
+		expect(text).not.toContain("c.txt");
+	});
+	it("matches recursive patterns with **", async () => {
+		const r = await globTool.execute("t1", { pattern: "**/*.ts", root: tmp });
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("a.ts");
+		expect(text).toContain("sub/d.ts");
+	});
+	it("returns (no matches) when nothing matches", async () => {
+		const r = await globTool.execute("t1", { pattern: "*.py", root: tmp });
+		expect((r.content[0] as any).text).toBe("(no matches)");
+	});
+});
+
+describe("grepTool", () => {
+	beforeEach(async () => {
+		await fs.writeFile(path.join(tmp, "x.ts"), "alpha\nbeta\ngamma\n");
+		await fs.writeFile(path.join(tmp, "y.ts"), "alpha2\ndelta\n");
+	});
+	it("finds matches in a single file", async () => {
+		const r = await grepTool.execute("t1", { pattern: "alpha", path: path.join(tmp, "x.ts"), root: tmp });
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("alpha");
+		expect(text).toContain("x.ts:1");
+	});
+	it("walks a directory by default", async () => {
+		const r = await grepTool.execute("t1", { pattern: "alpha", root: tmp });
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("alpha");
+		expect(text).toContain("alpha2");
+	});
+	it("honors the include filter", async () => {
+		const r = await grepTool.execute("t1", { pattern: "alpha", root: tmp, include: "x.ts" });
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("x.ts:1");
+		expect(text).not.toContain("alpha2");
+	});
+	it("rejects paths outside the root", async () => {
+		const r = await grepTool.execute("t1", { pattern: ".", path: "../escape", root: tmp });
+		expect(r.isError).toBe(true);
+	});
+	it("rejects invalid regex", async () => {
+		const r = await grepTool.execute("t1", { pattern: "[unclosed", root: tmp });
+		expect(r.isError).toBe(true);
+	});
+});
+
+describe("builtinTools list", () => {
+	it("exports every built-in tool in registration order", () => {
+		expect(builtinTools.map((t) => t.name)).toEqual(["bash", "read", "write", "edit", "glob", "grep"]);
+	});
+});

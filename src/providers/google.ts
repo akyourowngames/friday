@@ -157,21 +157,21 @@ async function googleToStream(
 						const isThought = part.thought === true;
 						if (isThought) {
 							const block: ThinkingContent = { type: "thinking", thinking: part.text };
-							partialMessage.content = [...partialMessage.content, block];
+							partialMessage.content.push(block);
 							stream.push({
 								type: "thinking_delta",
 								contentIndex: partialMessage.content.length - 1,
 								delta: part.text,
-								partial: { ...partialMessage },
+								partial: partialMessage,
 							});
 						} else {
 							const block: TextContent = { type: "text", text: part.text };
-							partialMessage.content = [...partialMessage.content, block];
+							partialMessage.content.push(block);
 							stream.push({
 								type: "text_delta",
 								contentIndex: partialMessage.content.length - 1,
 								delta: part.text,
-								partial: { ...partialMessage },
+								partial: partialMessage,
 							});
 						}
 					} else if (part?.functionCall) {
@@ -181,12 +181,12 @@ async function googleToStream(
 							name: part.functionCall.name,
 							arguments: part.functionCall.args ?? {},
 						};
-						partialMessage.content = [...partialMessage.content, tc];
+						partialMessage.content.push(tc);
 						stream.push({
 							type: "toolcall_end",
 							contentIndex: partialMessage.content.length - 1,
 							toolCall: tc,
-							partial: { ...partialMessage },
+							partial: partialMessage,
 						});
 					}
 				}

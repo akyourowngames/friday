@@ -215,23 +215,20 @@ function openAICompatToStream(
 }
 
 function pushTextDelta(message: AssistantMessage, text: string): AssistantMessage {
-	const content = [...message.content];
-	const lastText = content[content.length - 1];
+	const lastText = message.content[message.content.length - 1];
 	if (lastText && lastText.type === "text") {
 		lastText.text += text;
 	} else {
-		const newText: TextContent = { type: "text", text };
-		content.push(newText);
+		message.content.push({ type: "text", text } as TextContent);
 	}
-	return { ...message, content };
+	return message;
 }
 
 function pushToolCallDelta(message: AssistantMessage, delta: any): AssistantMessage {
-	const content = [...message.content];
 	let existing: ToolCall | undefined;
-	for (let i = content.length - 1; i >= 0; i--) {
-		if (content[i].type === "toolCall") {
-			existing = content[i] as ToolCall;
+	for (let i = message.content.length - 1; i >= 0; i--) {
+		if (message.content[i].type === "toolCall") {
+			existing = message.content[i] as ToolCall;
 			break;
 		}
 	}
@@ -242,7 +239,6 @@ function pushToolCallDelta(message: AssistantMessage, delta: any): AssistantMess
 			const parsed = JSON.parse(delta.function.arguments);
 			existing.arguments = { ...existing.arguments, ...parsed };
 		} catch {
-			// accumulate raw if not parseable
 			existing.arguments = { ...existing.arguments, [delta.function.arguments]: undefined };
 		}
 	} else if (!existing) {
@@ -251,15 +247,14 @@ function pushToolCallDelta(message: AssistantMessage, delta: any): AssistantMess
 			try { args = JSON.parse(delta.function.arguments); }
 			catch { args = { raw: delta.function.arguments }; }
 		}
-		const newToolCall: ToolCall = {
+		message.content.push({
 			type: "toolCall",
 			id: delta.id ?? "",
 			name: delta.function?.name ?? "",
 			arguments: args,
-		};
-		content.push(newToolCall);
+		} as ToolCall);
 	}
-	return { ...message, content };
+	return message;
 }
 
 function emptyUsage(): Usage {

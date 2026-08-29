@@ -10,7 +10,7 @@
  * This file is just the lookup table.
  */
 
-export type ApiStyle = "openai" | "anthropic" | "gemini" | "ollama" | "faux";
+export type ApiStyle = "openai" | "anthropic" | "gemini" | "ollama" | "faux" | "freecc";
 
 export interface ProviderMeta {
 	/** Canonical id used in --provider flag and config keys. */
@@ -36,6 +36,10 @@ export interface ProviderMeta {
 	keyUrl: string;
 	/** Short description for help output. */
 	description: string;
+	/** Default context window size (tokens) for models from this provider. */
+	defaultContextWindow: number;
+	/** Default max output tokens for models from this provider. */
+	defaultMaxTokens: number;
 }
 
 const PROVIDERS: ProviderMeta[] = [
@@ -49,6 +53,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: false,
 		keyUrl: "",
 		description: "Built-in mock provider. Streams fake responses without needing an API key.",
+		defaultContextWindow: 8192,
+		defaultMaxTokens: 4096,
 	},
 	{
 		id: "openai",
@@ -61,6 +67,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://platform.openai.com/api-keys",
 		description: "OpenAI's GPT-4o, o1, and friends.",
+		defaultContextWindow: 128000,
+		defaultMaxTokens: 16384,
 	},
 	{
 		id: "anthropic",
@@ -73,6 +81,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://console.anthropic.com/settings/keys",
 		description: "Anthropic's Claude 3.5 Sonnet, Haiku, and Opus models.",
+		defaultContextWindow: 200000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		// Alias for the Anthropic provider — same adapter, invoked as `claude`.
@@ -86,6 +96,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://console.anthropic.com/settings/keys",
 		description: "Anthropic's Claude models (alias for `anthropic`).",
+		defaultContextWindow: 200000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		id: "google",
@@ -98,6 +110,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://aistudio.google.com/app/apikey",
 		description: "Google's Gemini 2.0 Flash, Pro, and Flash-Lite models.",
+		defaultContextWindow: 1000000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		id: "ollama",
@@ -110,6 +124,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: false,
 		keyUrl: "",
 		description: "Local LLMs via Ollama. No API key needed, just run `ollama serve`.",
+		defaultContextWindow: 128000,
+		defaultMaxTokens: 4096,
 	},
 	// The rest are OpenAI-compatible providers whose canonical base URLs
 	// (verified against official docs) are set below.
@@ -124,6 +140,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://console.groq.com/keys",
 		description: "Groq ultra-fast inference (OpenAI-compatible).",
+		defaultContextWindow: 128000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		id: "openrouter",
@@ -136,6 +154,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://openrouter.ai/keys",
 		description: "OpenRouter — gateway to 100+ models (OpenAI-compatible).",
+		defaultContextWindow: 200000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		id: "deepseek",
@@ -148,6 +168,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://platform.deepseek.com/api_keys",
 		description: "DeepSeek — strong coding/reasoning (OpenAI-compatible).",
+		defaultContextWindow: 128000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		id: "mistral",
@@ -160,6 +182,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://console.mistral.ai/api-keys/",
 		description: "Mistral models (OpenAI-compatible).",
+		defaultContextWindow: 128000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		id: "together",
@@ -172,6 +196,8 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://api.together.xyz/settings/api-keys",
 		description: "Together AI — open-source models (OpenAI-compatible).",
+		defaultContextWindow: 128000,
+		defaultMaxTokens: 8192,
 	},
 	{
 		id: "kilo",
@@ -184,6 +210,28 @@ const PROVIDERS: ProviderMeta[] = [
 		requiresKey: true,
 		keyUrl: "https://kilo.ai",
 		description: "Kilo.ai gateway — OpenAI-compatible (https://api.kilo.ai/api/gateway).",
+		defaultContextWindow: 128000,
+		defaultMaxTokens: 4096,
+	},
+	{
+		// Local freecc proxy: a thin Anthropic-Messages-compatible gateway
+		// that aggregates many providers' free tiers. Distinct from the real
+		// Anthropic provider because it authenticates via `Authorization:
+		// Bearer <adminToken>` ONLY — it does not accept `x-api-key` and it
+		// does not understand `anthropic-version`. We talk to it over a
+		// hand-rolled fetch + SSE adapter, not the Anthropic SDK.
+		id: "freecc",
+		name: "freecc (local proxy)",
+		apiKeyEnvVars: ["FREECC_ADMIN_TOKEN"],
+		baseUrlEnvVar: "FREECC_BASE_URL",
+		defaultBaseUrl: "http://127.0.0.1:8082",
+		defaultModel: "claude-3-freecc-no-thinking/kilo/tencent/hy3:free",
+		apiStyle: "freecc",
+		requiresKey: true,
+		keyUrl: "",
+		description: "Local freecc proxy (Anthropic-Messages-compatible, Bearer auth).",
+		defaultContextWindow: 200000,
+		defaultMaxTokens: 8192,
 	},
 ];
 

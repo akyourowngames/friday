@@ -64,8 +64,126 @@ export {
 	withLastModel,
 	withLastProvider,
 	resetConfig,
+	withSettings,
+	withRecentSessions,
+	withLastSessionId,
+	bumpRecentSession,
 } from "./config.ts";
-export type { FridConfig, ProviderConfig } from "./config.ts";
+export type { FridConfig, ProviderConfig, FridSettings } from "./config.ts";
+
+// Settings store
+export {
+	SettingsStore,
+	registerSetting,
+	getSettingSchema,
+	listSettings,
+	settingsToJson,
+	validateValue,
+} from "./settings.ts";
+export type { SettingSchema, SettingType, SettingValue } from "./settings.ts";
+
+// Slash commands
+export {
+	registerSlashCommand,
+	getSlashCommand,
+	listSlashCommands,
+	findCommands,
+	clearSlashCommands,
+	parseSlashCommand,
+} from "./slash-commands.ts";
+export type {
+	SlashCommand,
+	SlashCommandContext,
+	SlashCommandResult,
+	SlashCommandHost,
+} from "./slash-commands.ts";
+
+// Built-in slash commands
+export { registerBuiltinCommands } from "./commands/builtin.ts";
+export type { UsageTotals } from "./commands/builtin.ts";
+
+// Sessions
+export {
+	createSession,
+	loadSession,
+	listSessions,
+	deleteSession,
+	recordMessage,
+	updateMeta,
+	readMeta,
+	readMessages,
+	appendMessage,
+	writeMeta,
+	newSessionMeta,
+	getSessionsDirPath,
+} from "./sessions.ts";
+export type { SessionMeta, SavedSession } from "./sessions.ts";
+
+// Compaction
+export {
+	compactTranscript,
+	estimateMessageTokens,
+	estimateTranscriptTokens,
+	makeTransformContext,
+	makeSummaryMessage,
+} from "./compaction.ts";
+export type { CompactOptions } from "./compaction.ts";
+
+// Tools
+export {
+	bashTool,
+	readTool,
+	writeTool,
+	editTool,
+	globTool,
+	grepTool,
+	builtinTools,
+} from "./tools/shell.ts";
+export { isPathInside, resolveSafePath, tryStat } from "./tools/path-safety.ts";
+
+// Permissions
+export {
+	DEFAULT_POLICY,
+	decide,
+	matchPattern,
+	PermissionCache,
+} from "./permissions.ts";
+export type { PermissionMode, PermissionPolicy, PermissionRule, PermissionRequest } from "./permissions.ts";
+
+// Retry
+export { isRetryable, backoffDelay, retryAfterMs, withRetry } from "./retry.ts";
+export type { RetryOptions } from "./retry.ts";
+
+// Lifecycle hooks
+export { HookRegistry } from "./hooks.ts";
+export type {
+	HookEvent,
+	Hook,
+	HookResult,
+	HookPayloads,
+	PreToolUsePayload,
+	PostToolUsePayload,
+	PreUserMessagePayload,
+	PostAssistantMessagePayload,
+	PreModelCallPayload,
+	PostModelCallPayload,
+	TurnEndPayload,
+} from "./hooks.ts";
+
+// Extension loader
+export {
+	buildHost,
+	defaultExtensionsDir,
+	discoverExtensions,
+	importExtension,
+	loadExtensions,
+	runExtension,
+} from "./extension-loader.ts";
+export type { ExtensionHost, ExtensionModule, LoadResult, BuildHostOptions } from "./extension-loader.ts";
+
+// Markdown
+export { renderMarkdown, renderMarkdownColored, markdownToPlain } from "./markdown.ts";
+export type { MarkdownLine, MarkdownSpan, ColoredLine, RenderColoredOptions } from "./markdown.ts";
 
 export { setupProvider, readSecret, readLine, pickModel, listModelsForProvider } from "./interactive.ts";
 export type { SetupResult, SetupOptions } from "./interactive.ts";

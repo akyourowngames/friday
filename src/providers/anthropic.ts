@@ -157,17 +157,14 @@ async function anthropicToStream(
 				switch (event.type) {
 					case "content_block_start": {
 						const block = event.content_block;
-						if (block?.type === "text") {
-							partialMessage.content = [...partialMessage.content, { type: "text", text: "" } as TextContent];
-						} else if (block?.type === "thinking") {
-							partialMessage.content = [...partialMessage.content, { type: "thinking", thinking: "" } as ThinkingContent];
-						} else if (block?.type === "tool_use") {
-							partialMessage.content = [
-								...partialMessage.content,
-								{ type: "toolCall", id: block.id, name: block.name, arguments: {} } as ToolCall,
-							];
-						}
-						stream.push({ type: "start", partial: { ...partialMessage } });
+					if (block?.type === "text") {
+						partialMessage.content.push({ type: "text", text: "" } as TextContent);
+					} else if (block?.type === "thinking") {
+						partialMessage.content.push({ type: "thinking", thinking: "" } as ThinkingContent);
+					} else if (block?.type === "tool_use") {
+						partialMessage.content.push({ type: "toolCall", id: block.id, name: block.name, arguments: {} } as ToolCall);
+					}
+					stream.push({ type: "start", partial: partialMessage });
 						break;
 					}
 					case "content_block_delta": {
@@ -180,7 +177,7 @@ async function anthropicToStream(
 								type: "text_delta",
 								contentIndex: index,
 								delta: delta.text,
-								partial: { ...partialMessage },
+								partial: partialMessage,
 							});
 						} else if (delta?.type === "thinking_delta") {
 							const block = partialMessage.content[index] as ThinkingContent;
@@ -189,7 +186,7 @@ async function anthropicToStream(
 								type: "thinking_delta",
 								contentIndex: index,
 								delta: delta.thinking,
-								partial: { ...partialMessage },
+								partial: partialMessage,
 							});
 						} else if (delta?.type === "input_json_delta") {
 							// Tool use arguments — accumulate JSON
@@ -208,7 +205,7 @@ async function anthropicToStream(
 								type: "toolcall_delta",
 								contentIndex: index,
 								delta: delta.partial_json ?? "",
-								partial: { ...partialMessage },
+								partial: partialMessage,
 							});
 						}
 						break;
@@ -217,11 +214,11 @@ async function anthropicToStream(
 						const index = event.index;
 						const block = partialMessage.content[index];
 						if (block?.type === "text") {
-							stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: { ...partialMessage } });
+							stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: partialMessage });
 						} else if (block?.type === "thinking") {
-							stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: { ...partialMessage } });
+							stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: partialMessage });
 						} else if (block?.type === "toolCall") {
-							stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...partialMessage } });
+							stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: partialMessage });
 						}
 						break;
 					}

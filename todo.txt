@@ -1,0 +1,27 @@
+r Age of Ultron.                                                                                                    │
+│                                                                                                                                                                  │
+│ So the name's probably a nod to that — a smart, loyal AI sidekick for a tech genius. That actually fits the vibe way better than Robinson Crusoe. 😂 Good catch, │
+│ bro!                                                                                                                                                             │
+│                                                                                                                                                                  │
+│ So which camp do you fall in — Marvel fan or just here to keep me honest? 😎                                                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Pick one: e344d8d1-cce7-4164-a540-f690b74acc9a, 9cc052e6-ec82-48d3-9ed1-ebeb136e51b1, 7f52fc3e-e199-4d96-9d5d-d27ad924bcbc, 08ab8490-0f13-4a31-9d1a-be90adb168fd,
+62e72b28-ce7a-4355-840d-3a4aea29e77d, 33ef1671-dcea-4803-b3e8-7a53bb2144df, 4ae13c6f-5525-4d23-af8d-383e1691a805, 30143352-96ca-498d-adde-c4d6a16ab5e0,
+dc89f9f5-b39e-4f77-bf8f-df94b7562d24, 08c2425b-5ae3-4fea-bd5a-81f3d1486635, b635619b-1b16-46f8-a4a3-764a3abab6bc, 93c0b814-3f6d-4f76-bb1a-b0ad5fb6b27d,
+9d4a4c80-eb4b-41d6-b75b-b2d7d613aca7, 7da3a9df-9462-4574-8299-89a1bd61c139, 004f74f6-d41a-417d-b631-ea1a1d0dbb68, 7d05a084-9ba1-4bf0-9972-b56fd2b975f3,
+412efc8c-65ae-4228-a2fa-27686dbf49f1, 3089a145-ee62-411e-a8a5-5becdaa4a5f0, 30debb1b-157d-45be-8e27-a8db3a2148ee, 8f7ac6ed-5abc-400d-a8cd-fc242369da87,
+ecdc8332-ddfb-4e1a-bfbf-20e086f1adaa, 9764aa36-b36a-48a3-b805-33af20e16d33
+tencent/hy3:free • 1,421↑ 212↓ • 1%                                                                                                                               /help
+you›
+df94b7562d24, 08c2425b-5ae3-4fea-bd5a-81f3d1486635, b635619b-1b16-46f8-a4a3-764a3abab6bc, 93c0b814-3f6d-4f76-bb1a-b0ad5fb6b27d,
+9d4a4c80-eb4b-41d6-b75b-b2d7d613aca7, 7da3a9df-9462-4574-8299-89a1bd61c139, 004f74f6-d41a-417d-b631-ea1a1d0dbb68, 7d05a084-9ba1-4bf0-9972-b56fd2b975f3,
+412efc8c-65ae-4228-a2fa-27686dbf49f1, 3089a145-ee62-411e-a8a5-5becdaa4a5f0, 30debb1b-157d-45be-8e27-a8db3a2148ee, 8f7ac6ed-5abc-400d-a8cd-fc242369da87,
+ecdc8332-ddfb-4e1a-bfbf-20e086f1adaa, 9764aa36-b36a-48a3-b805-33af20e16d33
+tencent/hy3:free • 1,421↑ 212↓ • 1%                                                                                                                               /help
+you› /
+/help  Show this list of commands.
+/exit  Quit friday-ng.
+/quit  Alias for /exit.
+/clear Clear the current chat history.
+/model Pick a different model.
+/cost  Show token usage so far for this session.

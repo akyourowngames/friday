@@ -267,6 +267,9 @@ async function streamAssistantResponse(
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
+		// Update context.messages so the compacted transcript is what the
+		// agent keeps — otherwise old messages pile up forever.
+		context.messages = messages;
 	}
 
 	const llmMessages = await config.convertToLlm(messages);
@@ -295,6 +298,21 @@ async function streamAssistantResponse(
 	};
 	signal?.addEventListener("abort", onAbort);
 
+	// Stream idle timeout: if no events arrive for 30 seconds, abort.
+	// This prevents the TUI from hanging when a proxy stalls.
+	const STREAM_IDLE_MS = 30_000;
+	const idleAbort = new AbortController();
+	let idleTimer: ReturnType<typeof setTimeout> | null = null;
+	const resetIdleTimer = () => {
+		if (idleTimer) clearTimeout(idleTimer);
+		idleTimer = setTimeout(() => {				if (!aborted) {
+					aborted = true;
+					try { idleAbort.abort(); } catch { /* already aborted */ }
+				}
+			}, STREAM_IDLE_MS);
+	};
+	resetIdleTimer();
+
 	try {
 		const iterator = response[Symbol.asyncIterator]();
 		while (true) {
@@ -309,10 +327,12 @@ async function streamAssistantResponse(
 				new Promise<IteratorResult<AssistantMessageEvent>>((resolve) => {
 					const handler = () => resolve({ value: undefined as any, done: true });
 					signal?.addEventListener("abort", handler, { once: true });
+					idleAbort.signal.addEventListener("abort", handler, { once: true });
 				}),
 			]);
 			if (next.done) break;
 			const event = next.value;
+			resetIdleTimer(); // got data — reset the timeout
 			switch (event.type) {
 				case "start":
 					partialMessage = event.partial;
@@ -336,7 +356,7 @@ async function streamAssistantResponse(
 						await emit({
 							type: "message_update",
 							assistantMessageEvent: event,
-							message: { ...partialMessage },
+							message: partialMessage,
 						});
 					}
 					break;
@@ -358,7 +378,9 @@ async function streamAssistantResponse(
 			}
 		}
 	} finally {
+		if (idleTimer) clearTimeout(idleTimer);
 		signal?.removeEventListener("abort", onAbort);
+		try { idleAbort.abort(); } catch { /* noop */ }
 	}
 
 	// If the signal aborted before a terminal event arrived, synthesize an

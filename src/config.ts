@@ -23,10 +23,24 @@ export interface ProviderConfig {
 	authToken?: string;
 }
 
+/** Setting value type — re-exported from settings.ts. */
+export type { SettingValue } from "./settings.ts";
+
+/** Settings block inside FridConfig. Loose `Record` so unknown keys don't
+ *  trip up older builds. */
+export type FridSettings = Record<string, unknown>;
+
 /** Root config schema. */
 export interface FridConfig {
 	providers: Record<string, ProviderConfig>;
 	lastProvider?: string;
+	/** User-configurable settings. Persisted alongside the rest of the config. */
+	settings?: FridSettings;
+	/** Saved list of recent session ids (most recent first). */
+	recentSessions?: string[];
+	/** Last session id the user resumed from, so the TUI can pick it up
+	 *  automatically on the next launch. */
+	lastSessionId?: string;
 }
 
 const DEFAULT_CONFIG: FridConfig = {
@@ -51,6 +65,14 @@ export async function loadConfig(): Promise<FridConfig> {
 		return {
 			providers: parsed.providers && typeof parsed.providers === "object" ? parsed.providers : {},
 			lastProvider: typeof parsed.lastProvider === "string" ? parsed.lastProvider : undefined,
+			settings:
+				parsed.settings && typeof parsed.settings === "object" && !Array.isArray(parsed.settings)
+					? (parsed.settings as FridSettings)
+					: undefined,
+			recentSessions: Array.isArray(parsed.recentSessions)
+				? parsed.recentSessions.filter((s): s is string => typeof s === "string")
+				: undefined,
+			lastSessionId: typeof parsed.lastSessionId === "string" ? parsed.lastSessionId : undefined,
 		};
 	} catch (err: any) {
 		// File doesn't exist or is invalid → return default
@@ -171,4 +193,38 @@ export async function resetConfig(): Promise<void> {
 	} catch {
 		// ignore if doesn't exist
 	}
+}
+
+/** Update the config with a new `settings` block and return the updated config. */
+export function withSettings(config: FridConfig, settings: FridSettings): FridConfig {
+	return { ...config, settings: { ...config.settings, ...settings } };
+}
+
+/** Update the config with a recent-sessions list and return the updated config. */
+export function withRecentSessions(
+	config: FridConfig,
+	recent: string[],
+	limit = 10,
+): FridConfig {
+	return { ...config, recentSessions: recent.slice(0, limit) };
+}
+
+/** Update the config with a last-session id and return the updated config. */
+export function withLastSessionId(config: FridConfig, id: string | undefined): FridConfig {
+	if (id === undefined) {
+		const { lastSessionId: _drop, ...rest } = config;
+		return rest;
+	}
+	return { ...config, lastSessionId: id };
+}
+
+/** Add (or move-to-front) a session id in the recent-sessions list. */
+export function bumpRecentSession(
+	config: FridConfig,
+	id: string,
+	limit = 10,
+): FridConfig {
+	const current = config.recentSessions ?? [];
+	const next = [id, ...current.filter((s) => s !== id)].slice(0, limit);
+	return withRecentSessions(config, next, limit);
 }

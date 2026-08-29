@@ -149,6 +149,8 @@ export interface ToolResult {
 	addedToolNames?: string[];
 	/** Hint that the agent should stop after the current tool batch. */
 	terminate?: boolean;
+	/** Set by tools that want to surface an error result to the model without throwing. */
+	isError?: boolean;
 }
 
 // --- Context (sent to LLM) ---
