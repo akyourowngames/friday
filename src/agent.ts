@@ -249,6 +249,19 @@ export class Agent {
 		this.clearSteeringQueue();
 	}
 
+	/** Replace the whole transcript (used by `/resume` to restore a saved
+	 *  conversation). Throws if the agent is mid-run. */
+	replaceMessages(messages: AgentMessage[]): void {
+		if (this.activeRun) {
+			throw new Error("Cannot replace messages while the agent is processing.");
+		}
+		this._state.messages = messages;
+		this._state.isStreaming = false;
+		this._state.streamingMessage = undefined;
+		this._state.pendingToolCalls = new Set<string>();
+		this._state.errorMessage = undefined;
+	}
+
 	async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
 	async prompt(input: string): Promise<void>;
 	async prompt(input: string | AgentMessage | AgentMessage[]): Promise<void> {

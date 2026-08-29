@@ -21,10 +21,12 @@ import { findProvider, listProviders, resolveApiKey, type ProviderMeta } from ".
 import { isOllamaRunning } from "./providers/ollama.ts";
 import { setupConsoleEncoding, applyWindowsUtf8Default, revertWindowsUtf8Default, readConsoleStatus } from "./console-setup.ts";
 import { bashTool, readTool, writeTool, editTool, globTool, grepTool } from "./tools/shell.ts";
+import { websearchTool } from "./tools/websearch.ts";
+import { buildEnvironmentContext } from "./env-context.ts";
 import { Type } from "typebox";
 import { SettingsStore, listSettings } from "./settings.ts";
 import { parseSlashCommand, clearSlashCommands } from "./slash-commands.ts";
-import { registerBuiltinCommands } from "./commands/builtin.ts";
+import { registerBuiltinCommands, type SessionSummary } from "./commands/builtin.ts";
 import { createSession, loadSession, listSessions, deleteSession, recordMessage, type SessionMeta } from "./sessions.ts";
 import { compactTranscript, makeTransformContext } from "./compaction.ts";
 import { withRetry } from "./retry.ts";
@@ -180,8 +182,9 @@ async function listAvailableModels(providerId: string, apiKey?: string): Promise
 /** Built-in tools for the CLI.
  *
  *  We combine the coding-agent shell tools (bash, read, write, edit, glob, grep)
- *  with two small demo tools (calculator, websearch) so the default experience
- *  is "you can actually do things", not "you can only chat". */
+ *  with the real websearch tool (DuckDuckGo Instant Answer + Wikipedia
+ *  fallback) and a small calculator, so the default experience is "you can
+ *  actually do things", not "you can only chat". */
 const calculatorTool = {
 	name: "calculator",
 	description: "Evaluate a simple arithmetic expression and return the result.",
@@ -205,25 +208,11 @@ const calculatorTool = {
 	},
 };
 
-const websearchTool = {
-	name: "websearch",
-	description: "Search the web for information.",
-	parameters: Type.Object({
-		query: Type.String({ description: "Search query" }),
-	}),
-	execute: async (_id: string, params: any) => {
-		return {
-			content: [{ type: "text" as const, text: `Search results for: ${params.query}` }],
-			details: { simulated: true },
-		};
-	},
-};
-
 /** `codingTools` is the workspace shell toolset, used when the user is in
  *  a real project. `cliTools` is the default set, which also includes the
- *  demo tools (calculator, websearch). */
-const codingTools = [bashTool, readTool, writeTool, editTool, globTool, grepTool];
-const cliTools = [...codingTools, calculatorTool, websearchTool];
+ *  demo calculator and real web search. */
+const codingTools = [bashTool, readTool, writeTool, editTool, globTool, grepTool, websearchTool];
+const cliTools = [...codingTools, calculatorTool];
 
 async function main(): Promise<void> {
 	// Switch the console to UTF-8 (Windows) and force stdout/stderr to emit
@@ -383,7 +372,7 @@ async function main(): Promise<void> {
 
 	const agent = new Agent({
 		initialState: {
-			systemPrompt: `You are friday-ng, a next-generation AI assistant with instant token streaming. Current model: ${setup.model}. Be helpful, concise, and friendly.`,
+			systemPrompt: buildSystemPrompt(setup.model),
 			tools: cliTools as any,
 			model,
 		},
@@ -401,6 +390,16 @@ async function main(): Promise<void> {
 
 	await agent.prompt(opts.prompt);
 	await agent.waitForIdle();
+}
+
+/** Build the system prompt: identity + live environment context (OS, shell,
+ *  cwd, current date) so the model never needs a tool call to learn them. */
+function buildSystemPrompt(modelId: string): string {
+	return (
+		`You are friday-ng, a next-generation AI assistant with instant token streaming. ` +
+		`Current model: ${modelId}. Be helpful, concise, and friendly.` +
+		buildEnvironmentContext()
+	);
 }
 
 /** Build the `Model` object the Agent loop needs from provider meta + id. */
@@ -430,7 +429,8 @@ async function runRepl(
 	const config = await loadConfig();
 	const settings = new SettingsStore({ config });
 
-	// Set up the session: either resume one or start a new one.
+	// Set up the session: either resume one or start a new one. Held in a
+	// mutable ref so `/resume` can swap it mid-session.
 	let sessionMeta: SessionMeta;
 	let initialMessages: AgentMessage[] = [];
 	if (opts.resumeSession) {
@@ -448,15 +448,18 @@ async function runRepl(
 			provider: providerId as any,
 			model: setup.model,
 			apiStyle: providerMeta.apiStyle,
-			systemPrompt: `You are friday-ng, a next-generation AI assistant with instant token streaming. Current model: ${setup.model}. Be helpful, concise, and friendly.`,
+			systemPrompt: buildSystemPrompt(setup.model),
 		});
 		// Persist last-session id.
 		await saveConfig(withLastSessionId(bumpRecentSession(await loadConfig(), sessionMeta.id), sessionMeta.id));
 	}
+	const sessionRef: { current: SessionMeta } = { current: sessionMeta };
 
 	const agent = new Agent({
 		initialState: {
-			systemPrompt: sessionMeta.systemPrompt,
+			// Always rebuilt at startup so the environment block (OS, cwd,
+			// current date) is fresh even when resuming an old session.
+			systemPrompt: buildSystemPrompt(model.id),
 			tools: cliTools as any,
 			model,
 			messages: initialMessages,
@@ -513,8 +516,31 @@ async function runRepl(
 		listProviders: () => listProviders().map((p) => p.id),
 		listTools: () => cliTools.map((t) => t.name),
 		onCompact: () => undefined,
-		listSessions: async () => (await listSessions()).map((s) => s.id),
-		onResumeSession: () => undefined,
+		listSessions: async (): Promise<SessionSummary[]> => {
+			const metas = await listSessions();
+			return metas.map((m) => ({
+				id: m.id,
+				title: m.title,
+				updatedAt: m.updatedAt,
+				messageCount: m.messageCount,
+			}));
+		},
+		onResumeSession: async (id: string) => {
+			const loaded = await loadSession(id);
+			if (!loaded) {
+				return;
+			}
+			if (agent.hasQueuedMessages() || agent.signal) {
+				return;
+			}
+			sessionRef.current = loaded.meta;
+			// Restore the conversation + model in the running agent + TUI.
+			agent.replaceMessages(loaded.messages);
+			agent.useModel(buildModelObject(providerMeta, loaded.meta.model), agent.streamFunction);
+			tuiRef.current?.setModel(loaded.meta.model);
+			tuiRef.current?.loadConversation(loaded.messages);
+			await saveConfig(withLastSessionId(bumpRecentSession(await loadConfig(), loaded.meta.id), loaded.meta.id));
+		},
 	});
 
 	const tui = new Tui({
@@ -529,6 +555,7 @@ async function runRepl(
 			await agent.waitForIdle();
 		},
 		onQuit: () => agent.abort(),
+		onInterrupt: () => agent.abort(),
 		onListModels: async () => {
 			const baseUrl = config.providers[providerId]?.baseUrl ?? providerMeta.defaultBaseUrl;
 			const apiKey = config.providers[providerId]?.apiKey ?? "";
@@ -567,7 +594,7 @@ async function runRepl(
 		tui.handleEvent(event);
 		if (event.type === "message_end") {
 			try {
-				await recordMessage(sessionMeta.id, event.message, 0);
+				await recordMessage(sessionRef.current.id, event.message, 0);
 			} catch {
 				// Best-effort; don't kill the REPL if disk fails.
 			}

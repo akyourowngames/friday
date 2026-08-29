@@ -127,6 +127,9 @@ export type AssistantMessageEvent =
 export interface Tool<TParameters extends TSchema = TSchema, TResult = any> extends ToolBase<TParameters> {
 	prepareArguments?: (args: unknown) => Static<TParameters>;
 	executionMode?: "sequential" | "parallel";
+	/** True for tools with no side effects (read, glob, grep, websearch) —
+	 *  hosts can auto-approve these without asking the user. */
+	isReadOnly?: boolean;
 	execute: (
 		toolCallId: string,
 		params: Static<TParameters>,

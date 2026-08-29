@@ -241,31 +241,55 @@ describe("builtin commands", () => {
 	});
 
 	it("/sessions lists saved sessions", async () => {
-		const cmd = makeSessionsCommand({ onList: async () => ["s1", "s2"] });
+		const cmd = makeSessionsCommand({ onList: async () => [
+			{ id: "s1", title: "My first session", updatedAt: new Date().toISOString(), messageCount: 3 },
+			{ id: "s2", title: "Coding session", updatedAt: new Date().toISOString(), messageCount: 7 },
+		] });
 		registerSlashCommand(cmd);
 		const r = await getSlashCommand("/sessions")!.run({ tui: host, agent, args: "" });
-		expect((r as any).message).toContain("s1");
+		expect((r as any).message).toContain("My first session");
+		expect((r as any).message).toContain("Coding session");
 	});
 
 	it("/resume with no args asks which session", async () => {
 		const cmd = makeResumeCommand({
-			listSessions: async () => ["s1", "s2"],
+			listSessions: async () => [
+				{ id: "s1", title: "One", updatedAt: new Date().toISOString(), messageCount: 1 },
+				{ id: "s2", title: "Two", updatedAt: new Date().toISOString(), messageCount: 2 },
+			],
 			onResume: () => {},
 		});
 		registerSlashCommand(cmd);
 		const r = await getSlashCommand("/resume")!.run({ tui: host, agent, args: "" });
-		expect((r as any).message).toContain("s1");
+		expect((r as any).message).toContain("One");
 	});
 
 	it("/resume with an id resumes that session", async () => {
 		let resumed = "";
 		const cmd = makeResumeCommand({
-			listSessions: async () => ["s1", "s2"],
+			listSessions: async () => [
+				{ id: "s1", title: "One", updatedAt: new Date().toISOString(), messageCount: 1 },
+				{ id: "s2", title: "Two", updatedAt: new Date().toISOString(), messageCount: 2 },
+			],
 			onResume: async (id) => { resumed = id; },
 		});
 		registerSlashCommand(cmd);
 		await getSlashCommand("/resume")!.run({ tui: host, agent, args: "s2" });
 		expect(resumed).toBe("s2");
+	});
+
+	it("/resume accepts a 1-based index to pick a session", async () => {
+		let resumed = "";
+		const cmd = makeResumeCommand({
+			listSessions: async () => [
+				{ id: "aa", title: "Alpha", updatedAt: new Date().toISOString(), messageCount: 1 },
+				{ id: "bb", title: "Beta", updatedAt: new Date().toISOString(), messageCount: 2 },
+			],
+			onResume: async (id) => { resumed = id; },
+		});
+		registerSlashCommand(cmd);
+		await getSlashCommand("/resume")!.run({ tui: host, agent, args: "2" });
+		expect(resumed).toBe("bb");
 	});
 
 	it("parseSlashCommand routes registered names", () => {

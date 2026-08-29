@@ -15,6 +15,8 @@ const {
 	filterModels,
 	visibleSelector,
 	Tui,
+	formatToolCall,
+	summarizeToolResult,
 } = await import("../src/tui.ts");
 
 // Lazy imports for the slash-command tests (avoids circular-import issues at
@@ -467,6 +469,67 @@ describe("Tui (headless)", () => {
 		expect(status).toBeDefined();
 		expect(visibleWidth(status!)).toBeLessThanOrEqual(39);
 	});
+it("moves cursor with arrow keys and edits mid-line (readline editing)", async () => {
+		const { tui } = makeTui();
+		tui.handleInput(Buffer.from("hello"));
+		expect((tui as any).cursorPos).toBe(5);
+		// ← ← → move cursor to index 3, type 'XYZ'.
+		tui.handleInput(Buffer.from("\x1b[D"));
+		tui.handleInput(Buffer.from("\x1b[D"));
+		tui.handleInput(Buffer.from("XYZ"));
+		// Cursor was 3 → typing inserts there: "helXYZlo".
+		expect(tui.inputBuffer).toBe("helXYZlo");
+		// Home then kill-to-end (Ctrl+K) empties the buffer.
+		tui.handleInput(Buffer.from("\x01"));
+		tui.handleInput(Buffer.from("\x0b"));
+		expect(tui.inputBuffer).toBe("");
+	});
+
+	it("navigates the slash-command suggestion popup with arrow keys", async () => {
+		const slash = await getSlashCmds();
+		slash.clearSlashCommands();
+		slash.registerSlashCommand({ name: "/model", description: "Pick a model", run: () => ({ handled: true }) });
+		slash.registerSlashCommand({ name: "/models", description: "List models", run: () => ({ handled: true }) });
+		const { tui } = makeTui();
+		// Type `/` then a partial query to open the popup.
+		tui.handleInput(Buffer.from("/"));
+		tui.handleInput(Buffer.from("m"));
+		// Should have suggestions now (findCommands matches /model etc.).
+		expect((tui as any).showSuggestions).toBe(true);
+		expect(tui.inputBuffer).toBe("/m");
+		// Arrow down → highlight moves / input fills the next suggestion.
+		tui.handleInput(Buffer.from("\x1b[B"));
+		expect((tui as any).suggestionCursor).toBe(1);
+		expect(tui.inputBuffer).toBe("/models");
+		slash.clearSlashCommands();
+	});
+
+	it("Ctrl+C interrupts a running operation instead of quitting", async () => {
+		const interrupted: boolean[] = [];
+		const tui = new Tui({
+			out: () => {},
+			getSize: () => [40, 10],
+			model: "faux",
+			provider: "faux",
+			onSubmit: async () => {},
+			onInterrupt: () => { interrupted.push(true); },
+		});
+		(tui as any).busy = true;
+		tui.handleInput(Buffer.from("\x03"));
+		expect(interrupted.length).toBe(1);
+		expect((tui as any).busy).toBe(false);
+	});
+
+	it("reverse-search (Ctrl+R) finds and applies a history entry", async () => {
+		const { tui } = makeTui();
+		(tui as any).inputHistory = ["first prompt", "second prompt", "model thing"];
+		tui.handleInput(Buffer.from("\x12")); // Ctrl+R
+		// Type the query.
+		tui.handleInput(Buffer.from("second"));
+		tui.handleInput(Buffer.from("\r")); // accept
+		expect((tui as any).searchActive).toBe(false);
+		expect(tui.inputBuffer).toBe("second prompt");
+	});
 });
 
 describe("Tui /model selector (headless)", () => {
@@ -677,4 +740,197 @@ describe("Tui slash-command suggestions (headless)", () => {
 	});
 
 	afterEach(() => cmdsPromise.then((c) => c.clearSlashCommands()));
+});
+
+describe("Tui tool-run rendering (the empty-box bug)", () => {
+	function makeTui() {
+		const writes: string[] = [];
+		const tui = new Tui({
+			out: (t) => writes.push(t),
+			getSize: () => [80, 24],
+			model: "test",
+			provider: "faux",
+			onSubmit: vi.fn(),
+		});
+		return { tui: tui as any, writes };
+	}
+
+	const toolOnlyAssistantEnd = {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }],
+			usage: { input: 0, output: 0, totalTokens: 0 },
+			stopReason: "toolUse",
+			timestamp: 0,
+		},
+	} as any;
+
+	it("does not append an empty assistant box for a tool-only reply", () => {
+		const { tui } = makeTui();
+		tui.handleEvent(toolOnlyAssistantEnd);
+		const roles = tui.history.map((h: any) => h.role);
+		expect(roles).not.toContain("assistant");
+	});
+
+	it("shows a concise bash summary (exit code + short preview) after a tool run", () => {
+		const { tui } = makeTui();
+		tui.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "c1",
+			toolName: "bash",
+			args: { command: "ls" },
+		} as any);
+		tui.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "c1",
+			toolName: "bash",
+			isError: false,
+			result: { content: [{ type: "text", text: "file-a.txt\nfile-b.ts\n[exit code 0]" }], details: { code: 0 } },
+		} as any);
+		const toolEntries = tui.history.filter((h: any) => h.role === "tool");
+		// A single collapsed entry — not a content dump.
+		expect(toolEntries.length).toBe(1);
+		const text = toolEntries[0].text;
+		expect(text).toContain("✓");
+		expect(text).toContain("bash ls");
+		expect(text).toContain("exit 0");
+		expect(text).toContain("file-a.txt");
+	});
+
+	it("does NOT dump file contents into the chat after a read", () => {
+		const { tui } = makeTui();
+		tui.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "c1",
+			toolName: "read",
+			args: { path: "src/tui.ts" },
+		} as any);
+		tui.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "c1",
+			toolName: "read",
+			isError: false,
+			result: {
+				content: [{ type: "text", text: "     1│ import ...\n     2│ export ..." }],
+				details: { totalLines: 1800, shown: 1800 },
+			},
+		} as any);
+		const toolEntries = tui.history.filter((h: any) => h.role === "tool");
+		expect(toolEntries.length).toBe(1);
+		const text = toolEntries[0].text;
+		expect(text).toContain("read src/tui.ts");
+		expect(text).toContain("1800 lines");
+		expect(text).not.toContain("import");
+		expect(text).not.toContain("export");
+	});
+
+	it("summarizes glob / grep match counts instead of listing every match", () => {
+		const { tui } = makeTui();
+		tui.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "c1",
+			toolName: "grep",
+			isError: false,
+			result: { content: [{ type: "text", text: "a.ts:1: x\nb.ts:2: y" }], details: { matches: 47 } },
+		} as any);
+		const text = tui.history.filter((h: any) => h.role === "tool")[0].text;
+		expect(text).toContain("47 matches");
+		expect(text).not.toContain("a.ts:1");
+	});
+
+	it("surfaces errorMessage as a system line instead of an empty box", () => {
+		const { tui } = makeTui();
+		tui.handleEvent({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				usage: { input: 0, output: 0, totalTokens: 0 },
+				stopReason: "error",
+				errorMessage: "gateway 500",
+				timestamp: 0,
+			},
+		} as any);
+		const sys = tui.history.filter((h: any) => h.role === "system");
+		expect(sys.length).toBe(1);
+		expect(sys[0].text).toContain("[error] gateway 500");
+	});
+
+	it("flags a genuinely empty reply instead of a silent box", () => {
+		const { tui } = makeTui();
+		tui.handleEvent({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				usage: { input: 0, output: 0, totalTokens: 0 },
+				stopReason: "stop",
+				timestamp: 0,
+			},
+		} as any);
+		const sys = tui.history.filter((h: any) => h.role === "system");
+		expect(sys.length).toBe(1);
+		expect(sys[0].text).toContain("(empty response)");
+	});
+});
+
+describe("formatToolCall / summarizeToolResult", () => {
+	it("formatToolCall shows the command for bash, path for file tools, query for websearch", () => {
+		expect(formatToolCall("bash", { command: "date /t" })).toBe("bash date /t");
+		expect(formatToolCall("read", { path: "src/tui.ts", startLine: 1 })).toBe("read src/tui.ts");
+		expect(formatToolCall("websearch", { query: "node.js news" })).toBe("websearch node.js news");
+		expect(formatToolCall("glob", { pattern: "**/*.ts" })).toBe("glob **/*.ts");
+	});
+
+	it("formatToolCall clips long arguments to one line", () => {
+		const long = "x".repeat(200);
+		const out = formatToolCall("bash", { command: long });
+		expect(out.length).toBeLessThanOrEqual(90);
+		expect(out.endsWith("…")).toBe(true);
+	});
+
+	it("formatToolCall collapses multi-line commands", () => {
+		expect(formatToolCall("bash", { command: "echo a\necho b" })).toBe("bash echo a ⏎ echo b");
+	});
+
+	it("summarizeToolResult reports bash exit codes with a capped output preview", () => {
+		const many = Array.from({ length: 30 }, (_, i) => `line-${i}`).join("\n");
+		const out = summarizeToolResult("bash", {
+			content: [{ type: "text", text: `${many}\n[exit code 0]` }],
+			details: { code: 0 },
+		}, false);
+		expect(out).toContain("exit 0");
+		expect(out).toContain("line-0");
+		expect(out).not.toContain("line-5");
+	});
+
+	it("summarizeToolResult reports timeouts", () => {
+		const out = summarizeToolResult("bash", {
+			content: [{ type: "text", text: "partial" }],
+			details: { code: null, timedOut: true },
+		}, false);
+		expect(out).toContain("timed out");
+	});
+
+	it("summarizeToolResult reports line/match/result counts", () => {
+		expect(summarizeToolResult("read", { content: [], details: { totalLines: 12 } }, false)).toBe("12 lines");
+		expect(summarizeToolResult("grep", { content: [], details: { matches: 3 } }, false)).toBe("3 matches");
+		expect(summarizeToolResult("glob", { content: [], details: { matches: 1 } }, false)).toBe("1 match");
+		expect(summarizeToolResult("websearch", { content: [], details: { results: 5, source: "duckduckgo" } }, false)).toBe(
+			"5 results (duckduckgo)",
+		);
+		expect(summarizeToolResult("write", { content: [], details: { bytes: 42 } }, false)).toBe("wrote 42 bytes");
+		expect(summarizeToolResult("edit", { content: [], details: {} }, false)).toBe("edited");
+	});
+
+	it("summarizeToolResult surfaces errors briefly", () => {
+		const out = summarizeToolResult(
+			"bash",
+			{ content: [{ type: "text", text: `Error: ${"boom ".repeat(60)}` }] },
+			true,
+		);
+		expect(out.startsWith("error: ")).toBe(true);
+		expect(out.length).toBeLessThanOrEqual(180);
+	});
 });

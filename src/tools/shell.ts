@@ -15,7 +15,7 @@
  *  - Tools never throw on user errors; they return a `ToolResult` with
  *    `isError: true` so the LLM can react.
  */
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
@@ -44,11 +44,117 @@ const bashParams = Type.Object({
 	),
 });
 
+/** Platform-specific guidance so the model doesn't guess shell syntax. */
+function shellGuidance(): string {
+	if (process.platform === "win32") {
+		return (
+			"Run a command with Windows cmd.exe (`cmd /c`). IMPORTANT: this is NOT a POSIX shell — " +
+			"POSIX commands do not exist. Use `dir` not `ls`, `del` not `rm`, `copy` not `cp`, " +
+			"`move` not `mv`, `type` not `cat`, `findstr` not `grep`. To print the date use `date /t` " +
+			"and time with `time /t` (bare `date` PROMPTS FOR INPUT and would hang). " +
+			"Long-running commands are killed after the timeout."
+		);
+	}
+	return (
+		"Run a shell command with `/bin/sh -c` (POSIX). Long-running commands are killed after the timeout."
+	);
+}
+
+/** Run a shell command with stdin closed (EOF), output caps, and a timeout. */
+function runShell(
+	shellCmd: string,
+	shellArgs: string[],
+	cwd: string,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean; aborted: boolean }> {
+	return new Promise((resolve, reject) => {
+		// stdin is IGNORED so any command that reads stdin (Windows `date`,
+		// `pause`, an interpreter REPL, a forgotten prompt) gets immediate EOF
+		// instead of hanging until the timeout kills it.
+		const child = spawn(shellCmd, shellArgs, {
+			cwd,
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+			env: process.env,
+		});
+
+		let stdout = "";
+		let stderr = "";
+		let timedOut = false;
+		let aborted = false;
+		let settled = false;
+
+		const cap = SHELL_MAX_OUTPUT;
+		child.stdout.on("data", (chunk: Buffer) => {
+			if (stdout.length < cap) stdout += chunk.toString("utf8");
+		});
+		child.stderr.on("data", (chunk: Buffer) => {
+			if (stderr.length < cap) stderr += chunk.toString("utf8");
+		});
+
+		// Kill the whole process TREE. On Windows `child.kill()` only kills
+		// cmd.exe — its children (ping, node, whatever) survive and keep the
+		// stdout pipe open, so `close` never fires and the tool appears to
+		// hang long past the timeout. `taskkill /T /F` takes the tree down.
+		const killTree = (): void => {
+			if (child.pid == null || child.exitCode !== null) {
+				child.kill();
+				return;
+			}
+			if (process.platform === "win32") {
+				try {
+					spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+						stdio: "ignore",
+						windowsHide: true,
+					});
+				} catch {
+					child.kill();
+				}
+			} else {
+				child.kill("SIGKILL");
+			}
+		};
+
+		const timer = setTimeout(() => {
+			timedOut = true;
+			killTree();
+		}, timeoutMs);
+
+		const onAbort = () => {
+			aborted = true;
+			killTree();
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		const finish = (code: number | null) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			resolve({ stdout, stderr, code, timedOut, aborted });
+		};
+
+		child.on("error", (err) => {
+			// Spawn failure (ENOENT etc.) — reject so the caller reports it.
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			if (!settled) {
+				settled = true;
+				reject(err);
+			}
+		});
+		child.on("close", (code) => finish(code));
+	});
+}
+
 /** `/bin/sh -c <command>` (with a hard timeout and output cap). */
 export const bashTool: AgentTool<typeof bashParams> = {
 	name: "bash",
 	description:
-		"Run a shell command in the current working directory. Use this to execute scripts, inspect the filesystem, or run CLI tools. Commands run via `/bin/sh -c` (POSIX) or `cmd /c` (Windows). Output is truncated at 200KB.",
+		"Run a shell command in the current working directory. Use this to execute scripts, inspect the filesystem, or run CLI tools. " +
+		shellGuidance() +
+		" Output is truncated at 200KB. Commands that read stdin receive immediate EOF.",
 	parameters: bashParams,
 	execute: async (_id, params, signal) => {
 		const command = String(params.command ?? "");
@@ -66,31 +172,11 @@ export const bashTool: AgentTool<typeof bashParams> = {
 		const shellArgs = isWin ? ["/c", command] : ["-c", command];
 
 		try {
-			const { stdout, stderr, code } = await new Promise<{
-				stdout: string;
-				stderr: string;
-				code: number | null;
-			}>((resolve, reject) => {
-				execFile(
-					shellCmd,
-					shellArgs,
-					{ cwd, maxBuffer: SHELL_MAX_OUTPUT, timeout: timeoutMs, signal: signal as any },
-					(err, stdout, stderr) => {
-						if (err) {
-							const e: any = err;
-							if (e.killed || e.signal === "SIGTERM") {
-								resolve({ stdout: stdout ?? "", stderr: stderr ?? "", code: null });
-								return;
-							}
-							// Non-zero exit code is NOT an error here — return it
-							// in the result so the LLM can react.
-							resolve({ stdout: stdout ?? "", stderr: stderr ?? "", code: typeof e.code === "number" ? e.code : 1 });
-							return;
-						}
-						resolve({ stdout: stdout ?? "", stderr: stderr ?? "", code: 0 });
-					},
-				);
-			});
+			const { stdout, stderr, code, timedOut, aborted } = await runShell(shellCmd, shellArgs, cwd, timeoutMs, signal);
+
+			if (aborted) {
+				return errorResult("Command was aborted by the user.");
+			}
 
 			let out = "";
 			if (stdout) out += stdout;
@@ -98,12 +184,17 @@ export const bashTool: AgentTool<typeof bashParams> = {
 			if (out.length > SHELL_MAX_OUTPUT) {
 				out = out.slice(0, SHELL_MAX_OUTPUT) + `\n... (truncated to ${SHELL_MAX_OUTPUT} bytes)`;
 			}
-			if (out.length === 0) out = `(command exited with code ${code ?? 0} and no output)`;
-			else out += `\n[exit code ${code ?? 0}]`;
+			if (timedOut) {
+				out += (out ? "\n" : "") + `[command timed out after ${Math.round(timeoutMs / 1000)}s and was killed]`;
+			} else if (out.length === 0) {
+				out = `(command exited with code ${code ?? 0} and no output)`;
+			} else {
+				out += `\n[exit code ${code ?? 0}]`;
+			}
 
 			return {
 				content: [{ type: "text" as const, text: out }],
-				details: { code, stdoutBytes: stdout.length, stderrBytes: stderr.length },
+				details: { code, timedOut, stdoutBytes: stdout.length, stderrBytes: stderr.length },
 			};
 		} catch (e) {
 			return errorResult(e instanceof Error ? e.message : String(e));
@@ -133,6 +224,7 @@ export const readTool: AgentTool<typeof readParams> = {
 	name: "read",
 	description: "Read a text file. Supports optional line range. Output is truncated at 512KB.",
 	parameters: readParams,
+	isReadOnly: true,
 	execute: async (_id, params) => {
 		const root = params.root ?? process.cwd();
 		const safe = resolveSafePath(root, params.path);
@@ -257,6 +349,7 @@ export const globTool: AgentTool<typeof globParams> = {
 	name: "glob",
 	description: "Find files matching a glob pattern. Returns paths relative to `root`, one per line.",
 	parameters: globParams,
+	isReadOnly: true,
 	execute: async (_id, params) => {
 		const root = params.root ?? process.cwd();
 		try {
@@ -342,6 +435,7 @@ export const grepTool: AgentTool<typeof grepParams> = {
 	name: "grep",
 	description: "Search files for a regex pattern. Returns matching lines with file paths and line numbers.",
 	parameters: grepParams,
+	isReadOnly: true,
 	execute: async (_id, params) => {
 		const root = params.root ?? process.cwd();
 		const searchPath = path.resolve(root, params.path ?? ".");

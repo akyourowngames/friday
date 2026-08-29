@@ -1,0 +1,22 @@
+fix(tools): close stdin, kill process tree, report timeouts, concise rendering
+
+- bash tool: spawn with stdin ignored so date/pause/REPLs get EOF
+- bash tool: taskkill /T /F on Windows so timeouts kill the whole tree
+- bash tool: report "[command timed out after Ns and was killed]"
+- bash tool: platform-aware description (cmd.exe vs /bin/sh; date /t hint)
+- env context: inject OS/shell/cwd/date into system prompt on every startup
+- tool rendering: collapsed call lines + summaries (no file dumps)
+
+fix(providers): openai-compat tool-call argument assembly + round-trip
+
+- pushToolCallDelta replaced with fragment accumulator + single parse
+- assistant messages now include tool_calls on the wire (orphan guard)
+- mapFinishReason infers stop/toolUse from content when missing
+
+feat(tools): real web search via DDG Instant Answer + Wikipedia fallback
+
+- replaces simulated stub
+- read-only tools (read/glob/grep/websearch) carry isReadOnly: true
+- tests: 354 -> 368 passing
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>

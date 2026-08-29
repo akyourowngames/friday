@@ -22,7 +22,7 @@ designed around a few key principles:
 | Subsystem | File(s) | What it does |
 |---|---|---|
 | **Agent core** | `src/agent.ts`, `src/agent-loop.ts`, `src/event-stream.ts` | State machine + event stream. `Agent` drives the loop, manages messages, calls tools, supports abort. |
-| **Tools** | `src/tools.ts`, `src/tools/shell.ts` | `read`, `write`, `edit`, `bash`, `glob`, `grep`, `websearch`. Each tool has a `TypeBox` schema, an `isReadOnly` flag, and a path-policy check. |
+| **Tools** | `src/tools/shell.ts`, `src/tools/websearch.ts` | `read`, `write`, `edit`, `bash`, `glob`, `grep`, `websearch`. Each tool has a `TypeBox` schema, and read-only tools carry an `isReadOnly` flag. |
 | **Sessions** | `src/sessions.ts` | JSONL-per-message sessions, with `createSession` / `loadSession` / `listSessions` / `deleteSession` / `recordMessage`. |
 | **Compaction** | `src/compaction.ts` | Token-budget transformer that drops old tool results when the transcript is too long. Pluggable via `transformContext` on the agent. |
 | **Settings** | `src/settings.ts` | Namespaced persisted settings (UI, model, harness). Hot-reload via `replaceConfig`. |
@@ -82,7 +82,7 @@ designed around a few key principles:
 - `bash(command, timeout?)` — run a shell command (with a 30s default timeout).
 - `glob(pattern, path?)` — find files by pattern, returning sorted paths.
 - `grep(pattern, path?, glob_filter?, max_results?)` — search file contents.
-- `websearch(query, numResults?)` — DuckDuckGo HTML search.
+- `websearch(query, numResults?)` — real web search via the DuckDuckGo Instant Answer API with a Wikipedia fallback (keyless).
 
 All file/shell tools honour a `workingDir` and refuse to leave it unless the
 host opts in. Read-only tools are tagged with `isReadOnly: true` so hosts can
@@ -134,7 +134,8 @@ src/
   extension-loader.ts     Auto-load ~/.friday-ng/extensions/*.js
   retry.ts                Stream-function retry with exponential backoff
   tools.ts                Built-in tool exports
-  tools/shell.ts          bash, read, write, edit, glob, grep, websearch
+  tools/shell.ts          bash, read, write, edit, glob, grep
+  tools/websearch.ts      websearch (DuckDuckGo Instant Answer + Wikipedia fallback)
   tools/path-safety.ts    Path-policy helpers
   types.ts                AgentMessage, Model, Tool, ToolResult, etc.
   providers/

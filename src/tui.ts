@@ -528,6 +528,9 @@ export interface TuiOptions {
 	onSelectModel?: (id: string) => Promise<void> | void;
 	/** Called by the `/clear` command (optional; history is always wiped). */
 	onClear?: () => void;
+	/** Called when the user presses Ctrl+C while the agent is busy. Hosts
+	 *  should abort the running operation (like Claude Code's interrupt). */
+	onInterrupt?: () => void;
 	/** Optional: parse a slash command. If it returns a result, the TUI
 	 *  applies the result instead of submitting to the LLM. The default
 	 *  is to only handle the built-in /model and /clear (preserving
@@ -548,6 +551,7 @@ export class Tui {
 	private onListModels?: () => Promise<string[]>;
 	private onSelectModel?: (id: string) => Promise<void> | void;
 	private onClear?: () => void;
+	private onInterrupt?: () => void;
 	private defaultModels: string[] = [];
 	private onSlashCommand?: TuiOptions["onSlashCommand"];
 	private showThinking: boolean;
@@ -571,6 +575,16 @@ export class Tui {
 	/** The input that was in the buffer when the user first pressed ↑. We
 	 *  restore it when the user walks past the end of the history. */
 	private inputHistoryDraft = "";
+	/** Cursor offset into the editable `inputBuffer` (UTF-16 index). Readline
+	 *  editing keys (←/→, Ctrl+A/E/U/K/W, Home/End) move and edit here. */
+	private cursorPos = 0;
+	/** Reverse-history search state (Ctrl+R). */
+	private searchActive = false;
+	private searchQuery = "";
+	private searchMatches: string[] = []; // most-recent-first matches
+	private searchCursor = -1; // index into searchMatches
+	/** The input draft to restore when search is cancelled. */
+	private searchDraft = "";
 	/** Paste-detection timer: when Enter is pressed, we wait a few ms
 	 *  to see if more input is coming (paste). If so, we buffer it
 	 *  instead of submitting immediately. */
@@ -601,6 +615,8 @@ export class Tui {
 	private suggestions: { name: string; description: string }[] = [];
 	/** Whether the suggestion popup is open. */
 	private showSuggestions = false;
+	/** Highlighted row in the suggestion popup (↑/↓ navigates it). */
+	private suggestionCursor = 0;
 
 	private resolveRun?: () => void;
 	private onData = (chunk: Buffer) => this.handleInput(chunk);
@@ -621,6 +637,7 @@ export class Tui {
 		this.onListModels = options.onListModels;
 		this.onSelectModel = options.onSelectModel;
 		this.onClear = options.onClear;
+		this.onInterrupt = options.onInterrupt;
 		this.defaultModels = options.defaultModels ?? [];
 		this.onSlashCommand = options.onSlashCommand;
 		this.showThinking = options.showThinking ?? false;
@@ -710,7 +727,18 @@ export class Tui {
 
 			case "message_end":
 				if (event.message.role === "assistant") {
-					this.appendHistory({ role: "assistant", text: this.assistantText(event.message) });
+					const m = event.message;
+					const text = this.assistantText(m);
+					const hasToolCalls = m.content.some((c) => c.type === "toolCall");
+					// Tool-only replies render as the tool execution lines
+					// below — don't add a silent empty box for them.
+					if (text.trim().length > 0) {
+						this.appendHistory({ role: "assistant", text });
+					} else if (m.errorMessage) {
+						this.appendHistory({ role: "system", text: `[error] ${m.errorMessage}` });
+					} else if (!hasToolCalls) {
+						this.appendHistory({ role: "system", text: "(empty response)" });
+					}
 					this.streamingText = "";
 					const usage = (event.message as any).usage;
 					if (usage) {
@@ -726,28 +754,31 @@ export class Tui {
 			case "tool_execution_start":
 				this.appendHistory({
 					role: "tool",
-					text: `● ${event.toolName}(${safeStringify(event.args)})`,
+					text: `${DIM}●${RESET} ${formatToolCall(event.toolName, event.args)}`,
 				});
 				break;
 
 			case "tool_execution_end": {
-				// Update the last tool entry to show result status inline.
+				// Replace the in-flight "● tool …" line with a completed
+				// "✓ tool … · summary" entry. The summary is derived from the
+				// result's metadata (line counts, match counts, exit codes) so
+				// the chat never gets flooded with raw file contents.
 				let lastToolIdx = -1;
 				for (let i = this.history.length - 1; i >= 0; i--) {
 					if (this.history[i]!.role === "tool") { lastToolIdx = i; break; }
 				}
+				const icon = event.isError ? `${RED}✗${RESET}` : `${GREEN}✓${RESET}`;
+				const call = lastToolIdx >= 0
+					? this.history[lastToolIdx]!.text.replace(/^[^\w]*●\s*/, "").replace(/\x1b\[[0-9;]*m/g, "")
+					: formatToolCall(event.toolName, {});
+				const summary = summarizeToolResult(event.toolName, event.result, event.isError)
+					.split("\n")
+					.join("\n  ");
+				const text = `${icon} ${call}${summary ? ` ${DIM}·${RESET} ${summary}` : ""}`;
 				if (lastToolIdx >= 0) {
-					const prev = this.history[lastToolIdx]!;
-					const icon = event.isError ? `${RED}✗${RESET}` : `${GREEN}✓${RESET}`;
-					this.history[lastToolIdx] = {
-						role: "tool",
-						text: `${icon} ${prev.text.replace(/^● /, "")}`,
-					};
+					this.history[lastToolIdx] = { role: "tool", text };
 				} else {
-					this.appendHistory({
-						role: "tool",
-						text: `${event.isError ? "✗" : "✓"} ${event.toolName}`,
-					});
+					this.appendHistory({ role: "tool", text });
 				}
 				break;
 			}
@@ -789,6 +820,28 @@ export class Tui {
 		this.history = [];
 		this.render();
 		this.onClear?.();
+	}
+
+	/** Replace the on-screen conversation with a restored transcript (used by
+	 *  `/resume`). Renders each user/assistant message as a boxed entry. */
+	loadConversation(messages: { role: string; content: unknown }[]): void {
+		this.history = [];
+		this.streamingText = "";
+		for (const m of messages) {
+			if (m.role === "user") {
+				const text = typeof m.content === "string" ? m.content : "";
+				this.appendHistory({ role: "user", text });
+			} else if (m.role === "assistant" && typeof m.content !== "string") {
+				const parts: string[] = [];
+				for (const c of m.content as any[]) {
+					if (c?.type === "text") parts.push(c.text);
+				}
+				const text = parts.join("");
+				if (text) this.appendHistory({ role: "assistant", text });
+			}
+		}
+		this.entryCache = new WeakMap();
+		this.render();
 	}
 
 	/** Read a setting by key. The TUI doesn't itself own a settings store;
@@ -859,8 +912,40 @@ export class Tui {
 			this.handleSelectorInput(s);
 			return;
 		}
-		if (s === "\x03" || s === "\x1b") {
+		// Reverse-history search swallows most keys while active.
+		if (this.searchActive) {
+			this.handleSearchInput(s);
+			return;
+		}
+		// Ctrl+C: interrupt a running operation, else clear the prompt; a
+		// second press (when the prompt is empty) quits — like Claude Code.
+		if (s === "\x03") {
+			if (this.busy) {
+				this.status = "interrupted";
+				this.onInterrupt?.();
+				this.busy = false;
+				this.stopElapsedTimer();
+				this.render();
+				return;
+			}
+			if (this.inputBuffer.length > 0) {
+				this.inputBuffer = "";
+				this.cursorPos = 0;
+				this.showSuggestions = false;
+				this.suggestions = [];
+				this.render();
+				return;
+			}
 			this.quit();
+			return;
+		}
+		if (s === "\x1b") {
+			this.quit();
+			return;
+		}
+		// Ctrl+R — reverse search command history.
+		if (s === "\x12") {
+			this.beginSearch();
 			return;
 		}
 		// Tab → complete the current slash command (if a unique prefix matches).
@@ -900,10 +985,60 @@ export class Tui {
 			}
 			return;
 		}
+		// Backspace → delete char before cursor.
 		if (s === "\x7f" || s === "\b") {
-			this.inputBuffer = this.inputBuffer.slice(0, -1);
+			if (this.cursorPos > 0) {
+				this.inputBuffer = this.inputBuffer.slice(0, this.cursorPos - 1) + this.inputBuffer.slice(this.cursorPos);
+				this.cursorPos -= 1;
+			}
 			this.updateSuggestions();
 			this.render();
+			return;
+		}
+		// Ctrl+D → delete char after cursor (or quit when input is empty).
+		if (s === "\x04") {
+			if (this.inputBuffer.length > 0 && this.cursorPos < this.inputBuffer.length) {
+				this.inputBuffer = this.inputBuffer.slice(0, this.cursorPos) + this.inputBuffer.slice(this.cursorPos + 1);
+				this.updateSuggestions();
+				this.render();
+				return;
+			}
+			this.quit();
+			return;
+		}
+		// Ctrl+A / Ctrl+E — start / end of line.
+		if (s === "\x01") {
+			this.cursorPos = 0;
+			this.render();
+			return;
+		}
+		if (s === "\x05") {
+			this.cursorPos = this.inputBuffer.length;
+			this.render();
+			return;
+		}
+		// Ctrl+U → kill to start. Ctrl+K → kill to end. Ctrl+W → kill word.
+		if (s === "\x15") {
+			this.inputBuffer = this.inputBuffer.slice(this.cursorPos);
+			this.cursorPos = 0;
+			this.updateSuggestions();
+			this.render();
+			return;
+		}
+		if (s === "\x0b") {
+			this.inputBuffer = this.inputBuffer.slice(0, this.cursorPos);
+			this.render();
+			return;
+		}
+		if (s === "\x17") {
+			const before = this.inputBuffer.slice(0, this.cursorPos);
+			const match = /(\s*)(\S+)\s*$/.exec(before);
+			if (match) {
+				const keepLen = before.length - match[0].length;
+				this.inputBuffer = this.inputBuffer.slice(0, keepLen) + this.inputBuffer.slice(this.cursorPos);
+				this.cursorPos = keepLen;
+				this.render();
+			}
 			return;
 		}
 		if (s === "\x0c") {
@@ -911,40 +1046,8 @@ export class Tui {
 			return;
 		}
 		if (s.startsWith("\x1b[")) {
-			if (s === "\x1b[A" || s === "\x1b[B") {
-				// When the input buffer is non-empty OR we're already browsing
-				// history, ↑/↓ walks through previous prompts. Otherwise
-				// they scroll the chat backbuffer.
-				const wantHistory = this.inputBuffer.length > 0 || this.inputHistoryCursor !== -1;
-				if (wantHistory) {
-					if (s === "\x1b[A") {
-						if (this.inputHistoryCursor === -1) {
-							if (this.inputHistory.length === 0) return;
-							this.inputHistoryCursor = this.inputHistory.length - 1;
-							this.inputHistoryDraft = this.inputBuffer;
-						} else if (this.inputHistoryCursor > 0) {
-							this.inputHistoryCursor -= 1;
-						} else {
-							return;
-						}
-					} else {
-						if (this.inputHistoryCursor === -1) return;
-						if (this.inputHistoryCursor < this.inputHistory.length - 1) {
-							this.inputHistoryCursor += 1;
-						} else {
-							this.inputHistoryCursor = -1;
-							this.inputBuffer = this.inputHistoryDraft;
-							this.render();
-							return;
-						}
-					}
-					this.inputBuffer = this.inputHistory[this.inputHistoryCursor] ?? "";
-					this.render();
-				} else {
-					this.scroll(s === "\x1b[A" ? -1 : 1);
-				}
-				return;
-			}
+			this.handleAnsiEscape(s);
+			return;
 		}
 		if (s >= " " && !s.startsWith("\x1b")) {
 			// Any new typing clears the history cursor (we're now editing a
@@ -957,14 +1060,171 @@ export class Tui {
 				this.pasteTimer = null;
 				// Flush any buffered paste text back into the input.
 				if (this.pasteBuffer) {
-					this.inputBuffer += this.pasteBuffer.replace(/\n$/, "");
+					this.inputBuffer = this.inputBuffer.slice(0, this.cursorPos) + this.pasteBuffer.replace(/\n$/, "") + this.inputBuffer.slice(this.cursorPos);
+					this.cursorPos += this.pasteBuffer.replace(/\n$/, "").length;
 					this.pasteBuffer = "";
 				}
 			}
-			this.inputBuffer += s;
+			// Cursor-aware insertion.
+			this.inputBuffer = this.inputBuffer.slice(0, this.cursorPos) + s + this.inputBuffer.slice(this.cursorPos);
+			this.cursorPos += s.length;
 			this.updateSuggestions();
 			this.render();
 		}
+	}
+
+	/** Handle ANSI CSI sequences: arrow keys, Home/End, Delete. */
+	private handleAnsiEscape(s: string): void {
+		if (s === "\x1b[A" || s === "\x1b[B") {
+			// When the suggestion popup is open, ↑/↓ navigates it.
+			if (this.showSuggestions && this.suggestions.length > 0) {
+				const delta = s === "\x1b[A" ? -1 : 1;
+				const len = this.suggestions.length;
+				this.suggestionCursor = (this.suggestionCursor + delta + len) % len;
+				this.inputBuffer = this.suggestions[this.suggestionCursor]!.name;
+				this.cursorPos = this.inputBuffer.length;
+				this.render();
+				return;
+			}
+			// Otherwise ↑/↓ walk input history when editing, else scroll.
+			const wantHistory = this.inputBuffer.length > 0 || this.inputHistoryCursor !== -1;
+			if (wantHistory) {
+				if (s === "\x1b[A") {
+					if (this.inputHistoryCursor === -1) {
+						if (this.inputHistory.length === 0) return;
+						this.inputHistoryCursor = this.inputHistory.length - 1;
+						this.inputHistoryDraft = this.inputBuffer;
+					} else if (this.inputHistoryCursor > 0) {
+						this.inputHistoryCursor -= 1;
+					} else {
+						return;
+					}
+				} else {
+					if (this.inputHistoryCursor === -1) return;
+					if (this.inputHistoryCursor < this.inputHistory.length - 1) {
+						this.inputHistoryCursor += 1;
+					} else {
+						this.inputHistoryCursor = -1;
+						this.inputBuffer = this.inputHistoryDraft;
+						this.cursorPos = this.inputBuffer.length;
+						this.render();
+						return;
+					}
+				}
+				this.inputBuffer = this.inputHistory[this.inputHistoryCursor] ?? "";
+				this.cursorPos = this.inputBuffer.length;
+				this.render();
+			} else {
+				this.scroll(s === "\x1b[A" ? -1 : 1);
+			}
+			return;
+		}
+		if (s === "\x1b[C") {
+			// → move cursor right.
+			if (this.cursorPos < this.inputBuffer.length) {
+				this.cursorPos += 1;
+				this.render();
+			}
+			return;
+		}
+		if (s === "\x1b[D") {
+			// ← move cursor left.
+			if (this.cursorPos > 0) {
+				this.cursorPos -= 1;
+				this.render();
+			}
+			return;
+		}
+		if (s === "\x1b[H" || s === "\x1b[1~") {
+			// Home → start of line.
+			this.cursorPos = 0;
+			this.render();
+			return;
+		}
+		if (s === "\x1b[F" || s === "\x1b[4~") {
+			// End → end of line.
+			this.cursorPos = this.inputBuffer.length;
+			this.render();
+			return;
+		}
+		if (s === "\x1b[3~") {
+			// Delete key → delete char after cursor.
+			if (this.cursorPos < this.inputBuffer.length) {
+				this.inputBuffer = this.inputBuffer.slice(0, this.cursorPos) + this.inputBuffer.slice(this.cursorPos + 1);
+				this.updateSuggestions();
+				this.render();
+			}
+			return;
+		}
+		// Ignore all other escape sequences.
+	}
+
+	/** Start a reverse-history search (Ctrl+R). */
+	private beginSearch(): void {
+		this.searchDraft = this.inputBuffer;
+		this.searchActive = true;
+		this.searchQuery = "";
+		this.searchMatches = [];
+		this.searchCursor = -1;
+		this.renderChat();
+	}
+
+	/** Handle keys while reverse-search is active. */
+	private handleSearchInput(s: string): void {
+		if (s === "\x12") {
+			// Ctrl+R again → next older match.
+			if (this.searchMatches.length > 0 && this.searchCursor < this.searchMatches.length - 1) {
+				this.searchCursor += 1;
+			}
+			this.renderChat();
+			return;
+		}
+		if (s === "\r" || s === "\n") {
+			this.acceptSearch();
+			return;
+		}
+		if (s === "\x03" || s === "\x1b") {
+			// Cancel → restore the draft.
+			this.searchActive = false;
+			this.inputBuffer = this.searchDraft;
+			this.cursorPos = this.inputBuffer.length;
+			this.renderChat();
+			return;
+		}
+		if (s === "\x7f" || s === "\b" || s === "\x04") {
+			// Backspace / Ctrl+D → edit the query.
+			if (s === "\x7f" || s === "\b") {
+				this.searchQuery = this.searchQuery.slice(0, -1);
+			}
+			this.recomputeSearch();
+			this.renderChat();
+			return;
+		}
+		if (s >= " " && !s.startsWith("\x1b")) {
+			this.searchQuery += s;
+			this.recomputeSearch();
+			this.renderChat();
+		}
+	}
+
+	/** Recompute matches for the current search query (most recent first). */
+	private recomputeSearch(): void {
+		const q = this.searchQuery.toLowerCase();
+		this.searchMatches = this.inputHistory
+			.slice()
+			.reverse()
+			.filter((h) => h.toLowerCase().includes(q))
+			.slice(0, 50);
+		this.searchCursor = this.searchMatches.length > 0 ? 0 : -1;
+	}
+
+	/** Accept the current (or draft) search result back into the input. */
+	private acceptSearch(): void {
+		this.searchActive = false;
+		const chosen = this.searchCursor >= 0 ? this.searchMatches[this.searchCursor] : undefined;
+		this.inputBuffer = chosen ?? this.searchDraft;
+		this.cursorPos = this.inputBuffer.length;
+		this.renderChat();
 	}
 
 	/** Recompute the slash-command suggestion popup based on the current
@@ -994,16 +1254,24 @@ export class Tui {
 			// query is empty (i.e. the user just typed `/`).
 			this.suggestions = matches.map((c) => ({ name: c.name, description: c.description }));
 			this.showSuggestions = matches.length > 0;
+			// Keep the highlight within bounds (e.g. after a filter narrows the list).
+			if (this.suggestionCursor >= this.suggestions.length) {
+				this.suggestionCursor = Math.max(0, this.suggestions.length - 1);
+			}
 		}
 	}
 
 	/** Tab-complete the current slash-command input. If there's a unique
 	 * common prefix or a single match, fill in the command name. */
 	private completeSlashCommand(): void {
-		if (this.suggestions.length === 0) return;
+		if (this.suggestions.length === 0) {
+			this.repaint();
+			return;
+		}
 		if (this.suggestions.length === 1) {
 			const name = this.suggestions[0]!.name;
 			this.inputBuffer = name;
+			this.cursorPos = name.length;
 			this.showSuggestions = false;
 			this.suggestions = [];
 			this.render();
@@ -1014,6 +1282,7 @@ export class Tui {
 		const prefix = longestCommonPrefix(names);
 		if (prefix) {
 			this.inputBuffer = `/${prefix}`;
+			this.cursorPos = this.inputBuffer.length;
 			this.render();
 		}
 	}
@@ -1134,6 +1403,7 @@ export class Tui {
 
 	private async submit(): Promise<void> {
 		const text = this.inputBuffer.trim();
+		this.cursorPos = 0;
 		if (!text || this.busy) {
 			this.inputBuffer = "";
 			this.render();
@@ -1292,12 +1562,21 @@ export class Tui {
 			safeCols,
 		);
 
-		// Input line: prefix + buffer.
-		const inputLine = truncateToWidth(`${USER_PREFIX}${this.inputBuffer}${RESET}`, safeCols);
+		// Input line: prefix + buffer (cursor-aware).
+		let inputLine: string;
+		let inputCursorCol: number;
+		if (this.searchActive) {
+			const label = `${CYAN}(reverse-i-search)\`${RESET}${this.searchQuery}${CYAN}\`${RESET}${DIM}${this.searchCursor >= 0 ? `: ${this.searchMatches[this.searchCursor]}` : ": (no match)"}${RESET}`;
+			inputLine = truncateToWidth(label, safeCols);
+			inputCursorCol = 1 + visibleWidth(`(reverse-i-search)\``) + visibleWidth(this.searchQuery);
+		} else {
+			inputLine = truncateToWidth(`${USER_PREFIX}${this.inputBuffer}${RESET}`, safeCols);
+			inputCursorCol = 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer.slice(0, this.cursorPos));
+		}
 		const suggestionLines = this.renderSuggestions(safeCols).map((l) => truncateToWidth(l, safeCols));
 		const frame = [...visible, statusLine, inputLine, ...suggestionLines].slice(0, rows);
 
-		this.writeFrame(frame, safeCols, rows);
+		this.writeFrame(frame, safeCols, rows, undefined, inputCursorCol);
 	}
 
 	/** Wrapped content lines with a per-entry cache: committed history entries
@@ -1327,7 +1606,9 @@ export class Tui {
 		return out;
 	}
 
-	/** Render the slash-command suggestion popup beneath the input line. */
+	/** Render the slash-command suggestion popup beneath the input line. The
+	 *  highlighted (selected) row is given reverse video; ↑/↓ moves the
+	 *  selection. */
 	private renderSuggestions(cols: number): string[] {
 		if (!this.showSuggestions || this.suggestions.length === 0) return [];
 		const max = 6; // cap visible height
@@ -1337,9 +1618,11 @@ export class Tui {
 			Math.max(...items.map((s) => s.name.length)),
 		);
 		return items.map((s, i) => {
-			const dim = i === 0 ? YELLOW : DIM;
+			const selected = i === this.suggestionCursor;
+			const dim = selected ? `${REVERSE}` : (i === 0 ? YELLOW : DIM);
 			const desc = s.description ?? "";
-			return `${dim}${s.name.padEnd(nameWidth)} ${RESET}${desc.slice(0, Math.max(0, cols - nameWidth - 1))}`;
+			const line = `${dim}${s.name.padEnd(nameWidth)} ${RESET}${desc.slice(0, Math.max(0, cols - nameWidth - 1))}`;
+			return selected ? `${line}${RESET}` : line;
 		});
 	}
 
@@ -1430,6 +1713,119 @@ function safeStringify(value: unknown): string {
 		return s && s.length > 120 ? `${s.slice(0, 120)}…` : s ?? "";
 	} catch {
 		return "";
+	}
+}
+
+/** Format a tool call for display: the tool name plus its most relevant
+ *  argument (the command for bash, the path for file tools, the query for
+ *  websearch), collapsed to one short line. Raw argument JSON is only used
+ *  for unknown tools — the chat must not be flooded with file contents or
+ *  argument dumps. */
+export function formatToolCall(name: string, args: unknown): string {
+	const a = (args ?? {}) as Record<string, unknown>;
+	const pick = (...keys: string[]): string | undefined => {
+		for (const k of keys) {
+			const v = a[k];
+			if (typeof v === "string" && v.trim().length > 0) return v;
+		}
+		return undefined;
+	};
+	let summary: string;
+	switch (name) {
+		case "bash":
+		case "calculator":
+			summary = pick("command", "expression") ?? "";
+			break;
+		case "read":
+		case "write":
+		case "edit":
+			summary = pick("path") ?? "";
+			break;
+		case "glob":
+			summary = pick("pattern") ?? "";
+			break;
+		case "grep":
+			summary = pick("pattern") ?? "";
+			break;
+		case "websearch":
+			summary = pick("query") ?? "";
+			break;
+		default: {
+			const s = safeStringify(a);
+			summary = s && s !== "{}" ? s : "";
+		}
+	}
+	const oneLine = summary.split("\n").map((l) => l.trim()).filter(Boolean).join(" ⏎ ");
+	const clipped = oneLine.length > 80 ? `${oneLine.slice(0, 77)}…` : oneLine;
+	return clipped ? `${name} ${clipped}` : name;
+}
+
+function firstLines(text: string, maxLines: number, maxChars: number): string {
+	if (!text) return "";
+	const lines = text.split("\n").slice(0, maxLines).map((l) => l.trimEnd());
+	let out = lines.join("\n");
+	if (out.length > maxChars) out = `${out.slice(0, maxChars)}…`;
+	return out;
+}
+
+/** Build a short human summary of a tool result from its metadata — the
+ *  opposite of dumping content into the chat. File reads report line
+ *  counts, searches report match counts, bash reports its exit code plus
+ *  at most a 3-line output preview. */
+export function summarizeToolResult(name: string, result: unknown, isError: boolean): string {
+	const res = (result ?? {}) as { content?: { type: string; text?: string }[]; details?: Record<string, unknown> };
+	const text = (res.content ?? [])
+		.filter((c) => c?.type === "text")
+		.map((c) => c.text ?? "")
+		.join("\n")
+		.trim();
+	const details = res.details ?? {};
+	if (isError) {
+		return `error: ${firstLines(text || "failed", 1, 160)}`;
+	}
+	switch (name) {
+		case "bash": {
+			const timedOut = details.timedOut === true;
+			const code = typeof details.code === "number" ? details.code : 0;
+			const body = text
+				.split("\n")
+				.filter((l) => !/^\[(exit code|command timed out)/.test(l.trim()))
+				.join("\n")
+				.trim();
+			const head = timedOut ? "timed out" : `exit ${code}`;
+			const preview = firstLines(body, 3, 240);
+			return preview ? `${head}\n${preview}` : head;
+		}
+		case "read": {
+			if (typeof details.totalLines === "number") {
+				return `${details.totalLines} lines`;
+			}
+			if (typeof details.returnedBytes === "number") {
+				return `${details.returnedBytes} bytes (truncated)`;
+			}
+			return "done";
+		}
+		case "glob":
+		case "grep": {
+			const m = details.matches;
+			if (typeof m === "number") return `${m} match${m === 1 ? "" : "es"}`;
+			return "done";
+		}
+		case "websearch": {
+			const r = details.results;
+			const src = typeof details.source === "string" ? ` (${details.source})` : "";
+			if (typeof r === "number") return `${r} result${r === 1 ? "" : "s"}${src}`;
+			return "done";
+		}
+		case "write": {
+			const b = details.bytes;
+			if (typeof b === "number") return `wrote ${b} bytes`;
+			return "done";
+		}
+		case "edit":
+			return "edited";
+		default:
+			return firstLines(text, 1, 120) || "done";
 	}
 }
 

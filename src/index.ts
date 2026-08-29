@@ -139,6 +139,7 @@ export {
 	grepTool,
 	builtinTools,
 } from "./tools/shell.ts";
+export { websearchTool, formatSearchResults } from "./tools/websearch.ts";
 export { isPathInside, resolveSafePath, tryStat } from "./tools/path-safety.ts";
 
 // Permissions

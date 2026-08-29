@@ -202,34 +202,72 @@ export function makeCompactCommand(deps: { onCompact: () => Promise<void> | void
 	};
 }
 
-/** `/sessions` — list saved sessions. */
-export function makeSessionsCommand(deps: { onList: () => Promise<string[]> }): SlashCommand {
+/** A lightweight human-friendly summary of a saved session for `/sessions` /
+ *  `/resume`. Hosts feed this from session metadata (title, dates, counts). */
+export interface SessionSummary {
+	id: string;
+	title: string;
+	updatedAt: string;
+	messageCount: number;
+}
+
+function formatRelative(iso: string): string {
+	const then = new Date(iso).getTime();
+	if (Number.isNaN(then)) return "";
+	const secs = Math.floor((Date.now() - then) / 1000);
+	if (secs < 60) return "just now";
+	if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+	if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+	return `${Math.floor(secs / 86400)}d ago`;
+}
+
+/** `/sessions` — list saved sessions with titles + ages instead of a wall of
+ *  UUIDs (the previous output in todo.txt made them impossible to navigate). */
+export function makeSessionsCommand(deps: { onList: () => Promise<SessionSummary[]> }): SlashCommand {
 	return {
 		name: "/sessions",
 		description: "List saved sessions.",
 		run: async (): Promise<SlashCommandResult> => {
 			const sessions = await deps.onList();
 			if (sessions.length === 0) return { message: "(no saved sessions)" };
-			return { message: `Saved sessions:\n${sessions.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}` };
+			const lines = sessions.map((s, i) => {
+				const title = s.title.length > 48 ? s.title.slice(0, 45) + "…" : s.title;
+				const age = formatRelative(s.updatedAt);
+				return `  ${i + 1}. ${title}${" ".repeat(Math.max(0, 50 - title.length))}${s.messageCount} msgs  ${age}`;
+			});
+			return { message: `Saved sessions:\n${lines.join("\n")}\n\nRun /resume <index> to open one.` };
 		},
 	};
 }
 
-/** `/resume` — resume a saved session. */
-export function makeResumeCommand(deps: { onResume: (id: string) => Promise<void> | void; listSessions: () => Promise<string[]> }): SlashCommand {
+/** `/resume` — resume a saved session by index or id. */
+export function makeResumeCommand(deps: {
+	onResume: (id: string) => Promise<void> | void;
+	listSessions: () => Promise<SessionSummary[]>;
+}): SlashCommand {
 	return {
 		name: "/resume",
-		description: "Resume a saved session by id (or omit to pick).",
-		usage: "[session-id]",
+		description: "Resume a saved session.",
+		usage: "[index | id]",
 		run: async ({ args }): Promise<SlashCommandResult> => {
 			const trimmed = args.trim();
+			const all = await deps.listSessions();
+			if (all.length === 0) return { message: "(no saved sessions)" };
 			if (!trimmed) {
-				const all = await deps.listSessions();
-				if (all.length === 0) return { message: "(no saved sessions)" };
-				return { message: `Pick one: ${all.join(", ")}` };
+				// Show a numbered, navigable list.
+				const lines = all.map((s, i) => {
+					const title = s.title.length > 40 ? s.title.slice(0, 37) + "…" : s.title;
+					return `  ${i + 1}. ${title}  (${formatRelative(s.updatedAt)})`;
+				});
+				return { message: `Pick one (or /resume <index>):\n${lines.join("\n")}` };
 			}
-			await deps.onResume(trimmed);
-			return { message: `Resumed ${trimmed}` };
+			let id = trimmed;
+			const idx = Number.parseInt(trimmed, 10);
+			if (Number.isFinite(idx) && String(idx) === trimmed && idx >= 1 && idx <= all.length) {
+				id = all[idx - 1]!.id;
+			}
+			await deps.onResume(id);
+			return { message: `Resumed ${all.find((s) => s.id === id)?.title ?? id}` };
 		},
 	};
 }
@@ -296,7 +334,7 @@ export function registerBuiltinCommands(deps: {
 	listProviders: () => string[];
 	listTools: () => string[];
 	onCompact: () => Promise<void> | void;
-	listSessions: () => Promise<string[]>;
+	listSessions: () => Promise<SessionSummary[]>;
 	onResumeSession: (id: string) => Promise<void> | void;
 }): void {
 	const tryRegister = (cmd: SlashCommand) => {

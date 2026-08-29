@@ -71,7 +71,9 @@ function openAICompatToStream(
 	const stream = new EventStreamClass();
 	const abortSignal = options.signal;
 
-	// Translate messages
+	// Translate messages. Assistant tool calls MUST be echoed back with
+	// `tool_calls` — otherwise the toolResult messages that follow are
+	// orphaned and OpenAI-compatible APIs reject the whole request.
 	const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
 	if (context.systemPrompt) {
 		messages.push({ role: "system", content: context.systemPrompt });
@@ -80,13 +82,24 @@ function openAICompatToStream(
 		if (msg.role === "user") {
 			messages.push({ role: "user", content: typeof msg.content === "string" ? msg.content : msg.content });
 		} else if (msg.role === "assistant") {
-			const contentParts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];
-			for (const c of msg.content) {
-				if (c.type === "text") {
-					contentParts.push({ type: "text" as const, text: c.text } as any);
-				}
+			const text = (msg.content as any[])
+				.filter((c: any) => c.type === "text")
+				.map((c: any) => c.text)
+				.join("");
+			const toolCalls = (msg.content as any[]).filter((c: any) => c.type === "toolCall") as ToolCall[];
+			if (toolCalls.length > 0) {
+				messages.push({
+					role: "assistant",
+					content: text || null,
+					tool_calls: toolCalls.map((tc) => ({
+						id: tc.id,
+						type: "function" as const,
+						function: { name: tc.name, arguments: JSON.stringify(tc.arguments ?? {}) },
+					})),
+				} as any);
+			} else {
+				messages.push({ role: "assistant", content: text } as any);
 			}
-			messages.push({ role: "assistant", content: contentParts } as any);
 		} else if (msg.role === "toolResult") {
 			messages.push({
 				role: "tool",
@@ -139,6 +152,12 @@ function openAICompatToStream(
 				timestamp: Date.now(),
 			};
 
+			// Tool-call arguments arrive as STRING FRAGMENTS across chunks
+			// (e.g. `{"comm` + `and":"ls"}`). They must be concatenated and
+			// parsed exactly once at the end — parsing per-fragment corrupts
+			// the arguments and every tool call fails validation.
+			const toolCallAccumulators = new Map<number, { id: string; name: string; args: string }>();
+
 			stream.push({ type: "start", partial: partialMessage });
 
 			let lastChunk: OpenAI.Chat.Completions.ChatCompletionChunk | undefined;
@@ -164,15 +183,21 @@ function openAICompatToStream(
 
 				if (delta.tool_calls) {
 					for (const tc of delta.tool_calls) {
-						if (tc.type === "function" && tc.function?.arguments) {
-							partialMessage = pushToolCallDelta(partialMessage, tc as any);
-							stream.push({
-								type: "toolcall_delta",
-								contentIndex: 0,
-								delta: tc.function.arguments,
-								partial: partialMessage,
-							});
+						const idx = typeof tc.index === "number" ? tc.index : 0;
+						let acc = toolCallAccumulators.get(idx);
+						if (!acc) {
+							acc = { id: "", name: "", args: "" };
+							toolCallAccumulators.set(idx, acc);
 						}
+						if (tc.id) acc.id = tc.id;
+						if (tc.function?.name) acc.name = tc.function.name;
+						if (tc.function?.arguments) acc.args += tc.function.arguments;
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex: idx,
+							delta: tc.function?.arguments ?? tc.id ?? "",
+							partial: partialMessage,
+						});
 					}
 				}
 
@@ -181,9 +206,36 @@ function openAICompatToStream(
 				}
 			}
 
+			// Finalize tool calls: parse each accumulated argument string once.
+			const finalizedToolCalls: ToolCall[] = [];
+			for (const [idx, acc] of [...toolCallAccumulators.entries()].sort((a, b) => a[0] - b[0])) {
+				let arguments_: Record<string, any> = {};
+				if (acc.args) {
+					try {
+						arguments_ = JSON.parse(acc.args);
+					} catch {
+						arguments_ = { raw: acc.args };
+					}
+				}
+				const toolCall: ToolCall = {
+					type: "toolCall",
+					id: acc.id || `call_${idx}`,
+					name: acc.name,
+					arguments: arguments_,
+				};
+				finalizedToolCalls.push(toolCall);
+				partialMessage.content.push(toolCall);
+				stream.push({
+					type: "toolcall_end",
+					contentIndex: idx,
+					toolCall,
+					partial: partialMessage,
+				});
+			}
+
 			const finishReason = lastChunk?.choices[0]?.finish_reason ?? null;
-			const stopReason = mapFinishReason(finishReason);
-			partialMessage.stopReason = stopReason === "error" ? "error" : (stopReason as "stop" | "length" | "toolUse");
+			const stopReason = mapFinishReason(finishReason, finalizedToolCalls.length > 0);
+			partialMessage.stopReason = stopReason;
 			if (stopReason === "error") {
 				stream.push({ type: "error", reason: "error", error: partialMessage });
 			} else {
@@ -224,39 +276,6 @@ function pushTextDelta(message: AssistantMessage, text: string): AssistantMessag
 	return message;
 }
 
-function pushToolCallDelta(message: AssistantMessage, delta: any): AssistantMessage {
-	let existing: ToolCall | undefined;
-	for (let i = message.content.length - 1; i >= 0; i--) {
-		if (message.content[i].type === "toolCall") {
-			existing = message.content[i] as ToolCall;
-			break;
-		}
-	}
-	if (existing && delta.id) existing.id = delta.id;
-	if (existing && delta.function?.name) existing.name = delta.function.name;
-	if (existing && delta.function?.arguments) {
-		try {
-			const parsed = JSON.parse(delta.function.arguments);
-			existing.arguments = { ...existing.arguments, ...parsed };
-		} catch {
-			existing.arguments = { ...existing.arguments, [delta.function.arguments]: undefined };
-		}
-	} else if (!existing) {
-		let args: any = {};
-		if (delta.function?.arguments) {
-			try { args = JSON.parse(delta.function.arguments); }
-			catch { args = { raw: delta.function.arguments }; }
-		}
-		message.content.push({
-			type: "toolCall",
-			id: delta.id ?? "",
-			name: delta.function?.name ?? "",
-			arguments: args,
-		} as ToolCall);
-	}
-	return message;
-}
-
 function emptyUsage(): Usage {
 	return {
 		input: 0,
@@ -279,16 +298,25 @@ function mapUsage(u: OpenAI.CompletionUsage): Usage {
 	};
 }
 
-function mapFinishReason(reason: string | null | undefined): "stop" | "length" | "toolUse" | "deferred" | "error" {
+function mapFinishReason(
+	reason: string | null | undefined,
+	hasToolCalls: boolean,
+): "stop" | "length" | "toolUse" | "deferred" | "error" {
 	switch (reason) {
 		case "stop":
 			return "stop";
 		case "length":
 			return "length";
 		case "tool_calls":
+		case "function_call":
 			return "toolUse";
-		default:
+		case "content_filter":
 			return "error";
+		default:
+			// Many gateways omit finish_reason on the final chunk. Inferring
+			// from content (instead of failing) keeps good replies alive —
+			// a null finish_reason used to kill every such response.
+			return hasToolCalls ? "toolUse" : "stop";
 	}
 }
 

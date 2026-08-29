@@ -58,6 +58,35 @@ describe("bashTool", () => {
 		// Either "code 7" or "(command exited with code 7 and no output)"
 		expect(text).toMatch(/code 7/);
 	});
+	it("gives stdin-reading commands immediate EOF instead of hanging (the `date` hang bug)", async () => {
+		// Windows: bare `date` prompts for input; with stdin closed it must
+		// return promptly instead of blocking until the 60s timeout.
+		// POSIX: `cat` with no args reads stdin; EOF ends it immediately.
+		const command = process.platform === "win32" ? "date" : "cat";
+		const start = Date.now();
+		const r = await bashTool.execute("t1", { command, timeoutMs: 10_000 });
+		const elapsed = Date.now() - start;
+		expect(elapsed).toBeLessThan(8000);
+		expect(r.isError).toBeFalsy();
+		const details = (r as any).details;
+		expect(details?.timedOut).toBe(false);
+	}, 15_000);
+	it("reports a timeout instead of returning a misleading exit code 0", async () => {
+		const sleep = process.platform === "win32" ? "ping -n 15 127.0.0.1 >nul" : "sleep 15";
+		const r = await bashTool.execute("t1", { command: sleep, timeoutMs: 1000 });
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("timed out after 1s");
+		expect((r as any).details?.timedOut).toBe(true);
+	}, 10_000);
+	it("description tells the model which shell and OS it is on", async () => {
+		const desc: string = (bashTool as any).description;
+		if (process.platform === "win32") {
+			expect(desc).toContain("cmd.exe");
+			expect(desc).toContain("NOT a POSIX shell");
+		} else {
+			expect(desc).toContain("/bin/sh");
+		}
+	});
 });
 
 describe("readTool / writeTool / editTool", () => {
