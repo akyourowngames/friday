@@ -82,15 +82,19 @@ async function freeccToStream(
 				}
 				anthropicMessages.push({ role: "assistant", content: blocks });
 			} else if (msg.role === "toolResult") {
+				const images = msg.content.filter((c: any) => c.type === "image");
+				const content = images.length === 0
+					? msg.content.map((c: any) => (c.type === "text" ? c.text : "")).join("")
+					: msg.content.map((c: any) => c.type === "text"
+						? { type: "text", text: c.text }
+						: { type: "image", source: { type: "base64", media_type: c.mimeType, data: c.data } });
 				anthropicMessages.push({
 					role: "user",
 					content: [
 						{
 							type: "tool_result",
 							tool_use_id: msg.toolCallId,
-							content: Array.isArray(msg.content)
-								? msg.content.map((c: any) => (c.type === "text" ? c.text : "")).join("")
-								: msg.content,
+							content,
 							is_error: msg.isError,
 						},
 					],

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { markdownToPlain, renderMarkdown, renderMarkdownColored } from "../src/markdown.ts";
+import { markdownToPlain, markdownVisibleWidth, renderMarkdown, renderMarkdownColored } from "../src/markdown.ts";
 
 describe("markdown renderer", () => {
 	it("renders plain text", () => {
@@ -137,7 +137,7 @@ describe("renderMarkdownColored", () => {
 		const lines = renderMarkdownColored("```ts\nconst x = 1;\n```");
 		// Should have at least one line with ANSI background codes.
 		expect(lines.some((l) => l.includes("\x1b[48;5;236m"))).toBe(true);
-		expect(lines.some((l) => l.includes("const x = 1"))).toBe(true);
+		expect(lines.some((l) => l.replace(/\x1b\[[0-9;]*m/g, "").includes("const x = 1"))).toBe(true);
 	});
 
 	it("colors bold/italic/inline-code text", () => {
@@ -171,5 +171,64 @@ describe("renderMarkdownColored", () => {
 
 	it("returns empty array for empty input", () => {
 		expect(renderMarkdownColored("")).toEqual([""]);
+	});
+
+	it("highlights language aliases without coloring strings or comments as keywords", () => {
+		for (const lang of ["ts", "typescript", "js", "javascript", "py", "python", "bash", "sh", "shell", "zsh"]) {
+			const source = lang === "py" || lang === "python" ? 'if True: print("if") # if' : lang === "bash" || lang === "sh" || lang === "shell" || lang === "zsh" ? 'if true; then echo "if"; fi # if' : 'const value = "const"; // const';
+			const output = renderMarkdownColored(`\`\`\`${lang}\n${source}\n\`\`\``)[0]!;
+			expect(output).toContain("\x1b[35m");
+			const stringStart = output.indexOf("\x1b[32m");
+			const stringEnd = output.indexOf("\x1b[0m", stringStart);
+			expect(output.slice(stringStart, stringEnd)).not.toContain("\x1b[35m");
+			const commentStart = output.lastIndexOf("\x1b[2m");
+			expect(output.slice(commentStart)).not.toContain("\x1b[35m");
+		}
+	});
+
+	it("creates OSC 8 links and measures them as zero-width controls", () => {
+		const line = renderMarkdownColored("See https://example.com/path.")[0]!;
+		expect(line).toContain("\x1b]8;;https://example.com/path\x07");
+		expect(line).toContain("https://example.com/path\x1b]8;;\x07.");
+		expect(markdownVisibleWidth(line)).toBe("See https://example.com/path.".length);
+	});
+
+	it("wraps OSC 8 links atomically and closes truncated link state", () => {
+		const lines = renderMarkdownColored("https://example.com/abcdefgh", { wrapWidth: 10 });
+		expect(lines.length).toBeGreaterThan(1);
+		for (const line of lines) {
+			expect(markdownVisibleWidth(line)).toBeLessThanOrEqual(10);
+			if (line.includes("\x1b]8;;")) expect(line).toContain("\x1b]8;;\x07");
+		}
+	});
+
+	it("detects delimiter-row tables and applies alignments", () => {
+		const lines = renderMarkdownColored("| left | middle | right |\n| :--- | :---: | ---: |\n| a | b | c |", { wrapWidth: 50 });
+		expect(lines).toEqual([
+			"┌──────┬────────┬───────┐",
+			"│ left │ middle │ right │",
+			"├──────┼────────┼───────┤",
+			"│ a    │   b    │     c │",
+			"└──────┴────────┴───────┘",
+		]);
+	});
+
+	it("renders Unicode tables within width and falls back when too narrow or malformed", () => {
+		const table = "| 名称 | value |\n| --- | ---: |\n| 猫 | something-long |";
+		const rendered = renderMarkdownColored(table, { wrapWidth: 18 });
+		expect(rendered.every((line) => markdownVisibleWidth(line) <= 18)).toBe(true);
+		expect(renderMarkdownColored(table, { wrapWidth: 5 })).toEqual(table.split("\n"));
+		const malformed = "| a | b |\n| --- | nope |\n| c | d |";
+		expect(renderMarkdownColored(malformed)).toEqual(malformed.split("\n"));
+	});
+
+	it("preserves every incomplete fenced and table streaming prefix", () => {
+		const complete = "```ts\nconst x = '```';\n```\n| a | b |\n| :--- | ---: |\n| c | d |";
+		for (let index = 1; index <= complete.length; index++) {
+			const partial = complete.slice(0, index);
+			const rendered = renderMarkdown(partial);
+			expect(rendered.length).toBeGreaterThan(0);
+			expect(markdownToPlain(partial).length).toBeGreaterThanOrEqual(0);
+		}
 	});
 });

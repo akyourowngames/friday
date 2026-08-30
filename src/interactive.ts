@@ -29,6 +29,7 @@ import type { StreamFn } from "./types.ts";
 export interface SetupOptions {
 	/** Force a key prompt even if env or config has one. */
 	forceKeyPrompt?: boolean;
+	apiKeyOverride?: string;
 	/** Skip the model picker (use default or last). */
 	skipModelPicker?: boolean;
 	/** Skip saving to config. */
@@ -117,6 +118,7 @@ export async function ensureApiKey(
 	if (!provider.requiresKey) {
 		return ""; // local providers
 	}
+	if (options.apiKeyOverride) return options.apiKeyOverride;
 
 	// 1. Env var
 	if (!options.forceKeyPrompt) {

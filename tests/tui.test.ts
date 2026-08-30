@@ -17,6 +17,8 @@ const {
 	Tui,
 	formatToolCall,
 	summarizeToolResult,
+	renderToolEntry,
+	renderTodos,
 } = await import("../src/tui.ts");
 
 // Lazy imports for the slash-command tests (avoids circular-import issues at
@@ -30,6 +32,14 @@ describe("visibleWidth", () => {
 	it("ignores ANSI escape sequences", () => {
 		expect(visibleWidth("\x1b[36myou› \x1b[0m")).toBe(5);
 		expect(visibleWidth("plain")).toBe(5);
+	});
+
+	it("treats OSC 8 hyperlinks as zero-width controls", () => {
+		const link = "\x1b]8;;https://example.com\x07example\x1b]8;;\x07";
+		expect(visibleWidth(link)).toBe(7);
+		const clipped = truncateToWidth(link, 4);
+		expect(visibleWidth(clipped)).toBe(4);
+		expect(clipped).toContain("\x1b]8;;\x07");
 	});
 
 	it("counts emoji as 2 columns", () => {
@@ -872,6 +882,114 @@ describe("Tui tool-run rendering (the empty-box bug)", () => {
 		const sys = tui.history.filter((h: any) => h.role === "system");
 		expect(sys.length).toBe(1);
 		expect(sys[0].text).toContain("(empty response)");
+	});
+});
+
+describe("structured tool rendering and pinned todos", () => {
+	it("renders running, done, and error tools in width-safe boxes", () => {
+		for (const status of ["running", "done", "error"] as const) {
+			const lines = renderToolEntry({ role: "tool", text: "", toolCallId: "x", name: "bash", args: { command: "echo hello" }, status, result: { content: [{ type: "text", text: "ok" }], details: { code: status === "error" ? 1 : 0 } } }, 30);
+			expect(lines[0]).toContain(status === "running" ? "●" : status === "done" ? "✓" : "✗");
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(30);
+		}
+	});
+
+	it("keeps plain legacy tool entries compatible", () => {
+		expect(renderToolEntry({ role: "tool", text: "legacy output" }, 40).join("\n")).toContain("legacy output");
+	});
+
+	it("collapses tool bodies to 12 lines and expands fully", () => {
+		const body = Array.from({ length: 20 }, (_, i) => `line-${i}`).join("\n");
+		const base = { role: "tool", text: "", name: "bash", args: {}, status: "running", body } as const;
+		const collapsed = renderToolEntry(base, 80).join("\n");
+		expect(collapsed).toContain("line-11");
+		expect(collapsed).not.toContain("line-12");
+		expect(renderToolEntry({ ...base, expanded: true }, 80).join("\n")).toContain("line-19");
+	});
+
+	it("renders edit details as red and green line diffs", () => {
+		const lines = renderToolEntry({ role: "tool", text: "", name: "edit", args: { path: "a.ts" }, status: "done", result: { content: [], details: { path: "a.ts", oldText: "old", newText: "new" } } }, 60).join("\n");
+		expect(lines).toContain("- old");
+		expect(lines).toContain("+ new");
+		expect(lines).toContain("\x1b[31m");
+		expect(lines).toContain("\x1b[32m");
+	});
+
+	it("renders bounded todos without including them in scrollback", () => {
+		const todos = Array.from({ length: 5 }, (_, i) => ({ text: `todo-${i}`, status: i === 0 ? "completed" : "pending" }));
+		const lines = renderTodos(todos, 20, 3);
+		expect(lines).toHaveLength(3);
+		expect(lines.join("\n")).toContain("todo-0");
+		expect(lines[2]).toContain("more todos");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(20);
+	});
+
+	it("matches interleaved tool completion and progress by ID", async () => {
+		const tui: any = new Tui({ out: () => {}, getSize: () => [80, 24], model: "m", provider: "p", onSubmit: vi.fn(), streamDebounceMs: 0 });
+		tui.handleEvent({ type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: { command: "a" } });
+		tui.handleEvent({ type: "tool_execution_start", toolCallId: "b", toolName: "bash", args: { command: "b" } });
+		tui.handleEvent({
+			type: "tool_execution_progress",
+			toolCallId: "a",
+			toolName: "bash",
+			progress: { content: [{ type: "text", text: "chunk-a" }] },
+		});
+		tui.handleEvent({ type: "tool_execution_end", toolCallId: "a", toolName: "bash", result: { content: [], details: { code: 0 } }, isError: false });
+		expect(tui.history[0].status).toBe("done");
+		expect(tui.history[0].body).toBe("chunk-a");
+		expect(tui.history[1].status).toBe("running");
+	});
+
+	it("Ctrl+O toggles only the most recent structured tool", () => {
+		const tui: any = new Tui({ out: () => {}, getSize: () => [80, 24], model: "m", provider: "p", onSubmit: vi.fn() });
+		tui.handleEvent({ type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: {} });
+		tui.handleEvent({ type: "tool_execution_start", toolCallId: "b", toolName: "bash", args: {} });
+		tui.handleInput(Buffer.from("\x0f"));
+		expect(tui.history[0].expanded).toBeUndefined();
+		expect(tui.history[1].expanded).toBe(true);
+	});
+
+	it("serializes confirmations, blocks normal input, and supports yes/no keys", async () => {
+		const input = { isTTY: true } as any;
+		const tui: any = new Tui({ input, out: () => {}, getSize: () => [80, 24], model: "m", provider: "p", onSubmit: vi.fn() });
+		const first = tui.confirm("first?");
+		const second = tui.confirm("second?");
+		tui.handleInput(Buffer.from("ignored"));
+		expect(tui.inputBuffer).toBe("");
+		tui.handleInput(Buffer.from("y"));
+		expect(await first).toBe(true);
+		expect(tui.activeConfirmation.prompt).toBe("second?");
+		tui.handleInput(Buffer.from("\x1b"));
+		expect(await second).toBe(false);
+	});
+
+	it("rejects confirmation safely on non-TTY input", async () => {
+		const tui = new Tui({ input: { isTTY: false } as any, out: () => {}, getSize: () => [80, 24], model: "m", provider: "p", onSubmit: vi.fn() });
+		expect(await tui.confirm("danger?")).toBe(false);
+	});
+
+	it("submits slash follow-ups through the normal busy path once", async () => {
+		const onSubmit = vi.fn().mockResolvedValue(undefined);
+		const onSlashCommand = vi.fn().mockResolvedValue({ handled: true, submitFollowUp: "follow up" });
+		const tui: any = new Tui({ out: () => {}, getSize: () => [80, 24], model: "m", provider: "p", onSubmit, onSlashCommand });
+		tui.inputBuffer = "/go";
+		await tui.submit();
+		expect(onSlashCommand).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledWith("follow up");
+		expect(tui.busy).toBe(false);
+	});
+
+	it("uses setting hooks and reconstructs tool calls from conversation", () => {
+		const setSetting = vi.fn();
+		const tui: any = new Tui({ out: () => {}, getSize: () => [80, 24], model: "m", provider: "p", onSubmit: vi.fn(), getSetting: (key) => key === "x" ? 7 : undefined, setSetting });
+		expect(tui.getSetting("x")).toBe(7);
+		tui.setSetting("x", 8);
+		expect(setSetting).toHaveBeenCalledWith("x", 8);
+		tui.loadConversation([
+			{ role: "assistant", content: [{ type: "toolCall", id: "c", name: "read", arguments: { path: "a" } }] },
+			{ role: "toolResult", toolCallId: "c", toolName: "read", content: [], details: { totalLines: 3 }, isError: false },
+		]);
+		expect(tui.history[0]).toMatchObject({ toolCallId: "c", name: "read", status: "done" });
 	});
 });
 

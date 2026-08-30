@@ -7,7 +7,9 @@ import {
 	makeCostCommand,
 	makeExitCommand,
 	makeHelpCommand,
+	makeInitCommand,
 	makeModelCommand,
+	makeProfileCommand,
 	makeProviderCommand,
 	makeQuitCommand,
 	makeReloadCommand,
@@ -15,6 +17,7 @@ import {
 	makeSessionsCommand,
 	makeSettingsCommand,
 	makeToolsCommand,
+	makeUndoCommand,
 	makeUsageCommand,
 } from "../../src/commands/builtin.ts";
 import {
@@ -26,6 +29,7 @@ import {
 } from "../../src/slash-commands.ts";
 import type { Agent } from "../../src/agent.ts";
 import type { SlashCommandHost } from "../../src/slash-commands.ts";
+import { SettingsStore } from "../../src/settings.ts";
 
 class FakeHost implements SlashCommandHost {
 	cleared = false;
@@ -171,12 +175,17 @@ describe("builtin commands", () => {
 		expect(r.message).toContain("No models");
 	});
 
-	it("/settings calls the host open callback", async () => {
-		let opened = false;
-		const cmd = makeSettingsCommand({ onOpenSettings: async () => { opened = true; } });
+	it("/settings lists and updates persisted settings", async () => {
+		let saved = false;
+		const settings = new SettingsStore({ config: { providers: {} } });
+		const cmd = makeSettingsCommand({ settings, onSave: async () => { saved = true; } });
 		registerSlashCommand(cmd);
-		await getSlashCommand("/settings")!.run({ tui: host, agent, args: "" });
-		expect(opened).toBe(true);
+		const listed = await getSlashCommand("/settings")!.run({ tui: host, agent, args: "" });
+		expect((listed as any).message).toContain("confirmToolCalls = false");
+		const updated = await getSlashCommand("/settings")!.run({ tui: host, agent, args: "confirmToolCalls true" });
+		expect((updated as any).message).toBe("confirmToolCalls = true");
+		expect(settings.get("confirmToolCalls")).toBe(true);
+		expect(saved).toBe(true);
 	});
 
 	it("/reload calls the host reload callback", async () => {

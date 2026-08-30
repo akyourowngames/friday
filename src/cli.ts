@@ -15,24 +15,28 @@ import fs from "node:fs";
 import { Agent } from "./agent.ts";
 import { ConsoleRenderer } from "./console-renderer.ts";
 import { Tui } from "./tui.ts";
-import { loadConfig, saveConfig, withLastModel, bumpRecentSession, withLastSessionId } from "./config.ts";
+import { loadConfig, saveConfig, withLastModel, bumpRecentSession, withLastSessionId, withSettings } from "./config.ts";
 import { setupProvider, listModelsForProvider, buildStreamFunction } from "./interactive.ts";
 import { findProvider, listProviders, resolveApiKey, type ProviderMeta } from "./providers/registry.ts";
 import { isOllamaRunning } from "./providers/ollama.ts";
 import { setupConsoleEncoding, applyWindowsUtf8Default, revertWindowsUtf8Default, readConsoleStatus } from "./console-setup.ts";
-import { bashTool, readTool, writeTool, editTool, globTool, grepTool } from "./tools/shell.ts";
+import { bashTool, readTool, writeTool, editTool, multiEditTool, globTool, grepTool, isDangerousShellCommand } from "./tools/shell.ts";
 import { websearchTool } from "./tools/websearch.ts";
 import { buildEnvironmentContext } from "./env-context.ts";
 import { Type } from "typebox";
-import { SettingsStore, listSettings } from "./settings.ts";
+import { SettingsStore, settingsToJson } from "./settings.ts";
 import { parseSlashCommand, clearSlashCommands } from "./slash-commands.ts";
 import { registerBuiltinCommands, type SessionSummary } from "./commands/builtin.ts";
-import { createSession, loadSession, listSessions, deleteSession, recordMessage, type SessionMeta } from "./sessions.ts";
+import { createSession, loadSession, listSessions, deleteSession, recordMessage, replaceSessionMessages, updateMeta, type SessionMeta } from "./sessions.ts";
 import { compactTranscript, makeTransformContext } from "./compaction.ts";
 import { withRetry } from "./retry.ts";
 import { HookRegistry } from "./hooks.ts";
 import { buildHost, defaultExtensionsDir, loadExtensions } from "./extension-loader.ts";
-import type { AgentMessage, Model } from "./types.ts";
+import { DEFAULT_POLICY, decide } from "./permissions.ts";
+import { appendProfile, loadProfile, loadProjectFile, profileDir, profileExists } from "./profile.ts";
+import { loadTodos, makeTodoWriteTool, saveTodos, type TodoStore } from "./todos.ts";
+import { createCheckpoint, discardCheckpoint, finalizeCheckpoint, listCheckpoints, restoreCheckpoint, type CheckpointManifest } from "./checkpoints.ts";
+import type { AgentMessage, Model, Tool } from "./types.ts";
 
 interface CliOptions {
 	prompt: string;
@@ -211,8 +215,8 @@ const calculatorTool = {
 /** `codingTools` is the workspace shell toolset, used when the user is in
  *  a real project. `cliTools` is the default set, which also includes the
  *  demo calculator and real web search. */
-const codingTools = [bashTool, readTool, writeTool, editTool, globTool, grepTool, websearchTool];
-const cliTools = [...codingTools, calculatorTool];
+const codingTools = [bashTool, readTool, writeTool, editTool, multiEditTool, globTool, grepTool, websearchTool];
+const baseCliTools = [...codingTools, calculatorTool];
 
 async function main(): Promise<void> {
 	// Switch the console to UTF-8 (Windows) and force stdout/stderr to emit
@@ -299,11 +303,6 @@ async function main(): Promise<void> {
 		);
 	}
 
-	// Load any user-installed extensions under ~/.friday-ng/extensions/.
-	// The slash command registry is process-global, so we load it before
-	// the help/REPL decision so `/help` shows extension commands too.
-	await loadStartupExtensions();
-
 	if (opts.setupUtf8) {
 		try {
 			applyWindowsUtf8Default();
@@ -357,6 +356,7 @@ async function main(): Promise<void> {
 	// Auto-setup: prompt for key if needed, pick model if needed
 	const setup = await setupProvider(providerId, {
 		modelOverride: opts.model,
+		apiKeyOverride: opts.apiKey,
 		noConfig: opts.noConfig,
 		forceKeyPrompt: opts.forceKey,
 	});
@@ -370,10 +370,13 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	const oneShotSettings = new SettingsStore({ config: await loadConfig() });
+	const maxTokens = Number(oneShotSettings.get("maxTokens"));
+	const temperature = Number(oneShotSettings.get("temperature"));
 	const agent = new Agent({
 		initialState: {
-			systemPrompt: buildSystemPrompt(setup.model),
-			tools: cliTools as any,
+			systemPrompt: await buildSystemPrompt(setup.model),
+			tools: baseCliTools as Tool[],
 			model,
 		},
 		streamFunction: withRetry(setup.streamFn, {
@@ -383,9 +386,11 @@ async function main(): Promise<void> {
 			onRetry: (e) => console.error(`[retry] attempt ${e.attempt} in ${Math.round(e.delayMs / 1000)}s: ${e.error.message}`),
 		}),
 		toolExecution: "sequential",
+		maxTokens: maxTokens > 0 ? maxTokens : undefined,
+		temperature: temperature >= 0 ? temperature : undefined,
 	});
 
-	const renderer = new ConsoleRenderer({ showThinking: false });
+	const renderer = new ConsoleRenderer({ showThinking: oneShotSettings.get("showThinking") === true });
 	agent.subscribe((event) => renderer.render(event));
 
 	await agent.prompt(opts.prompt);
@@ -394,16 +399,20 @@ async function main(): Promise<void> {
 
 /** Build the system prompt: identity + live environment context (OS, shell,
  *  cwd, current date) so the model never needs a tool call to learn them. */
-function buildSystemPrompt(modelId: string): string {
+export async function buildSystemPrompt(modelId: string, workspace = process.cwd()): Promise<string> {
+	const [profile, project] = await Promise.all([loadProfile(), loadProjectFile(workspace)]);
 	return (
 		`You are friday-ng, a next-generation AI assistant with instant token streaming. ` +
 		`Current model: ${modelId}. Be helpful, concise, and friendly.` +
+		(profile ? `\n\n## About the user\n${profile.trim()}\n` : "") +
+		(project ? `\n\n## About this project\n${project.trim()}\n` : "") +
 		buildEnvironmentContext()
 	);
 }
 
 /** Build the `Model` object the Agent loop needs from provider meta + id. */
 function buildModelObject(provider: ProviderMeta, modelId: string): Model {
+	const supportsImages = ["openai", "anthropic", "gemini", "freecc"].includes(provider.apiStyle);
 	return {
 		id: modelId,
 		name: modelId,
@@ -411,7 +420,7 @@ function buildModelObject(provider: ProviderMeta, modelId: string): Model {
 		provider: provider.id as any,
 		baseUrl: provider.defaultBaseUrl,
 		reasoning: false,
-		input: ["text"],
+		input: supportsImages ? ["text", "image"] : ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		contextWindow: provider.defaultContextWindow,
 		maxTokens: provider.defaultMaxTokens,
@@ -426,41 +435,50 @@ async function runRepl(
 	model: Model,
 ): Promise<void> {
 	const providerMeta = findProvider(providerId)!;
-	const config = await loadConfig();
-	const settings = new SettingsStore({ config });
-
-	// Set up the session: either resume one or start a new one. Held in a
-	// mutable ref so `/resume` can swap it mid-session.
+	const settings = new SettingsStore({ config: await loadConfig() });
+	const systemPrompt = await buildSystemPrompt(model.id);
 	let sessionMeta: SessionMeta;
 	let initialMessages: AgentMessage[] = [];
 	if (opts.resumeSession) {
 		const loaded = await loadSession(opts.resumeSession);
-		if (!loaded) {
-			console.error(`✗ Session not found: ${opts.resumeSession}`);
-			process.exit(1);
+		if (!loaded) throw new Error(`Session not found: ${opts.resumeSession}`);
+		if (loaded.meta.provider !== providerId) {
+			throw new Error(`Session ${loaded.meta.id} uses provider ${loaded.meta.provider}; restart with --provider ${loaded.meta.provider}`);
 		}
 		sessionMeta = loaded.meta;
 		initialMessages = loaded.messages;
-		// Restore the model the user had selected.
 		model = buildModelObject(providerMeta, sessionMeta.model);
 	} else {
 		sessionMeta = await createSession({
 			provider: providerId as any,
 			model: setup.model,
 			apiStyle: providerMeta.apiStyle,
-			systemPrompt: buildSystemPrompt(setup.model),
+			systemPrompt,
 		});
-		// Persist last-session id.
 		await saveConfig(withLastSessionId(bumpRecentSession(await loadConfig(), sessionMeta.id), sessionMeta.id));
 	}
 	const sessionRef: { current: SessionMeta } = { current: sessionMeta };
+	const tuiRef: { current: Tui | null } = { current: null };
+	const pendingCheckpoints = new Map<string, CheckpointManifest>();
+	const toolStartedAt = new Map<string, number>();
+	const hooks = new HookRegistry();
+	let todoStore = await loadTodos(sessionMeta.id);
+	const todoTool = makeTodoWriteTool({
+		getSessionId: () => sessionRef.current.id,
+		onChange: (store) => {
+			todoStore = store;
+			tuiRef.current?.setTodos(store.items.map((item) => ({ text: item.content, status: item.status })));
+		},
+	});
+	const cliTools: Tool[] = [...baseCliTools, todoTool] as Tool[];
+	const maxTokens = Number(settings.get("maxTokens"));
+	const temperature = Number(settings.get("temperature"));
 
 	const agent = new Agent({
+		sessionId: sessionMeta.id,
 		initialState: {
-			// Always rebuilt at startup so the environment block (OS, cwd,
-			// current date) is fresh even when resuming an old session.
-			systemPrompt: buildSystemPrompt(model.id),
-			tools: cliTools as any,
+			systemPrompt: await buildSystemPrompt(model.id),
+			tools: cliTools,
 			model,
 			messages: initialMessages,
 		},
@@ -468,136 +486,244 @@ async function runRepl(
 			enabled: true,
 			maxRetries: 3,
 			baseDelayMs: 2000,
-			onRetry: (e) => console.error(`[retry] attempt ${e.attempt} in ${Math.round(e.delayMs / 1000)}s: ${e.error.message}`),
+			onRetry: (event) => console.error(`[retry] attempt ${event.attempt} in ${Math.round(event.delayMs / 1000)}s: ${event.error.message}`),
 		}),
 		toolExecution: "sequential",
+		maxTokens: maxTokens > 0 ? maxTokens : undefined,
+		temperature: temperature >= 0 ? temperature : undefined,
 		transformContext: makeTransformContext({
-			targetTokens: Math.min(32_000, Math.floor(model.contextWindow * 0.4)),
+			targetTokens: Number(settings.get("compactAt")) > 0
+				? Number(settings.get("compactAt"))
+				: Math.min(32_000, Math.floor(model.contextWindow * 0.4)),
 			preserveTail: 4,
 			maxToolResultChars: 3000,
 		}),
-	});
-
-	// Forward Tui reference to the slash command callbacks (closure-captured).
-	const tuiRef: { current: Tui | null } = { current: null };
-
-	// Register built-in slash commands (idempotent). They get a reference
-	// to the agent and tui once both are constructed.
-	clearSlashCommands();
-	const settingsRef = settings;
-	registerBuiltinCommands({
-		settings: settingsRef,
-		listModels: async () => {
-			const baseUrl = config.providers[providerId]?.baseUrl ?? providerMeta.defaultBaseUrl;
-			const apiKey = config.providers[providerId]?.apiKey ?? "";
-			try {
-				return await listModelsForProvider(providerMeta, apiKey, baseUrl);
-			} catch {
-				return [];
+		beforeToolCall: async ({ toolCall, args, context }) => {
+			const tool = cliTools.find((candidate) => candidate.name === toolCall.name);
+			if (!tool) return { block: true, reason: `Unknown tool: ${toolCall.name}` };
+			const hookResult = await hooks.trigger("pre_tool_use", { tool, args, callId: toolCall.id });
+			if (hookResult.cancel) return { block: true, reason: hookResult.reason ?? "blocked by extension" };
+			if (toolCall.name === "bash" && isDangerousShellCommand(String((args as any)?.command ?? ""))) {
+				return { block: true, reason: "dangerous shell command denied" };
 			}
-		},
-		onSelectModel: async (id: string) => {
-			await selectModelInRepl(id, agent, tuiRef, providerId, providerMeta, setup);
-		},
-		onOpenSettings: () => {
-			// The /settings command is a stub here — the TUI shows a
-			// usage hint. A real UI overlay is left to the host
-			// application (a desktop app wrapping friday-ng, for example).
+			const decision = decide(DEFAULT_POLICY, { tool, args });
+			if (decision.mode === "deny") return { block: true, reason: decision.reason ?? "denied by policy" };
+			if (decision.mode === "ask" && settings.get("confirmToolCalls") === true) {
+				const accepted = await tuiRef.current?.confirm(`Run ${toolCall.name}(${JSON.stringify(args)})?`);
+				if (!accepted) return { block: true, reason: "declined by user" };
+			}
+			if (!["write", "edit", "multi_edit", "bash"].includes(toolCall.name)) return undefined;
+			const values = (args ?? {}) as Record<string, unknown>;
+			const workspace = toolCall.name === "bash"
+				? String(values.cwd ?? process.cwd())
+				: String(values.root ?? process.cwd());
+			const files = toolCall.name === "multi_edit"
+				? ((values.edits as Array<{ path?: unknown }> | undefined) ?? []).map((edit) => String(edit.path ?? ""))
+				: toolCall.name === "bash" ? undefined : [String(values.path ?? "")];
+			try {
+				const checkpoint = await createCheckpoint({
+					sessionId: sessionRef.current.id,
+					workspace,
+					files,
+					workspaceSnapshot: toolCall.name === "bash",
+					exclude: [".friday-ng", ".commandcode", ".cache", ".next", ".turbo"],
+					maxFiles: 10_000,
+					maxBytes: 100 * 1024 * 1024,
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					todo: todoStore,
+					transcript: context.messages.slice(0, -1),
+				});
+				pendingCheckpoints.set(toolCall.id, checkpoint);
+				toolStartedAt.set(toolCall.id, Date.now());
+			} catch (error) {
+				const accepted = await tuiRef.current?.confirm(`Checkpoint failed: ${error instanceof Error ? error.message : String(error)}. Run without undo?`);
+				if (!accepted) return { block: true, reason: "checkpoint failed" };
+			}
 			return undefined;
 		},
-		onReload: async () => {
-			const fresh = await loadConfig();
-			settingsRef.replaceConfig(fresh);
-		},
-		onSwitchProvider: async (id: string) => {
-			console.error(`[friday-ng] provider switching mid-session is not yet implemented (asked: ${id})`);
-		},
-		currentProvider: providerId,
-		listProviders: () => listProviders().map((p) => p.id),
-		listTools: () => cliTools.map((t) => t.name),
-		onCompact: () => undefined,
-		listSessions: async (): Promise<SessionSummary[]> => {
-			const metas = await listSessions();
-			return metas.map((m) => ({
-				id: m.id,
-				title: m.title,
-				updatedAt: m.updatedAt,
-				messageCount: m.messageCount,
-			}));
-		},
-		onResumeSession: async (id: string) => {
-			const loaded = await loadSession(id);
-			if (!loaded) {
-				return;
+		afterToolCall: async ({ toolCall, args, result, isError, context }) => {
+			const checkpoint = pendingCheckpoints.get(toolCall.id);
+			if (checkpoint) {
+				if (isError || result.isError) await discardCheckpoint(checkpoint.sessionId, checkpoint.id);
+				else await finalizeCheckpoint(checkpoint.sessionId, checkpoint.id);
+				pendingCheckpoints.delete(toolCall.id);
 			}
-			if (agent.hasQueuedMessages() || agent.signal) {
-				return;
+			const tool = cliTools.find((candidate) => candidate.name === toolCall.name);
+			if (tool) {
+				const hookResult = await hooks.trigger("post_tool_use", {
+					tool,
+					args,
+					callId: toolCall.id,
+					result,
+					durationMs: Date.now() - (toolStartedAt.get(toolCall.id) ?? Date.now()),
+				});
+				toolStartedAt.delete(toolCall.id);
+				if (hookResult.cancel) return { isError: true, content: [{ type: "text", text: hookResult.reason ?? "blocked by extension" }] };
+				return { content: hookResult.result.content, details: hookResult.result.details };
 			}
-			sessionRef.current = loaded.meta;
-			// Restore the conversation + model in the running agent + TUI.
-			agent.replaceMessages(loaded.messages);
-			agent.useModel(buildModelObject(providerMeta, loaded.meta.model), agent.streamFunction);
-			tuiRef.current?.setModel(loaded.meta.model);
-			tuiRef.current?.loadConversation(loaded.messages);
-			await saveConfig(withLastSessionId(bumpRecentSession(await loadConfig(), loaded.meta.id), loaded.meta.id));
+			return undefined;
 		},
 	});
 
+	const listCurrentModels = async (): Promise<string[]> => {
+		const fresh = await loadConfig();
+		const baseUrl = fresh.providers[providerId]?.baseUrl ?? setup.baseUrl ?? providerMeta.defaultBaseUrl;
+		const apiKey = setup.apiKey ?? fresh.providers[providerId]?.apiKey ?? "";
+		try {
+			return await listModelsForProvider(providerMeta, apiKey, baseUrl);
+		} catch {
+			return [];
+		}
+	};
+	const applyRuntimeSettings = (): void => {
+		const outputTokens = Number(settings.get("maxTokens"));
+		const sampling = Number(settings.get("temperature"));
+		agent.maxTokens = outputTokens > 0 ? outputTokens : undefined;
+		agent.temperature = sampling >= 0 ? sampling : undefined;
+		tuiRef.current?.applySettings({
+			showThinking: settings.get("showThinking") === true,
+			streamDebounceMs: Number(settings.get("streamDebounceMs")),
+		});
+	};
+	const persistSettings = async (): Promise<void> => {
+		const fresh = await loadConfig();
+		await saveConfig(withSettings(fresh, settingsToJson(settings)));
+		applyRuntimeSettings();
+	};
+	const refreshPrompt = async (): Promise<void> => {
+		const next = await buildSystemPrompt(agent.state.model.id);
+		agent.setSystemPrompt(next);
+		sessionRef.current = await updateMeta(sessionRef.current.id, { systemPrompt: next });
+	};
+	const resumeSession = async (id: string): Promise<void> => {
+		if (agent.state.isStreaming || agent.hasQueuedMessages()) throw new Error("Wait for the current run before resuming a session.");
+		const loaded = await loadSession(id);
+		if (!loaded) throw new Error(`Session not found: ${id}`);
+		if (loaded.meta.provider !== providerId) throw new Error(`Session uses provider ${loaded.meta.provider}; restart with --provider ${loaded.meta.provider}`);
+		const nextStream = await buildStreamFunction(providerId, {
+			model: loaded.meta.model,
+			apiKey: setup.apiKey ?? "",
+			baseUrl: setup.baseUrl,
+			authToken: setup.authToken,
+		});
+		sessionRef.current = loaded.meta;
+		todoStore = await loadTodos(loaded.meta.id);
+		agent.useSession(loaded.meta.id, loaded.messages);
+		agent.useModel(buildModelObject(providerMeta, loaded.meta.model), withRetry(nextStream));
+		agent.setSystemPrompt(await buildSystemPrompt(loaded.meta.model));
+		tuiRef.current?.setModel(loaded.meta.model);
+		tuiRef.current?.loadConversation(loaded.messages);
+		tuiRef.current?.setTodos(todoStore.items.map((item) => ({ text: item.content, status: item.status })));
+		await saveConfig(withLastSessionId(bumpRecentSession(await loadConfig(), loaded.meta.id), loaded.meta.id));
+	};
+	const undoLatest = async (): Promise<string> => {
+		if (agent.state.isStreaming || agent.hasQueuedMessages()) return "Wait for the current run before undoing.";
+		const latest = (await listCheckpoints(sessionRef.current.id)).find((checkpoint) => checkpoint.status === "finalized" && !checkpoint.restoredAt);
+		if (!latest) return "No checkpoint to restore.";
+		const restored = await restoreCheckpoint({ sessionId: sessionRef.current.id, workspace: latest.workspace, checkpointId: latest.id });
+		if (latest.todo && typeof latest.todo === "object") {
+			const current = await loadTodos(sessionRef.current.id);
+			todoStore = await saveTodos(sessionRef.current.id, latest.todo as TodoStore, current.revision);
+		}
+		const messages = Array.isArray(latest.transcript) ? latest.transcript as AgentMessage[] : agent.state.messages.slice();
+		agent.replaceMessages(messages);
+		sessionRef.current = await replaceSessionMessages(sessionRef.current.id, messages);
+		tuiRef.current?.loadConversation(messages);
+		tuiRef.current?.setTodos(todoStore.items.map((item) => ({ text: item.content, status: item.status })));
+		return `Restored checkpoint ${restored.manifest.id}: ${restored.restored.length} restored, ${restored.deleted.length} removed.`;
+	};
+
+	clearSlashCommands();
+	registerBuiltinCommands({
+		settings,
+		onSaveSettings: persistSettings,
+		listModels: listCurrentModels,
+		onSelectModel: async (id) => selectModelInRepl(id, agent, tuiRef, sessionRef, providerId, providerMeta, setup),
+		onReload: async () => {
+			settings.replaceConfig(await loadConfig());
+			applyRuntimeSettings();
+			await refreshPrompt();
+		},
+		onSwitchProvider: async (id) => {
+			throw new Error(`Provider switching requires restart: friday-ng --provider ${id}`);
+		},
+		currentProvider: providerId,
+		listProviders: () => listProviders().map((provider) => provider.id),
+		listTools: () => cliTools.map((tool) => tool.name),
+		onCompact: async () => {
+			const result = compactTranscript(agent.state.messages, {
+				targetTokens: Number(settings.get("compactAt")) || Math.min(32_000, Math.floor(agent.state.model.contextWindow * 0.4)),
+				preserveTail: 4,
+				maxToolResultChars: 3000,
+			});
+			agent.replaceMessages(result.messages);
+			sessionRef.current = await replaceSessionMessages(sessionRef.current.id, result.messages);
+			tuiRef.current?.loadConversation(result.messages);
+		},
+		listSessions: async (): Promise<SessionSummary[]> => (await listSessions()).map((entry) => ({
+			id: entry.id,
+			title: entry.title,
+			updatedAt: entry.updatedAt,
+			messageCount: entry.messageCount,
+		})),
+		onResumeSession: resumeSession,
+		init: { hasProfile: profileExists, dir: profileDir() },
+		profile: { load: loadProfile, append: async (text) => appendProfile(`\n- ${text}\n`), onChanged: refreshPrompt },
+		onUndo: undoLatest,
+	});
+	await loadStartupExtensions(settings, hooks, persistSettings);
+
 	const tui = new Tui({
-		model: setup.model,
+		model: model.id,
 		provider: providerId,
-		contextWindow: providerMeta.defaultContextWindow,
-		defaultModels: providerMeta.defaultModel
-			? [providerMeta.defaultModel]
-			: [],
-		onSubmit: async (text: string) => {
-			await agent.prompt(text);
+		contextWindow: model.contextWindow,
+		defaultModels: providerMeta.defaultModel ? [providerMeta.defaultModel] : [],
+		showThinking: settings.get("showThinking") === true,
+		streamDebounceMs: Number(settings.get("streamDebounceMs")),
+		getSetting: (key) => settings.get(key),
+		setSetting: (key, value) => {
+			settings.set(key, value as any);
+			void persistSettings();
+		},
+		onSubmit: async (text) => {
+			const pre = await hooks.trigger("pre_user_message", { text });
+			if (pre.cancel) throw new Error(pre.reason ?? "Message cancelled by extension");
+			await agent.prompt(pre.text);
 			await agent.waitForIdle();
 		},
 		onQuit: () => agent.abort(),
 		onInterrupt: () => agent.abort(),
-		onListModels: async () => {
-			const baseUrl = config.providers[providerId]?.baseUrl ?? providerMeta.defaultBaseUrl;
-			const apiKey = config.providers[providerId]?.apiKey ?? "";
-			try {
-				return await listModelsForProvider(providerMeta, apiKey, baseUrl);
-			} catch {
-				return [];
-			}
-		},
-		onSelectModel: async (id: string) => {
-			await selectModelInRepl(id, agent, tuiRef, providerId, providerMeta, setup);
-		},
-		onSlashCommand: async (input: string) => {
+		onListModels: listCurrentModels,
+		onSelectModel: async (id) => selectModelInRepl(id, agent, tuiRef, sessionRef, providerId, providerMeta, setup),
+		onSlashCommand: async (input) => {
 			const parsed = parseSlashCommand(input);
-			if (!parsed) {
-				return { handled: false };
-			}
+			if (!parsed) return { handled: false };
 			const result = await parsed.command.run({
 				tui: tuiRef.current!,
 				agent,
 				args: parsed.args,
-				meta: { provider: providerId, model: setup.model, settings: settingsRef },
+				meta: { provider: providerId, model: agent.state.model.id, settings },
 			});
-			return {
-				handled: true,
-				message: result.message,
-				clearHistory: result.clearHistory,
-				quit: result.quit,
-			};
+			return { handled: true, ...result };
 		},
 	});
 	tuiRef.current = tui;
+	applyRuntimeSettings();
+	tui.loadConversation(initialMessages, false);
+	tui.setTodos(todoStore.items.map((item) => ({ text: item.content, status: item.status })), false);
+	if (!(await profileExists())) tui.appendSystemLine("No profile yet — run /init to personalize friday-ng.", false);
 
-	// Record every message into the session, and forward agent events to the TUI.
 	agent.subscribe(async (event) => {
 		tui.handleEvent(event);
 		if (event.type === "message_end") {
+			const toolCalls = event.message.role === "assistant"
+				? event.message.content.filter((content) => content.type === "toolCall").length
+				: 0;
 			try {
-				await recordMessage(sessionRef.current.id, event.message, 0);
-			} catch {
-				// Best-effort; don't kill the REPL if disk fails.
-			}
+				sessionRef.current = await recordMessage(sessionRef.current.id, event.message, toolCalls);
+			} catch {}
+			if (event.message.role === "assistant") await hooks.trigger("post_assistant_message", { message: event.message });
 		}
 	});
 
@@ -608,6 +734,7 @@ async function selectModelInRepl(
 	id: string,
 	agent: Agent,
 	tuiRef: { current: Tui | null },
+	sessionRef: { current: SessionMeta },
 	providerId: string,
 	providerMeta: ProviderMeta,
 	setup: Awaited<ReturnType<typeof setupProvider>>,
@@ -624,7 +751,9 @@ async function selectModelInRepl(
 		authToken,
 	});
 	agent.useModel(buildModelObject(providerMeta, id), streamFn);
+	agent.setSystemPrompt(await buildSystemPrompt(id));
 	tuiRef.current?.setModel(id);
+	sessionRef.current = await updateMeta(sessionRef.current.id, { model: id, systemPrompt: agent.state.systemPrompt });
 	await saveConfig(withLastModel(config, providerId, id));
 }
 
@@ -634,16 +763,20 @@ async function selectModelInRepl(
  * settings store. Failures are isolated per extension; the harness keeps
  * running even if one extension throws.
  */
-async function loadStartupExtensions(): Promise<void> {
+async function loadStartupExtensions(
+	settings: SettingsStore,
+	hooks: HookRegistry,
+	onSettingsChanged: () => Promise<void>,
+): Promise<void> {
 	const dir = defaultExtensionsDir();
-	const config = await loadConfig();
-	const settings = new SettingsStore({ config });
-	const hooks = new HookRegistry();
 	const host = buildHost({
 		hooks,
-		getSetting: (k) => settings.get(k),
-		setSetting: (k, v) => settings.set(k, v as any),
-		log: (m) => console.error(`[extension] ${m}`),
+		getSetting: (key) => settings.get(key),
+		setSetting: (key, value) => {
+			settings.set(key, value as any);
+			void onSettingsChanged();
+		},
+		log: (message) => console.error(`[extension] ${message}`),
 	});
 	const result = await loadExtensions(dir, host);
 	if (result.failed.length > 0) {

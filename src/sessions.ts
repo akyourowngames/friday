@@ -30,8 +30,19 @@ function getSessionsDir(): string {
 	return process.env.FRIDAY_NG_SESSIONS_DIR ?? path.join(os.homedir(), ".friday-ng", "sessions");
 }
 
+export function validateSessionId(id: string): string {
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) || id === "." || id === "..") {
+		throw new Error(`Invalid session id: ${id}`);
+	}
+	return id;
+}
+
+export function getSessionDirPath(id: string): string {
+	return path.join(getSessionsDir(), validateSessionId(id));
+}
+
 function sessionDir(id: string): string {
-	return path.join(getSessionsDir(), id);
+	return getSessionDirPath(id);
 }
 
 function metaPath(id: string): string {
@@ -221,6 +232,44 @@ export async function recordMessage(
 	await appendMessage(id, message);
 	await writeMeta(meta);
 	return meta;
+}
+
+export async function replaceSessionMessages(id: string, messages: AgentMessage[]): Promise<SessionMeta> {
+	const meta = await readMeta(id);
+	if (!meta) throw new Error(`Session not found: ${id}`);
+	const dir = await ensureSessionDir(id);
+	const target = messagesPath(id);
+	const tmp = path.join(dir, `.messages.${process.pid}.${Date.now()}.tmp`);
+	await fs.writeFile(tmp, messages.map((message) => JSON.stringify(message)).join("\n") + (messages.length ? "\n" : ""), {
+		mode: 0o600,
+	});
+	await fs.rename(tmp, target);
+	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+	let toolCalls = 0;
+	let title = "(new session)";
+	for (const message of messages) {
+		if (message.role === "user" && title === "(new session)") {
+			title = deriveTitle(typeof message.content === "string" ? message.content : "");
+		}
+		if (message.role === "assistant") {
+			usage.input += message.usage.input;
+			usage.output += message.usage.output;
+			usage.cacheRead += message.usage.cacheRead;
+			usage.cacheWrite += message.usage.cacheWrite;
+			usage.totalTokens += message.usage.totalTokens;
+			toolCalls += message.content.filter((content) => content.type === "toolCall").length;
+		}
+	}
+	const next = {
+		...meta,
+		title,
+		messageCount: messages.length,
+		usage,
+		toolCalls,
+		updatedAt: new Date().toISOString(),
+	};
+	await writeMeta(next);
+	return next;
 }
 
 /** Update only the meta (e.g. to record a model switch). */

@@ -101,13 +101,25 @@ function openAICompatToStream(
 				messages.push({ role: "assistant", content: text } as any);
 			}
 		} else if (msg.role === "toolResult") {
+			const text = msg.content.map((c: any) => (c.type === "text" ? c.text : "")).join("");
 			messages.push({
 				role: "tool",
 				tool_call_id: msg.toolCallId,
-				content: Array.isArray(msg.content)
-					? msg.content.map((c: any) => (c.type === "text" ? c.text : "")).join("")
-					: msg.content,
-			} as any);
+				content: text,
+			});
+			const images = msg.content.filter((c: any) => c.type === "image");
+			if (images.length > 0) {
+				messages.push({
+					role: "user",
+					content: [
+						{ type: "text", text: `Images returned by tool result ${msg.toolCallId} (${msg.toolName}):` },
+						...images.map((image: any) => ({
+							type: "image_url" as const,
+							image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+						})),
+					],
+				});
+			}
 		}
 	}
 

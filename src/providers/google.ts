@@ -84,17 +84,21 @@ async function googleToStream(
 				}
 				contents.push({ role: "model", parts });
 			} else if (msg.role === "toolResult") {
+				const text = msg.content.map((c: any) => (c.type === "text" ? c.text : "")).join("");
+				const images = msg.content.filter((c: any) => c.type === "image");
 				contents.push({
 					role: "function",
 					parts: [
 						{
 							functionResponse: {
+								id: msg.toolCallId,
 								name: msg.toolName,
-								response: {
-									result: Array.isArray(msg.content)
-										? msg.content.map((c: any) => (c.type === "text" ? c.text : "")).join("")
-										: msg.content,
-								},
+								response: { result: text },
+								...(images.length > 0 ? {
+									parts: images.map((image: any) => ({
+										inlineData: { data: image.data, mimeType: image.mimeType },
+									})),
+								} : {}),
 							},
 						},
 					],

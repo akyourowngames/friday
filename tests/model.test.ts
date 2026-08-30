@@ -58,4 +58,15 @@ describe("model registry", () => {
 		expect(retrieved).toBeDefined();
 		expect(retrieved?.id).toBe("gpt-4o");
 	});
+
+	it("preserves registered input capabilities", () => {
+		registerModel(makeModel({ input: ["text", "image"] }));
+		expect(getModel("openai/gpt-4o")?.input).toEqual(["text", "image"]);
+	});
+
+	it("defaults omitted input capabilities to text", () => {
+		const { input: _input, cost: _cost, ...registered } = makeModel();
+		registerModel(registered);
+		expect(getModel("openai/gpt-4o")?.input).toEqual(["text"]);
+	});
 });

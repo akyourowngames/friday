@@ -44,10 +44,26 @@ export interface PermissionPolicy {
 	rules: PermissionRule[];
 }
 
+export const SHELL_DANGEROUS_PATTERNS: RegExp[] = [
+	/(?:^|[;&|]\s*)rm\s+-[a-z]*r[a-z]*f[a-z]*\s+(?:\/|~)(?:\s|$)/i,
+	/(?:curl|wget)(?:\.exe)?\b[^\n|]*\|\s*(?:ba|z|k)?sh\b/i,
+	/(?:^|[;&|]\s*)mkfs(?:\.[a-z0-9]+)?\b/i,
+	/(?:^|[;&|]\s*)dd\s+[^\n]*\bof=\/dev\//i,
+	/(?:^|[;&|]\s*)(?:shutdown|reboot|halt|poweroff)\b/i,
+	/(?:^|[&|]\s*)(?:format|diskpart)\b/i,
+	/(?:^|[&|]\s*)(?:del|erase)\s+[^\n]*(?:\\Windows\\System32|[A-Z]:\\\*)/i,
+	/(?:^|[&|]\s*)Remove-Item\b[^\n]*-(?:Recurse|r)\b[^\n]*-(?:Force|fo)\b[^\n]*(?:[A-Z]:\\|\/)/i,
+];
+
+export function isDangerousShellCommand(command: string): boolean {
+	return SHELL_DANGEROUS_PATTERNS.some((pattern) => pattern.test(command));
+}
+
 export const DEFAULT_POLICY: PermissionPolicy = {
 	default: "ask",
 	tools: {
 		// Read-only tools are auto-approved by default; the host can override.
+		bash: "ask",
 		read: "allow",
 		glob: "allow",
 		grep: "allow",
@@ -119,13 +135,10 @@ export function decide(
 	policy: PermissionPolicy,
 	req: PermissionRequest,
 ): { mode: PermissionMode; matchedRule?: PermissionRule; reason?: string } {
-	// 1. Tool-level override.
-	const toolMode = policy.tools[req.tool.name];
-	if (toolMode) {
-		return { mode: toolMode, reason: `tool-level policy: ${req.tool.name} -> ${toolMode}` };
+	if (req.tool.name === "bash" && isDangerousShellCommand(String((req.args as Record<string, unknown> | null)?.command ?? ""))) {
+		return { mode: "deny", reason: "dangerous shell command" };
 	}
-
-	// 2. Per-rule match.
+	// 1. Per-rule match.
 	for (const rule of policy.rules) {
 		if (rule.tool !== "*" && rule.tool !== req.tool.name) continue;
 		if (!rule.key) {
@@ -135,6 +148,12 @@ export function decide(
 		if (value !== undefined && matchPattern(value, rule.pattern)) {
 			return { mode: rule.mode, matchedRule: rule, reason: rule.reason };
 		}
+	}
+
+	// 2. Tool-level default.
+	const toolMode = policy.tools[req.tool.name];
+	if (toolMode) {
+		return { mode: toolMode, reason: `tool-level policy: ${req.tool.name} -> ${toolMode}` };
 	}
 
 	// 3. Default.

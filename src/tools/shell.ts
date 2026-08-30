@@ -20,21 +20,15 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 import type { AgentTool, ToolResult } from "../types.ts";
+import { isDangerousShellCommand, SHELL_DANGEROUS_PATTERNS } from "../permissions.ts";
 import { isPathInside, resolveSafePath } from "./path-safety.ts";
+
+export { isDangerousShellCommand, SHELL_DANGEROUS_PATTERNS };
 
 /** Maximum stdout/stderr bytes to capture from a shell command. */
 const SHELL_MAX_OUTPUT = 200 * 1024; // 200 KB
 
 const SHELL_TIMEOUT_MS = 60_000;
-
-const SHELL_DANGEROUS_PATTERNS: RegExp[] = [
-	/^\s*rm\s+-rf?\s+\/\s*$/i,
-	/^\s*(curl|wget)\s+.*\|\s*sh\b/i,
-	/^\s*mkfs/i,
-	/^\s*dd\s+if=/i,
-	/^\s*shutdown\b/i,
-	/^\s*reboot\b/i,
-];
 
 const bashParams = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
@@ -61,12 +55,14 @@ function shellGuidance(): string {
 }
 
 /** Run a shell command with stdin closed (EOF), output caps, and a timeout. */
-function runShell(
+export function runShell(
 	shellCmd: string,
 	shellArgs: string[],
 	cwd: string,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	onStdout?: (chunk: string) => void,
+	onStderr?: (chunk: string) => void,
 ): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean; aborted: boolean }> {
 	return new Promise((resolve, reject) => {
 		// stdin is IGNORED so any command that reads stdin (Windows `date`,
@@ -87,10 +83,14 @@ function runShell(
 
 		const cap = SHELL_MAX_OUTPUT;
 		child.stdout.on("data", (chunk: Buffer) => {
-			if (stdout.length < cap) stdout += chunk.toString("utf8");
+			const text = chunk.toString("utf8");
+			if (stdout.length < cap) stdout += text;
+			onStdout?.(text);
 		});
 		child.stderr.on("data", (chunk: Buffer) => {
-			if (stderr.length < cap) stderr += chunk.toString("utf8");
+			const text = chunk.toString("utf8");
+			if (stderr.length < cap) stderr += text;
+			onStderr?.(text);
 		});
 
 		// Kill the whole process TREE. On Windows `child.kill()` only kills
@@ -156,15 +156,13 @@ export const bashTool: AgentTool<typeof bashParams> = {
 		shellGuidance() +
 		" Output is truncated at 200KB. Commands that read stdin receive immediate EOF.",
 	parameters: bashParams,
-	execute: async (_id, params, signal) => {
+	execute: async (_id, params, signal, onProgress) => {
 		const command = String(params.command ?? "");
 		const cwd = params.cwd ? path.resolve(String(params.cwd)) : process.cwd();
 		const timeoutMs = Math.min(SHELL_TIMEOUT_MS, Number(params.timeoutMs ?? SHELL_TIMEOUT_MS));
 
-		for (const pat of SHELL_DANGEROUS_PATTERNS) {
-			if (pat.test(command)) {
-				return errorResult(`Refusing to run potentially dangerous command: ${command}`);
-			}
+		if (isDangerousShellCommand(command)) {
+			return errorResult(`Refusing to run potentially dangerous command: ${command}`);
 		}
 
 		const isWin = process.platform === "win32";
@@ -172,7 +170,21 @@ export const bashTool: AgentTool<typeof bashParams> = {
 		const shellArgs = isWin ? ["/c", command] : ["-c", command];
 
 		try {
-			const { stdout, stderr, code, timedOut, aborted } = await runShell(shellCmd, shellArgs, cwd, timeoutMs, signal);
+			const progress = (stream: "stdout" | "stderr") => (chunk: string): void => {
+				void onProgress?.({
+					content: [{ type: "text", text: chunk }],
+					details: { stream, chunk },
+				});
+			};
+			const { stdout, stderr, code, timedOut, aborted } = await runShell(
+				shellCmd,
+				shellArgs,
+				cwd,
+				timeoutMs,
+				signal,
+				progress("stdout"),
+				progress("stderr"),
+			);
 
 			if (aborted) {
 				return errorResult("Command was aborted by the user.");
@@ -234,6 +246,21 @@ export const readTool: AgentTool<typeof readParams> = {
 		try {
 			const stat = await fs.stat(safe);
 			if (!stat.isFile()) return errorResult(`Not a regular file: ${safe}`);
+			const extension = path.extname(safe).toLowerCase();
+			const imageMimeTypes: Record<string, string> = {
+				".png": "image/png",
+				".jpg": "image/jpeg",
+				".jpeg": "image/jpeg",
+				".webp": "image/webp",
+			};
+			const mimeType = imageMimeTypes[extension];
+			if (mimeType) {
+				const data = await fs.readFile(safe);
+				return {
+					content: [{ type: "image", data: data.toString("base64"), mimeType }],
+					details: { path: safe, bytes: data.length, mimeType },
+				};
+			}
 			if (stat.size > MAX_READ_BYTES) {
 				const fh = await fs.open(safe, "r");
 				try {
@@ -284,11 +311,17 @@ export const writeTool: AgentTool<typeof writeParams> = {
 			return errorResult(`Path is outside the workspace root: ${params.path}`);
 		}
 		try {
+			let oldText = "";
+			try {
+				oldText = await fs.readFile(safe, "utf8");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
 			await fs.mkdir(path.dirname(safe), { recursive: true });
 			await fs.writeFile(safe, params.content, "utf8");
 			return {
 				content: [{ type: "text" as const, text: `Wrote ${params.content.length} bytes to ${safe}` }],
-				details: { path: safe, bytes: params.content.length },
+				details: { path: safe, oldText, newText: params.content, bytes: params.content.length },
 			};
 		} catch (e) {
 			return errorResult(e instanceof Error ? e.message : String(e));
@@ -331,11 +364,93 @@ export const editTool: AgentTool<typeof editParams> = {
 			await fs.writeFile(safe, next, "utf8");
 			return {
 				content: [{ type: "text" as const, text: `Edited ${safe} (1 occurrence replaced)` }],
-				details: { path: safe, oldLen: oldText.length, newLen: newText.length },
+				details: { path: safe, oldText, newText, oldLen: oldText.length, newLen: newText.length },
 			};
 		} catch (e) {
 			return errorResult(e instanceof Error ? e.message : String(e));
 		}
+	},
+};
+
+const multiEditParams = Type.Object({
+	edits: Type.Array(
+		Type.Object({
+			path: Type.String({ description: "File path to edit" }),
+			oldText: Type.String({ description: "Exact text to find" }),
+			newText: Type.String({ description: "Replacement text" }),
+		}),
+		{ minItems: 1 },
+	),
+	root: Type.Optional(Type.String({ description: "Workspace root to constrain writes to" })),
+});
+
+export const multiEditTool: AgentTool<typeof multiEditParams> = {
+	name: "multi_edit",
+	description: "Apply multiple unique text replacements atomically. All edits are validated before any file is changed.",
+	parameters: multiEditParams,
+	executionMode: "sequential",
+	execute: async (_id, params) => {
+		const root = params.root ?? process.cwd();
+		const originals = new Map<string, string>();
+		const nextContents = new Map<string, string>();
+		const details: { path: string; oldText: string; newText: string }[] = [];
+		try {
+			for (const edit of params.edits) {
+				const safe = resolveSafePath(root, edit.path);
+				if (!isPathInside(root, safe)) {
+					return errorResult(`Path is outside the workspace root: ${edit.path}`);
+				}
+				if (!originals.has(safe)) {
+					const original = await fs.readFile(safe, "utf8");
+					originals.set(safe, original);
+					nextContents.set(safe, original);
+				}
+				const current = nextContents.get(safe)!;
+				const occurrences = current.split(edit.oldText).length - 1;
+				if (occurrences === 0) return errorResult(`oldText not found in ${safe}`);
+				if (occurrences > 1) {
+					return errorResult(`oldText matches ${occurrences} times in ${safe}; please provide a more specific snippet`);
+				}
+				nextContents.set(safe, current.replace(edit.oldText, edit.newText));
+				details.push({ path: safe, oldText: edit.oldText, newText: edit.newText });
+			}
+		} catch (error) {
+			return errorResult(error instanceof Error ? error.message : String(error));
+		}
+
+		const staged = new Map<string, string>();
+		const committed: string[] = [];
+		try {
+			for (const [safe, content] of nextContents) {
+				const temporary = path.join(path.dirname(safe), `.${path.basename(safe)}.${process.pid}.${Date.now()}.tmp`);
+				await fs.writeFile(temporary, content, { encoding: "utf8", flag: "wx" });
+				staged.set(safe, temporary);
+			}
+			for (const [safe, temporary] of staged) {
+				await fs.rename(temporary, safe);
+				committed.push(safe);
+			}
+		} catch (error) {
+			const rollbackErrors: string[] = [];
+			for (const safe of committed) {
+				try {
+					const rollback = path.join(path.dirname(safe), `.${path.basename(safe)}.${process.pid}.${Date.now()}.rollback`);
+					await fs.writeFile(rollback, originals.get(safe)!, { encoding: "utf8", flag: "wx" });
+					await fs.rename(rollback, safe);
+				} catch (rollbackError) {
+					rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
+				}
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return errorResult(rollbackErrors.length > 0 ? `${message}; rollback failed: ${rollbackErrors.join("; ")}` : message);
+		} finally {
+			await Promise.all([...staged.values()].map((temporary) => fs.rm(temporary, { force: true }).catch(() => undefined)));
+		}
+
+		return {
+			content: [{ type: "text", text: `Applied ${params.edits.length} edits across ${nextContents.size} files` }],
+			details: { edits: details },
+		};
 	},
 };
 
@@ -513,4 +628,4 @@ export const grepTool: AgentTool<typeof grepParams> = {
 };
 
 /** Convenience: every built-in tool, in the order they should be registered. */
-export const builtinTools: AgentTool[] = [bashTool, readTool, writeTool, editTool, globTool, grepTool];
+export const builtinTools: AgentTool[] = [bashTool, readTool, writeTool, editTool, multiEditTool, globTool, grepTool];

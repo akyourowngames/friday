@@ -21,9 +21,12 @@ function makeTool(): Tool {
 		name: "echo",
 		description: "Echo back the input",
 		parameters: { type: "object" as const, properties: { msg: { type: "string" as const, description: "message" } }, required: ["msg"] } as any,
-		execute: async (_id, params) => ({
-			content: [{ type: "text", text: `Echo: ${params.msg}` }],
-		}),
+		execute: async (_id, params, _signal, onProgress) => {
+			await onProgress?.({ content: [{ type: "text", text: `Running: ${params.msg}` }] });
+			return {
+				content: [{ type: "text", text: `Echo: ${params.msg}` }],
+			};
+		},
 	};
 }
 
@@ -122,7 +125,7 @@ describe("agentLoop", () => {
 
 		const streamFn = vi.fn().mockReturnValueOnce(stream).mockReturnValueOnce(followUpStream);
 		const config = makeConfig(streamFn);
-		const context = makeContext();
+		const context = makeContext([makeTool()]);
 
 		const events: AgentEvent[] = [];
 		const emit = async (e: AgentEvent) => events.push(e);
@@ -137,6 +140,13 @@ describe("agentLoop", () => {
 		);
 
 		expect(events.some((e) => e.type === "tool_execution_start")).toBe(true);
+		const progress = events.find((e) => e.type === "tool_execution_progress");
+		expect(progress).toMatchObject({
+			type: "tool_execution_progress",
+			toolCallId: "call_1",
+			toolName: "echo",
+			progress: { content: [{ type: "text", text: "Running: hello" }] },
+		});
 		expect(events.some((e) => e.type === "tool_execution_end")).toBe(true);
 	});
 

@@ -100,6 +100,8 @@ export interface AgentOptions {
 	toolExecution?: "sequential" | "parallel";
 	sessionId?: string;
 	transport?: string;
+	temperature?: number;
+	maxTokens?: number;
 }
 
 export interface ShouldStopAfterTurnContext {
@@ -141,6 +143,8 @@ export class Agent {
 	public afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	private activeRun?: ActiveRun;
 	public sessionId?: string;
+	public temperature?: number;
+	public maxTokens?: number;
 	public toolExecution: "sequential" | "parallel";
 	private _steeringMode: "all" | "one-at-a-time" = "one-at-a-time";
 	private _followUpMode: "all" | "one-at-a-time" = "one-at-a-time";
@@ -157,6 +161,8 @@ export class Agent {
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
 		this.sessionId = runtimeOptions.sessionId;
+		this.temperature = runtimeOptions.temperature;
+		this.maxTokens = runtimeOptions.maxTokens;
 		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
 		this.steeringQueue = new PendingMessageQueue(this._steeringMode);
 		this.followUpQueue = new PendingMessageQueue(this._followUpMode);
@@ -175,6 +181,18 @@ export class Agent {
 	useModel(model: Model, streamFn: StreamFn): void {
 		this._state.model = model;
 		this.streamFunction = streamFn;
+	}
+
+	setSystemPrompt(systemPrompt: string): void {
+		if (this.activeRun) {
+			throw new Error("Cannot change the system prompt while the agent is processing.");
+		}
+		this._state.systemPrompt = systemPrompt;
+	}
+
+	useSession(sessionId: string, messages: AgentMessage[]): void {
+		this.replaceMessages(messages);
+		this.sessionId = sessionId;
 	}
 
 	get state(): AgentState {
@@ -351,6 +369,8 @@ export class Agent {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
 			sessionId: this.sessionId,
+			temperature: this.temperature,
+			maxTokens: this.maxTokens,
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall
 				? async (context, signal) => await this.beforeToolCall!(context, signal)

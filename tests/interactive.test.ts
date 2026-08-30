@@ -74,6 +74,12 @@ describe("ensureApiKey", () => {
     expect(await ensureApiKey(faux, config)).toBe("");
   });
 
+  it("uses an explicit API key override without reading config", async () => {
+    process.env.OPENAI_API_KEY = "env-key";
+    const config = { providers: { openai: { apiKey: "config-key" } } } as unknown as import("../src/config.ts").FridConfig;
+    expect(await ensureApiKey(openai, config, { apiKeyOverride: "argument-key" })).toBe("argument-key");
+  });
+
   it("prefers the environment variable over config", async () => {
     process.env.OPENAI_API_KEY = "env-key";
     const config = {

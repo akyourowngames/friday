@@ -1,27 +1,120 @@
-r Age of Ultron.                                                                                                    │
-│                                                                                                                                                                  │
-│ So the name's probably a nod to that — a smart, loyal AI sidekick for a tech genius. That actually fits the vibe way better than Robinson Crusoe. 😂 Good catch, │
-│ bro!                                                                                                                                                             │
-│                                                                                                                                                                  │
-│ So which camp do you fall in — Marvel fan or just here to keep me honest? 😎                                                                                     │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Pick one: e344d8d1-cce7-4164-a540-f690b74acc9a, 9cc052e6-ec82-48d3-9ed1-ebeb136e51b1, 7f52fc3e-e199-4d96-9d5d-d27ad924bcbc, 08ab8490-0f13-4a31-9d1a-be90adb168fd,
-62e72b28-ce7a-4355-840d-3a4aea29e77d, 33ef1671-dcea-4803-b3e8-7a53bb2144df, 4ae13c6f-5525-4d23-af8d-383e1691a805, 30143352-96ca-498d-adde-c4d6a16ab5e0,
-dc89f9f5-b39e-4f77-bf8f-df94b7562d24, 08c2425b-5ae3-4fea-bd5a-81f3d1486635, b635619b-1b16-46f8-a4a3-764a3abab6bc, 93c0b814-3f6d-4f76-bb1a-b0ad5fb6b27d,
-9d4a4c80-eb4b-41d6-b75b-b2d7d613aca7, 7da3a9df-9462-4574-8299-89a1bd61c139, 004f74f6-d41a-417d-b631-ea1a1d0dbb68, 7d05a084-9ba1-4bf0-9972-b56fd2b975f3,
-412efc8c-65ae-4228-a2fa-27686dbf49f1, 3089a145-ee62-411e-a8a5-5becdaa4a5f0, 30debb1b-157d-45be-8e27-a8db3a2148ee, 8f7ac6ed-5abc-400d-a8cd-fc242369da87,
-ecdc8332-ddfb-4e1a-bfbf-20e086f1adaa, 9764aa36-b36a-48a3-b805-33af20e16d33
-tencent/hy3:free • 1,421↑ 212↓ • 1%                                                                                                                               /help
-you›
-df94b7562d24, 08c2425b-5ae3-4fea-bd5a-81f3d1486635, b635619b-1b16-46f8-a4a3-764a3abab6bc, 93c0b814-3f6d-4f76-bb1a-b0ad5fb6b27d,
-9d4a4c80-eb4b-41d6-b75b-b2d7d613aca7, 7da3a9df-9462-4574-8299-89a1bd61c139, 004f74f6-d41a-417d-b631-ea1a1d0dbb68, 7d05a084-9ba1-4bf0-9972-b56fd2b975f3,
-412efc8c-65ae-4228-a2fa-27686dbf49f1, 3089a145-ee62-411e-a8a5-5becdaa4a5f0, 30debb1b-157d-45be-8e27-a8db3a2148ee, 8f7ac6ed-5abc-400d-a8cd-fc242369da87,
-ecdc8332-ddfb-4e1a-bfbf-20e086f1adaa, 9764aa36-b36a-48a3-b805-33af20e16d33
-tencent/hy3:free • 1,421↑ 212↓ • 1%                                                                                                                               /help
-you› /
-/help  Show this list of commands.
-/exit  Quit friday-ng.
-/quit  Alias for /exit.
-/clear Clear the current chat history.
-/model Pick a different model.
-/cost  Show token usage so far for this session.
+Good project — and no worries, "kill it" heard loud and clear 😄. Here's a concrete plan for both asks, with actual code you can drop into your existing files.
+
+## 1. Fixing the TUI/CLI rendering
+
+Your `markdown.ts` + `tui.ts` already have solid bones (grapheme-aware wrapping, diff-based frame rendering, boxed messages) — what's missing is the stuff that makes Claude Code/Codex *feel* polished:
+
+**a) Syntax-highlighted code blocks** (right now code blocks just get a flat background + one color per language). Add a lightweight tokenizer to `markdown.ts`:
+
+```ts
+const KEYWORDS: Record<string, RegExp> = {
+	ts: /\b(const|let|var|function|return|if|else|for|while|import|export|async|await|class|interface|type|extends|implements|new|this|typeof|as|from)\b/g,
+	js: /\b(const|let|var|function|return|if|else|for|while|import|export|async|await|class|new|this|typeof)\b/g,
+	py: /\b(def|return|if|elif|else|for|while|import|from|class|as|with|try|except|async|await|lambda)\b/g,
+	bash: /\b(if|then|fi|for|do|done|echo|export|function)\b/g,
+};
+
+function highlightLine(line: string, lang: string): string {
+	const kw = KEYWORDS[lang];
+	let out = line;
+	// strings first so keywords inside them aren't touched
+	out = out.replace(/(["'`])(?:(?!\1).)*\1/g, (m) => `${FG_GREEN}${m}${RESET}${BG_DIM}`);
+	out = out.replace(/\/\/.*$|#.*$/g, (m) => `${DIM}${m}${RESET}${BG_DIM}`);
+	if (kw) out = out.replace(kw, (m) => `${FG_YELLOW}${m}${RESET}${BG_DIM}`);
+	return out;
+}
+```
+
+Then in `renderMarkdownColored`, when emitting `blockLines`, call `highlightLine(bl, lang)` instead of the flat color. It's not a full grammar, but regex-level highlighting gets you 80% of the visual win for near-zero cost/deps.
+
+**b) Diff rendering for `edit`/`write` tool results** — this is the single biggest "looks like a real coding agent" upgrade. Right now `summarizeToolResult` just prints "edited". Have `editTool`/`writeTool` return a unified-diff-ish preview in `details`, and render it in `tui.ts`:
+
+```ts
+function renderDiffLines(oldText: string, newText: string, width: number): string[] {
+	const oldLines = oldText.split("\n");
+	const newLines = newText.split("\n");
+	const out: string[] = [];
+	// crude line diff is fine for chat display — full Myers diff is overkill
+	for (const l of oldLines) if (!newLines.includes(l)) out.push(truncateToWidth(`${RED}- ${l}${RESET}`, width));
+	for (const l of newLines) if (!oldLines.includes(l)) out.push(truncateToWidth(`${GREEN}+ ${l}${RESET}`, width));
+	return out;
+}
+```
+
+Wire this into `tool_execution_end` handling for `edit`/`write` in `tui.ts`, appended under the `✓ edit path.ts` line, capped at ~10 lines.
+
+**c) Hyperlinks (OSC 8)** — URLs in assistant text (docs links, file paths) should be clickable:
+
+```ts
+function osc8Link(url: string, label = url): string {
+	return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
+}
+```
+Apply to `\bhttps?:\/\/\S+\b` matches in `renderAssistantText`.
+
+**d) Tables** — `markdown.ts` has no `| a | b |` support at all; add a case in `renderMarkdown` that detects a `---|---` separator line and box-draws a table. Low priority unless the model outputs tables often.
+
+Priority order I'd actually do this in: **(b) diffs → (a) highlighting → (c) links → (d) tables**. Diffs are what makes edits legible; the rest is polish.
+
+## 2. `/init` — personal profile
+
+Model it on Claude Code's `/init`, but pointed at *you* instead of the repo. Two pieces: a profile file + a slash command that bootstraps it conversationally (reusing your existing `write`/`read` tools instead of building new plumbing).
+
+**`src/profile.ts`** (new file):
+```ts
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+export function profileDir(): string {
+	return process.env.FRIDAY_NG_CONFIG_DIR ?? path.join(os.homedir(), ".friday-ng");
+}
+export function profilePath(): string {
+	return path.join(profileDir(), "PROFILE.md");
+}
+export async function loadProfile(): Promise<string | undefined> {
+	try {
+		return await fs.readFile(profilePath(), "utf8");
+	} catch {
+		return undefined;
+	}
+}
+```
+
+**Slash command** (`commands/builtin.ts`):
+```ts
+export function makeInitCommand(deps: { hasProfile: () => Promise<boolean>; dir: string }): SlashCommand {
+	return {
+		name: "/init",
+		description: "Set up or update your personal profile (name, preferences, current projects).",
+		run: async (): Promise<SlashCommandResult> => {
+			const exists = await deps.hasProfile();
+			const prompt = exists
+				? `Read PROFILE.md (root: "${deps.dir}") with the read tool, summarize it for me, ask what's changed, then rewrite it with the write tool (same root) once I confirm.`
+				: `Interview me one question at a time — name, role, how I like explanations (terse vs detailed), tone, current projects, anything else worth remembering. When done, write a concise Markdown PROFILE.md via the write tool with root "${deps.dir}" and path "PROFILE.md".`;
+			return { submitFollowUp: prompt };
+		},
+	};
+}
+```
+
+Important gotcha: `writeTool` restricts writes to inside `root` (defaults to `process.cwd()`). Pass `root: profileDir()` explicitly in the prompt (as above) or the safety check in `path-safety.ts` will reject the absolute home-dir path.
+
+**Wire it into `cli.ts`**: register the command next to the others, and make `buildSystemPrompt` async so it injects the profile every session:
+
+```ts
+async function buildSystemPrompt(modelId: string): Promise<string> {
+	const profile = await loadProfile();
+	return (
+		`You are friday-ng, a next-generation AI assistant with instant token streaming. ` +
+		`Current model: ${modelId}. Be helpful, concise, and friendly.` +
+		(profile ? `\n\n## About the user\n${profile}\n` : "") +
+		buildEnvironmentContext()
+	);
+}
+```
+(you'll need to `await` the two call sites in `main()`/`runRepl()`.)
+
+One more nicety: also support a **project-level** file (`./AGENTS.md` in cwd, like CLAUDE.md) loaded alongside the global `PROFILE.md` — global = who you are, project file = what this codebase is. Same loader pattern, just `path.join(process.cwd(), "AGENTS.md")`.
+
+That gets you: `/init` once → friday-ng remembers you across every session and project, plus per-project context when you want it. Want me to also sketch the `/profile` (quick view/edit) and auto-detection of "no profile yet → suggest `/init`" on first run?

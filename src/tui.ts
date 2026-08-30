@@ -17,7 +17,7 @@
  * difference is the surface (a living TUI instead of a single scroll).
  */
 import type { AgentEvent, AgentMessage, AssistantMessage } from "./types.ts";
-import { renderMarkdown, renderMarkdownColored } from "./markdown.ts";
+import { markdownSliceByWidth, markdownTruncateToWidth, markdownVisibleWidth, renderMarkdown, renderMarkdownColored } from "./markdown.ts";
 import { findCommands } from "./slash-commands.ts";
 
 /** True if the terminal likely supports ANSI colors. */
@@ -61,9 +61,9 @@ function renderAssistantText(input: string): string {
 		} else if (inCode) {
 			out.push("```");
 			inCode = false;
-			out.push(line.spans.map((s) => s.text).join(""));
+			out.push(line.spans.map((s) => s.kind === "table" ? s.source.join("\n") : s.text).join(""));
 		} else {
-			out.push(line.spans.map((s) => s.text).join(""));
+			out.push(line.spans.map((s) => s.kind === "table" ? s.source.join("\n") : s.text).join(""));
 		}
 	}
 	if (inCode) out.push("```");
@@ -96,9 +96,23 @@ const CURSOR_BLOCK = `${MAGENTA}▍${RESET}`;
 
 export type TuiRole = "user" | "assistant" | "tool" | "system";
 
+export type ToolHistoryStatus = "running" | "done" | "error";
+
 export interface TuiHistoryEntry {
 	role: TuiRole;
 	text: string;
+	toolCallId?: string;
+	name?: string;
+	args?: unknown;
+	status?: ToolHistoryStatus;
+	body?: string;
+	result?: unknown;
+	expanded?: boolean;
+}
+
+export interface TuiTodoItem {
+	text: string;
+	status: string;
 }
 
 /** Wrap `text` to `width` columns, prefixing the first line with `prefix` and
@@ -162,49 +176,15 @@ export function wrapText(text: string, width: number, prefix: string, reset: str
  *  exceed `max`. Returns the prefix that fits (`head`) and the suffix (`tail`).
  *  Never slices a multi-column grapheme in half. */
 function sliceByWidth(s: string, max: number): { head: string; tail: string } {
-	const segmenter = (globalThis as any).Intl?.Segmenter as
-		| (new (l?: string, o?: { granularity: "grapheme" }) => {
-				segment: (s: string) => Iterable<{ segment: string; index: number }>;
-		  })
+	const sliced = markdownSliceByWidth(s, max);
+	if (sliced.head || !s) return sliced;
+	const Segmenter = (globalThis as any).Intl?.Segmenter as
+		| (new (locale?: string, options?: { granularity: "grapheme" }) => { segment(value: string): Iterable<{ segment: string }> })
 		| undefined;
-	if (segmenter) {
-		const iter = new segmenter("en", { granularity: "grapheme" }).segment(s);
-		let width = 0;
-		let cut = s.length;
-		let progressed = false;
-		for (const { segment, index } of iter) {
-			const w = graphemeWidth(segment);
-			if (width + w > max) {
-				// If not even a single grapheme fits, emit it anyway so the
-				// caller always makes forward progress. Without this guard a
-				// 2-column emoji at max=1 (or a 6-column ZWJ family at max=1)
-				// yields head="" forever → infinite loop → frozen TUI + OOM.
-				cut = progressed ? index : index + segment.length;
-				break;
-			}
-			width += w;
-			progressed = true;
-		}
-		return { head: s.slice(0, cut), tail: s.slice(cut) };
-	}
-	// Fallback: char-by-char.
-	let width = 0;
-	let cut = s.length;
-	let progressed = false;
-	for (let i = 0; i < s.length; ) {
-		const cp = s.codePointAt(i)!;
-		const size = cp > 0xffff ? 2 : 1;
-		const w = cp > 0xffff ? 2 : 1;
-		if (width + w > max) {
-			// Same progress guarantee as the segmenter path above.
-			cut = progressed ? i : i + size;
-			break;
-		}
-		width += w;
-		i += size;
-		progressed = true;
-	}
-	return { head: s.slice(0, cut), tail: s.slice(cut) };
+	const first = Segmenter
+		? [...new Segmenter("en", { granularity: "grapheme" }).segment(s)][0]?.segment ?? ""
+		: Array.from(s)[0] ?? "";
+	return { head: first, tail: s.slice(first.length) };
 }
 
 /**
@@ -263,43 +243,7 @@ export function visibleSelector(
  * wrap width.
  */
 export function visibleWidth(s: string): number {
-	let width = 0;
-	let inEscape = false;
-
-	// Quick scan: strip ANSI escapes first so the segmenter doesn't see
-	// them. Keep the string in order so emoji ZWJ sequences still group
-	// correctly.
-	const stripped: string[] = [];
-	for (let i = 0; i < s.length; i++) {
-		const code = s.charCodeAt(i);
-		if (inEscape) {
-			if (code === 0x6d /* 'm' */) inEscape = false;
-			continue;
-		}
-		if (code === 0x1b /* ESC */) {
-			inEscape = true;
-			continue;
-		}
-		stripped.push(s[i]!);
-	}
-	const text = stripped.join("");
-
-	const segmenter = (globalThis as any).Intl?.Segmenter as
-		| (new (l?: string, o?: { granularity: "grapheme" }) => {
-				segment: (s: string) => Iterable<{ segment: string }>;
-		  })
-		| undefined;
-	if (segmenter) {
-		const iter = new segmenter("en", { granularity: "grapheme" }).segment(text);
-		for (const { segment } of iter) {
-			width += graphemeWidth(segment);
-		}
-		return width;
-	}
-
-	// Fallback: per-code-unit count (1 each) — wrong for emoji, but stable.
-	for (let i = 0; i < text.length; i++) width += 1;
-	return width;
+	return markdownVisibleWidth(s);
 }
 
 /** Width of a single grapheme cluster. 0 for ZWJ/VS sequences, 2 for
@@ -353,6 +297,68 @@ function codepointWidth(cp: number): number {
 	}
 	return 1;
 }
+function resultText(result: unknown): string {
+	const r = (result ?? {}) as { content?: { type?: string; text?: string }[] };
+	return (r.content ?? []).filter((c) => c?.type === "text").map((c) => c.text ?? "").join("\n").trim();
+}
+
+function diffDetailLines(name: string, result: unknown): string[] {
+	const details = ((result ?? {}) as { details?: any }).details;
+	if (!details || !["edit", "write", "multiEdit", "multiedit"].includes(name)) return [];
+	const edits = name.toLowerCase() === "multiedit"
+		? (Array.isArray(details) ? details : details.edits ?? details.changes ?? [])
+		: [details];
+	const out: string[] = [];
+	for (const edit of edits) {
+		if (!edit || typeof edit !== "object") continue;
+		if (typeof edit.path === "string") out.push(`${DIM}${edit.path}${RESET}`);
+		if (typeof edit.oldText === "string") {
+			for (const line of edit.oldText.split("\n")) out.push(`${RED}- ${line}${RESET}`);
+		}
+		if (typeof edit.newText === "string") {
+			for (const line of edit.newText.split("\n")) out.push(`${GREEN}+ ${line}${RESET}`);
+		}
+	}
+	return out;
+}
+
+export function renderToolEntry(entry: TuiHistoryEntry, width: number): string[] {
+	if (!entry.name || !entry.status) return wrapText(entry.text, width, TOOL_PREFIX);
+	const color = entry.status === "error" ? RED : entry.status === "done" ? GREEN : YELLOW;
+	const icon = entry.status === "error" ? "✗" : entry.status === "done" ? "✓" : "●";
+	const title = `${icon} ${formatToolCall(entry.name, entry.args)}`;
+	const summary = entry.status === "running" ? "running" : summarizeToolResult(entry.name, entry.result, entry.status === "error");
+	let bodyLines = entry.body?.split("\n") ?? [];
+	if (bodyLines.length === 0 && entry.expanded) bodyLines = resultText(entry.result).split("\n").filter(Boolean);
+	const diffs = diffDetailLines(entry.name, entry.result);
+	if (diffs.length > 0) bodyLines = diffs;
+	const fullCount = bodyLines.length;
+	if (!entry.expanded && bodyLines.length > 12) bodyLines = bodyLines.slice(0, 12);
+	const body = [`${DIM}${summary}${RESET}`, ...bodyLines];
+	if (!entry.expanded && fullCount > 12) body.push(`${DIM}… ${fullCount - 12} more lines (Ctrl+O)${RESET}`);
+	const innerWidth = Math.max(1, width - 4);
+	const wrapped = body.flatMap((line) => wrapText(line, innerWidth, ""));
+	const contentW = Math.max(visibleWidth(title), ...wrapped.map(visibleWidth), 1);
+	const inner = Math.max(1, Math.min(innerWidth, contentW));
+	const topTitle = truncateToWidth(title, inner);
+	const topPad = Math.max(0, inner - visibleWidth(topTitle));
+	const lines = [`${color}╭${RESET} ${topTitle}${" ".repeat(topPad)} ${color}╮${RESET}`];
+	for (const line of wrapped) {
+		const clipped = truncateToWidth(line, inner);
+		lines.push(`${color}│${RESET} ${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))} ${color}│${RESET}`);
+	}
+	lines.push(`${color}╰${"─".repeat(inner + 2)}╯${RESET}`);
+	return lines;
+}
+
+export function renderTodos(todos: readonly TuiTodoItem[], width: number, maxLines: number): string[] {
+	if (maxLines <= 0 || todos.length === 0) return [];
+	const marker = (status: string) => status === "completed" ? `${GREEN}✓${RESET}` : status === "in_progress" ? `${YELLOW}●${RESET}` : `${DIM}○${RESET}`;
+	const lines = todos.slice(0, maxLines).map((todo) => truncateToWidth(`${marker(todo.status)} ${todo.text}`, width));
+	if (todos.length > maxLines) lines[maxLines - 1] = truncateToWidth(`${DIM}… ${todos.length - maxLines + 1} more todos${RESET}`, width);
+	return lines;
+}
+
 /** Render one history entry to lines. User/assistant messages are enclosed in
  *  labeled rounded boxes (Claude Code / Codex style) so every response is a
  *  self-contained block that can never bleed into the status bar; tool and
@@ -365,7 +371,7 @@ export function renderHistoryEntry(entry: TuiHistoryEntry, width: number): strin
 		case "assistant":
 			return renderBox(entry.text, width, "friday", MAGENTA);
 		case "tool":
-			return wrapText(entry.text, width, TOOL_PREFIX);
+			return renderToolEntry(entry, width);
 		case "system":
 			return wrapText(entry.text, width, DIM);
 		default:
@@ -424,37 +430,7 @@ export function computeContentLines(
  *  This is the last line of defense against lines wrapping over the frame —
  *  the bug that made the status bar collide with the input prompt. */
 export function truncateToWidth(s: string, max: number): string {
-	if (visibleWidth(s) <= max) return s;
-	let width = 0;
-	let inEscape = false;
-	let sawSgr = false;
-	let end = s.length;
-	for (let i = 0; i < s.length; i++) {
-		const code = s.charCodeAt(i);
-		if (inEscape) {
-			if (code === 0x6d /* 'm' */) {
-				inEscape = false;
-				sawSgr = true;
-			}
-			continue;
-		}
-		if (code === 0x1b /* ESC */) {
-			inEscape = true;
-			continue;
-		}
-		const cp = s.codePointAt(i)!;
-		const size = cp > 0xffff ? 2 : 1;
-		const w = codepointWidth(cp);
-		if (width + w > max) {
-			end = i;
-			break;
-		}
-		width += w;
-		if (size === 2) i++; // skip low surrogate
-	}
-	let out = s.slice(0, end);
-	if (sawSgr && !out.endsWith(RESET)) out += RESET;
-	return out;
+	return markdownTruncateToWidth(s, max);
 }
 
 /** Return the indices of `next` whose line differs from `prev`, plus the
@@ -537,7 +513,10 @@ export interface TuiOptions {
 	 *  current behavior). */
 	onSlashCommand?: (
 		input: string,
-	) => Promise<{ handled: boolean; message?: string; clearHistory?: boolean; quit?: boolean }> | { handled: boolean; message?: string; clearHistory?: boolean; quit?: boolean };
+	) => Promise<{ handled: boolean; message?: string; clearHistory?: boolean; quit?: boolean; submitFollowUp?: string }> | { handled: boolean; message?: string; clearHistory?: boolean; quit?: boolean; submitFollowUp?: string };
+	streamDebounceMs?: number;
+	getSetting?: (key: string) => unknown;
+	setSetting?: (key: string, value: unknown) => void;
 }
 
 export class Tui {
@@ -556,8 +535,14 @@ export class Tui {
 	private onSlashCommand?: TuiOptions["onSlashCommand"];
 	private showThinking: boolean;
 	private contextWindow: number;
+	private streamDebounceMs: number;
+	private getSettingHook?: (key: string) => unknown;
+	private setSettingHook?: (key: string, value: unknown) => void;
 
 	private history: TuiHistoryEntry[] = [];
+	private todos: TuiTodoItem[] = [];
+	private confirmationQueue: { prompt: string; resolve: (value: boolean) => void }[] = [];
+	private activeConfirmation?: { prompt: string; resolve: (value: boolean) => void };
 	private streamingText = "";
 	private inputBuffer = "";
 	private status = "";
@@ -642,6 +627,9 @@ export class Tui {
 		this.onSlashCommand = options.onSlashCommand;
 		this.showThinking = options.showThinking ?? false;
 		this.contextWindow = options.contextWindow ?? 0;
+		this.streamDebounceMs = Math.max(0, options.streamDebounceMs ?? 32);
+		this.getSettingHook = options.getSetting;
+		this.setSettingHook = options.setSetting;
 	}
 
 	/** Enter the TUI. Resolves when the user quits. `initialPrompt`, if given,
@@ -655,9 +643,8 @@ export class Tui {
 		// right border, and on narrow terminals the border got hard-split into
 		// garbage like the captured session in todo.txt).
 		const [cols] = this.getSize();
-		for (const line of buildWelcomeBox(cols, this.provider, this.model)) {
-			this.appendHistory({ role: "system", text: line });
-		}
+		const welcome = buildWelcomeBox(cols, this.provider, this.model).map((text) => ({ role: "system" as const, text }));
+		this.history = [...welcome, ...this.history];
 		this.render();
 
 		try {
@@ -754,31 +741,41 @@ export class Tui {
 			case "tool_execution_start":
 				this.appendHistory({
 					role: "tool",
-					text: `${DIM}●${RESET} ${formatToolCall(event.toolName, event.args)}`,
+					text: formatToolCall(event.toolName, event.args),
+					toolCallId: event.toolCallId,
+					name: event.toolName,
+					args: event.args,
+					status: "running",
+					body: "",
 				});
 				break;
 
-			case "tool_execution_end": {
-				// Replace the in-flight "● tool …" line with a completed
-				// "✓ tool … · summary" entry. The summary is derived from the
-				// result's metadata (line counts, match counts, exit codes) so
-				// the chat never gets flooded with raw file contents.
-				let lastToolIdx = -1;
-				for (let i = this.history.length - 1; i >= 0; i--) {
-					if (this.history[i]!.role === "tool") { lastToolIdx = i; break; }
+			case "tool_execution_progress": {
+				const entry = this.findToolEntry(event.toolCallId);
+				if (entry) {
+					const chunk = event.progress.content
+						.filter((content) => content.type === "text")
+						.map((content) => content.text)
+						.join("");
+					entry.body = `${entry.body ?? ""}${chunk}`;
+					this.entryCache.delete(entry);
 				}
-				const icon = event.isError ? `${RED}✗${RESET}` : `${GREEN}✓${RESET}`;
-				const call = lastToolIdx >= 0
-					? this.history[lastToolIdx]!.text.replace(/^[^\w]*●\s*/, "").replace(/\x1b\[[0-9;]*m/g, "")
-					: formatToolCall(event.toolName, {});
-				const summary = summarizeToolResult(event.toolName, event.result, event.isError)
-					.split("\n")
-					.join("\n  ");
-				const text = `${icon} ${call}${summary ? ` ${DIM}·${RESET} ${summary}` : ""}`;
-				if (lastToolIdx >= 0) {
-					this.history[lastToolIdx] = { role: "tool", text };
+				this.pendingCoalesce = true;
+				break;
+			}
+
+			case "tool_execution_end": {
+				const entry = this.findToolEntry(event.toolCallId);
+				if (entry) {
+					entry.status = event.isError ? "error" : "done";
+					entry.result = event.result;
+					entry.name = event.toolName;
+					const summary = summarizeToolResult(event.toolName, event.result, event.isError).split("\n").join("\n  ");
+					entry.text = `${event.isError ? "✗" : "✓"} ${formatToolCall(event.toolName, entry.args)}${summary ? ` · ${summary}` : ""}`;
+					this.entryCache.delete(entry);
 				} else {
-					this.appendHistory({ role: "tool", text });
+					const summary = summarizeToolResult(event.toolName, event.result, event.isError).split("\n").join("\n  ");
+					this.appendHistory({ role: "tool", text: `${event.isError ? "✗" : "✓"} ${formatToolCall(event.toolName, {})}${summary ? ` · ${summary}` : ""}`, toolCallId: event.toolCallId, name: event.toolName, args: {}, status: event.isError ? "error" : "done", result: event.result });
 				}
 				break;
 			}
@@ -793,7 +790,7 @@ export class Tui {
 
 	/** Coalesce high-frequency repaints (streaming tokens, spinner ticks) into
 	 *  at most one frame per ~32ms so the UI never falls behind the model. */
-	private scheduleRender(delay = 32): void {
+	private scheduleRender(delay = this.streamDebounceMs): void {
 		if (this.renderTimer) return;
 		this.renderTimer = setTimeout(() => {
 			this.renderTimer = null;
@@ -810,9 +807,9 @@ export class Tui {
 	// ---- SlashCommandHost implementation ----
 
 	/** Append a system-line entry to the chat history. */
-	appendSystemLine(text: string): void {
+	appendSystemLine(text: string, render = true): void {
 		this.appendHistory({ role: "system", text });
-		this.render();
+		if (render) this.render();
 	}
 
 	/** Clear the in-memory chat history. */
@@ -824,7 +821,7 @@ export class Tui {
 
 	/** Replace the on-screen conversation with a restored transcript (used by
 	 *  `/resume`). Renders each user/assistant message as a boxed entry. */
-	loadConversation(messages: { role: string; content: unknown }[]): void {
+	loadConversation(messages: { role: string; content: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }[], render = true): void {
 		this.history = [];
 		this.streamingText = "";
 		for (const m of messages) {
@@ -835,25 +832,46 @@ export class Tui {
 				const parts: string[] = [];
 				for (const c of m.content as any[]) {
 					if (c?.type === "text") parts.push(c.text);
+					if (c?.type === "toolCall") this.appendHistory({ role: "tool", text: formatToolCall(c.name, c.arguments), toolCallId: c.id, name: c.name, args: c.arguments, status: "running", body: "" });
 				}
 				const text = parts.join("");
 				if (text) this.appendHistory({ role: "assistant", text });
+			} else if (m.role === "toolResult") {
+				const entry = m.toolCallId ? this.findToolEntry(m.toolCallId) : undefined;
+				const result = { content: m.content, details: m.details };
+				if (entry) {
+					entry.status = m.isError ? "error" : "done";
+					entry.result = result;
+					entry.name = m.toolName ?? entry.name;
+				} else if (m.toolName) {
+					this.appendHistory({ role: "tool", text: m.toolName, toolCallId: m.toolCallId, name: m.toolName, args: {}, status: m.isError ? "error" : "done", result });
+				}
 			}
 		}
 		this.entryCache = new WeakMap();
-		this.render();
+		if (render) this.render();
 	}
 
-	/** Read a setting by key. The TUI doesn't itself own a settings store;
-	 *  hosts that want /settings to actually do something can supply a
-	 *  callback. For now we return undefined for unknown keys. */
-	getSetting(_key: string): unknown {
-		return undefined;
+	getSetting(key: string): unknown {
+		return this.getSettingHook?.(key);
 	}
 
-	/** Write a setting by key. Same caveat as `getSetting`. */
-	setSetting(_key: string, _value: unknown): void {
-		// No-op by default; hosts can subclass or wrap to wire this up.
+	setSetting(key: string, value: unknown): void {
+		this.setSettingHook?.(key, value);
+	}
+
+	setTodos(todos: readonly TuiTodoItem[], render = true): void {
+		this.todos = todos.map((todo) => ({ text: todo.text, status: todo.status }));
+		if (render) this.render();
+	}
+
+	confirm(prompt: string): Promise<boolean> {
+		const tty = (this.input as any).isTTY;
+		if (tty === false) return Promise.resolve(false);
+		return new Promise<boolean>((resolve) => {
+			this.confirmationQueue.push({ prompt, resolve });
+			this.advanceConfirmation();
+		});
 	}
 
 	/** Submit a follow-up user prompt as if the user typed it. */
@@ -906,8 +924,52 @@ export class Tui {
 		this.history.push(entry);
 	}
 
+	private findToolEntry(toolCallId: string): TuiHistoryEntry | undefined {
+		for (let i = this.history.length - 1; i >= 0; i--) {
+			const entry = this.history[i]!;
+			if (entry.role === "tool" && entry.toolCallId === toolCallId) return entry;
+		}
+		return undefined;
+	}
+
+	private advanceConfirmation(): void {
+		if (this.activeConfirmation) return;
+		this.activeConfirmation = this.confirmationQueue.shift();
+		if (this.activeConfirmation) this.render();
+	}
+
+	private answerConfirmation(value: boolean): void {
+		const active = this.activeConfirmation;
+		if (!active) return;
+		this.activeConfirmation = undefined;
+		active.resolve(value);
+		this.advanceConfirmation();
+		this.render();
+	}
+
+	private toggleLatestTool(): void {
+		for (let i = this.history.length - 1; i >= 0; i--) {
+			const entry = this.history[i]!;
+			if (entry.role === "tool" && entry.name) {
+				entry.expanded = !entry.expanded;
+				this.entryCache.delete(entry);
+				this.render();
+				return;
+			}
+		}
+	}
+
 	private handleInput(chunk: Buffer): void {
 		const s = chunk.toString();
+		if (this.activeConfirmation) {
+			if (s === "y" || s === "Y" || s === "\r" || s === "\n") this.answerConfirmation(true);
+			else if (s === "n" || s === "N" || s === "\x1b" || s === "\x03") this.answerConfirmation(false);
+			return;
+		}
+		if (s === "\x0f") {
+			this.toggleLatestTool();
+			return;
+		}
 		if (this.mode === "selector") {
 			this.handleSelectorInput(s);
 			return;
@@ -1447,6 +1509,10 @@ export class Tui {
 				}
 				if (result.quit) {
 					this.quit();
+					return;
+				}
+				if (result.submitFollowUp?.trim()) {
+					await this.submitText(result.submitFollowUp.trim());
 				} else {
 					this.render();
 				}
@@ -1454,19 +1520,20 @@ export class Tui {
 			}
 		}
 
+		await this.submitText(text);
+	}
+
+	private async submitText(text: string): Promise<void> {
+		if (!text || this.busy) return;
 		this.busy = true;
 		this.status = "thinking…";
 		this.busyStartTime = Date.now();
 		this.startElapsedTimer();
 		this.render();
-
 		try {
 			await this.onSubmit(text);
 		} catch (err) {
-			this.appendHistory({
-				role: "system",
-				text: `[error] ${err instanceof Error ? err.message : String(err)}`,
-			});
+			this.appendHistory({ role: "system", text: `[error] ${err instanceof Error ? err.message : String(err)}` });
 		} finally {
 			this.busy = false;
 			this.status = "";
@@ -1513,9 +1580,11 @@ export class Tui {
 		// Reserving one column makes every wrap path impossible.
 		const safeCols = Math.max(20, cols - 1);
 		const sugCount = this.showSuggestions && this.suggestions.length > 0
-			? Math.min(this.suggestions.length, 6) // status + input + suggestions
+			? Math.min(this.suggestions.length, 6)
 			: 0;
-		const reserved = 2 + sugCount; // status line + input line (+ suggestions)
+		const modalCount = this.activeConfirmation ? Math.min(4, rows - 2) : 0;
+		const todoCount = Math.min(this.todos.length, Math.max(0, Math.min(6, rows - 3 - sugCount - modalCount)));
+		const reserved = 2 + sugCount + todoCount + modalCount;
 		const usable = Math.max(1, rows - reserved);
 
 		const content = this.contentLines(safeCols);
@@ -1574,7 +1643,11 @@ export class Tui {
 			inputCursorCol = 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer.slice(0, this.cursorPos));
 		}
 		const suggestionLines = this.renderSuggestions(safeCols).map((l) => truncateToWidth(l, safeCols));
-		const frame = [...visible, statusLine, inputLine, ...suggestionLines].slice(0, rows);
+		const todoLines = renderTodos(this.todos, safeCols, todoCount);
+		const modalLines = this.activeConfirmation
+			? renderBox(`${this.activeConfirmation.prompt}\n${BOLD}y/Enter${RESET} yes  ${BOLD}n/Esc${RESET} no`, safeCols, "confirm", YELLOW).slice(0, modalCount)
+			: [];
+		const frame = [...visible, ...todoLines, ...modalLines, statusLine, inputLine, ...suggestionLines].slice(0, rows);
 
 		this.writeFrame(frame, safeCols, rows, undefined, inputCursorCol);
 	}
@@ -1694,6 +1767,14 @@ export class Tui {
 	/** Update the displayed model (called after a `/model` selection). */
 	setModel(modelId: string): void {
 		this.model = modelId;
+		this.render();
+	}
+
+	applySettings(settings: { showThinking?: boolean; streamDebounceMs?: number }): void {
+		if (settings.showThinking !== undefined) this.showThinking = settings.showThinking;
+		if (settings.streamDebounceMs !== undefined && Number.isFinite(settings.streamDebounceMs)) {
+			this.streamDebounceMs = Math.max(0, settings.streamDebounceMs);
+		}
 		this.render();
 	}
 }

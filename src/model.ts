@@ -12,6 +12,7 @@ interface RegisteredModel {
 	provider: ProviderId;
 	baseUrl: string;
 	reasoning: boolean;
+	input?: ("text" | "image")[];
 	contextWindow: number;
 	maxTokens: number;
 }
@@ -41,7 +42,7 @@ export function getModel<TApi extends Api = Api>(
 		provider: found.provider,
 		baseUrl: found.baseUrl,
 		reasoning: found.reasoning,
-		input: ["text"],
+		input: found.input ?? ["text"],
 		cost: EMPTY_COST,
 		contextWindow: found.contextWindow,
 		maxTokens: found.maxTokens,

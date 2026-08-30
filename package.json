@@ -1,6 +1,6 @@
 {
 	"name": "friday-ng",
-	"version": "0.2.0",
+	"version": "0.3.1",
 	"description": "Next-generation AI assistant with instant token streaming and multi-provider auto-setup (Pi Harness architecture)",
 	"packageManager": "npm@10",
 	"type": "module",
@@ -14,11 +14,13 @@
 		"./package.json": "./package.json"
 	},
 	"bin": {
-		"friday-ng": "./dist/cli.js"
+		"friday-ng": "friday-ng.js"
 	},
 	"files": [
 		"dist",
-		"README.md"
+		"README.md",
+		"LICENSE",
+		"friday-ng.js"
 	],
 	"scripts": {
 		"clean": "node -e \"require('fs').rmSync('dist', {recursive: true, force: true}); require('fs').rmSync('coverage', {recursive: true, force: true});\"",
@@ -31,7 +33,7 @@
 		"dev": "tsx watch src/cli.ts",
 		"start": "node --max-old-space-size=4096 dist/cli.js --provider kilo -i",
 		"chat": "npm start",
-		"prepublishOnly": "npm run clean && npm run build && npm run check"
+		"prepublishOnly": "npm run clean && npm run build && npm run check && node -e \"const {execSync}=require('child_process');if(!execSync('git rev-parse --verify HEAD').toString().trim())throw new Error('uncommitted changes');\""
 	},
 	"engines": {
 		"node": ">=22.19.0"

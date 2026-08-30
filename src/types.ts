@@ -124,6 +124,8 @@ export type AssistantMessageEvent =
 
 // --- Tool definition ---
 
+export type ToolProgressCallback = (progress: ToolResult) => Promise<void> | void;
+
 export interface Tool<TParameters extends TSchema = TSchema, TResult = any> extends ToolBase<TParameters> {
 	prepareArguments?: (args: unknown) => Static<TParameters>;
 	executionMode?: "sequential" | "parallel";
@@ -134,6 +136,7 @@ export interface Tool<TParameters extends TSchema = TSchema, TResult = any> exte
 		toolCallId: string,
 		params: Static<TParameters>,
 		signal?: AbortSignal,
+		onProgress?: ToolProgressCallback,
 	) => Promise<ToolResult>;
 }
 
@@ -207,6 +210,8 @@ export interface AgentLoopConfig {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	apiKey?: string;
+	temperature?: number;
+	maxTokens?: number;
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
@@ -280,6 +285,7 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+	| { type: "tool_execution_progress"; toolCallId: string; toolName: string; progress: ToolResult }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: ToolResult; isError: boolean };
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;

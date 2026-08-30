@@ -13,6 +13,7 @@ import {
 	readMeta,
 	readMessages,
 	recordMessage,
+	replaceSessionMessages,
 	updateMeta,
 	writeMeta,
 	type SessionMeta,

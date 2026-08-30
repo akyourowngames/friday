@@ -736,15 +736,29 @@ async function executePreparedToolCall(
 	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
 
+	const onProgress = (progress: AgentToolResult): void => {
+		if (!acceptingUpdates) return;
+		const update = Promise.resolve(
+			emit({
+				type: "tool_execution_progress",
+				toolCallId: prepared.toolCall.id,
+				toolName: prepared.toolCall.name,
+				progress,
+			}),
+		);
+		updateEvents.push(update);
+	};
+
 	try {
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
 			signal,
+			onProgress,
 		);
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
-		return { result, isError: false };
+		return { result, isError: result.isError === true };
 	} catch (error) {
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);

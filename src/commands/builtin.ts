@@ -17,7 +17,7 @@ import {
 	type SlashCommandResult,
 } from "../slash-commands.ts";
 import type { Agent } from "../agent.ts";
-import type { SettingsStore } from "../settings.ts";
+import { getSettingSchema, listSettings, type SettingValue, type SettingsStore } from "../settings.ts";
 
 /** `/help` — list every registered command with its description. */
 export function makeHelpCommand(): SlashCommand {
@@ -134,14 +134,47 @@ export function makeUsageCommand(): SlashCommand {
 	};
 }
 
-/** `/settings` — open the settings editor (the TUI handles the actual UI). */
-export function makeSettingsCommand(deps: { onOpenSettings: () => Promise<void> | void }): SlashCommand {
+function parseSettingValue(key: string, raw: string): SettingValue {
+	const definition = getSettingSchema(key);
+	if (!definition) throw new Error(`Unknown setting: ${key}`);
+	if (raw === "null") return null;
+	if (definition.type === "boolean") {
+		if (raw === "true") return true;
+		if (raw === "false") return false;
+		throw new Error(`Expected true or false for ${key}`);
+	}
+	if (definition.type === "number") {
+		const value = Number(raw);
+		if (!Number.isFinite(value)) throw new Error(`Expected a number for ${key}`);
+		return value;
+	}
+	if (definition.type === "stringList") return raw.split(",").map((value) => value.trim()).filter(Boolean);
+	return raw;
+}
+
+export function makeSettingsCommand(deps: {
+	settings: SettingsStore;
+	onSave: () => Promise<void> | void;
+}): SlashCommand {
 	return {
 		name: "/settings",
-		description: "Edit user settings.",
-		run: async (): Promise<SlashCommandResult> => {
-			await deps.onOpenSettings();
-			return {};
+		description: "Show or update user settings.",
+		usage: "[key] [value]",
+		run: async ({ args }): Promise<SlashCommandResult> => {
+			const [key, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			if (!key) {
+				return {
+					message: listSettings().map((setting) => `${setting.key} = ${JSON.stringify(deps.settings.get(setting.key))}`).join("\n"),
+				};
+			}
+			if (rest.length === 0) return { message: `${key} = ${JSON.stringify(deps.settings.get(key))}` };
+			try {
+				deps.settings.set(key, parseSettingValue(key, rest.join(" ")));
+				await deps.onSave();
+				return { message: `${key} = ${JSON.stringify(deps.settings.get(key))}` };
+			} catch (error) {
+				return { message: `[error] ${error instanceof Error ? error.message : String(error)}` };
+			}
 		},
 	};
 }
@@ -272,6 +305,51 @@ export function makeResumeCommand(deps: {
 	};
 }
 
+export function makeInitCommand(deps: { hasProfile: () => Promise<boolean>; dir: string }): SlashCommand {
+	return {
+		name: "/init",
+		description: "Set up or update your personal profile.",
+		run: async (): Promise<SlashCommandResult> => {
+			const exists = await deps.hasProfile();
+			return {
+				submitFollowUp: exists
+					? `Read PROFILE.md with the read tool using root ${JSON.stringify(deps.dir)}, summarize it, ask what changed, and rewrite it only after I confirm.`
+					: `Interview me one question at a time about my name, role, explanation detail, tone, current projects, and anything worth remembering. When complete, write a concise PROFILE.md with the write tool using root ${JSON.stringify(deps.dir)} and path "PROFILE.md".`,
+			};
+		},
+	};
+}
+
+export function makeProfileCommand(deps: {
+	load: () => Promise<string | undefined>;
+	append: (text: string) => Promise<void>;
+	onChanged: () => Promise<void> | void;
+}): SlashCommand {
+	return {
+		name: "/profile",
+		description: "Show or append to your personal profile.",
+		usage: "[edit <text>]",
+		run: async ({ args }): Promise<SlashCommandResult> => {
+			const trimmed = args.trim();
+			if (!trimmed) return { message: (await deps.load()) ?? "No profile yet — run /init." };
+			if (!trimmed.startsWith("edit ") || trimmed.slice(5).trim().length === 0) {
+				return { message: "Usage: /profile edit <text>" };
+			}
+			await deps.append(trimmed.slice(5).trim());
+			await deps.onChanged();
+			return { message: "Profile updated." };
+		},
+	};
+}
+
+export function makeUndoCommand(deps: { onUndo: () => Promise<string> }): SlashCommand {
+	return {
+		name: "/undo",
+		description: "Restore the most recent file checkpoint.",
+		run: async (): Promise<SlashCommandResult> => ({ message: await deps.onUndo() }),
+	};
+}
+
 /** Aggregate token usage from the agent's message log. */
 export interface UsageTotals {
 	input: number;
@@ -325,9 +403,9 @@ export function formatUsageTotals(totals: UsageTotals): string {
 /** Register all built-in commands. Idempotent. */
 export function registerBuiltinCommands(deps: {
 	settings: SettingsStore;
+	onSaveSettings: () => Promise<void> | void;
 	listModels: () => Promise<string[]>;
 	onSelectModel: (id: string) => Promise<void> | void;
-	onOpenSettings: () => Promise<void> | void;
 	onReload: () => Promise<void> | void;
 	onSwitchProvider: (id: string) => Promise<void> | void;
 	currentProvider: string;
@@ -336,6 +414,9 @@ export function registerBuiltinCommands(deps: {
 	onCompact: () => Promise<void> | void;
 	listSessions: () => Promise<SessionSummary[]>;
 	onResumeSession: (id: string) => Promise<void> | void;
+	init: { hasProfile: () => Promise<boolean>; dir: string };
+	profile: { load: () => Promise<string | undefined>; append: (text: string) => Promise<void>; onChanged: () => Promise<void> | void };
+	onUndo: () => Promise<string>;
 }): void {
 	const tryRegister = (cmd: SlashCommand) => {
 		try {
@@ -351,7 +432,7 @@ export function registerBuiltinCommands(deps: {
 	tryRegister(makeModelCommand({ listModels: deps.listModels, onSelect: deps.onSelectModel }));
 	tryRegister(makeCostCommand());
 	tryRegister(makeUsageCommand());
-	tryRegister(makeSettingsCommand({ onOpenSettings: deps.onOpenSettings }));
+	tryRegister(makeSettingsCommand({ settings: deps.settings, onSave: deps.onSaveSettings }));
 	tryRegister(makeReloadCommand({ onReload: deps.onReload }));
 	tryRegister(
 		makeProviderCommand({
@@ -364,4 +445,7 @@ export function registerBuiltinCommands(deps: {
 	tryRegister(makeCompactCommand({ onCompact: deps.onCompact }));
 	tryRegister(makeSessionsCommand({ onList: deps.listSessions }));
 	tryRegister(makeResumeCommand({ listSessions: deps.listSessions, onResume: deps.onResumeSession }));
+	tryRegister(makeInitCommand(deps.init));
+	tryRegister(makeProfileCommand(deps.profile));
+	tryRegister(makeUndoCommand({ onUndo: deps.onUndo }));
 }

@@ -2,7 +2,17 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { bashTool, readTool, writeTool, editTool, globTool, grepTool, builtinTools } from "../src/tools/shell.ts";
+import {
+	bashTool,
+	readTool,
+	writeTool,
+	editTool,
+	multiEditTool,
+	globTool,
+	grepTool,
+	builtinTools,
+	isDangerousShellCommand,
+} from "../src/tools/shell.ts";
 import { isPathInside, resolveSafePath } from "../src/tools/path-safety.ts";
 
 let tmp: string;
@@ -47,8 +57,20 @@ describe("bashTool", () => {
 		expect(text).toContain("exit code 0");
 	});
 	it("rejects obviously dangerous commands", async () => {
+		expect(isDangerousShellCommand("rm -rf /")).toBe(true);
+		expect(isDangerousShellCommand("echo safe")).toBe(false);
 		const r = await bashTool.execute("t1", { command: "rm -rf /" });
 		expect(r.isError).toBe(true);
+	});
+	it("streams stdout and stderr while retaining final output", async () => {
+		const command = process.platform === "win32" ? "echo out & echo err 1>&2" : "printf out; printf err >&2";
+		const progress: any[] = [];
+		const r = await bashTool.execute("t1", { command }, undefined, (update) => progress.push(update));
+		expect(progress.some((update) => update.details?.stream === "stdout")).toBe(true);
+		expect(progress.some((update) => update.details?.stream === "stderr")).toBe(true);
+		const text = (r.content[0] as any).text;
+		expect(text).toContain("out");
+		expect(text).toContain("err");
 	});
 	it("captures non-zero exit codes without isError", async () => {
 		const cmd = process.platform === "win32" ? "exit 7" : "exit 7";
@@ -94,8 +116,16 @@ describe("readTool / writeTool / editTool", () => {
 		const file = path.join(tmp, "hello.txt");
 		const w = await writeTool.execute("t1", { path: file, content: "hi there", root: tmp });
 		expect(w.isError).toBeFalsy();
+		expect(w.details).toMatchObject({ path: file, oldText: "", newText: "hi there" });
 		const r = await readTool.execute("t1", { path: file, root: tmp });
 		expect((r.content[0] as any).text).toContain("hi there");
+	});
+	it("reads supported images as base64 content", async () => {
+		const file = path.join(tmp, "pixel.png");
+		const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+		await fs.writeFile(file, bytes);
+		const r = await readTool.execute("t1", { path: file, root: tmp });
+		expect(r.content).toEqual([{ type: "image", data: bytes.toString("base64"), mimeType: "image/png" }]);
 	});
 	it("read rejects paths outside the root", async () => {
 		const r = await readTool.execute("t1", { path: "../escape.txt", root: tmp });
@@ -106,6 +136,7 @@ describe("readTool / writeTool / editTool", () => {
 		await writeTool.execute("t1", { path: file, content: "hello world\n", root: tmp });
 		const r = await editTool.execute("t1", { path: file, oldText: "hello", newText: "goodbye", root: tmp });
 		expect(r.isError).toBeFalsy();
+		expect(r.details).toMatchObject({ path: file, oldText: "hello", newText: "goodbye" });
 		const after = await fs.readFile(file, "utf8");
 		expect(after).toBe("goodbye world\n");
 	});
@@ -131,6 +162,38 @@ describe("readTool / writeTool / editTool", () => {
 		expect(text).toContain("three");
 		expect(text).not.toContain("one");
 		expect(text).not.toContain("four");
+	});
+	it("multi edit validates every edit before committing", async () => {
+		const first = path.join(tmp, "first.txt");
+		const second = path.join(tmp, "second.txt");
+		await fs.writeFile(first, "alpha", "utf8");
+		await fs.writeFile(second, "beta", "utf8");
+		const r = await multiEditTool.execute("t1", {
+			root: tmp,
+			edits: [
+				{ path: first, oldText: "alpha", newText: "changed" },
+				{ path: second, oldText: "missing", newText: "changed" },
+			],
+		});
+		expect(r.isError).toBe(true);
+		expect(await fs.readFile(first, "utf8")).toBe("alpha");
+		expect(await fs.readFile(second, "utf8")).toBe("beta");
+	});
+	it("multi edit commits validated edits together", async () => {
+		const first = path.join(tmp, "first.txt");
+		const second = path.join(tmp, "second.txt");
+		await fs.writeFile(first, "alpha", "utf8");
+		await fs.writeFile(second, "beta", "utf8");
+		const r = await multiEditTool.execute("t1", {
+			root: tmp,
+			edits: [
+				{ path: first, oldText: "alpha", newText: "one" },
+				{ path: second, oldText: "beta", newText: "two" },
+			],
+		});
+		expect(r.isError).toBeFalsy();
+		expect(await fs.readFile(first, "utf8")).toBe("one");
+		expect(await fs.readFile(second, "utf8")).toBe("two");
 	});
 });
 
@@ -196,6 +259,6 @@ describe("grepTool", () => {
 
 describe("builtinTools list", () => {
 	it("exports every built-in tool in registration order", () => {
-		expect(builtinTools.map((t) => t.name)).toEqual(["bash", "read", "write", "edit", "glob", "grep"]);
+		expect(builtinTools.map((t) => t.name)).toEqual(["bash", "read", "write", "edit", "multi_edit", "glob", "grep"]);
 	});
 });
