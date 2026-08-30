@@ -14,6 +14,86 @@ import { spawnSync } from "node:child_process";
 
 let ran = false;
 
+/** Cheap, spawn-free guess at whether the terminal already interprets ANSI.
+ *  Windows Terminal, VS Code's terminal, ConEmu and ANSICON all do. Plain
+ *  `cmd.exe`/Conhost does not — that's the case we need to fix by hand. */
+export function consoleHasAnsiSupport(): boolean {
+	return Boolean(
+		process.env.WT_SESSION ||
+			process.env.TERM_PROGRAM ||
+			process.env.ConEmuANSI === "ON" ||
+			process.env.ANSICON,
+	);
+}
+
+/**
+ * Ask the console we are attached to to interpret ANSI escape sequences.
+ *
+ * `chcp 65001` only decides *how bytes are decoded* — it does nothing about
+ * escape sequences. On a plain Conhost (cmd.exe) ANSI codes are written out
+ * literally unless `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is set, which is what
+ * makes a differential TUI collapse into lines of text "painted" down the
+ * screen: no colors, no cursor addressing, no repaints.
+ *
+ * The registry value written by `applyWindowsUtf8Default()` fixes this for
+ * *future* consoles. This fixes the one we are already attached to. Console
+ * mode is a property of the console rather than of any single process, so a
+ * child process with the console attached can change it for everyone — the
+ * same reason `chcp` works at all.
+ *
+ * Returns true if VT is believed to be on. Fail-soft by design: if PowerShell
+ * is missing or P/Invoke is blocked, the app still runs, just unstyled.
+ */
+export function enableVirtualTerminalProcessing(): boolean {
+	if (process.platform !== "win32") return true;
+	// Nothing to fix when we aren't talking to a real console, and this is what
+	// keeps the (comparatively slow) PowerShell call out of tests and pipes.
+	if (!process.stdout.isTTY) return false;
+	if (consoleHasAnsiSupport()) return true;
+	if (enableVirtualTerminalProcessing.done) return enableVirtualTerminalProcessing.result;
+
+	// -EncodedCommand (UTF-16LE base64) sidesteps every layer of shell quoting.
+	const script = [
+		"$sig='[DllImport(\"kernel32.dll\")]public static extern bool GetConsoleMode(System.IntPtr h,out uint m);",
+		"[DllImport(\"kernel32.dll\")]public static extern bool SetConsoleMode(System.IntPtr h,uint m);",
+		"[DllImport(\"kernel32.dll\")]public static extern System.IntPtr GetStdHandle(int n);';",
+		"Add-Type -MemberDefinition $sig -Name ConsoleMode -Namespace Friday -ErrorAction Stop;",
+		// 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
+		// 0x0008 = DISABLE_NEWLINE_AUTO_RETURN (stops \n from also moving col 0,
+		//          which would shear every box drawn with line-addressing)
+		"foreach ($n in -11,-12) {",
+		"  $h=[Friday.ConsoleMode]::GetStdHandle($n);",
+		"  $m=[uint32]0;",
+		"  if ([Friday.ConsoleMode]::GetConsoleMode($h,[ref]$m)) {",
+		"    [Friday.ConsoleMode]::SetConsoleMode($h,($m -bor 4 -bor 8)) | Out-Null;",
+		"  }",
+		"}",
+	].join(" ");
+
+	const encoded = Buffer.from(script, "utf16le").toString("base64");
+	for (const shell of ["powershell", "pwsh"]) {
+		try {
+			const r = spawnSync(
+				shell,
+				["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+				{ stdio: "ignore", windowsHide: true, timeout: 10_000 },
+			);
+			if (r.status === 0) {
+				enableVirtualTerminalProcessing.done = true;
+				enableVirtualTerminalProcessing.result = true;
+				return true;
+			}
+		} catch {
+			// Try the next shell; PowerShell may simply not be installed.
+		}
+	}
+	enableVirtualTerminalProcessing.done = true;
+	enableVirtualTerminalProcessing.result = false;
+	return false;
+}
+enableVirtualTerminalProcessing.done = false;
+enableVirtualTerminalProcessing.result = false;
+
 /** Run the per-invocation console setup. Idempotent. */
 export function setupConsoleEncoding(): void {
 	if (ran) return;
@@ -46,6 +126,11 @@ export function setupConsoleEncoding(): void {
 		// Some sandboxes block chcp; that's fine, the next-best thing is the
 		// Node-side encoding fix above.
 	}
+
+	// ...and now the other half of the problem: make the console actually
+	// *interpret* the escape sequences we're about to emit. Without this the
+	// TUI renders as flat unstyled text even though the bytes are perfect UTF-8.
+	enableVirtualTerminalProcessing();
 }
 
 export interface Utf8Status {
