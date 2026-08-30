@@ -3,6 +3,7 @@
 import { Volume2 } from "lucide-react";
 import type { ChatMessage, ToolRun } from "@/lib/types";
 import { ToolCard } from "./ToolCard";
+import { MarkdownView } from "./MarkdownView";
 
 /** Drop duplicate tool cards (defensive — the reducer already dedupes). */
 function dedupeToolsById(tools: ToolRun[] | undefined): ToolRun[] {
@@ -37,8 +38,14 @@ export function MessageBubble({
 					HarNESs
 				</div>
 			)}
-			<div className={isUser ? "harness-message-user-body" : undefined}>
-				{message.text && <div className="harness-message-text">{message.text}</div>}
+			<div className={isUser ? "harness-message-user-body" : "harness-message-body"}>
+				{message.text && (
+					isUser ? (
+						<div className="harness-message-text">{message.text}</div>
+					) : (
+						<MarkdownView source={message.text} className="harness-md" />
+					)
+				)}
 				{dedupeToolsById(message.tools).map((tool) => (
 					<ToolCard
 						key={`${message.id}::${tool.id}`}

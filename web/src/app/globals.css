@@ -551,6 +551,108 @@
 		font-size: 13px;
 		line-height: 1.55;
 	}
+
+	/* Markdown-rendered assistant text. Lives in the assistant body, never
+	 * in the user bubble. All block elements have margin-block so the
+	 * transcript breathes the way Claude Code / Codex do. */
+	.harness-md {
+		font-size: 14px;
+		line-height: 1.72;
+		letter-spacing: -0.006em;
+		color: var(--ink);
+	}
+	.harness-md > * + * {
+		margin-top: 0.55em;
+	}
+	.harness-md-paragraph {
+		margin: 0;
+	}
+	.harness-md-heading {
+		display: flex;
+		align-items: center;
+		gap: 0.55em;
+		margin: 0.4em 0 0.2em;
+		font-weight: 600;
+		color: var(--violet);
+		letter-spacing: -0.02em;
+		line-height: 1.25;
+	}
+	.harness-md-heading.is-h1 { font-size: 22px; }
+	.harness-md-heading.is-h2 { font-size: 19px; }
+	.harness-md-heading.is-h3 { font-size: 16px; }
+	.harness-md-heading.is-h4,
+	.harness-md-heading.is-h5,
+	.harness-md-heading.is-h6 { font-size: 15px; }
+	.harness-md-heading-bar {
+		display: inline-block;
+		width: 3px;
+		height: 1em;
+		border-radius: 2px;
+		background: var(--violet);
+		flex: none;
+	}
+	.harness-md-code {
+		margin: 0;
+		padding: 14px 16px;
+		background: rgba(0, 0, 0, 0.32);
+		border: 1px solid var(--line);
+		border-radius: 10px;
+		font: 12.5px/1.6 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		overflow-x: auto;
+		white-space: pre;
+	}
+	.light .harness-md-code {
+		background: rgba(25, 28, 42, 0.05);
+	}
+	.harness-md-code code {
+		font: inherit;
+		color: inherit;
+		background: transparent;
+		padding: 0;
+	}
+	.harness-md-bullet,
+	.harness-md-ordered {
+		display: flex;
+		align-items: baseline;
+		gap: 0.55em;
+	}
+	.harness-md-bullet-marker,
+	.harness-md-ordered-marker {
+		flex: none;
+		min-width: 1.2em;
+		color: var(--violet);
+		font-weight: 600;
+	}
+	.harness-md-quote {
+		margin: 0;
+		padding: 4px 0 4px 14px;
+		border-left: 3px solid var(--violet);
+		color: var(--muted);
+		font-style: italic;
+	}
+	.harness-md-rule {
+		border: 0;
+		border-top: 1px solid var(--line);
+		margin: 0.6em 0;
+	}
+	.harness-md-inline-code {
+		font: 12.5px/1.4 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		padding: 1px 6px;
+		border-radius: 4px;
+		background: rgba(167, 139, 250, 0.14);
+		color: var(--violet);
+	}
+	.harness-md strong { font-weight: 650; }
+	.harness-md em { font-style: italic; color: var(--muted); }
+	.harness-md-link {
+		color: var(--violet);
+		text-decoration: underline;
+		text-decoration-color: rgba(167, 139, 250, 0.4);
+		text-underline-offset: 2px;
+	}
+	.harness-md-link:hover {
+		text-decoration-color: var(--violet);
+	}
 	.harness-speak-message {
 		margin: 7px 0 0;
 		padding: 3px 0;

@@ -1,0 +1,51 @@
+event: session
+data: {"id":"7d0fb1e0-fae7-45ea-a3bc-e6ca1b2c673f","provider":"faux","model":"faux-1"}
+
+event: agent-event
+data: {"type":"agent_start"}
+
+event: agent-event
+data: {"type":"turn_start"}
+
+event: agent-event
+data: {"type":"message_start","message":{"role":"user","content":"reply with: ## Hello World\\n\\nThis is **bold** and *italic* and a code block:\\n\\n```ts\\nconst x = 1;\\n```\\n\\n- first bullet\\n- second bullet\\n\\n quote","timestamp":1788116271938}}
+
+event: agent-event
+data: {"type":"message_end","message":{"role":"user","content":"reply with: ## Hello World\\n\\nThis is **bold** and *italic* and a code block:\\n\\n```ts\\nconst x = 1;\\n```\\n\\n- first bullet\\n- second bullet\\n\\n quote","timestamp":1788116271938}}
+
+event: agent-event
+data: {"type":"message_start","message":{"role":"assistant","content":[],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0,"partial":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}},"message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"(faux) Hello","partial":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}},"message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"! I'm friday-ng ","partial":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}},"message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"running on the mock ","partial":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}},"message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"provider — no API ke","partial":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}},"message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"y needed.","partial":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}},"message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed.","partial":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}},"message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1788116271950}}
+
+event: agent-event
+data: {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1788116271950},"toolResults":[]}
+
+event: agent-event
+data: {"type":"agent_end","messages":[{"role":"user","content":"reply with: ## Hello World\\n\\nThis is **bold** and *italic* and a code block:\\n\\n```ts\\nconst x = 1;\\n```\\n\\n- first bullet\\n- second bullet\\n\\n quote","timestamp":1788116271938},{"role":"assistant","content":[{"type":"text","text":"(faux) Hello! I'm friday-ng running on the mock provider — no API key needed."}],"api":"faux","provider":"faux","model":"faux-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1788116271950}]}
+
+event: complete
+data: {}
+
