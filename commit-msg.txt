@@ -1,18 +1,29 @@
-fix(tui): render markdown once on message_end, stream raw during deltas
+fix(tui): give markdown a real visual structure in the assistant box
 
-The TUI was re-parsing the full accumulated assistant message through
-the markdown renderer on every streaming token. That meant partial
-`## Over` text mid-stream produced broken output, and the markdown
-pipeline (code fences, headings, bullet lists, tables) didn't actually
-appear in the final box until a re-paint.
+The TUI was recognizing `## headings` and `- bullets` in the parser
+but rendering them as flat bold text + `•` prefix with no color or
+visual separation. A 6-item heading, a code block, and a paragraph
+all looked the same to the eye, so responses from the model came
+across as raw markdown source.
 
-Switch the streaming path to concatenate raw text only; run the full
-`renderAssistantText` markdown pass exactly once on `message_end`,
-where the final history entry is built. The streaming box still shows
-the live text with its animated cursor; the final box now has the
-proper headings, code-fence borders, bullet markers, and table grid.
+Restructure the span model so headings, bullets, ordered lists,
+quotes, and horizontal rules are first-class kinds (not hidden
+inside `text` spans with extra flags). Render them with:
+- Headings: bold magenta with a `▌` / `▎` accent bar and a blank
+  line above for separation.
+- Bullets: colored `•` marker, indentation by nesting depth
+  (2 spaces per level, up to 3).
+- Ordered lists: colored index marker (`1.`, `2.`, ...).
+- Block quotes: dim cyan `│` bar.
+- Rules: dim `─` divider.
 
-Adds `rawAssistantText()` (no-op concat) alongside the existing
-`assistantText()` (full markdown pass).
+`markdownToPlain` and the TUI's no-color fallback also re-emit the
+markup as proper markdown (`#` prefix for headings, `-` for bullets,
+`>` for quotes, etc.) so the structure is preserved on plain
+terminals.
+
+Tests in `tests/markdown.test.ts` updated for the new span kinds
+and a half-dozen new render cases added. All 36 markdown tests,
+87 TUI tests, and 14 console-renderer tests pass.
 
 Co-authored-by: CommandCodeBot <noreply@commandcode.ai>

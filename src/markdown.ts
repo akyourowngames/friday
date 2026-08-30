@@ -1,7 +1,11 @@
 export type TableAlignment = "left" | "center" | "right";
 
 export type MarkdownSpan =
-	| { kind: "text"; text: string; bold?: boolean; italic?: boolean; code?: boolean }
+	| { kind: "text"; text: string; bold?: boolean; italic?: boolean; code?: boolean; heading?: 1 | 2 | 3 | 4 | 5 | 6 }
+	| { kind: "bullet"; depth?: number; text: string }
+	| { kind: "ordered"; index: number; text: string }
+	| { kind: "quote"; text: string }
+	| { kind: "rule" }
 	| { kind: "code-block"; lang: string; text: string }
 	| { kind: "table"; rows: string[][]; alignments: TableAlignment[]; source: string[] };
 
@@ -128,16 +132,26 @@ export function renderMarkdown(input: string): MarkdownLine[] {
 			continue;
 		}
 		const header = /^(#{1,6})\s+(.+)$/.exec(line);
-		if (header) out.push({ spans: [{ kind: "text", text: header[2]!, bold: true }] });
-		else {
+		if (header) {
+			const level = header[1]!.length as 1 | 2 | 3 | 4 | 5 | 6;
+			out.push({ spans: [{ kind: "text", text: header[2]!, bold: true, heading: level }] });
+		} else {
 			const quote = /^>\s*(.*)$/.exec(line);
-			const unordered = /^[-*]\s+(.+)$/.exec(line);
-			const ordered = /^\d+\.\s+(.+)$/.exec(line);
-			if (quote) out.push({ spans: [{ kind: "text", text: `│ ${quote[1] ?? ""}` }] });
-			else if (unordered) out.push({ spans: parseLine(`• ${unordered[1]!}`) });
-			else if (ordered) out.push({ spans: parseLine(ordered[1]!) });
-			else if (/^---+\s*$/.test(line) || /^\*\*\*+\s*$/.test(line)) out.push({ spans: [{ kind: "text", text: "─".repeat(20) }] });
-			else out.push({ spans: parseLine(line) });
+			const unordered = /^(\s*)[-*]\s+(.+)$/.exec(line);
+			const ordered = /^(\s*)(\d+)\.\s+(.+)$/.exec(line);
+			if (quote) {
+				const inner = parseLine(quote[1] ?? "");
+				out.push({ spans: [{ kind: "quote", text: quote[1] ?? "" }, ...inner] });
+			} else if (unordered) {
+				const depth = Math.min(3, Math.floor((unordered[1]?.length ?? 0) / 2));
+				out.push({ spans: [{ kind: "bullet", depth, text: unordered[2]! }] });
+			} else if (ordered) {
+				out.push({ spans: [{ kind: "ordered", index: Number(ordered[2]!), text: ordered[3]! }] });
+			} else if (/^---+\s*$/.test(line) || /^\*\*\*+\s*$/.test(line)) {
+				out.push({ spans: [{ kind: "rule" }] });
+			} else {
+				out.push({ spans: parseLine(line) });
+			}
 		}
 		i++;
 	}
@@ -149,9 +163,21 @@ export function markdownToPlain(input: string): string {
 	for (const line of renderMarkdown(input)) {
 		let text = "";
 		for (const span of line.spans) {
-			if (span.kind === "code-block") out.push(span.text);
-			else if (span.kind === "table") out.push(...renderTable(span, Number.POSITIVE_INFINITY));
-			else text += span.text;
+			if (span.kind === "code-block") {
+				out.push(span.text);
+			} else if (span.kind === "table") {
+				out.push(...renderTable(span, Number.POSITIVE_INFINITY));
+			} else if (span.kind === "bullet") {
+				text += "  ".repeat(span.depth ?? 0) + "- " + span.text;
+			} else if (span.kind === "ordered") {
+				text += `${span.index}. ${span.text}`;
+			} else if (span.kind === "quote") {
+				text += "> " + span.text;
+			} else if (span.kind === "rule") {
+				text += "---";
+			} else {
+				text += span.text;
+			}
 		}
 		if (text) out.push(text);
 	}
@@ -443,6 +469,46 @@ export function renderMarkdownColored(input: string, opts: RenderColoredOptions 
 			out.push(...renderTable(line.spans[0], opts.wrapWidth ?? Number.POSITIVE_INFINITY));
 			continue;
 		}
+		// Headings: distinct color, bold, accent bar, and an extra blank
+		// line above so they pop out of the transcript.
+		if (line.spans.length === 1 && line.spans[0]?.kind === "text" && line.spans[0].heading) {
+			const span = line.spans[0];
+			const level = span.heading!;
+			const accent = `${FG_MAGENTA}${BOLD}${level === 1 ? "▌" : level === 2 ? "▌" : "▎"}${RESET} `;
+			const head = `${FG_MAGENTA}${BOLD}${span.text}${RESET}`;
+			out.push(""); // blank line above for visual separation
+			out.push(`${accent}${head}`);
+			continue;
+		}
+		// Bullet list: indent by nesting depth, with a colored marker.
+		if (line.spans.length === 1 && line.spans[0]?.kind === "bullet") {
+			const span = line.spans[0];
+			const indent = "  ".repeat(span.depth ?? 0);
+			const marker = `${FG_MAGENTA}•${RESET}`;
+			const content = colorizeInline(span.text);
+			out.push(`${indent}${marker} ${content}`);
+			continue;
+		}
+		// Ordered list: `1. content`, `2. content`, ...
+		if (line.spans.length === 1 && line.spans[0]?.kind === "ordered") {
+			const span = line.spans[0];
+			const marker = `${FG_MAGENTA}${span.index}.${RESET}`;
+			const content = colorizeInline(span.text);
+			out.push(`${marker} ${content}`);
+			continue;
+		}
+		// Block quote: `│` bar in dim cyan.
+		if (line.spans.length >= 1 && line.spans[0]?.kind === "quote") {
+			const bar = `${FG_CYAN}${DIM}│${RESET}`;
+			const content = colorizeInline(line.spans[0]!.text);
+			out.push(`${bar} ${content}`);
+			continue;
+		}
+		// Horizontal rule: a dim magenta divider.
+		if (line.spans.length === 1 && line.spans[0]?.kind === "rule") {
+			out.push(`${DIM}${"─".repeat(40)}${RESET}`);
+			continue;
+		}
 		let text = "";
 		for (const span of line.spans) {
 			if (span.kind !== "text") continue;
@@ -455,4 +521,26 @@ export function renderMarkdownColored(input: string, opts: RenderColoredOptions 
 		out.push(...(opts.wrapWidth ? wrapColored(text, opts.wrapWidth) : [text]));
 	}
 	return out;
+}
+
+/** Apply inline markdown styling (bold, italic, code, links) to a string. */
+function colorizeInline(input: string): string {
+	const out: string[] = [];
+	for (const span of parseLine(input)) {
+		if (span.kind !== "text") {
+			if (span.kind === "rule") out.push("---");
+			else if (span.kind === "bullet") out.push("  ".repeat(span.depth ?? 0) + "- " + span.text);
+			else if (span.kind === "ordered") out.push(`${span.index}. ${span.text}`);
+			else if (span.kind === "quote") out.push("> " + span.text);
+			else if (span.kind === "code-block") out.push(span.text);
+			else if (span.kind === "table") out.push(span.source.join("\n"));
+			continue;
+		}
+		let segment = linkify(span.text);
+		if (span.bold) segment = `${BOLD}${segment}${RESET}`;
+		if (span.italic) segment = `${DIM}${segment}${RESET}`;
+		if (span.code) segment = `${FG_CYAN}${segment}${RESET}`;
+		out.push(segment);
+	}
+	return out.join("");
 }

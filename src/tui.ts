@@ -48,7 +48,9 @@ function renderAssistantText(input: string): string {
 	if (HAS_COLOR) {
 		return renderMarkdownColored(input).join("\n");
 	}
-	// Fallback: use the existing plain-text rendering (indented code blocks).
+	// Fallback: plain-text rendering for terminals without color support.
+	// Preserves the structure of code blocks, tables, bullets, and headings
+	// so the response stays legible when the user's TTY can't render ANSI.
 	const lines = renderMarkdown(input);
 	const out: string[] = [];
 	let inCode = false;
@@ -62,13 +64,25 @@ function renderAssistantText(input: string): string {
 			for (const s of line.spans) {
 				if (s.kind === "code-block") out.push("  " + s.text);
 			}
-		} else if (inCode) {
+			continue;
+		}
+		if (inCode) {
 			out.push("```");
 			inCode = false;
-			out.push(line.spans.map((s) => s.kind === "table" ? s.source.join("\n") : s.text).join(""));
-		} else {
-			out.push(line.spans.map((s) => s.kind === "table" ? s.source.join("\n") : s.text).join(""));
 		}
+		const pieces = line.spans.map((s) => {
+			if (s.kind === "table") return s.source.join("\n");
+			if (s.kind === "bullet") return "  ".repeat(s.depth ?? 0) + "- " + s.text;
+			if (s.kind === "ordered") return `${s.index}. ${s.text}`;
+			if (s.kind === "quote") return "> " + s.text;
+			if (s.kind === "rule") return "---";
+			if (s.kind === "text") {
+				const hashes = s.heading ? "#".repeat(s.heading) + " " : "";
+				return hashes + s.text;
+			}
+			return s.text;
+		});
+		out.push(pieces.join(""));
 	}
 	if (inCode) out.push("```");
 	return out.join("\n");

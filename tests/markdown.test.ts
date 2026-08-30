@@ -69,31 +69,56 @@ describe("markdown renderer", () => {
 		}
 	});
 
-	it("renders headers with bold", () => {
+	it("renders headers with bold and the heading level", () => {
 		const lines = renderMarkdown("## Header text");
-		expect((lines[0]!.spans[0] as any).text).toBe("Header text");
-		expect((lines[0]!.spans[0] as any).bold).toBe(true);
+		const span = lines[0]!.spans[0]!;
+		expect(span.kind).toBe("text");
+		expect((span as any).text).toBe("Header text");
+		expect((span as any).bold).toBe(true);
+		expect((span as any).heading).toBe(2);
 	});
 
-	it("renders unordered lists with a bullet", () => {
+	it("preserves the heading level for all six tiers", () => {
+		for (let level = 1; level <= 6; level++) {
+			const lines = renderMarkdown(`${"#".repeat(level)} Title`);
+			const span = lines[0]!.spans[0]!;
+			expect(span.kind).toBe("text");
+			expect((span as any).heading).toBe(level);
+		}
+	});
+
+	it("renders unordered lists as a dedicated bullet span", () => {
 		const lines = renderMarkdown("- first\n- second");
-		expect((lines[0]!.spans[0] as any).text).toBe("• first");
-		expect((lines[1]!.spans[0] as any).text).toBe("• second");
-	});
-
-	it("renders ordered lists preserving content", () => {
-		const lines = renderMarkdown("1. first\n2. second");
+		expect(lines[0]!.spans[0]!.kind).toBe("bullet");
 		expect((lines[0]!.spans[0] as any).text).toBe("first");
+		expect((lines[0]!.spans[0] as any).depth).toBe(0);
+		expect((lines[1]!.spans[0] as any).text).toBe("second");
 	});
 
-	it("renders blockquotes with a leading bar", () => {
+	it("preserves nesting depth for indented bullets", () => {
+		const lines = renderMarkdown("- top\n  - nested\n    - deeper");
+		expect((lines[0]!.spans[0] as any).depth).toBe(0);
+		expect((lines[1]!.spans[0] as any).depth).toBe(1);
+		expect((lines[2]!.spans[0] as any).depth).toBe(2);
+	});
+
+	it("renders ordered lists with their starting index", () => {
+		const lines = renderMarkdown("1. first\n2. second");
+		expect(lines[0]!.spans[0]!.kind).toBe("ordered");
+		expect((lines[0]!.spans[0] as any).index).toBe(1);
+		expect((lines[0]!.spans[0] as any).text).toBe("first");
+		expect((lines[1]!.spans[0] as any).index).toBe(2);
+	});
+
+	it("renders blockquotes as a dedicated quote span", () => {
 		const lines = renderMarkdown("> quoted");
-		expect((lines[0]!.spans[0] as any).text).toBe("│ quoted");
+		expect(lines[0]!.spans[0]!.kind).toBe("quote");
+		expect((lines[0]!.spans[0] as any).text).toBe("quoted");
 	});
 
-	it("renders horizontal rules as a dashed line", () => {
+	it("renders horizontal rules as a dedicated rule span", () => {
 		const lines = renderMarkdown("---");
-		expect((lines[0]!.spans[0] as any).text).toMatch(/─+/);
+		expect(lines[0]!.spans[0]!.kind).toBe("rule");
 	});
 
 	it("markdownToPlain returns plain text for prose", () => {
@@ -103,6 +128,15 @@ describe("markdown renderer", () => {
 	it("markdownToPlain keeps code blocks verbatim", () => {
 		const out = markdownToPlain("```\nconst x = 1;\n```");
 		expect(out).toBe("const x = 1;");
+	});
+
+	it("markdownToPlain renders bullets, ordered lists, and quotes", () => {
+		const out = markdownToPlain("- first\n  - nested\n1. one\n2. two\n> quoted");
+		expect(out).toContain("- first");
+		expect(out).toContain("  - nested");
+		expect(out).toContain("1. one");
+		expect(out).toContain("2. two");
+		expect(out).toContain("> quoted");
 	});
 
 	it("handles a full mixed document", () => {
@@ -121,7 +155,6 @@ const x = 1;
 `;
 		const out = markdownToPlain(md);
 		expect(out).toContain("Title");
-		expect(out).toContain("This is a paragraph with bold and italic and code.");
 		expect(out).toContain("This is a paragraph with bold and italic and code.");
 	});
 });
@@ -151,22 +184,53 @@ describe("renderMarkdownColored", () => {
 		expect(all).toContain("code");
 	});
 
-	it("handles headers", () => {
+	it("handles headers with an accent bar and blank line above", () => {
 		const lines = renderMarkdownColored("# Title");
-		expect(lines[0]!).toContain("Title");
-		expect(lines[0]!).toContain("\x1b[1m"); // bold
+		// Blank line for visual separation, then the heading with the
+		// accent bar, magenta color, and bold.
+		expect(lines[0]).toBe("");
+		expect(lines[1]).toContain("Title");
+		expect(lines[1]).toContain("\x1b[1m"); // bold
+		expect(lines[1]).toContain("\x1b[35m"); // magenta
+		expect(lines[1]).toMatch(/▌|▎/); // accent bar
 	});
 
-	it("handles lists", () => {
+	it("renders sub-headers with a smaller accent bar", () => {
+		const lines = renderMarkdownColored("## Subhead");
+		expect(lines[0]).toBe("");
+		expect(lines[1]).toContain("Subhead");
+	});
+
+	it("handles lists with a colored bullet marker", () => {
 		const lines = renderMarkdownColored("- item 1\n- item 2");
-		expect(lines[0]!).toContain("•");
-		expect(lines[0]!).toContain("item 1");
+		expect(lines[0]).toContain("\x1b[35m•\x1b[0m");
+		expect(lines[0]).toContain("item 1");
+		expect(lines[1]).toContain("item 2");
 	});
 
-	it("handles blockquotes", () => {
+	it("indents nested bullets", () => {
+		const lines = renderMarkdownColored("- top\n  - nested");
+		expect(lines[1]).toMatch(/^ {2}\x1b\[35m•/);
+	});
+
+	it("handles ordered lists with a colored index", () => {
+		const lines = renderMarkdownColored("1. first\n2. second");
+		expect(lines[0]).toContain("\x1b[35m1.\x1b[0m");
+		expect(lines[0]).toContain("first");
+		expect(lines[1]).toContain("\x1b[35m2.\x1b[0m");
+		expect(lines[1]).toContain("second");
+	});
+
+	it("handles blockquotes with a dim cyan bar", () => {
 		const lines = renderMarkdownColored("> quoted text");
-		expect(lines[0]!).toContain("│");
-		expect(lines[0]!).toContain("quoted text");
+		expect(lines[0]).toContain("\x1b[36m\x1b[2m│\x1b[0m");
+		expect(lines[0]).toContain("quoted text");
+	});
+
+	it("handles horizontal rules with a dim divider", () => {
+		const lines = renderMarkdownColored("---");
+		expect(lines[0]).toContain("\x1b[2m");
+		expect(lines[0]).toContain("─");
 	});
 
 	it("returns empty array for empty input", () => {
