@@ -19,6 +19,7 @@ const {
 	summarizeToolResult,
 	renderToolEntry,
 	renderTodos,
+	buildWelcomeBox,
 } = await import("../src/tui.ts");
 
 // Lazy imports for the slash-command tests (avoids circular-import issues at
@@ -274,6 +275,40 @@ describe("renderHistoryEntry", () => {
 		const joined = lines.join("\n");
 		expect(joined).toContain("still typing…");
 		expect(joined).toContain("friday");
+	});
+
+	it("wraps messages to the capped box width on wide terminals", () => {
+		const text = "This sentence is deliberately longer than ninety six columns so it must wrap inside the full-width transcript box rather than leaking beyond its right border.";
+		const lines = renderHistoryEntry({ role: "assistant", text }, 180);
+		const widths = lines.map((line) => visibleWidth(line));
+		expect(new Set(widths).size).toBe(1);
+		expect(widths[0]).toBe(100); // MAX_BLOCK_INNER (96) + two borders + two gutters
+		expect(lines.length).toBeGreaterThan(3);
+	});
+
+	it("wraps long command output to the capped tool box width", () => {
+		const output = "command-output-".repeat(12);
+		const lines = renderToolEntry({
+			role: "tool",
+			text: "",
+			name: "bash",
+			args: { command: "echo long" },
+			status: "done",
+			body: output,
+		}, 180);
+		const widths = lines.map((line) => visibleWidth(line));
+		expect(new Set(widths).size).toBe(1);
+		expect(widths[0]).toBe(100);
+		expect(lines.length).toBeGreaterThan(3);
+	});
+});
+
+describe("buildWelcomeBox", () => {
+	it("uses the available wide-terminal width and keeps every row aligned", () => {
+		const lines = buildWelcomeBox(180, "kilo", "stepfun/step-3.7-flash:free", 0);
+		const widths = lines.map((line) => visibleWidth(line));
+		expect(new Set(widths).size).toBe(1);
+		expect(widths[0]).toBe(100);
 	});
 });
 

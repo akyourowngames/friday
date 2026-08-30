@@ -468,12 +468,14 @@ export function renderToolEntry(entry: TuiHistoryEntry, width: number): string[]
 	if (!entry.expanded && bodyLines.length > 12) bodyLines = bodyLines.slice(0, 12);
 	const bodyContent = [summary, ...bodyLines];
 	if (!entry.expanded && fullCount > 12) bodyContent.push(`${DIM}… ${fullCount - 12} more lines (Ctrl+O to expand)${RESET}`);
-	const innerWidth = Math.max(1, width - 4);
-	const wrapped = bodyContent.flatMap((line) => wrapText(line, innerWidth, ""));
+	const availableInner = Math.max(1, width - 4);
 	// Tool blocks span the full width like message blocks — a ragged stack of
 	// content-sized boxes reads as noise. Never wider than the terminal: an
-	// overflowing row wraps and scrolls the screen.
-	const inner = Math.min(innerWidth, MAX_BLOCK_INNER);
+	// overflowing row wraps and scrolls the screen. Wrap against the *capped*
+	// inner width, not the raw terminal width, or long command output can spill
+	// out of an otherwise correctly sized box on wide terminals.
+	const inner = Math.min(availableInner, MAX_BLOCK_INNER);
+	const wrapped = bodyContent.flatMap((line) => wrapText(line, inner, ""));
 	// Header row: ╭─ {title} ───────────────╮  — sized so the row is exactly
 	// `inner + 4` columns wide, matching every body row and the bottom border.
 	// "╭─ " (3) + title + " " (1) + dashes + "╮" (1) = inner + 4.
@@ -583,14 +585,19 @@ function formatTime(ts: number): string {
  *  header bar (e.g. "12:34" or "247 tok"). When omitted, the header is just
  *  `─ label ────…` so existing call sites and tests stay unchanged. */
 function renderBox(text: string, width: number, label: string, color: string, open = false, meta = ""): string[] {
-	const maxInner = Math.max(10, width - 4); // │ + space + content + space + │
-	const wrapped = text.length > 0 ? wrapText(text, maxInner, "") : [""];
-	const labelNeed = label.length + 4; // "─ label "
-	const metaNeed = meta ? visibleWidth(meta) + 4 : 0; // " ── meta "
+	// A body row is "│ " + content + " │", so only `width - 4` columns are
+	// available for text. Pick the final box width first, then wrap to *that*
+	// inner width. Previously we wrapped against the uncapped terminal width and
+	// later capped the border at MAX_BLOCK_INNER: a sentence that fit the former
+	// leaked past the latter (exactly the overflow shown in the report).
+	const availableInner = Math.max(1, width - 4);
 	// Blocks span the full available width (capped so they stay readable on an
 	// ultrawide terminal). Uniform block width is what gives the transcript its
 	// rhythm — content-sized boxes end up ragged next to each other.
-	const inner = Math.min(maxInner, MAX_BLOCK_INNER);
+	const inner = Math.min(availableInner, MAX_BLOCK_INNER);
+	const wrapped = text.length > 0 ? wrapText(text, inner, "") : [""];
+	const labelNeed = label.length + 4; // "─ label "
+	const metaNeed = meta ? visibleWidth(meta) + 4 : 0; // " ── meta "
 	const lines: string[] = [];
 	if (inner >= labelNeed) {
 		if (meta && inner >= labelNeed + metaNeed) {
@@ -691,15 +698,12 @@ export function buildWelcomeBox(
 		`${BOLD}${DIM}↵   ${RESET}${DIM}type to chat${RESET}`,
 		`${BOLD}${DIM}^K  ${RESET}${DIM}commands${RESET}   ${BOLD}${DIM}?  ${RESET}${DIM}help${RESET}   ${BOLD}${DIM}^L${RESET} ${DIM}clear${RESET}   ${BOLD}${DIM}esc${RESET} ${DIM}quit${RESET}`,
 	];
-	const widest = Math.max(
-		visibleWidth(headerLeft) + visibleWidth(headerRight) + 2,
-		...contentLines.map((l) => visibleWidth(l)),
-	);
 	const maxBox = Math.max(0, cols - 2);
-	// widest + 2 spaces of gutter on each side + 2 border glyphs, so the widest
-	// line never ends up flush against the right border.
-	const desired = widest + 6;
-	const boxWidth = Math.min(Math.max(desired, 46), 64, maxBox);
+	// The welcome surface belongs to the same transcript as messages and tools,
+	// so it uses that same full available width (up to the shared readability
+	// cap). A content-sized banner created a detached mini-card on wide
+	// terminals, even though all subsequent boxes correctly occupied the row.
+	const boxWidth = Math.min(MAX_BLOCK_INNER + 4, maxBox);
 	// Below ~30 columns a border costs more than it communicates: the content
 	// would be truncated to slivers. Degrade to plain lines instead.
 	if (boxWidth < 30) return [headerLeft, ...contentLines];
