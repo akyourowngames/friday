@@ -969,7 +969,11 @@ export class Tui {
 
 			case "message_update":
 				if (event.message.role === "assistant") {
-					this.streamingText = this.assistantText(event.message);
+					// Stream the raw markdown source — don't run it through the
+					// markdown renderer per token. A partial `## Over` heading
+					// produces broken output if we parse it on every delta; the
+					// real render happens once on message_end.
+					this.streamingText = this.rawAssistantText(event.message);
 					const usage = (event.message as any).usage;
 					if (usage) {
 						this.lastUsage = {
@@ -987,6 +991,9 @@ export class Tui {
 			case "message_end":
 				if (event.message.role === "assistant") {
 					const m = event.message;
+					// Final render: parse the accumulated markdown ONCE. This is
+					// where headings, code fences, bullet lists, and tables get
+					// their structure and color.
 					const text = this.assistantText(m);
 					const hasToolCalls = m.content.some((c) => c.type === "toolCall");
 					// Tool-only replies render as the tool execution lines
@@ -1189,6 +1196,21 @@ export class Tui {
 		const parts: string[] = [];
 		for (const c of message.content) {
 			if (c.type === "text") parts.push(renderAssistantText(c.text));
+			else if (c.type === "thinking" && this.showThinking) parts.push(`[thinking: ${c.thinking}]`);
+		}
+		return parts.join("");
+	}
+
+	/**
+	 * Raw text concatenation for in-flight streaming — no markdown parsing.
+	 * The streaming box paints this verbatim, so partial `##` headings look
+	 * fine and the renderer doesn't have to re-parse the whole message on
+	 * every token.
+	 */
+	private rawAssistantText(message: AssistantMessage): string {
+		const parts: string[] = [];
+		for (const c of message.content) {
+			if (c.type === "text") parts.push(c.text);
 			else if (c.type === "thinking" && this.showThinking) parts.push(`[thinking: ${c.thinking}]`);
 		}
 		return parts.join("");

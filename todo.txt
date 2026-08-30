@@ -1,158 +1,36 @@
-Good project — and no worries, "kill it" heard loud and clear 😄. Here's a concrete plan for both asks, with actual code you can drop into your existing files.
+I've inspected the project. Here's the full picture.
 
-## 1. Fixing the TUI/CLI rendering
+## Overview
 
-Your `markdown.ts` + `tui.ts` already have solid bones (grapheme-aware wrapping, diff-based frame rendering, boxed messages) — what's missing is the stuff that makes Claude Code/Codex *feel* polished:
+This is the **`web` package** of **friday-ng** ("HarNESs"), a local, multi-provider AI coding agent with streaming tool calls. It's a **Next.js 15 App Router** frontend (not Vite, despite the stale README) that shells a parent `friday-ng` core repo.
 
-**a) Syntax-highlighted code blocks** (right now code blocks just get a flat background + one color per language). Add a lightweight tokenizer to `markdown.ts`:
+- **Stack:** Next.js 15.1, React 19.2, TypeScript 5.9 (strict), Tailwind 3.4, shadcn/ui (Radix + CVA + `lucide-react`), `cmdk`, `sonner`, `zod` (v4), `recharts`.
+- **Port:** dev/start on `4317`; built as a **standalone** output (`output: "standalone"`).
+- **Version:** `0.3.1`.
 
-```ts
-const KEYWORDS: Record<string, RegExp> = {
-	ts: /\b(const|let|var|function|return|if|else|for|while|import|export|async|await|class|interface|type|extends|implements|new|this|typeof|as|from)\b/g,
-	js: /\b(const|let|var|function|return|if|else|for|while|import|export|async|await|class|new|this|typeof)\b/g,
-	py: /\b(def|return|if|elif|else|for|while|import|from|class|as|with|try|except|async|await|lambda)\b/g,
-	bash: /\b(if|then|fi|for|do|done|echo|export|function)\b/g,
-};
+## Architecture
 
-function highlightLine(line: string, lang: string): string {
-	const kw = KEYWORDS[lang];
-	let out = line;
-	// strings first so keywords inside them aren't touched
-	out = out.replace(/(["'`])(?:(?!\1).)*\1/g, (m) => `${FG_GREEN}${m}${RESET}${BG_DIM}`);
-	out = out.replace(/\/\/.*$|#.*$/g, (m) => `${DIM}${m}${RESET}${BG_DIM}`);
-	if (kw) out = out.replace(kw, (m) => `${FG_YELLOW}${m}${RESET}${BG_DIM}`);
-	return out;
-}
-```
+**It's a thin frontend over a parent core.** Almost all business logic is imported via the tsconfig alias `@/src/* → ../src/*` — the chat route pulls in `Agent`, `buildStreamFunction`, `loadConfig`, `findProvider`, `SettingsStore`, the `shell`/`websearch` tools, etc. Those modules live in the **parent `friday-ng/src`**, which is *not present in this checkout* (the `friday-ng` folder only contains `web`). So this package **cannot build/run on its own** — it needs the sibling core repo.
 
-Then in `renderMarkdownColored`, when emitting `blockLines`, call `highlightLine(bl, lang)` instead of the flat color. It's not a full grammar, but regex-level highlighting gets you 80% of the visual win for near-zero cost/deps.
+**Data flow (server → client):**
+- `src/app/page.tsx` — server-rendered root; loads config + sessions and hydrates `<ChatApp>` (no loading flash).
+- `src/app/api/chat/route.ts` — the heart: POST resolves provider/model, loads/creates a session, reuses or builds an `Agent`, and streams `AgentEvent`s as **SSE** (`event: agent-event`, `session`, `complete`, `error`). Returns the `Response` *before* driving the agent to avoid Node stream backpressure deadlock. Honors client `AbortSignal` to stop the agent.
+- `src/server/agent-registry.ts` — in-process `Map<sessionId, Agent>` so multi-turn chats keep history.
+- `src/server/route-helpers.ts` — exposes 8 tools (bash, read, write, edit, multiEdit, glob, grep, websearch) + a `calculator` tool.
 
-**b) Diff rendering for `edit`/`write` tool results** — this is the single biggest "looks like a real coding agent" upgrade. Right now `summarizeToolResult` just prints "edited". Have `editTool`/`writeTool` return a unified-diff-ish preview in `details`, and render it in `tui.ts`:
+**Client:**
+- `src/lib/use-chat.ts` — owns transcript + SSE consumption; `reduceEvent()` is a pure reducer for applying `AgentEvent`s (text deltas, tool start/progress/end, dedup by toolCallId).
+- `src/lib/sse.ts` — hand-rolled SSE parser over `ReadableStream`.
+- `src/lib/api.ts` — single typed fetch wrapper.
+- Components: `ChatApp`, `Composer`, `MessageList`, `MessageBubble`, `ModelPicker`, `ToolCard`, `Topbar`, `SessionRail`, `SettingsModal`, `CommandPalette` (Cmd/Ctrl+K), `ThemeToggle`.
 
-```ts
-function renderDiffLines(oldText: string, newText: string, width: number): string[] {
-	const oldLines = oldText.split("\n");
-	const newLines = newText.split("\n");
-	const out: string[] = [];
-	// crude line diff is fine for chat display — full Myers diff is overkill
-	for (const l of oldLines) if (!newLines.includes(l)) out.push(truncateToWidth(`${RED}- ${l}${RESET}`, width));
-	for (const l of newLines) if (!oldLines.includes(l)) out.push(truncateToWidth(`${GREEN}+ ${l}${RESET}`, width));
-	return out;
-}
-```
+**Other API routes:** `health`, `config`, `settings` (POST saves settings), `sessions` (GET list), `sessions/[id]` (GET transcript), `abort` (POST stops an agent).
 
-Wire this into `tool_execution_end` handling for `edit`/`write` in `tui.ts`, appended under the `✓ edit path.ts` line, capped at ~10 lines.
+## Notes / Issues spotted
+1. **README is wrong** — still the default Vite/React template text; doesn't match the Next.js app.
+2. **Missing parent core** — `../src/*` imports won't resolve here; building standalone fails without the `friday-ng` core repo.
+3. **`buildModel` defaults** — `cost: 0` and `reasoning: false` are hardcoded for every model in `route-helpers.ts`, so cost/token accounting is currently inert.
+4. **`use-chat.ts`** — `toolCategory` / `deriveText` imported from `./types-helpers` (local copy) while `route-helpers.ts` has its own `deriveText`/`resultText` (server copy); minor duplication.
+5. **`ChatApp`** — `onSettingsChange` is a no-op and theme is managed with manual `data-theme`/class toggling alongside `next-themes`, slightly redundant.
 
-**c) Hyperlinks (OSC 8)** — URLs in assistant text (docs links, file paths) should be clickable:
-
-```ts
-function osc8Link(url: string, label = url): string {
-	return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
-}
-```
-Apply to `\bhttps?:\/\/\S+\b` matches in `renderAssistantText`.
-
-**d) Tables** — `markdown.ts` has no `| a | b |` support at all; add a case in `renderMarkdown` that detects a `---|---` separator line and box-draws a table. Low priority unless the model outputs tables often.
-
-Priority order I'd actually do this in: **(b) diffs → (a) highlighting → (c) links → (d) tables**. Diffs are what makes edits legible; the rest is polish.
-
-## 2. `/init` — personal profile
-
-Model it on Claude Code's `/init`, but pointed at *you* instead of the repo. Two pieces: a profile file + a slash command that bootstraps it conversationally (reusing your existing `write`/`read` tools instead of building new plumbing).
-
-**`src/profile.ts`** (new file):
-```ts
-import { promises as fs } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
-export function profileDir(): string {
-	return process.env.FRIDAY_NG_CONFIG_DIR ?? path.join(os.homedir(), ".friday-ng");
-}
-export function profilePath(): string {
-	return path.join(profileDir(), "PROFILE.md");
-}
-export async function loadProfile(): Promise<string | undefined> {
-	try {
-		return await fs.readFile(profilePath(), "utf8");
-	} catch {
-		return undefined;
-	}
-}
-```
-
-**Slash command** (`commands/builtin.ts`):
-```ts
-export function makeInitCommand(deps: { hasProfile: () => Promise<boolean>; dir: string }): SlashCommand {
-	return {
-		name: "/init",
-		description: "Set up or update your personal profile (name, preferences, current projects).",
-		run: async (): Promise<SlashCommandResult> => {
-			const exists = await deps.hasProfile();
-			const prompt = exists
-				? `Read PROFILE.md (root: "${deps.dir}") with the read tool, summarize it for me, ask what's changed, then rewrite it with the write tool (same root) once I confirm.`
-				: `Interview me one question at a time — name, role, how I like explanations (terse vs detailed), tone, current projects, anything else worth remembering. When done, write a concise Markdown PROFILE.md via the write tool with root "${deps.dir}" and path "PROFILE.md".`;
-			return { submitFollowUp: prompt };
-		},
-	};
-}
-```
-
-Important gotcha: `writeTool` restricts writes to inside `root` (defaults to `process.cwd()`). Pass `root: profileDir()` explicitly in the prompt (as above) or the safety check in `path-safety.ts` will reject the absolute home-dir path.
-
-**Wire it into `cli.ts`**: register the command next to the others, and make `buildSystemPrompt` async so it injects the profile every session:
-
-```ts
-async function buildSystemPrompt(modelId: string): Promise<string> {
-	const profile = await loadProfile();
-	return (
-		`You are friday-ng, a next-generation AI assistant with instant token streaming. ` +
-		`Current model: ${modelId}. Be helpful, concise, and friendly.` +
-		(profile ? `\n\n## About the user\n${profile}\n` : "") +
-		buildEnvironmentContext()
-	);
-}
-```
-(you'll need to `await` the two call sites in `main()`/`runRepl()`.)
-
-One more nicety: also support a **project-level** file (`./AGENTS.md` in cwd, like CLAUDE.md) loaded alongside the global `PROFILE.md` — global = who you are, project file = what this codebase is. Same loader pattern, just `path.join(process.cwd(), "AGENTS.md")`.
-
----
-
-## STATUS — all four items are done
-
-**1. TUI/CLI rendering**
-- (a) Syntax highlighting — `highlightCode()` in `src/markdown.ts`. Tokenizer for js/ts/py/bash: keywords, strings, comments, numbers.
-- (b) Diffs — `src/diff.ts` (LCS, prefix/suffix trim, context collapsing, size guard) + `diffDetailLines()` in `src/tui.ts`. `write` / `edit` / `multi_edit` render as colored hunks; summaries carry `(+N -M)` stats.
-- (c) Hyperlinks — `linkify()` in `src/markdown.ts` (OSC 8), with ANSI-aware truncate/wrap/slice helpers so escape sequences never break width math.
-- (d) Tables — `renderTable()` in `src/markdown.ts`, box-drawn with alignment + width-aware shrink.
-
-**2. `/init` profile**
-- `src/profile.ts` — global `~/.friday-ng/PROFILE.md` + project-level `./AGENTS.md`, atomic writes, path containment checks.
-- `/init`, `/profile edit <text>`, `/undo` in `src/commands/builtin.ts`, registered via `registerBuiltinCommands()`.
-- `buildSystemPrompt()` in `src/cli.ts` injects both files; startup nudges `/init` when no profile exists.
-
-**Follow-ups after the first pass**
-- Hunk headers — `diffChunks()` emits `@@ -a,b +c,d @@` before each run of changes, but only when
-  the diff is split into several hunks or has elided context; a single small change stays bare.
-  Pure insertions report `-n,0`, pure deletions `+n,0`, brand-new files `-0,0`.
-- Console renderer — one-shot CLI (`friday-ng -p ...`) now prints the same diff after the result
-  line, in plain text with no ANSI (it's routinely piped to files). `showDiffs: false` opts out.
-  Two lines of context, capped at 20 lines.
-- Shared the "which results have a diff" logic as `toolDiffEdits()` / `formatToolDiff()` in
-  `src/diff.ts` so the TUI and the console renderer can't drift apart.
-
-**Also done while implementing (b)**
-- Tool `details` payloads are capped at 256 KB (`diffPayload()` in `src/tools/shell.ts`) so huge files don't bloat the event stream or session transcripts; oversized pairs degrade to `diffTooLarge: true` + line counts.
-- Fixed a latent bug: the old renderer matched `multiEdit`, but the tool is named `multi_edit`, so multi-file diffs never rendered.
-- Tests: `tests/diff.test.ts` (22) plus new `tests/tui.test.ts` and `tests/console-renderer.test.ts`
-  cases. `tsc --noEmit` is clean.
-
-**Known environmental failures (not code defects)**
-- `tests/console-setup.test.ts` writes to the Windows registry via `reg.exe`, which a sandbox blocks
-  with EPERM. Passes on a normal machine.
-- `tests/todos.test.ts` intermittently fails its `afterEach` cleanup with "Hook timed out in 10000ms"
-  only during the full parallel run — the sandbox is slow enough that `fs.rm(recursive)` exceeds the
-  hook timeout. Passes 4/4 in isolation.
-
-That gets you: `/init` once → friday-ng remembers you across every session and project, plus per-project context when you want it. Want me to also sketch the `/profile` (quick view/edit) and auto-detection of "no profile yet → suggest `/init`" on first run?
+Want me to dig deeper into any specific area (e.g., the tool system, SSE wiring, the UI components), fix the README, or check whether the parent core can be located?

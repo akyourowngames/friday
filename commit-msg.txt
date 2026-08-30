@@ -1,0 +1,18 @@
+fix(tui): render markdown once on message_end, stream raw during deltas
+
+The TUI was re-parsing the full accumulated assistant message through
+the markdown renderer on every streaming token. That meant partial
+`## Over` text mid-stream produced broken output, and the markdown
+pipeline (code fences, headings, bullet lists, tables) didn't actually
+appear in the final box until a re-paint.
+
+Switch the streaming path to concatenate raw text only; run the full
+`renderAssistantText` markdown pass exactly once on `message_end`,
+where the final history entry is built. The streaming box still shows
+the live text with its animated cursor; the final box now has the
+proper headings, code-fence borders, bullet markers, and table grid.
+
+Adds `rawAssistantText()` (no-op concat) alongside the existing
+`assistantText()` (full markdown pass).
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
