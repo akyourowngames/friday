@@ -20,6 +20,7 @@ const {
 	renderToolEntry,
 	renderTodos,
 	buildWelcomeBox,
+	diffDetailLines,
 } = await import("../src/tui.ts");
 
 // Lazy imports for the slash-command tests (avoids circular-import issues at
@@ -948,6 +949,66 @@ describe("structured tool rendering and pinned todos", () => {
 		expect(lines).toContain("+ new");
 		expect(lines).toContain("\x1b[31m");
 		expect(lines).toContain("\x1b[32m");
+	});
+
+	it("diffs a whole-file write instead of dumping every line", () => {
+		const before = Array.from({ length: 60 }, (_, i) => `line-${i}`).join("\n");
+		const after = before.replace("line-30", "line-30-edited");
+		const lines = diffDetailLines("write", { details: { path: "big.ts", oldText: before, newText: after } });
+		expect(lines.some((l) => l.includes("- line-30"))).toBe(true);
+		expect(lines.some((l) => l.includes("+ line-30-edited"))).toBe(true);
+		expect(lines.some((l) => l.includes("unchanged lines"))).toBe(true);
+		// Unchanged lines far from the change must not be printed.
+		expect(lines.some((l) => l.includes("line-0") || l.includes("line-59"))).toBe(false);
+		expect(lines.length).toBeLessThanOrEqual(10);
+	});
+
+	it("renders multi_edit hunks per file", () => {
+		const lines = diffDetailLines("multi_edit", {
+			details: {
+				edits: [
+					{ path: "a.ts", oldText: "one", newText: "uno" },
+					{ path: "b.ts", oldText: "two", newText: "dos" },
+				],
+			},
+		}).join("\n");
+		expect(lines).toContain("a.ts");
+		expect(lines).toContain("b.ts");
+		expect(lines).toContain("- one");
+		expect(lines).toContain("+ dos");
+	});
+
+	it("falls back to a summary when the payload is too large to diff", () => {
+		expect(diffDetailLines("write", { details: { path: "huge.ts", diffTooLarge: true, bytes: 9_000_000 } })).toEqual([]);
+		expect(summarizeToolResult("write", { content: [], details: { bytes: 9_000_000, diffTooLarge: true } }, false)).toBe("wrote 9000000 bytes");
+	});
+
+	it("summarizes multi_edit as edits across files", () => {
+		const result = (details: unknown) => ({ content: [], details });
+		expect(summarizeToolResult("multi_edit", result({ edits: [] }), false)).toBe("done");
+		expect(
+			summarizeToolResult("multi_edit", result({
+				edits: [
+					{ path: "a.ts", oldText: "one", newText: "uno" },
+					{ path: "b.ts", oldText: "two", newText: "dos" },
+				],
+			}), false),
+		).toBe("2 edits across 2 files (+2 -2)");
+		expect(
+			summarizeToolResult("multi_edit", result({
+				edits: [
+					{ path: "a.ts", oldText: "one\ntwo", newText: "uno" },
+					{ path: "a.ts", oldText: "x", newText: "y" },
+				],
+			}), false),
+		).toBe("2 edits across 1 file (+2 -3)");
+	});
+
+	it("summarizes writes and edits with +/- line stats", () => {
+		expect(summarizeToolResult("edit", { content: [], details: { oldText: "a\nb", newText: "a\nc\nd" } }, false)).toBe("edited (+2 -1)");
+		expect(summarizeToolResult("edit", { content: [], details: {} }, false)).toBe("edited");
+		expect(summarizeToolResult("write", { content: [], details: { bytes: 42, oldText: "", newText: "new" } }, false)).toBe("wrote 42 bytes (new file)");
+		expect(summarizeToolResult("write", { content: [], details: { bytes: 42 } }, false)).toBe("wrote 42 bytes");
 	});
 
 	it("renders bounded todos without including them in scrollback", () => {

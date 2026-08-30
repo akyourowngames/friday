@@ -119,6 +119,18 @@ export {
 } from "./sessions.ts";
 export type { SessionMeta, SavedSession } from "./sessions.ts";
 
+// Diff (write/edit result previews)
+export {
+	diffLines,
+	diffChunks,
+	diffStats,
+	formatDiff,
+	formatDiffChunk,
+	formatToolDiff,
+	toolDiffEdits,
+} from "./diff.ts";
+export type { DiffChunk, DiffEdit, DiffHunk, DiffLine, DiffOp, DiffOptions, DiffSkip, DiffStats } from "./diff.ts";
+
 // Compaction
 export {
 	compactTranscript,

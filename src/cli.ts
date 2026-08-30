@@ -22,7 +22,7 @@ import { isOllamaRunning } from "./providers/ollama.ts";
 import { setupConsoleEncoding, applyWindowsUtf8Default, revertWindowsUtf8Default, readConsoleStatus, enableVirtualTerminalProcessing } from "./console-setup.ts";
 import { bashTool, readTool, writeTool, editTool, multiEditTool, globTool, grepTool, isDangerousShellCommand } from "./tools/shell.ts";
 import { websearchTool } from "./tools/websearch.ts";
-import { buildEnvironmentContext } from "./env-context.ts";
+import { buildSystemPrompt } from "./system-prompt.ts";
 import { Type } from "typebox";
 import { SettingsStore, settingsToJson } from "./settings.ts";
 import { parseSlashCommand, clearSlashCommands } from "./slash-commands.ts";
@@ -33,7 +33,7 @@ import { withRetry } from "./retry.ts";
 import { HookRegistry } from "./hooks.ts";
 import { buildHost, defaultExtensionsDir, loadExtensions } from "./extension-loader.ts";
 import { DEFAULT_POLICY, decide } from "./permissions.ts";
-import { appendProfile, loadProfile, loadProjectFile, profileDir, profileExists } from "./profile.ts";
+import { appendProfile, loadProfile, profileDir, profileExists } from "./profile.ts";
 import { loadTodos, makeTodoWriteTool, saveTodos, type TodoStore } from "./todos.ts";
 import { createCheckpoint, discardCheckpoint, finalizeCheckpoint, listCheckpoints, restoreCheckpoint, type CheckpointManifest } from "./checkpoints.ts";
 import type { AgentMessage, Model, Tool } from "./types.ts";
@@ -396,19 +396,6 @@ async function main(): Promise<void> {
 
 	await agent.prompt(opts.prompt);
 	await agent.waitForIdle();
-}
-
-/** Build the system prompt: identity + live environment context (OS, shell,
- *  cwd, current date) so the model never needs a tool call to learn them. */
-export async function buildSystemPrompt(modelId: string, workspace = process.cwd()): Promise<string> {
-	const [profile, project] = await Promise.all([loadProfile(), loadProjectFile(workspace)]);
-	return (
-		`You are friday-ng, a next-generation AI assistant with instant token streaming. ` +
-		`Current model: ${modelId}. Be helpful, concise, and friendly.` +
-		(profile ? `\n\n## About the user\n${profile.trim()}\n` : "") +
-		(project ? `\n\n## About this project\n${project.trim()}\n` : "") +
-		buildEnvironmentContext()
-	);
 }
 
 /** Build the `Model` object the Agent loop needs from provider meta + id. */

@@ -11,18 +11,25 @@
  * in `./tui.ts` via `friday-ng -i`.
  */
 import type { AgentEvent, AssistantMessage, AgentMessage } from "./types.ts";
+import { formatToolDiff } from "./diff.ts";
 
 const ANSI_HIDE_CURSOR = "\x1b[?25l";
 const ANSI_SHOW_CURSOR = "\x1b[?25h";
 
+/** Diffs are for humans reading the terminal; nobody wants 200 lines of them. */
+const CONSOLE_DIFF_CONTEXT = 2;
+const CONSOLE_DIFF_MAX_LINES = 20;
+
 export interface ConsoleRendererOptions {
 	out?: (text: string) => void;
 	showThinking?: boolean;
+	showDiffs?: boolean;
 }
 
 export class ConsoleRenderer {
 	private output: (text: string) => void;
 	private showThinking: boolean;
+	private showDiffs: boolean;
 	private currentAssistantText: string = "";
 	/** Number of terminal rows the last painted assistant block occupied. */
 	private assistantRowCount = 0;
@@ -30,6 +37,7 @@ export class ConsoleRenderer {
 	constructor(options: ConsoleRendererOptions = {}) {
 		this.output = options.out ?? ((text) => process.stdout.write(text));
 		this.showThinking = options.showThinking ?? false;
+		this.showDiffs = options.showDiffs ?? true;
 	}
 
 	render(event: AgentEvent): void {
@@ -70,9 +78,17 @@ export class ConsoleRenderer {
 				this.output(`\n≻ ${event.toolName}(${JSON.stringify(event.args)})\n`);
 				break;
 
-			case "tool_execution_end":
+			case "tool_execution_end": {
 				this.output(`[${event.isError ? "Error" : "Result"}: ${this.toolResultText(event.result)}]\n`);
+				if (!this.showDiffs || event.isError) break;
+				const details = (event.result as { details?: unknown } | undefined)?.details;
+				const diff = formatToolDiff(event.toolName, details, {
+					context: CONSOLE_DIFF_CONTEXT,
+					maxLines: CONSOLE_DIFF_MAX_LINES,
+				});
+				if (diff.length > 0) this.output(`${diff.join("\n")}\n`);
 				break;
+			}
 
 			case "turn_end":
 				break;

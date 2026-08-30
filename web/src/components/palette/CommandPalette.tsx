@@ -1,0 +1,73 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Plus, Search, Settings2, Sun } from "lucide-react";
+
+export function CommandPalette({
+	onClose,
+	actions,
+}: {
+	onClose: () => void;
+	actions: {
+		newSession: () => void;
+		openSettings: () => void;
+		toggleTheme: () => void;
+	};
+}) {
+	const [query, setQuery] = useState("");
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") onClose();
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [onClose]);
+
+	const items = [
+		{ label: "New session", icon: Plus, run: actions.newSession },
+		{ label: "Open settings", icon: Settings2, run: actions.openSettings },
+		{ label: "Toggle theme", icon: Sun, run: actions.toggleTheme },
+	];
+	const filtered = items.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()));
+
+	return (
+		<div className="harness-modal-backdrop" onMouseDown={onClose}>
+			<section
+				className="harness-modal harness-palette"
+				onMouseDown={(e) => e.stopPropagation()}
+				role="dialog"
+				aria-label="Command palette"
+			>
+				<div className="harness-palette-search">
+					<Search size={17} />
+					<input
+						autoFocus
+						placeholder="Type a command or search…"
+						value={query}
+						onChange={(e) => setQuery(e.target.value)}
+					/>
+				</div>
+				<div className="harness-palette-actions">
+					<p>Quick actions</p>
+					{filtered.map((item) => {
+						const Icon = item.icon;
+						return (
+							<button
+								key={item.label}
+								type="button"
+								onClick={() => {
+									item.run();
+									onClose();
+								}}
+							>
+								<Icon size={16} />
+								{item.label}
+							</button>
+						);
+					})}
+				</div>
+			</section>
+		</div>
+	);
+}

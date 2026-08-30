@@ -17,6 +17,7 @@
  * difference is the surface (a living TUI instead of a single scroll).
  */
 import type { AgentEvent, AgentMessage, AssistantMessage } from "./types.ts";
+import { diffChunks, diffStats, formatDiffChunk, toolDiffEdits, type DiffChunk } from "./diff.ts";
 import { markdownSliceByWidth, markdownTruncateToWidth, markdownVisibleWidth, renderMarkdown, renderMarkdownColored } from "./markdown.ts";
 import { findCommands } from "./slash-commands.ts";
 
@@ -416,21 +417,42 @@ function resultText(result: unknown): string {
 	return (r.content ?? []).filter((c) => c?.type === "text").map((c) => c.text ?? "").join("\n").trim();
 }
 
-function diffDetailLines(name: string, result: unknown): string[] {
-	const details = ((result ?? {}) as { details?: any }).details;
-	if (!details || !["edit", "write", "multiEdit", "multiedit", "multi_edit"].includes(name)) return [];
-	const edits = ["multiedit", "multi_edit"].includes(name.toLowerCase())
-		? (Array.isArray(details) ? details : details.edits ?? details.changes ?? [])
-		: [details];
+const DIFF_CONTEXT = 1;
+const DIFF_MAX_LINES = 12;
+
+function colorizeDiffChunk(chunk: DiffChunk): string {
+	const text = formatDiffChunk(chunk);
+	switch (chunk.op) {
+		case "add":
+			return `${GREEN}${text}${RESET}`;
+		case "remove":
+			return `${RED}${text}${RESET}`;
+		case "hunk":
+			return `${CYAN}${text}${RESET}`;
+		default:
+			return `${DIM}${text}${RESET}`;
+	}
+}
+
+/**
+ * Render a `write` / `edit` / `multi_edit` result as colored hunks.
+ *
+ * Uses the real line diff, so a one-line change in a 2,000-line file shows
+ * one `-` and one `+` with a line of context and a `@@ -n,m @@` header — not
+ * the whole file. Files too large to diff safely render nothing and let the
+ * caller fall back to the byte/line-count summary.
+ */
+export function diffDetailLines(name: string, result: unknown): string[] {
+	const details = ((result ?? {}) as { details?: unknown }).details;
+	const edits = toolDiffEdits(name, details);
+
 	const out: string[] = [];
 	for (const edit of edits) {
-		if (!edit || typeof edit !== "object") continue;
-		if (typeof edit.path === "string") out.push(`${DIM}${edit.path}${RESET}`);
-		if (typeof edit.oldText === "string") {
-			for (const line of edit.oldText.split("\n")) out.push(`${RED}- ${line}${RESET}`);
-		}
-		if (typeof edit.newText === "string") {
-			for (const line of edit.newText.split("\n")) out.push(`${GREEN}+ ${line}${RESET}`);
+		const { oldText, newText } = edit;
+		if (typeof oldText !== "string" || typeof newText !== "string" || oldText === newText) continue;
+		if (edits.length > 1 && typeof edit.path === "string") out.push(`${DIM}${edit.path}${RESET}`);
+		for (const chunk of diffChunks(oldText, newText, { context: DIFF_CONTEXT, maxLines: DIFF_MAX_LINES })) {
+			out.push(colorizeDiffChunk(chunk));
 		}
 	}
 	return out;
@@ -2186,6 +2208,17 @@ function firstLines(text: string, maxLines: number, maxChars: number): string {
 	return out;
 }
 
+/**
+ * `(+3 -1)` suffix for results that carry both sides of a file change. Empty
+ * when there is nothing to diff (no payload, no changes, or too large).
+ */
+function diffStatSuffix(details: Record<string, unknown>): string {
+	if (typeof details.oldText !== "string" || typeof details.newText !== "string") return "";
+	const stats = diffStats(details.oldText, details.newText);
+	if (!stats || (stats.added === 0 && stats.removed === 0)) return "";
+	return ` (+${stats.added} -${stats.removed})`;
+}
+
 /** Build a short human summary of a tool result from its metadata — the
  *  opposite of dumping content into the chat. File reads report line
  *  counts, searches report match counts, bash reports its exit code plus
@@ -2237,11 +2270,32 @@ export function summarizeToolResult(name: string, result: unknown, isError: bool
 		}
 		case "write": {
 			const b = details.bytes;
-			if (typeof b === "number") return `wrote ${b} bytes`;
-			return "done";
+			const head = typeof b === "number" ? `wrote ${b} bytes` : "done";
+			if (details.oldText === "") return `${head} (new file)`;
+			return `${head}${diffStatSuffix(details)}`;
 		}
 		case "edit":
-			return "edited";
+			return `edited${diffStatSuffix(details)}`;
+		case "multi_edit": {
+			const edits = toolDiffEdits(name, details);
+			if (edits.length === 0) return "done";
+			let added = 0;
+			let removed = 0;
+			const files = new Set<string>();
+			for (const edit of edits) {
+				if (!edit || typeof edit !== "object") continue;
+				if (typeof edit.path === "string") files.add(edit.path);
+				if (typeof edit.oldText !== "string" || typeof edit.newText !== "string") continue;
+				const stats = diffStats(edit.oldText, edit.newText);
+				if (stats) {
+					added += stats.added;
+					removed += stats.removed;
+				}
+			}
+			const stat = added === 0 && removed === 0 ? "" : ` (+${added} -${removed})`;
+			const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+			return `${plural(edits.length, "edit")} across ${plural(files.size, "file")}${stat}`;
+		}
 		default:
 			return firstLines(text, 1, 120) || "done";
 	}

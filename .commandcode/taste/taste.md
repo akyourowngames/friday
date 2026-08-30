@@ -7,4 +7,8 @@
 - Prefers the assistant to handle publish-readiness prep itself (bump version, write LICENSE, add `.npmrc`, dry-run pack) but NEVER to run `npm login` or touch credentials — the user drives auth in a separate shell and signals when done. Confidence: 0.85
 
 ## Communication
-- Sends terse, casual, lowercase requests (typos common, e.g. "contieu", "hanress"); expects the assistant to infer missing specifics (like where session files live) instead of asking for clarification. Resumes in-progress work with single-word prompts like "continue". Confidence: 0.6
+- Sends terse, casual, lowercase requests (typos common, e.g. "contieu", "hanress", "di for and for repsonses"); expects the assistant to infer missing specifics (like where session files live) instead of asking for clarification. Resumes in-progress work with single-word prompts like "continue". Confidence: 0.7
+- Wants **properly formatted responses with headings, bullet points, and code blocks** — explicitly does NOT want raw text dumps (e.g. dumping raw `bash` JSON tool calls or file lists without structure). Confidence: 0.85
+
+## Git / publishing
+- GitHub username is `akyourowngames` — expects the assistant to push local changes to that GitHub account when asked ("push all local changes to github as akyourowngames"). Confidence: 0.8

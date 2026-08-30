@@ -32,8 +32,9 @@ designed around a few key principles:
 | **Extension loader** | `src/extension-loader.ts` | Auto-discovers and runs `~/.friday-ng/extensions/*.js` modules that can register commands, tools, and hooks. |
 | **Retry** | `src/retry.ts` | Wraps a `StreamFn` with exponential-backoff retry for transient errors (overloaded, 5xx, 429, network). |
 | **TUI** | `src/tui.ts` | Raw-mode Pi-style REPL with input history, multiline (shift+enter), command palette, model picker, status line, scroll, and markdown-aware rendering. |
-| **Console renderer** | `src/console-renderer.ts` | Token-by-token console rendering with optional color. |
-| **Markdown** | `src/markdown.ts` | Tiny dependency-free markdown subset (code, bold, italic, links, lists). |
+| **Console renderer** | `src/console-renderer.ts` | Token-by-token console rendering; prints plain-text (ANSI-free) file diffs after `write` / `edit` / `multi_edit`. Set `showDiffs: false` to switch them off. |
+| **Markdown** | `src/markdown.ts` | Tiny dependency-free markdown subset (code, bold, italic, links, lists, tables) with regex-level syntax highlighting and OSC 8 hyperlinks. |
+| **Diff** | `src/diff.ts` | LCS line diff with prefix/suffix trimming, context collapsing, `@@ -a,b +c,d @@` hunk headers, and a size guard. Renders `write` / `edit` / `multi_edit` results as hunks instead of dumping whole files. |
 | **Providers** | `src/providers/*.ts` | OpenAI, Anthropic, Google, Ollama, Groq, OpenRouter, DeepSeek, Mistral, Together, Kilo, freecc, plus a `faux` mock. |
 | **Config** | `src/config.ts` | Persisted `~/.friday-ng/config.json` with API keys, last model, recent sessions, last session id. |
 | **Console setup** | `src/console-setup.ts` | Windows console UTF-8 + VT helpers (`--setup-utf8` / `--revert-utf8`). |

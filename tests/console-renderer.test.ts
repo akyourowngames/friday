@@ -116,6 +116,45 @@ describe("ConsoleRenderer", () => {
 		expect(finalOutput).toContain("4");
 	});
 
+	it("prints a plain-text diff after a file write", () => {
+		const output: string[] = [];
+		const renderer = new ConsoleRenderer({ out: (text) => output.push(text) });
+		const before = Array.from({ length: 20 }, (_, i) => `line-${i}`).join("\n");
+		const after = before.replace("line-10", "changed");
+
+		renderer.render({
+			type: "tool_execution_end",
+			toolCallId: "abc",
+			toolName: "write",
+			result: { content: [{ type: "text", text: "Wrote 132 bytes" }], details: { path: "f.ts", oldText: before, newText: after } },
+			isError: false,
+		});
+
+		const finalOutput = output.join("");
+		expect(finalOutput).toContain("- line-10");
+		expect(finalOutput).toContain("+ changed");
+		// Two lines of context on each side, so the hunk spans old lines 9-13.
+		expect(finalOutput).toContain("@@ -9,5 +9,5 @@");
+		expect(finalOutput).toContain("⋮ 8 unchanged lines");
+		// No ANSI escapes — this renderer is routinely piped to files.
+		expect(finalOutput).not.toContain("\x1b[");
+	});
+
+	it("leaves non-file tools and errors alone", () => {
+		const output: string[] = [];
+		const renderer = new ConsoleRenderer({ out: (text) => output.push(text) });
+		renderer.render({ type: "tool_execution_end", toolCallId: "a", toolName: "bash", result: { content: [{ type: "text", text: "ok" }], details: { code: 0 } }, isError: false });
+		renderer.render({ type: "tool_execution_end", toolCallId: "b", toolName: "edit", result: { content: [{ type: "text", text: "boom" }], details: { oldText: "a", newText: "b" } }, isError: true });
+		expect(output.join("")).not.toContain("- a");
+	});
+
+	it("can be switched off", () => {
+		const output: string[] = [];
+		const renderer = new ConsoleRenderer({ out: (text) => output.push(text), showDiffs: false });
+		renderer.render({ type: "tool_execution_end", toolCallId: "a", toolName: "edit", result: { content: [], details: { oldText: "a", newText: "b" } }, isError: false });
+		expect(output.join("")).not.toContain("- a");
+	});
+
 	it("should render agent_end", () => {
 		const output: string[] = [];
 		const renderer = new ConsoleRenderer({ out: (text) => output.push(text) });

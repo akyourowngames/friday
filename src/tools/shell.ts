@@ -293,6 +293,28 @@ export const readTool: AgentTool<typeof readParams> = {
 	},
 };
 
+/**
+ * Cap on the before/after payloads attached to write/edit results.
+ *
+ * Those payloads exist purely so the TUI can render a diff. Shipping both
+ * copies of a multi-megabyte file through the event stream (and into the
+ * session transcript) buys no legibility, so oversized pairs are replaced by
+ * line counts and the UI falls back to its plain "wrote N bytes" summary.
+ */
+export const MAX_DIFF_PAYLOAD_BYTES = 256 * 1024;
+
+function countLines(text: string): number {
+	return text.length === 0 ? 0 : text.split("\n").length;
+}
+
+/** Build the `{ oldText, newText }` diff payload, or a size fallback. */
+export function diffPayload(oldText: string, newText: string): Record<string, unknown> {
+	if (oldText.length <= MAX_DIFF_PAYLOAD_BYTES && newText.length <= MAX_DIFF_PAYLOAD_BYTES) {
+		return { oldText, newText };
+	}
+	return { diffTooLarge: true, oldLines: countLines(oldText), newLines: countLines(newText) };
+}
+
 /** `write` — write a file (overwriting if it exists). */
 const writeParams = Type.Object({
 	path: Type.String({ description: "File path to write" }),
@@ -321,7 +343,12 @@ export const writeTool: AgentTool<typeof writeParams> = {
 			await fs.writeFile(safe, params.content, "utf8");
 			return {
 				content: [{ type: "text" as const, text: `Wrote ${params.content.length} bytes to ${safe}` }],
-				details: { path: safe, oldText, newText: params.content, bytes: params.content.length },
+				details: {
+					path: safe,
+					bytes: params.content.length,
+					previousBytes: oldText.length,
+					...diffPayload(oldText, params.content),
+				},
 			};
 		} catch (e) {
 			return errorResult(e instanceof Error ? e.message : String(e));
@@ -364,7 +391,12 @@ export const editTool: AgentTool<typeof editParams> = {
 			await fs.writeFile(safe, next, "utf8");
 			return {
 				content: [{ type: "text" as const, text: `Edited ${safe} (1 occurrence replaced)` }],
-				details: { path: safe, oldText, newText, oldLen: oldText.length, newLen: newText.length },
+				details: {
+					path: safe,
+					oldLen: oldText.length,
+					newLen: newText.length,
+					...diffPayload(oldText, newText),
+				},
 			};
 		} catch (e) {
 			return errorResult(e instanceof Error ? e.message : String(e));
@@ -393,7 +425,7 @@ export const multiEditTool: AgentTool<typeof multiEditParams> = {
 		const root = params.root ?? process.cwd();
 		const originals = new Map<string, string>();
 		const nextContents = new Map<string, string>();
-		const details: { path: string; oldText: string; newText: string }[] = [];
+		const details: Record<string, unknown>[] = [];
 		try {
 			for (const edit of params.edits) {
 				const safe = resolveSafePath(root, edit.path);
@@ -412,7 +444,7 @@ export const multiEditTool: AgentTool<typeof multiEditParams> = {
 					return errorResult(`oldText matches ${occurrences} times in ${safe}; please provide a more specific snippet`);
 				}
 				nextContents.set(safe, current.replace(edit.oldText, edit.newText));
-				details.push({ path: safe, oldText: edit.oldText, newText: edit.newText });
+				details.push({ path: safe, ...diffPayload(edit.oldText, edit.newText) });
 			}
 		} catch (error) {
 			return errorResult(error instanceof Error ? error.message : String(error));

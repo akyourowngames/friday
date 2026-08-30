@@ -117,4 +117,42 @@ async function buildSystemPrompt(modelId: string): Promise<string> {
 
 One more nicety: also support a **project-level** file (`./AGENTS.md` in cwd, like CLAUDE.md) loaded alongside the global `PROFILE.md` — global = who you are, project file = what this codebase is. Same loader pattern, just `path.join(process.cwd(), "AGENTS.md")`.
 
+---
+
+## STATUS — all four items are done
+
+**1. TUI/CLI rendering**
+- (a) Syntax highlighting — `highlightCode()` in `src/markdown.ts`. Tokenizer for js/ts/py/bash: keywords, strings, comments, numbers.
+- (b) Diffs — `src/diff.ts` (LCS, prefix/suffix trim, context collapsing, size guard) + `diffDetailLines()` in `src/tui.ts`. `write` / `edit` / `multi_edit` render as colored hunks; summaries carry `(+N -M)` stats.
+- (c) Hyperlinks — `linkify()` in `src/markdown.ts` (OSC 8), with ANSI-aware truncate/wrap/slice helpers so escape sequences never break width math.
+- (d) Tables — `renderTable()` in `src/markdown.ts`, box-drawn with alignment + width-aware shrink.
+
+**2. `/init` profile**
+- `src/profile.ts` — global `~/.friday-ng/PROFILE.md` + project-level `./AGENTS.md`, atomic writes, path containment checks.
+- `/init`, `/profile edit <text>`, `/undo` in `src/commands/builtin.ts`, registered via `registerBuiltinCommands()`.
+- `buildSystemPrompt()` in `src/cli.ts` injects both files; startup nudges `/init` when no profile exists.
+
+**Follow-ups after the first pass**
+- Hunk headers — `diffChunks()` emits `@@ -a,b +c,d @@` before each run of changes, but only when
+  the diff is split into several hunks or has elided context; a single small change stays bare.
+  Pure insertions report `-n,0`, pure deletions `+n,0`, brand-new files `-0,0`.
+- Console renderer — one-shot CLI (`friday-ng -p ...`) now prints the same diff after the result
+  line, in plain text with no ANSI (it's routinely piped to files). `showDiffs: false` opts out.
+  Two lines of context, capped at 20 lines.
+- Shared the "which results have a diff" logic as `toolDiffEdits()` / `formatToolDiff()` in
+  `src/diff.ts` so the TUI and the console renderer can't drift apart.
+
+**Also done while implementing (b)**
+- Tool `details` payloads are capped at 256 KB (`diffPayload()` in `src/tools/shell.ts`) so huge files don't bloat the event stream or session transcripts; oversized pairs degrade to `diffTooLarge: true` + line counts.
+- Fixed a latent bug: the old renderer matched `multiEdit`, but the tool is named `multi_edit`, so multi-file diffs never rendered.
+- Tests: `tests/diff.test.ts` (22) plus new `tests/tui.test.ts` and `tests/console-renderer.test.ts`
+  cases. `tsc --noEmit` is clean.
+
+**Known environmental failures (not code defects)**
+- `tests/console-setup.test.ts` writes to the Windows registry via `reg.exe`, which a sandbox blocks
+  with EPERM. Passes on a normal machine.
+- `tests/todos.test.ts` intermittently fails its `afterEach` cleanup with "Hook timed out in 10000ms"
+  only during the full parallel run — the sandbox is slow enough that `fs.rm(recursive)` exceeds the
+  hook timeout. Passes 4/4 in isolation.
+
 That gets you: `/init` once → friday-ng remembers you across every session and project, plus per-project context when you want it. Want me to also sketch the `/profile` (quick view/edit) and auto-detection of "no profile yet → suggest `/init`" on first run?
