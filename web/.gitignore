@@ -32,3 +32,8 @@ pnpm-debug.log*
 
 # Turbo
 .turbo
+
+# Local smoke-test artifacts
+page.html
+css-dump.txt
+
