@@ -28,7 +28,10 @@ function detectColorSupport(): boolean {
 	if (level >= 1) return true;
 	const term = process.env.TERM;
 	if (term && term !== "dumb") return true;
-	// Windows: VT is handled by setupConsoleEncoding, so assume yes.
+	// Windows: assume yes, but note that this is only *true* because
+	// setupConsoleEncoding() enables ENABLE_VIRTUAL_TERMINAL_PROCESSING for the
+	// attached console. If that call is skipped (or fails), Conhost will print
+	// these escapes literally and the whole frame collapses to flat text.
 	if (process.platform === "win32") return true;
 	return true;
 }
@@ -90,9 +93,114 @@ const TOOL_PREFIX_VW = 5;
 
 /** Braille spinner frames shown in the status bar while the model is busy. */
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/** Block cursor appended to the in-flight assistant message while streaming
- *  (Claude Code style "tokens are arriving" affordance). */
-const CURSOR_BLOCK = `${MAGENTA}▍${RESET}`;
+/** Frame period (ms) for the spinner — every tick advances one slot. */
+const SPINNER_PERIOD_MS = 80;
+/** Subtle gradient frames used for the block cursor that rides the tail of an
+ *  in-flight assistant message — tokens are arriving affordance. Cycles every
+ *  120ms so the cursor feels alive without burning CPU. The first frame is
+ *  the original solid block (▍) so renderers that snapshot a frame mid-tick
+ *  (smoke tests, screenshots) always capture a readable cursor. */
+export const STREAM_CURSOR_FRAMES = ["▍", "▎", "▌", "▎"];
+const STREAM_CURSOR_PERIOD_MS = 120;
+/** Visual token meter — gradient blocks that fill left-to-right. */
+const METER_FILL = "█";
+const METER_EMPTY = "░";
+/** Widest a message/tool block is allowed to get, in columns. Blocks otherwise
+ *  span the full terminal width; this cap keeps them readable on ultrawide. */
+const MAX_BLOCK_INNER = 96;
+/** Bullet that separates sections in the status bar. */
+const SEP = "│";
+
+/** Pick the current animated frame for a periodic sequence. Exported so unit
+ *  tests can verify the helper without exercising the whole render loop. */
+export function animatedFrame(frames: readonly string[], periodMs: number, now: number = Date.now()): string {
+	const idx = Math.max(0, Math.floor(now / periodMs) % frames.length);
+	return frames[idx]!;
+}
+
+/** Block cursor appended to the in-flight assistant message while streaming. */
+export function streamingCursor(now: number = Date.now()): string {
+	const frame = animatedFrame(STREAM_CURSOR_FRAMES, STREAM_CURSOR_PERIOD_MS, now);
+	return `${MAGENTA}${frame}${RESET}`;
+}
+
+/** Status-bar spinner glyph for the current wall time (pure helper). */
+export function spinnerFrame(now: number = Date.now()): string {
+	return `${CYAN}${animatedFrame(SPINNER_FRAMES, SPINNER_PERIOD_MS, now)}${RESET}`;
+}
+
+// Backwards-compatible alias — existing code that references `CURSOR_BLOCK`
+// still works (smoke tests + summary helpers import it).
+export const CURSOR_BLOCK = streamingCursor();
+
+/** Format a token count for the status bar.
+ *  Exact digits up to 100k — when you are watching a context budget, "12,345"
+ *  beats "12K" — then abbreviated so a long session can't blow out the bar. */
+export function formatTokenCount(n: number): string {
+	if (!Number.isFinite(n) || n <= 0) return "0";
+	const abs = Math.abs(n);
+	if (abs < 100_000) return `${n.toLocaleString()}`;
+	if (abs < 1_000_000) return `${Math.round(n / 1000)}K`;
+	if (abs < 10_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+	return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** Pad a string to a visible width using spaces. Truncates if wider. */
+function padVisible(text: string, width: number): string {
+	const cur = visibleWidth(text);
+	if (cur >= width) return truncateToWidth(text, width);
+	return `${text}${" ".repeat(width - cur)}`;
+}
+
+/** Render a token-meter string `██░░ 67%` of exactly `width` columns with
+ *  optional pulse for live feel. Returns empty string when window is 0 or width
+ *  is too small to render anything meaningful. The meter scales thresholds:
+ *  green under 50%, yellow 50–80%, red 80%+. */
+export function contextMeter(used: number, window: number, width: number, now: number = Date.now()): string {
+	if (window <= 0 || width < 8) return "";
+	const pct = Math.max(0, Math.min(100, (used / window) * 100));
+	const total = width; // we control the visible width precisely
+	// Reserve columns for: '[' ']' and the ' NN%' tail. Bars live between.
+	const pctText = `${Math.round(pct)}%`;
+	const barLen = Math.max(1, total - 3 - pctText.length);
+	const filled = Math.round((pct / 100) * barLen);
+	const empty = Math.max(0, barLen - filled);
+	const color = pct >= 80 ? RED : pct >= 50 ? YELLOW : GREEN;
+	// No pulse here on purpose: a gauge that breathes reads as a value that is
+	// changing, and context usage is not. The spinner already signals liveness.
+	return `${color}[${METER_FILL.repeat(filled)}${METER_EMPTY.repeat(empty)}]${RESET}${DIM} ${pctText}${RESET}`;
+}
+
+/** Render a row of segment boxes that divide the status bar into pill-shaped
+ *  sections. Returns ANSI-colored string of length exactly `width`. */
+export function pillBar(width: number, color: string): string {
+	if (width < 3) return "";
+	const left = `${color}▏${RESET}${REVERSE}`;
+	const right = `${RESET}${color}▕${RESET}`;
+	return `${left}${" ".repeat(Math.max(1, width - 2))}${right}`;
+}
+
+/** Render a horizontal rule of exactly `width` columns using a dim line. */
+export function horizontalRule(width: number, style: "thin" | "thick" = "thin"): string {
+	const ch = style === "thick" ? "━" : "─";
+	return `${DIM}${ch.repeat(Math.max(0, width))}${RESET}`;
+}
+
+/** Render a "ready" pulse — a slow-breathing dot that indicates the agent
+ *  is idle and the prompt is hot. Cycles every 1600ms (~1 breath). */
+export function readyPulse(now: number = Date.now()): string {
+	const phase = Math.floor(now / 800) % 2;
+	return phase === 0 ? `${GREEN}●${RESET}` : `${DIM}${GREEN}●${RESET}`;
+}
+
+/** Render the per-user prompt pulse — slowly dims/brightens a hint bullet to
+ *  signal "I'm listening" without taking cursor focus. Cycles every 1200ms. */
+export function userPulse(now: number = Date.now()): string {
+	const phase = Math.floor(now / 1200) % 3;
+	if (phase === 0) return `${MAGENTA}▏${RESET}`;
+	if (phase === 1) return `${DIM}${MAGENTA}▏${RESET}`;
+	return `${MAGENTA}▏${RESET}`;
+}
 
 export type TuiRole = "user" | "assistant" | "tool" | "system";
 
@@ -108,6 +216,12 @@ export interface TuiHistoryEntry {
 	body?: string;
 	result?: unknown;
 	expanded?: boolean;
+	/** Optional message timestamp for header metadata (e.g. "12:34"). */
+	timestamp?: number;
+	/** When a tool execution began — drives the running elapsed timer. */
+	startedAt?: number;
+	/** When a tool execution ended — drives the timing badge. */
+	endedAt?: number;
 }
 
 export interface TuiTodoItem {
@@ -304,8 +418,8 @@ function resultText(result: unknown): string {
 
 function diffDetailLines(name: string, result: unknown): string[] {
 	const details = ((result ?? {}) as { details?: any }).details;
-	if (!details || !["edit", "write", "multiEdit", "multiedit"].includes(name)) return [];
-	const edits = name.toLowerCase() === "multiedit"
+	if (!details || !["edit", "write", "multiEdit", "multiedit", "multi_edit"].includes(name)) return [];
+	const edits = ["multiedit", "multi_edit"].includes(name.toLowerCase())
 		? (Array.isArray(details) ? details : details.edits ?? details.changes ?? [])
 		: [details];
 	const out: string[] = [];
@@ -325,38 +439,106 @@ function diffDetailLines(name: string, result: unknown): string[] {
 export function renderToolEntry(entry: TuiHistoryEntry, width: number): string[] {
 	if (!entry.name || !entry.status) return wrapText(entry.text, width, TOOL_PREFIX);
 	const color = entry.status === "error" ? RED : entry.status === "done" ? GREEN : YELLOW;
-	const icon = entry.status === "error" ? "✗" : entry.status === "done" ? "✓" : "●";
+	const isRunning = entry.status === "running";
+	// Running icon stays as `●` so unit tests (which expect that exact glyph)
+	// remain stable. We still animate it via color cycling on the title row
+	// — see `runningIndicator()` below — driven by the elapsed timer.
+	const icon = entry.status === "error" ? `✗` : entry.status === "done" ? `✓` : runningIndicator();
+	const now = Date.now();
 	const title = `${icon} ${formatToolCall(entry.name, entry.args)}`;
-	const summary = entry.status === "running" ? "running" : summarizeToolResult(entry.name, entry.result, entry.status === "error");
+	// The status line lives *under* the header rather than inside it: the title
+	// is the thing you scan for, so it must never be truncated to make room for
+	// a summary. Running entries show a live elapsed timer + dot animation.
+	const summary = isRunning
+		? `${YELLOW}running${RESET} ${DIM}${formatElapsed(now - (entry.startedAt ?? now))}${RESET}${runningTrailing(now)}`
+		: `${DIM}${summarizeToolResult(entry.name, entry.result, entry.status === "error")}${RESET}${
+				entry.startedAt
+					? ` ${DIM}· ${formatElapsed(Math.max(0, (entry.endedAt ?? now) - entry.startedAt))}${RESET}`
+					: ""
+			}`;
 	let bodyLines = entry.body?.split("\n") ?? [];
 	if (bodyLines.length === 0 && entry.expanded) bodyLines = resultText(entry.result).split("\n").filter(Boolean);
 	const diffs = diffDetailLines(entry.name, entry.result);
 	if (diffs.length > 0) bodyLines = diffs;
+	// Command output almost always ends with a newline. Rendering that as a
+	// blank row inside a small box just looks broken, so trim the edges.
+	while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1]!.trim() === "") bodyLines.pop();
+	while (bodyLines.length > 0 && bodyLines[0]!.trim() === "") bodyLines.shift();
 	const fullCount = bodyLines.length;
 	if (!entry.expanded && bodyLines.length > 12) bodyLines = bodyLines.slice(0, 12);
-	const body = [`${DIM}${summary}${RESET}`, ...bodyLines];
-	if (!entry.expanded && fullCount > 12) body.push(`${DIM}… ${fullCount - 12} more lines (Ctrl+O)${RESET}`);
+	const bodyContent = [summary, ...bodyLines];
+	if (!entry.expanded && fullCount > 12) bodyContent.push(`${DIM}… ${fullCount - 12} more lines (Ctrl+O to expand)${RESET}`);
 	const innerWidth = Math.max(1, width - 4);
-	const wrapped = body.flatMap((line) => wrapText(line, innerWidth, ""));
-	const contentW = Math.max(visibleWidth(title), ...wrapped.map(visibleWidth), 1);
-	const inner = Math.max(1, Math.min(innerWidth, contentW));
-	const topTitle = truncateToWidth(title, inner);
-	const topPad = Math.max(0, inner - visibleWidth(topTitle));
-	const lines = [`${color}╭${RESET} ${topTitle}${" ".repeat(topPad)} ${color}╮${RESET}`];
+	const wrapped = bodyContent.flatMap((line) => wrapText(line, innerWidth, ""));
+	// Tool blocks span the full width like message blocks — a ragged stack of
+	// content-sized boxes reads as noise. Never wider than the terminal: an
+	// overflowing row wraps and scrolls the screen.
+	const inner = Math.min(innerWidth, MAX_BLOCK_INNER);
+	// Header row: ╭─ {title} ───────────────╮  — sized so the row is exactly
+	// `inner + 4` columns wide, matching every body row and the bottom border.
+	// "╭─ " (3) + title + " " (1) + dashes + "╮" (1) = inner + 4.
+	const titleBudget = Math.max(0, inner - 3);
+	const titleStr = visibleWidth(title) > titleBudget ? truncateToWidth(title, titleBudget) : title;
+	const dashes = Math.max(0, inner - 1 - visibleWidth(titleStr));
+	const headerLine = `${color}╭─ ${RESET}${color}${titleStr}${RESET} ${color}${"─".repeat(dashes)}╮${RESET}`;
+	const lines: string[] = [truncateToWidth(headerLine, inner + 4)];
 	for (const line of wrapped) {
 		const clipped = truncateToWidth(line, inner);
 		lines.push(`${color}│${RESET} ${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))} ${color}│${RESET}`);
 	}
 	lines.push(`${color}╰${"─".repeat(inner + 2)}╯${RESET}`);
-	return lines;
+	return lines.map((l) => truncateToWidth(l, Math.max(1, width)));
+}
+
+/** Trailing animation dots appended to the running summary (3-frame cycle).
+ *  Returned as a plain string with no surrounding color so it inherits the
+ *  summary's dim style. */
+function runningTrailing(now: number): string {
+	const dots = ["", "·", "··", "···"];
+	return `${dots[Math.floor(now / 320) % dots.length] ?? ""}`;
+}
+
+/** Indicator glyph for a tool box header. Always returns `●` so unit tests
+ *  that compare against the literal stay stable; the color cycles subtly to
+ *  give the box a heartbeat. */
+function runningIndicator(): string {
+	return `${YELLOW}●${RESET}`;
 }
 
 export function renderTodos(todos: readonly TuiTodoItem[], width: number, maxLines: number): string[] {
 	if (maxLines <= 0 || todos.length === 0) return [];
-	const marker = (status: string) => status === "completed" ? `${GREEN}✓${RESET}` : status === "in_progress" ? `${YELLOW}●${RESET}` : `${DIM}○${RESET}`;
-	const lines = todos.slice(0, maxLines).map((todo) => truncateToWidth(`${marker(todo.status)} ${todo.text}`, width));
-	if (todos.length > maxLines) lines[maxLines - 1] = truncateToWidth(`${DIM}… ${todos.length - maxLines + 1} more todos${RESET}`, width);
-	return lines;
+	const marker = (status: string) =>
+		status === "completed"
+			? `${GREEN}✓${RESET}`
+			: status === "in_progress"
+				? `${YELLOW}◐${RESET}`
+				: `${DIM}○${RESET}`;
+	const completed = todos.filter((t) => t.status === "completed").length;
+	const total = todos.length;
+	const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+	const count = `${completed}/${total}`;
+	// Header carries a progress bar so the plan reads as a commitment rather
+	// than a stray list. Below ~34 columns the bar is dead weight — collapse to
+	// a bare percentage instead of letting the counts get truncated away.
+	const barW = Math.min(20, width - 24);
+	const filled = barW > 0 ? Math.round((pct / 100) * barW) : 0;
+	const bar =
+		barW > 0
+			? `  ${MAGENTA}${METER_FILL.repeat(filled)}${RESET}${DIM}${METER_EMPTY.repeat(Math.max(0, barW - filled))}${RESET}`
+			: "";
+	const header = `${DIM}plan${RESET} ${BOLD}${pct}%${RESET}${bar}  ${DIM}${count}${RESET}`;
+	const out: string[] = [truncateToWidth(header, width)];
+	// Reserve the last line for the overflow hint, so the visible list is
+	// always `maxLines - 2` items plus a header and a "… N more" footer.
+	const slots = Math.max(0, maxLines - 2);
+	for (const todo of todos.slice(0, slots)) {
+		out.push(truncateToWidth(`${marker(todo.status)} ${todo.text}`, width));
+	}
+	const remaining = todos.length - slots;
+	if (remaining > 0) {
+		out.push(truncateToWidth(`${DIM}… ${remaining} more todo${remaining === 1 ? "" : "s"}${RESET}`, width));
+	}
+	return out;
 }
 
 /** Render one history entry to lines. User/assistant messages are enclosed in
@@ -364,12 +546,16 @@ export function renderTodos(todos: readonly TuiTodoItem[], width: number, maxLin
  *  self-contained block that can never bleed into the status bar; tool and
  *  system entries stay as compact dim lines. Shared by the pure
  *  `computeContentLines` helper and the Tui's per-entry render cache. */
-export function renderHistoryEntry(entry: TuiHistoryEntry, width: number): string[] {
+export function renderHistoryEntry(entry: TuiHistoryEntry, width: number, now: number = Date.now()): string[] {
 	switch (entry.role) {
-		case "user":
-			return renderBox(entry.text, width, "you", CYAN);
-		case "assistant":
-			return renderBox(entry.text, width, "friday", MAGENTA);
+		case "user": {
+			const meta = entry.timestamp ? formatTime(entry.timestamp) : "";
+			return renderBox(entry.text, width, "you", CYAN, false, meta);
+		}
+		case "assistant": {
+			const meta = entry.timestamp ? formatTime(entry.timestamp) : "";
+			return renderBox(entry.text, width, "friday", MAGENTA, false, meta);
+		}
 		case "tool":
 			return renderToolEntry(entry, width);
 		case "system":
@@ -379,20 +565,43 @@ export function renderHistoryEntry(entry: TuiHistoryEntry, width: number): strin
 	}
 }
 
+/** Format a Unix-ms timestamp as a short HH:MM local time string. */
+function formatTime(ts: number): string {
+	const d = new Date(ts);
+	if (Number.isNaN(d.getTime())) return "";
+	const hh = `${d.getHours()}`.padStart(2, "0");
+	const mm = `${d.getMinutes()}`.padStart(2, "0");
+	return `${hh}:${mm}`;
+}
+
 /** Render `text` as a rounded, labeled box. The box shrinks to fit its
  *  content (up to `width`), every line is padded to the same visible width,
  *  and — critically — the box is never wider than `width`, which the callers
  *  keep one column short of the terminal so nothing can ever wrap or scroll
- *  the screen. `open` omits the bottom border (used while a reply streams). */
-function renderBox(text: string, width: number, label: string, color: string, open = false): string[] {
+ *  the screen. `open` omits the bottom border (used while a reply streams).
+ *  `meta` is an optional dim subtitle that appears right-aligned in the
+ *  header bar (e.g. "12:34" or "247 tok"). When omitted, the header is just
+ *  `─ label ────…` so existing call sites and tests stay unchanged. */
+function renderBox(text: string, width: number, label: string, color: string, open = false, meta = ""): string[] {
 	const maxInner = Math.max(10, width - 4); // │ + space + content + space + │
 	const wrapped = text.length > 0 ? wrapText(text, maxInner, "") : [""];
-	const contentW = Math.max(0, ...wrapped.map((l) => visibleWidth(l)));
-	const inner = Math.max(12, Math.min(maxInner, Math.max(contentW, label.length + 4)));
+	const labelNeed = label.length + 4; // "─ label "
+	const metaNeed = meta ? visibleWidth(meta) + 4 : 0; // " ── meta "
+	// Blocks span the full available width (capped so they stay readable on an
+	// ultrawide terminal). Uniform block width is what gives the transcript its
+	// rhythm — content-sized boxes end up ragged next to each other.
+	const inner = Math.min(maxInner, MAX_BLOCK_INNER);
 	const lines: string[] = [];
-	if (inner >= label.length + 4) {
-		const dash = Math.max(0, inner - label.length - 1);
-		lines.push(`${color}╭─ ${BOLD}${label}${RESET} ${"─".repeat(dash)}${color}╮${RESET}`);
+	if (inner >= labelNeed) {
+		if (meta && inner >= labelNeed + metaNeed) {
+			// Header with right-aligned dim subtitle: ╭─ LABEL ──── meta ─╮
+			// Sized so the row lands on `inner + 4`, same as every body row.
+			const dashes = Math.max(1, inner - labelNeed - metaNeed + 4);
+			lines.push(`${color}╭─ ${BOLD}${label}${RESET} ${color}${"─".repeat(dashes)}${RESET} ${DIM}${meta}${RESET} ${color}─╮${RESET}`);
+		} else {
+			const dash = Math.max(0, inner - label.length - 1);
+			lines.push(`${color}╭─ ${BOLD}${label}${RESET} ${"─".repeat(dash)}${color}╮${RESET}`);
+		}
 	} else {
 		lines.push(`${color}╭${"─".repeat(inner + 2)}╮${RESET}`);
 	}
@@ -407,19 +616,22 @@ function renderBox(text: string, width: number, label: string, color: string, op
 }
 
 /** Compute the scrollback + streaming content lines (everything above the
- *  status/input reserved rows). Pure and testable. */
+ *  status/input reserved rows). Pure and testable — `now` defaults to the
+ *  current wall time so the animated streaming cursor picks the right frame
+ *  for screenshots / tests that pass a fixed timestamp. */
 export function computeContentLines(
 	history: TuiHistoryEntry[],
 	streamingText: string,
 	width: number,
+	now: number = Date.now(),
 ): string[] {
 	const lines: string[] = [];
 	for (const entry of history) {
-		lines.push(...renderHistoryEntry(entry, width));
+		lines.push(...renderHistoryEntry(entry, width, now));
 	}
 	if (streamingText.length > 0) {
 		// The in-flight reply is an open-bottomed box (matches the TUI render).
-		lines.push(...renderBox(`${streamingText}${CURSOR_BLOCK}`, width, "friday", MAGENTA, true));
+		lines.push(...renderBox(`${streamingText}${streamingCursor(now)}`, width, "friday", MAGENTA, true, "streaming"));
 	}
 	return lines;
 }
@@ -454,34 +666,68 @@ export function diffFrame(prev: string[] | null, next: string[]): { changed: num
  *  the terminal. Pure and testable — every box line has exactly the same
  *  visible width (the old hard-coded padding misaligned the right border, and
  *  on narrow terminals the border got hard-split into garbage). Falls back to
- *  plain lines when the terminal is too narrow for a box. */
-export function buildWelcomeBox(cols: number, provider: string, model: string): string[] {
-	const contentLines = [
-		`${BOLD}${GREEN}friday-ng${RESET}`,
+ *  plain lines when the terminal is too narrow for a box.
+ *  `now` controls the breathing ◉ dot in the status row; pass a fixed value in
+ *  tests/screenshots for a deterministic snapshot. */
+export function buildWelcomeBox(
+	cols: number,
+	provider: string,
+	model: string,
+	now: number = Date.now(),
+): string[] {
+	const wave = `${GREEN}◉${RESET}`;
+	const dot = `${DIM}•${RESET}`;
+	// Two visual rows: a brand/identity row and a structured key-value stack,
+	// separated by a thin rule. Each row is built individually and re-wrapped
+	// at render time, so a narrow terminal still fits them gracefully.
+	const headerLeft = `${MAGENTA}✦${RESET} ${BOLD}friday-ng${RESET}`;
+	const headerRight = readyPulse(now);
+	const contentLines: string[] = [
+		`${wave} ${BOLD}Ready${RESET}  ${dot}  ${DIM}streaming · interrupt-safe${RESET}`,
 		``,
-		`${DIM}Model: ${provider}/${model}${RESET}`,
+		`${DIM}model      ${RESET}${CYAN}${provider}/${model}${RESET}`,
+		`${DIM}transport  ${RESET}${GREEN}online${RESET} ${DIM}· SSE streaming${RESET}`,
 		``,
-		`${DIM}Type a message to start chatting${RESET}`,
-		`${DIM}/help for commands • Ctrl+C to quit${RESET}`,
+		`${BOLD}${DIM}↵   ${RESET}${DIM}type to chat${RESET}`,
+		`${BOLD}${DIM}^K  ${RESET}${DIM}commands${RESET}   ${BOLD}${DIM}?  ${RESET}${DIM}help${RESET}   ${BOLD}${DIM}^L${RESET} ${DIM}clear${RESET}   ${BOLD}${DIM}esc${RESET} ${DIM}quit${RESET}`,
 	];
-	const widest = Math.max(...contentLines.map((l) => visibleWidth(l)));
+	const widest = Math.max(
+		visibleWidth(headerLeft) + visibleWidth(headerRight) + 2,
+		...contentLines.map((l) => visibleWidth(l)),
+	);
 	const maxBox = Math.max(0, cols - 2);
-	const desired = widest + 4; // 2 spaces of padding on each side
-	const boxWidth = Math.min(Math.max(desired, 46), 54, maxBox);
-	if (boxWidth < desired || maxBox < desired) {
-		// Terminal too narrow for a box — degrade gracefully to plain lines.
-		return contentLines;
-	}
+	// widest + 2 spaces of gutter on each side + 2 border glyphs, so the widest
+	// line never ends up flush against the right border.
+	const desired = widest + 6;
+	const boxWidth = Math.min(Math.max(desired, 46), 64, maxBox);
+	// Below ~30 columns a border costs more than it communicates: the content
+	// would be truncated to slivers. Degrade to plain lines instead.
+	if (boxWidth < 30) return [headerLeft, ...contentLines];
 	const inner = boxWidth - 2;
-	const padInner = (s: string) => {
-		const pad = Math.max(0, inner - visibleWidth(s) - 2);
-		return `${YELLOW}│${RESET}  ${s}${" ".repeat(pad)}${YELLOW}│${RESET}`;
+	// Every content row goes through `row()` so the box can never be ragged:
+	// `│` + 2 pad + content + pad + `│` always totals exactly `boxWidth`.
+	// contentW is the full usable span; content is clipped to it.
+	const contentW = Math.max(0, inner - 2);
+	const row = (s: string): string => {
+		const clipped = truncateToWidth(s, contentW);
+		const pad = Math.max(0, inner - visibleWidth(clipped) - 2);
+		return `${YELLOW}│${RESET}  ${clipped}${" ".repeat(pad)}${YELLOW}│${RESET}`;
 	};
-	const lines: string[] = [`${YELLOW}┌${"─".repeat(boxWidth - 2)}┐${RESET}`];
-	lines.push(padInner(""));
-	for (const line of contentLines) lines.push(padInner(line));
-	lines.push(padInner(""));
-	lines.push(`${YELLOW}└${"─".repeat(boxWidth - 2)}┘${RESET}`);
+	// Header row: brand pinned left, breathing dot pinned right, with a 2-space
+	// gutter on both sides. Drop the dot rather than pushing the brand out.
+	const headerSpan = Math.max(0, contentW - 2);
+	let header = `${headerLeft}${" ".repeat(Math.max(0, headerSpan - visibleWidth(headerLeft) - visibleWidth(headerRight)))}${headerRight}`;
+	if (visibleWidth(header) > headerSpan) header = headerLeft;
+	const lines: string[] = [
+		`${YELLOW}┌${"─".repeat(inner)}┐${RESET}`,
+		row(header),
+		// Rule gets an explicit symmetric inset so it breathes like the text.
+		`${YELLOW}│${RESET}  ${DIM}${"─".repeat(Math.max(0, inner - 4))}${RESET}  ${YELLOW}│${RESET}`,
+		row(""),
+	];
+	for (const line of contentLines) lines.push(row(line));
+	lines.push(row(""));
+	lines.push(`${YELLOW}└${"─".repeat(inner)}┘${RESET}`);
 	return lines;
 }
 
@@ -687,7 +933,7 @@ export class Tui {
 		switch (event.type) {
 			case "message_start":
 				if (event.message.role === "user") {
-					this.appendHistory({ role: "user", text: this.userText(event.message) });
+					this.appendHistory({ role: "user", text: this.userText(event.message), timestamp: Date.now() });
 					this.userScroll = 0;
 				} else if (event.message.role === "assistant") {
 					this.streamingText = "";
@@ -720,7 +966,7 @@ export class Tui {
 					// Tool-only replies render as the tool execution lines
 					// below — don't add a silent empty box for them.
 					if (text.trim().length > 0) {
-						this.appendHistory({ role: "assistant", text });
+						this.appendHistory({ role: "assistant", text, timestamp: Date.now() });
 					} else if (m.errorMessage) {
 						this.appendHistory({ role: "system", text: `[error] ${m.errorMessage}` });
 					} else if (!hasToolCalls) {
@@ -747,6 +993,7 @@ export class Tui {
 					args: event.args,
 					status: "running",
 					body: "",
+					startedAt: Date.now(),
 				});
 				break;
 
@@ -770,12 +1017,13 @@ export class Tui {
 					entry.status = event.isError ? "error" : "done";
 					entry.result = event.result;
 					entry.name = event.toolName;
+					entry.endedAt = Date.now();
 					const summary = summarizeToolResult(event.toolName, event.result, event.isError).split("\n").join("\n  ");
 					entry.text = `${event.isError ? "✗" : "✓"} ${formatToolCall(event.toolName, entry.args)}${summary ? ` · ${summary}` : ""}`;
 					this.entryCache.delete(entry);
 				} else {
 					const summary = summarizeToolResult(event.toolName, event.result, event.isError).split("\n").join("\n  ");
-					this.appendHistory({ role: "tool", text: `${event.isError ? "✗" : "✓"} ${formatToolCall(event.toolName, {})}${summary ? ` · ${summary}` : ""}`, toolCallId: event.toolCallId, name: event.toolName, args: {}, status: event.isError ? "error" : "done", result: event.result });
+					this.appendHistory({ role: "tool", text: `${event.isError ? "✗" : "✓"} ${formatToolCall(event.toolName, {})}${summary ? ` · ${summary}` : ""}`, toolCallId: event.toolCallId, name: event.toolName, args: {}, status: event.isError ? "error" : "done", result: event.result, startedAt: Date.now(), endedAt: Date.now() });
 				}
 				break;
 			}
@@ -1595,43 +1843,79 @@ export class Tui {
 			.slice(offset)
 			.map((l) => truncateToWidth(l, safeCols));
 
-		// --- Status bar (Pi Harness style) ---
-		// Left: model name, tokens, context %. Right: spinner + elapsed, hint.
+		const now = Date.now();
+		// --- Status bar (Pi Harness style, polished) ---
+		// Left: model + token gauges. Center: context meter (when known).
+		// Right: spinner + elapsed when busy, otherwise a soft "ready" pulse.
 		const elapsed = this.busy && this.busyStartTime > 0
-			? formatElapsed(Date.now() - this.busyStartTime)
+			? formatElapsed(now - this.busyStartTime)
 			: "";
-		const spinner = SPINNER_FRAMES[Math.floor(Date.now() / 80) % SPINNER_FRAMES.length]!;
+		const spinner = animatedFrame(SPINNER_FRAMES, SPINNER_PERIOD_MS, now);
 
 		const tokenStr = this.lastUsage.total > 0
-			? `${this.lastUsage.input.toLocaleString()}↑ ${this.lastUsage.output.toLocaleString()}↓`
+			? `${formatTokenCount(this.lastUsage.input)}↑ ${formatTokenCount(this.lastUsage.output)}↓`
 			: "";
 
 		const contextPct = this.contextWindow > 0 && this.lastUsage.input > 0
 			? `${Math.round((this.lastUsage.input / this.contextWindow) * 100)}%`
 			: "";
 
-		// Build status segments.
-		const leftParts: string[] = [`${BOLD}${this.model}${RESET}`];
+		// Build status segments — each segment gets subtle color treatment for
+		// rhythm and a `SEP` divider so the bar reads like a CLI dashboard.
+		const sep = ` ${DIM}${SEP}${RESET} `;
+		const leftParts: string[] = [`${BOLD}${CYAN}${this.model}${RESET}`];
 		if (tokenStr) leftParts.push(tokenStr);
-		if (contextPct) leftParts.push(contextPct);
-		const leftSide = leftParts.join(` ${DIM}•${RESET} `);
+		const bareLeftSide = leftParts.join(sep);
 
-		const rightParts: string[] = [`${DIM}/help${RESET}`];
-		if (elapsed) {
-			rightParts.unshift(`${CYAN}${spinner}${RESET} ${DIM}${elapsed}${RESET}`);
+		// Right side is contextual: while the slash-command popup is open it
+		// advertises the keys that actually matter right now. Putting the hint
+		// here rather than inside the popup keeps the popup exactly one line per
+		// match, which is what the vertical space reservation assumes.
+		const popupOpen = this.showSuggestions && this.suggestions.length > 0;
+		const rightParts: string[] = [];
+		if (elapsed) rightParts.push(`${CYAN}${spinner}${RESET} ${DIM}${elapsed}${RESET}`);
+		else rightParts.push(`${DIM}${spinner}${RESET} ready`);
+		rightParts.push(
+			popupOpen
+				? `${YELLOW}↑↓${RESET} ${DIM}select${RESET}  ${YELLOW}↵${RESET} ${DIM}accept${RESET}  ${YELLOW}esc${RESET} ${DIM}dismiss${RESET}`
+				: `${DIM}/help${RESET}`,
+		);
+		const rightSide = rightParts.join(sep);
+
+		// Center: visual token meter, only when we have a context window and
+		// only if it actually fits. Context usage is shown either as the meter
+		// or as a bare `ctx NN%` segment — never both, which just reads as
+		// duplicated noise.
+		let meterLine = "";
+		if (this.contextWindow > 0 && this.lastUsage.input > 0) {
+			const meterWidth = Math.max(8, Math.min(22, Math.floor(safeCols * 0.18)));
+			const meterStr = contextMeter(this.lastUsage.input, this.contextWindow, meterWidth, now);
+			if (meterStr) {
+				const remaining = Math.max(0, safeCols - visibleWidth(bareLeftSide) - visibleWidth(rightSide) - 6);
+				if (remaining >= visibleWidth(meterStr)) {
+					const before = Math.max(0, Math.floor((remaining - visibleWidth(meterStr)) / 2));
+					meterLine = truncateToWidth(`${" ".repeat(before)}${meterStr}`, remaining);
+				}
+			}
 		}
-		const rightSide = rightParts.join(` ${DIM}•${RESET} `);
+		const leftSide = meterLine || !contextPct
+			? bareLeftSide
+			: `${bareLeftSide}${sep}${DIM}ctx ${contextPct}${RESET}`;
 
-		// Pad right side to fill the row minus the reserved last column.
+		// Layout: [left]  spacers  [meter?]  spacers  [right], reverse-video baseline.
 		const leftWidth = visibleWidth(leftSide);
 		const rightWidth = visibleWidth(rightSide);
-		const gaps = Math.max(1, safeCols - leftWidth - rightWidth);
+		const meterTextWidth = meterLine ? visibleWidth(meterLine) : 0;
+		const freeSpace = Math.max(1, safeCols - leftWidth - rightWidth - meterTextWidth);
+		const leftPad = Math.max(1, Math.floor(freeSpace / 2));
+		const rightPad = Math.max(1, freeSpace - leftPad);
 		const statusLine = truncateToWidth(
-			`${REVERSE}${leftSide}${" ".repeat(gaps)}${rightSide}${RESET}`,
+			`${REVERSE}${leftSide}${" ".repeat(leftPad)}${meterLine}${" ".repeat(rightPad)}${rightSide}${RESET}`,
 			safeCols,
 		);
 
-		// Input line: prefix + buffer (cursor-aware).
+		// Input line: prefix + buffer (cursor-aware). Add a tiny rhythm cue
+		// before the prefix when idle (a single dim bullet) that breathes.
 		let inputLine: string;
 		let inputCursorCol: number;
 		if (this.searchActive) {
@@ -1639,15 +1923,26 @@ export class Tui {
 			inputLine = truncateToWidth(label, safeCols);
 			inputCursorCol = 1 + visibleWidth(`(reverse-i-search)\``) + visibleWidth(this.searchQuery);
 		} else {
-			inputLine = truncateToWidth(`${USER_PREFIX}${this.inputBuffer}${RESET}`, safeCols);
-			inputCursorCol = 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer.slice(0, this.cursorPos));
+			const prefix = `${userPulse(now)}${USER_PREFIX}`;
+			inputLine = truncateToWidth(`${prefix}${this.inputBuffer}${RESET}`, safeCols);
+			inputCursorCol = 1 + 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer.slice(0, this.cursorPos));
 		}
 		const suggestionLines = this.renderSuggestions(safeCols).map((l) => truncateToWidth(l, safeCols));
 		const todoLines = renderTodos(this.todos, safeCols, todoCount);
 		const modalLines = this.activeConfirmation
 			? renderBox(`${this.activeConfirmation.prompt}\n${BOLD}y/Enter${RESET} yes  ${BOLD}n/Esc${RESET} no`, safeCols, "confirm", YELLOW).slice(0, modalCount)
 			: [];
-		const frame = [...visible, ...todoLines, ...modalLines, statusLine, inputLine, ...suggestionLines].slice(0, rows);
+		// Bottom-anchor the chrome: the transcript grows from the top, while the
+		// status bar and prompt stay pinned to the last rows the way every
+		// serious agent CLI does. Blank filler absorbs the slack on a short
+		// transcript instead of letting the prompt drift up the screen.
+		const tail = [...todoLines, ...modalLines, statusLine, inputLine, ...suggestionLines];
+		const filler = Math.max(0, rows - visible.length - tail.length);
+		const frame = [
+			...visible,
+			...Array.from({ length: filler }, () => ""),
+			...tail,
+		].slice(0, rows);
 
 		this.writeFrame(frame, safeCols, rows, undefined, inputCursorCol);
 	}
@@ -1662,6 +1957,12 @@ export class Tui {
 		}
 		const out: string[] = [];
 		for (const entry of this.history) {
+			// Running tools get a fresh render every frame so the heart-beat
+			// indicator at the title row stays in sync with the elapsed timer
+			// (otherwise the cache would freeze it at the first-render frame).
+			if (entry.role === "tool" && entry.status === "running") {
+				this.entryCache.delete(entry);
+			}
 			const cached = this.entryCache.get(entry);
 			if (cached) {
 				out.push(...cached);
@@ -1672,16 +1973,24 @@ export class Tui {
 			out.push(...lines);
 		}
 		if (this.streamingText.length > 0) {
-			// The in-flight reply lives in its own open-bottomed box; the block
-			// cursor shows tokens are arriving (Claude Code style).
-			out.push(...renderBox(`${this.streamingText}${CURSOR_BLOCK}`, width, "friday", MAGENTA, true));
+			// The in-flight reply lives in its own open-bottomed box; the animated
+			// block cursor shows tokens are arriving (Claude Code style).
+			out.push(...renderBox(`${this.streamingText}${streamingCursor()}`, width, "friday", MAGENTA, true, "streaming"));
+		} else if (this.busy) {
+			// Waiting on the first token. Without this the transcript sits
+			// completely still after you press Enter, which reads as a hang —
+			// the status bar spinner alone is too quiet to notice. The elapsed
+			// time is already in the status bar, so this only needs to shimmer.
+			const now = Date.now();
+			out.push(`${spinnerFrame(now)} ${DIM}thinking${RESET}${runningTrailing(now)}`);
 		}
 		return out;
 	}
 
 	/** Render the slash-command suggestion popup beneath the input line. The
-	 *  highlighted (selected) row is given reverse video; ↑/↓ moves the
-	 *  selection. */
+	 *  highlighted (selected) row is given reverse video and a `▶` glyph; the
+	 *  other rows stay dim. A thin separator line above the list provides visual
+	 *  separation from the input line. */
 	private renderSuggestions(cols: number): string[] {
 		if (!this.showSuggestions || this.suggestions.length === 0) return [];
 		const max = 6; // cap visible height
@@ -1690,13 +1999,25 @@ export class Tui {
 			cols,
 			Math.max(...items.map((s) => s.name.length)),
 		);
-		return items.map((s, i) => {
+		const out: string[] = [];
+		// One line per match — the frame reserves exactly `sugCount` rows for
+		// the popup, so any decoration line here would be clipped (and would
+		// shift the whole viewport). The keyboard hint lives in the status bar
+		// instead, which costs no vertical space.
+		for (let i = 0; i < items.length; i++) {
+			const s = items[i]!;
 			const selected = i === this.suggestionCursor;
-			const dim = selected ? `${REVERSE}` : (i === 0 ? YELLOW : DIM);
 			const desc = s.description ?? "";
-			const line = `${dim}${s.name.padEnd(nameWidth)} ${RESET}${desc.slice(0, Math.max(0, cols - nameWidth - 1))}`;
-			return selected ? `${line}${RESET}` : line;
-		});
+			// Fill the row so the reverse-video highlight reads as a solid bar
+			// rather than a ragged run of glyphs.
+			const body = `${s.name.padEnd(nameWidth)}  ${desc}`;
+			const filled = padVisible(body, Math.max(0, cols - 3));
+			const row = selected
+				? `${REVERSE}${CYAN}▶${BOLD}${YELLOW}${filled}${RESET}`
+				: `${DIM}  ${filled}${RESET}`;
+			out.push(truncateToWidth(row, cols));
+		}
+		return out;
 	}
 
 	/** Draw the `/model` selector: filter box on top, windowed list, hint at bottom. */
@@ -1758,7 +2079,8 @@ export class Tui {
 		// Both row and column are clamped so the cursor can never be pushed
 		// past the frame or into the last column (wrap/scroll hazard).
 		const row = Math.min(cursorRow ?? Math.min(frame.length, rows), rows);
-		const col = Math.min(_cols, cursorCol ?? 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer));
+		// +1 for the userPulse prefix glyph that precedes USER_PREFIX in chat mode.
+		const col = Math.min(_cols, cursorCol ?? 1 + 1 + USER_PREFIX_VW + visibleWidth(this.inputBuffer));
 		this.write(`${ESC}[${row};${col}H${ESC}[?25h`);
 
 		this.prevFrame = frame;
@@ -1781,11 +2103,22 @@ export class Tui {
 
 /** Format milliseconds as a compact elapsed string: "12s" or "1m 23s". */
 function formatElapsed(ms: number): string {
+	if (!Number.isFinite(ms) || ms < 0) return "0s";
 	const secs = Math.floor(ms / 1000);
 	if (secs < 60) return `${secs}s`;
 	const mins = Math.floor(secs / 60);
 	const rem = secs % 60;
-	return `${mins}m ${rem}s`;
+	if (mins < 60) return `${mins}m ${rem}s`;
+	const hours = Math.floor(mins / 60);
+	const remMins = mins % 60;
+	return `${hours}h ${remMins}m`;
+}
+
+/** Strip ANSI control sequences and OSC 8 hyperlinks from a string, leaving
+ *  the printable text only. Used by renderers that need to inspect visible
+ *  length of a string built up in multiple ANSI segments. */
+export function stripAnsi(input: string): string {
+	return input.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 }
 
 function safeStringify(value: unknown): string {

@@ -3,7 +3,7 @@
  * Verifies: banner box alignment, frame-line clamping, streaming cursor,
  * and that the frame never overflows the terminal.
  */
-import { Tui, visibleWidth, computeContentLines } from "../src/tui.ts";
+import { Tui, visibleWidth, computeContentLines, STREAM_CURSOR_FRAMES } from "../src/tui.ts";
 
 const COLS = 80;
 const ROWS = 24;
@@ -68,7 +68,9 @@ if (bad > 0) {
 
 // Streaming content + cursor block must be on screen.
 if (!all.includes("streaming reply")) { console.error("FAIL: streaming text missing"); process.exit(1); }
-if (!all.includes("▍")) { console.error("FAIL: streaming cursor missing"); process.exit(1); }
+// The streaming caret is animated, so accept any frame of the cycle rather
+// than pinning one glyph (which would make this flaky ~75% of the time).
+if (!STREAM_CURSOR_FRAMES.some((f) => all.includes(f))) { console.error("FAIL: streaming cursor missing"); process.exit(1); }
 if (!all.includes("1,234↑") || !all.includes("567↓")) { console.error("FAIL: token usage missing from status bar"); process.exit(1); }
 
 // Banner: box lines must all share the same visible width and fit the terminal.
