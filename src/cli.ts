@@ -19,7 +19,7 @@ import { loadConfig, saveConfig, withLastModel, bumpRecentSession, withLastSessi
 import { setupProvider, listModelsForProvider, buildStreamFunction } from "./interactive.ts";
 import { findProvider, listProviders, resolveApiKey, type ProviderMeta } from "./providers/registry.ts";
 import { isOllamaRunning } from "./providers/ollama.ts";
-import { setupConsoleEncoding, applyWindowsUtf8Default, revertWindowsUtf8Default, readConsoleStatus } from "./console-setup.ts";
+import { setupConsoleEncoding, applyWindowsUtf8Default, revertWindowsUtf8Default, readConsoleStatus, enableVirtualTerminalProcessing } from "./console-setup.ts";
 import { bashTool, readTool, writeTool, editTool, multiEditTool, globTool, grepTool, isDangerousShellCommand } from "./tools/shell.ts";
 import { websearchTool } from "./tools/websearch.ts";
 import { buildEnvironmentContext } from "./env-context.ts";
@@ -238,15 +238,15 @@ async function main(): Promise<void> {
 		opts.utf8Status ||
 		opts.setupUtf8 ||
 		opts.revertUtf8;
-	if (!silent && process.platform === "win32") {
-		const status = readConsoleStatus();
-		// Only nag if the VT mode isn't even enabled — that's the most
-		// reliable signal that emoji + colors are broken. The codepage
-		// reading is unreliable from a Node child process (it reflects the
-		// spawn env, not necessarily the user's terminal).
-		if (status.vtEnabled === false) {
+	if (!silent && process.platform === "win32" && process.stdout.isTTY) {
+		// Nag only when we are on a real terminal that genuinely can't do ANSI.
+		// The registry flag alone is a poor signal: it describes *future*
+		// consoles, and it is absent (not false) on a stock machine. What
+		// matters is whether we managed to switch VT on for this one.
+		if (!enableVirtualTerminalProcessing()) {
 			console.error(
-				"[console] VT processing is disabled — emoji and colors will not render. Run `friday-ng --setup-utf8` to fix.",
+				"[console] ANSI/VT processing is unavailable — colors, boxes and cursor repaints will not render. " +
+					"Run `friday-ng --setup-utf8` to enable it for this and future terminals.",
 			);
 		}
 	}
@@ -301,6 +301,7 @@ async function main(): Promise<void> {
 				`Code page:  ${s.codePage ?? "(unknown)"}${s.codePageIsUtf8 ? " ✓ UTF-8" : ""}\n` +
 				`VT mode:    ${s.vtEnabled === null ? "(unknown)" : s.vtEnabled ? "enabled ✓" : "disabled"}`,
 		);
+		return;
 	}
 
 	if (opts.setupUtf8) {
@@ -694,6 +695,15 @@ async function runRepl(
 		},
 		onQuit: () => agent.abort(),
 		onInterrupt: () => agent.abort(),
+		// `/clear` must clear the *agent* and persisted session as well as the
+		// painted transcript. Otherwise the next prompt silently carries context
+		// the user explicitly asked to discard.
+		onClear: () => {
+			agent.replaceMessages([]);
+			void replaceSessionMessages(sessionRef.current.id, [])
+				.then((meta) => { sessionRef.current = meta; })
+				.catch((error) => tuiRef.current?.appendSystemLine(`[session] failed to persist clear: ${error instanceof Error ? error.message : String(error)}`));
+		},
 		onListModels: listCurrentModels,
 		onSelectModel: async (id) => selectModelInRepl(id, agent, tuiRef, sessionRef, providerId, providerMeta, setup),
 		onSlashCommand: async (input) => {
