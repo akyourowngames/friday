@@ -3,193 +3,366 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Friday 2D Driving Game</title>
+<title>Friday Racer</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: #1a1a2e;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    font-family: 'Segoe UI', sans-serif;
-    color: #eee;
+  html, body {
+    height: 100%;
+    background: #0e0e1a;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #fff;
+    overflow: hidden;
   }
-  h1 { margin-bottom: 8px; font-size: 22px; }
-  #hint { margin-bottom: 12px; font-size: 14px; color: #aaa; }
+  #wrap {
+    position: relative;
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
   canvas {
-    background: #2e7d32;
-    border: 4px solid #fff;
-    border-radius: 8px;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    background: #15532b;
+    border: 3px solid #ffffff33;
+    border-radius: 10px;
+    box-shadow: 0 12px 50px #000a;
+    max-width: 96vw; max-height: 92vh;
+    touch-action: none;
   }
   #hud {
-    margin-top: 10px;
-    font-size: 16px;
-    display: flex;
-    gap: 24px;
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 22px; pointer-events: none;
+    font-size: 15px; text-shadow: 0 2px 4px #000;
   }
-  .key { color: #ffd54f; font-weight: bold; }
+  #hud b { color: #ffd54f; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    background: #0e0e1acc; text-align: center;
+  }
+  #overlay h1 { font-size: 40px; letter-spacing: 2px; }
+  #overlay p { color: #cdd; font-size: 15px; line-height: 1.7; max-width: 460px; }
+  #overlay .key { color: #ffd54f; font-weight: 700; }
+  #overlay button {
+    margin-top: 6px; padding: 12px 28px; font-size: 17px; cursor: pointer;
+    border: none; border-radius: 8px; background: #ffd54f; color: #1a1a1a;
+    font-weight: 700; transition: transform .1s;
+  }
+  #overlay button:active { transform: scale(.96); }
+  #overlay.hidden { display: none; }
+  .small { font-size: 13px; color: #9aa; }
 </style>
 </head>
 <body>
-  <h1>🚗 Friday 2D Driving Game</h1>
-  <div id="hint">Use <span class="key">↑</span> accelerate, <span class="key">↓</span> brake/reverse, <span class="key">← →</span> steer</div>
-  <canvas id="game" width="800" height="500"></canvas>
+<div id="wrap">
+  <canvas id="game" width="900" height="600"></canvas>
   <div id="hud">
-    <span>Speed: <b id="speed">0</b></span>
-    <span>Time: <b id="time">0.0</b>s</span>
-    <span>Laps: <b id="laps">0</b></span>
+    <span>Speed <b id="speed">0</b></span>
+    <span>Lap <b id="lap">0/3</b></span>
+    <span>Time <b id="time">0.0</b>s</span>
+    <span>Best <b id="best">--</b></span>
+    <span>Coins <b id="coins">0</b></span>
   </div>
+  <div id="overlay">
+    <h1>🏎️ FRIDAY RACER</h1>
+    <p>
+      <span class="key">↑</span> accelerate &nbsp; <span class="key">↓</span> brake / reverse<br>
+      <span class="key">← →</span> steer &nbsp; <span class="key">Space</span> handbrake drift<br><br>
+      Complete <b>3 laps</b> as fast as you can. Grab <b>coins</b> for points,
+      hit <b>boost pads</b> for speed, and dodge the <b>traffic cars</b>!<br>
+      <span class="small">(You can also use W A S D)</span>
+    </p>
+    <button id="startBtn">START RACE</button>
+  </div>
+</div>
 
 <script>
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
 
-// --- Input ---
-const keys = {};
-window.addEventListener('keydown', e => {
-  keys[e.key] = true;
-  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
-});
-window.addEventListener('keyup', e => keys[e.key] = false);
+// ---------- Track definition (centerline + width) ----------
+const cx = W/2, cy = H/2;
+const ctrl = [
+  [cx-300, cy-180], [cx+300, cy-200], [cx+340, cy+40],
+  [cx+180, cy+210], [cx-180, cy+210], [cx-340, cy+60]
+];
+const TRACK_W = 78; // half-width of road
 
-// --- Car ---
-const car = {
-  x: 120, y: 250,
-  angle: 0,          // facing right (radians)
-  speed: 0,
-  maxSpeed: 5,
-  accel: 0.12,
-  brake: 0.18,
-  friction: 0.04,
-  turnSpeed: 0.045,
-  width: 24, height: 12
-};
-
-// --- Track: a simple oval loop (checkpoints for lap counting) ---
-// Inner & outer boundary rectangles defining a rounded loop
-const track = {
-  outerX: 80, outerY: 60, outerW: 640, outerH: 380,
-  innerX: 180, innerY: 140, innerW: 440, innerH: 220
-};
-
-// Checkpoints (crossing the finish line counts a lap)
-let lapStartX = 130; // left straight
-let passedMid = false;
-let laps = 0;
-let startTime = null;
-
-function isOnTrack(x, y) {
-  const onOuter = x > track.outerX && x < track.outerX + track.outerW &&
-                  y > track.outerY && y < track.outerY + track.outerH;
-  const onInnerHole = x > track.innerX && x < track.innerX + track.innerW &&
-                      y > track.innerY && y < track.innerY + track.innerH;
-  return onOuter && !onInnerHole;
+// Catmull-Rom spline sampling
+function catmull(p0,p1,p2,p3,t){
+  const t2=t*t, t3=t2*t;
+  return 0.5*((2*p1)+(p2-p0)*t+(-2*p1+2*p0-p3+p2)*t2+(2*p1-3*p0+p3-2*p2)*t3);
+}
+const path = [];
+for(let i=0;i<ctrl.length;i++){
+  const p0=ctrl[(i-1+ctrl.length)%ctrl.length], p1=ctrl[i],
+        p2=ctrl[(i+1)%ctrl.length], p3=ctrl[(i+2)%ctrl.length];
+  for(let s=0;s<24;s++){
+    const t=s/24;
+    path.push([catmull(p0[0],p1[0],p2[0],p3[0],t), catmull(p0[1],p1[1],p2[1],p3[1],t)]);
+  }
+}
+const N = path.length;
+// precompute segment directions
+for(let i=0;i<N;i++){
+  const a=path[i], b=path[(i+1)%N];
+  a.ang=Math.atan2(b[1]-a[1], b[0]-a[0]);
+  a.nx=Math.cos(a.ang+Math.PI/2); a.ny=Math.sin(a.ang+Math.PI/2);
+  a.dx=b[0]-a[0]; a.dy=b[1]-a[1];
+  a.len=Math.hypot(a.dx,a.dy);
 }
 
-// --- Drawing ---
-function drawTrack() {
-  // grass already via canvas bg, draw asphalt
-  ctx.fillStyle = '#444';
-  ctx.fillRect(track.outerX, track.outerY, track.outerW, track.outerH);
-  ctx.fillStyle = '#2e7d32';
-  ctx.fillRect(track.innerX, track.innerY, track.innerW, track.innerH);
-  // center line dashes
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 3;
-  ctx.setLineDash([15, 15]);
-  ctx.strokeRect(
-    track.outerX + 35, track.outerY + 35,
-    track.outerW - 70, track.outerH - 70
-  );
-  ctx.setLineDash([]);
-  // finish line
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(lapStartX - 4, track.outerY, 8, 30);
+// nearest point on track
+function nearestOnTrack(x,y){
+  let best=1e9, bi=0, bt=0;
+  for(let i=0;i<N;i++){
+    const a=path[i];
+    const segLen=a.len;
+    let t=((x-a[0])*a.dx+(y-a[1])*a.dy)/(segLen*segLen);
+    t=Math.max(0,Math.min(1,t));
+    const px=a[0]+a.dx*t, py=a[1]+a.dy*t;
+    const d=Math.hypot(x-px,y-py);
+    if(d<best){best=d;bi=i;bt=t;}
+  }
+  const a=path[bi];
+  return {dist:best, idx:bi, t:bt, ang:a.ang};
 }
 
-function drawCar() {
-  ctx.save();
-  ctx.translate(car.x, car.y);
-  ctx.rotate(car.angle);
-  // body
-  ctx.fillStyle = '#e53935';
-  ctx.fillRect(-car.width/2, -car.height/2, car.width, car.height);
-  // windshield
-  ctx.fillStyle = '#90caf9';
-  ctx.fillRect(car.width/2 - 8, -car.height/2 + 2, 5, car.height - 4);
-  // wheels
-  ctx.fillStyle = '#222';
-  ctx.fillRect(-car.width/2 + 2, -car.height/2 - 3, 6, 3);
-  ctx.fillRect(-car.width/2 + 2, car.height/2, 6, 3);
-  ctx.fillRect(car.width/2 - 8, -car.height/2 - 3, 6, 3);
-  ctx.fillRect(car.width/2 - 8, car.height/2, 6, 3);
+// ---------- Input ----------
+const keys={};
+const codeMap={'ArrowUp':'up','ArrowDown':'down','ArrowLeft':'left','ArrowRight':'right',
+  'w':'up','s':'down','a':'left','d':'right','W':'up','S':'down','A':'left','D':'right',
+  ' ':'brake'};
+addEventListener('keydown',e=>{ if(codeMap[e.key]){keys[codeMap[e.key]]=true; e.preventDefault();}});
+addEventListener('keyup',e=>{ if(codeMap[e.key]){keys[codeMap[e.key]]=false;}});
+
+// ---------- Car ----------
+const car={
+  x:path[0][0], y:path[0][1], angle:path[0].ang,
+  speed:0, vx:0, vy:0, maxSpeed:4.6, accel:0.13, brakeForce:0.16,
+  friction:0.03, turn:0.05, w:26, h:13
+};
+
+// ---------- Coins ----------
+const coins=[];
+for(let i=8;i<N;i+=40){
+  const a=path[i];
+  const off=(i%80===8)?TRACK_W*0.45:-TRACK_W*0.45;
+  coins.push({x:a[0]+a.nx*off, y:a[1]+a.ny*off, got:false});
+}
+// ---------- Boost pads ----------
+const boosts=[];
+for(let i=24;i<N;i+=120){
+  const a=path[i];
+  boosts.push({x:a[0], y:a[1], t:Math.random()*6.28});
+}
+// ---------- Traffic ----------
+const traffic=[];
+function makeTraffic(idx, spd){
+  const a=path[idx];
+  const off=(Math.random()*2-1)*TRACK_W*0.4;
+  return {idx, off, speed:spd, x:a[0]+a.nx*off, y:a[1]+a.ny*off, hue:Math.floor(Math.random()*360)};
+}
+for(let i=0;i<5;i++){
+  traffic.push(makeTraffic(Math.floor(Math.random()*N), 0.9+Math.random()*0.5));
+}
+
+// ---------- Game state ----------
+let running=false, startTime=0, elapsed=0, laps=0, coinsGot=0;
+let lapTimes=[], bestLap=null, lastLapTime=0, prevIdx=0;
+let bestOverall=Number(localStorage.getItem('fridayRacerBest')||'Infinity');
+const TOTAL_LAPS=3;
+let shake=0;
+
+function resetCarToStart(){
+  car.x=path[0][0]; car.y=path[0][1]; car.angle=path[0].ang;
+  car.speed=0; car.vx=0; car.vy=0;
+  prevIdx=0;
+}
+
+function startGame(){
+  document.getElementById('overlay').classList.add('hidden');
+  running=true; startTime=performance.now(); elapsed=0; laps=0; coinsGot=0;
+  lapTimes=[]; bestLap=null; lastLapTime=startTime;
+  resetCarToStart();
+  coins.forEach(c=>c.got=false);
+  traffic.forEach(t=>{ Object.assign(t, makeTraffic(Math.floor(Math.random()*N), 0.9+Math.random()*0.5)); });
+  document.getElementById('best').textContent = bestOverall===Infinity?'--':bestOverall.toFixed(1)+'s';
+}
+
+// ---------- Update ----------
+function update(){
+  if(!running) return;
+  elapsed=(performance.now()-startTime)/1000;
+
+  // accel / brake
+  if(keys.up) car.speed+=car.accel;
+  else if(keys.down) car.speed-=car.brakeForce;
+  else {
+    if(car.speed>0) car.speed=Math.max(0,car.speed-car.friction);
+    if(car.speed<0) car.speed=Math.min(0,car.speed+car.friction);
+  }
+  // boost pad
+  for(const b of boosts){
+    if(Math.hypot(car.x-b.x,car.y-b.y)<26){ car.speed=Math.min(car.maxSpeed*1.6, car.speed+0.6); shake=Math.min(8,shake+2); b.t=0; }
+  }
+  car.speed=Math.max(-car.maxSpeed*0.5, Math.min(car.maxSpeed*1.6, car.speed));
+
+  // steering scaled by speed
+  const steer=Math.abs(car.speed)/car.maxSpeed;
+  const dir=car.speed>=0?1:-1;
+  if(keys.left) car.angle-=car.turn*steer*dir;
+  if(keys.right) car.angle+=car.turn*steer*dir;
+
+  const drift=keys.brake && Math.abs(car.speed)>1.5;
+
+  let tvx=Math.cos(car.angle)*car.speed;
+  let tvy=Math.sin(car.angle)*car.speed;
+  const grip=drift?0.85:0.95;
+  car.vx=car.vx*grip+tvx*(1-grip);
+  car.vy=car.vy*grip+tvy*(1-grip);
+  car.x+=car.vx; car.y+=car.vy;
+
+  car.x=Math.max(20,Math.min(W-20,car.x));
+  car.y=Math.max(20,Math.min(H-20,car.y));
+
+  const n=nearestOnTrack(car.x,car.y);
+  if(n.dist>TRACK_W){
+    const over=n.dist-TRACK_W;
+    car.vx*=0.86; car.vy*=0.86; car.speed*=0.9;
+    shake=Math.min(6,shake+over*0.04);
+  }
+
+  // lap detection
+  const ci=n.idx;
+  if(prevIdx>N*0.7 && ci<N*0.3){
+    const lapTime=(performance.now()-lastLapTime)/1000;
+    if(lapTimes.length>0){
+      lapTimes.push(lapTime);
+      if(bestLap===null||lapTime<bestLap) bestLap=lapTime;
+      laps++;
+      if(laps>=TOTAL_LAPS){ finish(); }
+    }
+    lastLapTime=performance.now();
+  }
+  prevIdx=ci;
+
+  // coins
+  for(const c of coins){
+    if(!c.got && Math.hypot(car.x-c.x,car.y-c.y)<18){
+      c.got=true; coinsGot++; shake=Math.min(7,shake+1.5);
+    }
+  }
+  // traffic
+  for(const t of traffic){
+    t.idx=(t.idx+Math.round(t.speed))%N;
+    const a=path[t.idx];
+    t.x=a[0]+a.nx*t.off; t.y=a[1]+a.ny*t.off;
+    if(Math.hypot(car.x-t.x,car.y-t.y)<22){
+      car.speed*=0.3; car.vx*=-0.4; car.vy*=-0.4; shake=Math.min(10,shake+4);
+    }
+  }
+  if(shake>0) shake*=0.85;
+}
+
+function finish(){
+  running=false;
+  const total=elapsed;
+  if(bestOverall===Infinity || total<bestOverall){
+    bestOverall=total; localStorage.setItem('fridayRacerBest',total.toFixed(1));
+  }
+  const ov=document.getElementById('overlay');
+  ov.classList.remove('hidden');
+  ov.innerHTML=`<h1>🏁 FINISHED!</h1>
+    <p>Total time <b>${total.toFixed(1)}s</b><br>
+    Best lap <b>${(bestLap??0).toFixed(1)}s</b><br>
+    Coins collected <b>${coinsGot}</b><br>
+    ${total<=bestOverall?'🥇 New best run!':''}</p>
+    <button onclick="location.reload()">RACE AGAIN</button>`;
+}
+
+// ---------- Draw ----------
+function drawTrack(){
+  ctx.fillStyle='#15532b'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#1b5e2f';
+  for(let i=0;i<W;i+=40) for(let j=0;j<H;j+=40) if(((i+j)/40)%2===0) ctx.fillRect(i,j,40,40);
+
+  ctx.lineJoin='round'; ctx.lineCap='round';
+  ctx.strokeStyle='#3a3a3a'; ctx.lineWidth=TRACK_W*2;
+  ctx.beginPath();
+  ctx.moveTo(path[0][0],path[0][1]);
+  for(let i=1;i<=N;i++){const p=path[i%N]; ctx.lineTo(p[0],p[1]);}
+  ctx.stroke();
+  // edge lines
+  ctx.strokeStyle='#fff'; ctx.lineWidth=3; ctx.setLineDash([18,16]);
+  ctx.beginPath();
+  ctx.moveTo(path[0][0],path[0][1]);
+  for(let i=1;i<=N;i++){const p=path[i%N]; ctx.lineTo(p[0],p[1]);}
+  ctx.stroke(); ctx.setLineDash([]);
+  // center dashed line
+  ctx.strokeStyle='#ffd54f'; ctx.lineWidth=2; ctx.setLineDash([6,22]);
+  ctx.beginPath();
+  ctx.moveTo(path[0][0],path[0][1]);
+  for(let i=1;i<=N;i++){const p=path[i%N]; ctx.lineTo(p[0],p[1]);}
+  ctx.stroke(); ctx.setLineDash([]);
+  // start/finish line
+  const a=path[0];
+  ctx.save(); ctx.translate(a[0],a[1]); ctx.rotate(a.ang);
+  for(let k=-TRACK_W;k<TRACK_W;k+=12){
+    ctx.fillStyle=((k/12)|0)%2? '#fff':'#222';
+    ctx.fillRect(-5,k,10,12);
+  }
+  ctx.restore();
+
+  // boost pads
+  for(const b of boosts){
+    ctx.save(); ctx.translate(b.x,b.y); ctx.rotate(b.t+=0.05);
+    ctx.fillStyle='rgba(80,200,255,0.85)';
+    for(let r=0;r<3;r++){ ctx.beginPath(); ctx.moveTo(-10+r*4,-12); ctx.lineTo(0,-12-r*4); ctx.lineTo(10-r*4,-12); ctx.fill(); }
+    ctx.restore();
+  }
+  // coins
+  for(const c of coins){
+    if(c.got) continue;
+    ctx.beginPath(); ctx.arc(c.x,c.y,7,0,7);
+    ctx.fillStyle='#ffd54f'; ctx.fill();
+    ctx.strokeStyle='#c9a227'; ctx.lineWidth=2; ctx.stroke();
+  }
+}
+
+function drawCar(x,y,ang,w,h,color,accent){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(ang);
+  ctx.fillStyle=color; ctx.fillRect(-w/2,-h/2,w,h);
+  ctx.fillStyle=accent; ctx.fillRect(w/2-7,-h/2+2,5,h-4);
+  ctx.fillStyle='#111';
+  ctx.fillRect(-w/2+2,-h/2-3,6,3); ctx.fillRect(-w/2+2,h/2,6,3);
+  ctx.fillRect(w/2-8,-h/2-3,6,3); ctx.fillRect(w/2-8,h/2,6,3);
   ctx.restore();
 }
 
-// --- Update ---
-function update() {
-  if (startTime === null) startTime = performance.now();
-
-  // acceleration
-  if (keys['ArrowUp']) car.speed += car.accel;
-  else if (keys['ArrowDown']) car.speed -= car.brake;
-  else {
-    // friction
-    if (car.speed > 0) car.speed = Math.max(0, car.speed - car.friction);
-    if (car.speed < 0) car.speed = Math.min(0, car.speed + car.friction);
-  }
-  car.speed = Math.max(-car.maxSpeed/2, Math.min(car.maxSpeed, car.speed));
-
-  // steering (only when moving)
-  if (Math.abs(car.speed) > 0.1) {
-    const dir = car.speed > 0 ? 1 : -1;
-    if (keys['ArrowLeft']) car.angle -= car.turnSpeed * dir;
-    if (keys['ArrowRight']) car.angle += car.turnSpeed * dir;
-  }
-
-  // move
-  car.x += Math.cos(car.angle) * car.speed;
-  car.y += Math.sin(car.angle) * car.speed;
-
-  // off-track = slow down + bounce back slightly
-  if (!isOnTrack(car.x, car.y)) {
-    car.speed *= 0.5;
-    car.x -= Math.cos(car.angle) * car.speed;
-    car.y -= Math.sin(car.angle) * car.speed;
-    car.x = Math.max(track.outerX, Math.min(track.outerX + track.outerW, car.x));
-    car.y = Math.max(track.outerY, Math.min(track.outerY + track.outerH, car.y));
-  }
-
-  // lap detection: crossing finish line (x = lapStartX) going right
-  if (car.x < lapStartX && passedMid && car.y > track.outerY && car.y < track.outerY + 60) {
-    laps++;
-    passedMid = false;
-  }
-  if (car.x > W/2) passedMid = true;
-}
-
-// --- HUD ---
-const elSpeed = document.getElementById('speed');
-const elTime = document.getElementById('time');
-const elLaps = document.getElementById('laps');
-
-function updateHUD() {
-  elSpeed.textContent = Math.abs(Math.round(car.speed * 20));
-  elTime.textContent = startTime ? ((performance.now() - startTime)/1000).toFixed(1) : '0.0';
-  elLaps.textContent = laps;
-}
-
-// --- Loop ---
-function loop() {
-  update();
-  ctx.clearRect(0, 0, W, H);
+function draw(){
+  ctx.save();
+  if(shake>0.3){ ctx.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake); }
   drawTrack();
-  drawCar();
-  updateHUD();
+  for(const t of traffic) drawCar(t.x,t.y,path[t.idx].ang,26,13,`hsl(${t.hue},70%,55%)`,'#fff');
+  drawCar(car.x,car.y,car.angle,car.w,car.h,'#e53935','#90caf9');
+  ctx.restore();
+}
+
+// ---------- HUD ----------
+const elSpeed=document.getElementById('speed'), elLap=document.getElementById('lap'),
+      elTime=document.getElementById('time'), elBest=document.getElementById('best'),
+      elCoins=document.getElementById('coins');
+function updateHUD(){
+  elSpeed.textContent=Math.round(Math.abs(car.speed)*22);
+  elLap.textContent=Math.min(laps+1,TOTAL_LAPS)+'/'+TOTAL_LAPS;
+  elTime.textContent=elapsed.toFixed(1);
+  elBest.textContent=(bestLap!==null?bestLap.toFixed(1)+'s':(bestOverall===Infinity?'--':bestOverall.toFixed(1)+'s'));
+  elCoins.textContent=coinsGot;
+}
+
+document.getElementById('startBtn').addEventListener('click',startGame);
+
+function loop(){
+  update(); draw(); updateHUD();
   requestAnimationFrame(loop);
 }
 loop();
