@@ -1,36 +1,10 @@
-I've inspected the project. Here's the full picture.
+Ho gaya chacha, khul gaya hoga browser! 😄 (command thoda hang kiya but start ne file open kar di hogi).
 
-## Overview
+Agar nahi khuli toh ek kaam kar — ye command chal le:
 
-This is the **`web` package** of **friday-ng** ("HarNESs"), a local, multi-provider AI coding agent with streaming tool calls. It's a **Next.js 15 App Router** frontend (not Vite, despite the stale README) that shells a parent `friday-ng` core repo.
+start "" "C:\Users\anime\Desktop\friday-ng\web\driving-game.html"
+Ya directly file pe double-click maar de. Agar abhi bhi nahi khuli toh bata, aur check karta hoon ki file sahi jagah toh hai. Game khel aur bata kaisa laga! 🚗
 
-- **Stack:** Next.js 15.1, React 19.2, TypeScript 5.9 (strict), Tailwind 3.4, shadcn/ui (Radix + CVA + `lucide-react`), `cmdk`, `sonner`, `zod` (v4), `recharts`.
-- **Port:** dev/start on `4317`; built as a **standalone** output (`output: "standalone"`).
-- **Version:** `0.3.1`.
 
-## Architecture
-
-**It's a thin frontend over a parent core.** Almost all business logic is imported via the tsconfig alias `@/src/* → ../src/*` — the chat route pulls in `Agent`, `buildStreamFunction`, `loadConfig`, `findProvider`, `SettingsStore`, the `shell`/`websearch` tools, etc. Those modules live in the **parent `friday-ng/src`**, which is *not present in this checkout* (the `friday-ng` folder only contains `web`). So this package **cannot build/run on its own** — it needs the sibling core repo.
-
-**Data flow (server → client):**
-- `src/app/page.tsx` — server-rendered root; loads config + sessions and hydrates `<ChatApp>` (no loading flash).
-- `src/app/api/chat/route.ts` — the heart: POST resolves provider/model, loads/creates a session, reuses or builds an `Agent`, and streams `AgentEvent`s as **SSE** (`event: agent-event`, `session`, `complete`, `error`). Returns the `Response` *before* driving the agent to avoid Node stream backpressure deadlock. Honors client `AbortSignal` to stop the agent.
-- `src/server/agent-registry.ts` — in-process `Map<sessionId, Agent>` so multi-turn chats keep history.
-- `src/server/route-helpers.ts` — exposes 8 tools (bash, read, write, edit, multiEdit, glob, grep, websearch) + a `calculator` tool.
-
-**Client:**
-- `src/lib/use-chat.ts` — owns transcript + SSE consumption; `reduceEvent()` is a pure reducer for applying `AgentEvent`s (text deltas, tool start/progress/end, dedup by toolCallId).
-- `src/lib/sse.ts` — hand-rolled SSE parser over `ReadableStream`.
-- `src/lib/api.ts` — single typed fetch wrapper.
-- Components: `ChatApp`, `Composer`, `MessageList`, `MessageBubble`, `ModelPicker`, `ToolCard`, `Topbar`, `SessionRail`, `SettingsModal`, `CommandPalette` (Cmd/Ctrl+K), `ThemeToggle`.
-
-**Other API routes:** `health`, `config`, `settings` (POST saves settings), `sessions` (GET list), `sessions/[id]` (GET transcript), `abort` (POST stops an agent).
-
-## Notes / Issues spotted
-1. **README is wrong** — still the default Vite/React template text; doesn't match the Next.js app.
-2. **Missing parent core** — `../src/*` imports won't resolve here; building standalone fails without the `friday-ng` core repo.
-3. **`buildModel` defaults** — `cost: 0` and `reasoning: false` are hardcoded for every model in `route-helpers.ts`, so cost/token accounting is currently inert.
-4. **`use-chat.ts`** — `toolCategory` / `deriveText` imported from `./types-helpers` (local copy) while `route-helpers.ts` has its own `deriveText`/`resultText` (server copy); minor duplication.
-5. **`ChatApp`** — `onSettingsChange` is a no-op and theme is managed with manual `data-theme`/class toggling alongside `next-themes`, slightly redundant.
-
-Want me to dig deeper into any specific area (e.g., the tool system, SSE wiring, the UI components), fix the README, or check whether the parent core can be located?
+hey this is response of the our harnesss so i want yu to like add in build cmd runner means i can click run cmd and o run icon it runs and one more things double clicking on the 
+cmd opens the cmd in the new cmd in the dir it is running respsectively

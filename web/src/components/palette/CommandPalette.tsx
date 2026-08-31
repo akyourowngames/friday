@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, Search, Settings2, Sun } from "lucide-react";
+import { Plus, Search, Settings2, Sun, Terminal as TerminalIcon } from "lucide-react";
+import { revealInTerminal } from "@/lib/run-client";
+import { toast } from "sonner";
 
 export function CommandPalette({
 	onClose,
@@ -24,9 +26,19 @@ export function CommandPalette({
 		return () => window.removeEventListener("keydown", onKey);
 	}, [onClose]);
 
+	const openTerminal = async () => {
+		try {
+			const result = await revealInTerminal();
+			toast.success(`Opened terminal in ${result.cwd}`);
+		} catch (e) {
+			toast.error("Could not open terminal", { description: (e as Error).message });
+		}
+	};
+
 	const items = [
 		{ label: "New session", icon: Plus, run: actions.newSession },
 		{ label: "Open settings", icon: Settings2, run: actions.openSettings },
+		{ label: "Open terminal", icon: TerminalIcon, run: openTerminal },
 		{ label: "Toggle theme", icon: Sun, run: actions.toggleTheme },
 	];
 	const filtered = items.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()));
@@ -57,7 +69,7 @@ export function CommandPalette({
 								key={item.label}
 								type="button"
 								onClick={() => {
-									item.run();
+									void item.run();
 									onClose();
 								}}
 							>

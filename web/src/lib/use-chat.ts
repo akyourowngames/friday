@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { api } from "./api";
 import { parseSse } from "./sse";
-import type { AgentEvent, AgentMessage, ChatMessage, ProviderInfo, SettingSchema, ToolRun } from "./types";
+import type { AgentEvent, AgentMessage, ChatMessage, ProviderInfo, RunResult, SettingSchema, ToolRun } from "./types";
 import { deriveText, toolCategory } from "./types-helpers";
 
 /**
@@ -35,6 +35,7 @@ export interface UseChatSessionResult {
 	loadTranscript: (id: string, transcript: AgentMessage[]) => void;
 	toggleTool: (messageId: string, toolId: string) => void;
 	resetSession: () => void;
+	appendRun: (result: RunResult) => void;
 	settings: Record<string, unknown>;
 	settingSchema: SettingSchema[];
 	saveSettings: (next: Record<string, unknown>) => Promise<void>;
@@ -147,6 +148,25 @@ export function useChatSession(opts: UseChatSessionOptions): UseChatSessionResul
 		opts.onSessionChange(null);
 	}, [opts]);
 
+	const appendRun = useCallback((result: RunResult) => {
+		const id =
+			typeof crypto !== "undefined" && "randomUUID" in crypto
+				? crypto.randomUUID()
+				: `run-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+		setMessages((current) => [
+			...current,
+			{
+				id,
+				role: "run",
+				text: result.command,
+				status: "done",
+				tools: [],
+				timestamp: Date.now(),
+				run: result,
+			},
+		]);
+	}, []);
+
 	const toggleTool = useCallback((messageId: string, toolId: string) => {
 		setMessages((current) =>
 			current.map((message) =>
@@ -183,6 +203,7 @@ export function useChatSession(opts: UseChatSessionOptions): UseChatSessionResul
 		loadTranscript,
 		toggleTool,
 		resetSession,
+		appendRun,
 		settings,
 		settingSchema: opts.settingSchema,
 		saveSettings,

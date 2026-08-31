@@ -1,0 +1,76 @@
+feat(web): Quick Run bar + native terminal launcher in the topbar
+
+Adds two power-user affordances to the web chat without disturbing
+the regular agent flow:
+
+1. **Quick Run** — a thin input bar above the composer. Type a
+   shell command, hit Enter (or Ctrl+Shift+R from anywhere), and the
+   command runs in the workspace's cwd via the new `/api/run`
+   route. The result lands inline in the chat as a `RunCard` so it
+   survives a page reload, can be copy-pasted, and sits in the
+   conversation context. Reuses the existing `runShell` executor
+   and the same `permissions.ts` dangerous-command guard as the
+   `bash` tool — no privilege escalation past the policy.
+
+2. **Open terminal** — an icon button in the topbar + a new entry
+   in the command palette that spawns a fresh native OS terminal
+   at the workspace cwd. On Windows: `start "" cmd /K cd /d <cwd>`
+   (a new cmd window pinned to the workspace). On macOS: `open -a
+   Terminal <cwd>`. On Linux: honours `$TERMINAL` or falls back to
+   `x-terminal-emulator`. The server does the spawn so the client
+   doesn't need elevated privileges.
+
+New route handlers:
+  - `POST /api/run`                  — runs a command, returns
+                                        {stdout, stderr, exitCode,
+                                        timedOut, aborted, durationMs,
+                                        cwd, platform, shell}.
+                                        Capped at 10 minutes; the
+                                        200KB-per-stream output cap
+                                        from `runShell` applies.
+  - `GET  /api/workspace/cwd`        — returns the server's cwd +
+                                        platform + shell.
+  - `POST /api/workspace/reveal`     — fires a detached spawn of a
+                                        new native terminal at cwd.
+                                        Returns ok so the client
+                                        can show a confirmation
+                                        toast.
+
+UI:
+  - `web/src/components/chat/QuickRunBar.tsx`  — input + run/stop btn
+                                                + inline error.
+  - `web/src/components/chat/TerminalLauncher.tsx` — icon button +
+                                                toast on success.
+  - `web/src/components/chat/RunCard.tsx`      — collapsible card
+                                                with command, exit
+                                                badge, stdout/stderr
+                                                blocks, copy btns,
+                                                cwd footer.
+  - `MessageBubble` now renders `role: "run"` messages as a
+    `RunCard` (separate from user/assistant bubbles).
+  - `useChatSession` exposes `appendRun(result)` so the QuickRunBar
+    can push a finished invocation onto the transcript.
+  - `Topbar` accepts an `extra` prop for topbar action slot; ChatApp
+    puts `<TerminalLauncher />` there.
+  - `CommandPalette` adds an "Open terminal" action that calls the
+    same endpoint.
+
+Wiring (ChatApp.tsx):
+  - Mount `getWorkspaceInfo()` on first render; track cwd in
+    state so the QuickRunBar can show the path in its placeholder
+    and the terminal tooltip.
+  - Render `<QuickRunBar cwd onRun={chat.appendRun} />` between the
+    model picker and the composer.
+
+Tests / verification:
+  - `web/scripts/smoke.mjs` hits the new routes over loopback and
+    asserts on shape + error cases. `npm run smoke` runs it.
+  - 7/7 smoke tests pass.
+  - `next build` clean, page chunk 12.5 kB -> 13.2 kB.
+  - 3 new routes: /api/run, /api/workspace/cwd, /api/workspace/reveal.
+  - Full root test suite: 474/474 pass.
+  - Live smoke: `echo hello` -> exit 0 with stdout captured,
+    empty command -> 400, `rm -rf /` -> 403, `dir /Z` -> non-zero
+    exit, "Open terminal" -> new cmd window at workspace cwd.
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>

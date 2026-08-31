@@ -807,10 +807,212 @@
 		right: 0;
 		padding: 0 12vw 19px;
 		pointer-events: none;
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
 	}
 	.harness-composer-wrap > * {
 		pointer-events: auto;
 	}
+
+	/* Quick Run bar — sits above the composer, runs commands via /api/run. */
+	.harness-quickrun {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: min(800px, 100%);
+		margin: 0 auto;
+		padding: 7px 10px 7px 12px;
+		background: var(--panel-strong);
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		box-shadow: 0 6px 22px rgba(0, 0, 0, 0.18);
+		backdrop-filter: blur(28px);
+		font-size: 12px;
+	}
+	.light .harness-quickrun {
+		background: rgba(255, 255, 255, 0.92);
+	}
+	.harness-quickrun-prompt {
+		color: var(--violet);
+		display: inline-grid;
+		place-items: center;
+	}
+	.harness-quickrun-input {
+		flex: 1;
+		background: transparent;
+		border: 0;
+		outline: none;
+		color: var(--ink);
+		font: 12.5px/1.5 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+	}
+	.harness-quickrun-input::placeholder {
+		color: var(--subtle);
+	}
+	.harness-quickrun-btn {
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
+		border: 0;
+		background: var(--violet);
+		color: white;
+		border-radius: 7px;
+		transition: filter 0.15s ease;
+	}
+	.harness-quickrun-btn:hover:not(:disabled) {
+		filter: brightness(1.08);
+	}
+	.harness-quickrun-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.harness-quickrun-btn.is-stop {
+		background: rgba(239, 118, 118, 0.22);
+		color: #ef7676;
+	}
+	.harness-quickrun-error {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: min(800px, 100%);
+		margin: 0 auto;
+		padding: 6px 10px;
+		font-size: 11px;
+		color: #ef7676;
+		background: rgba(239, 118, 118, 0.1);
+		border: 1px solid rgba(239, 118, 118, 0.3);
+		border-radius: 8px;
+	}
+
+	/* Run card — a local Quick Run invocation rendered inline in the chat. */
+	.harness-message.is-run {
+		padding: 0;
+	}
+	.harness-run-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 9px 12px 9px 10px;
+		font-size: 11px;
+		color: var(--muted);
+		border-bottom: 1px solid var(--line);
+	}
+	.harness-run-title {
+		font-weight: 600;
+		color: var(--ink);
+		font-size: 12px;
+	}
+	.harness-run-cmd {
+		flex: 1;
+		min-width: 0;
+		font: 11.5px/1.4 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		color: var(--ink);
+		background: rgba(0, 0, 0, 0.18);
+		padding: 3px 8px;
+		border-radius: 5px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.light .harness-run-cmd {
+		background: rgba(25, 28, 42, 0.07);
+	}
+	.harness-run-badge {
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 2px 7px;
+		border-radius: 4px;
+		flex: none;
+	}
+	.harness-run-badge.is-done {
+		color: #6fc79b;
+		background: rgba(111, 199, 155, 0.14);
+	}
+	.harness-run-badge.is-error {
+		color: #ef7676;
+		background: rgba(239, 118, 118, 0.18);
+	}
+	.harness-run-meta {
+		font-size: 10px;
+		color: var(--subtle);
+		letter-spacing: 0.04em;
+		flex: none;
+	}
+	.harness-run-running {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 10px 14px;
+		font-size: 11px;
+		color: var(--muted);
+	}
+	.harness-run-output {
+		display: grid;
+		gap: 6px;
+		padding: 8px 10px 10px;
+	}
+	.harness-run-block {
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		overflow: hidden;
+		background: rgba(0, 0, 0, 0.16);
+	}
+	.harness-run-block.is-stderr {
+		background: rgba(239, 118, 118, 0.1);
+		border-color: rgba(239, 118, 118, 0.25);
+	}
+	.harness-run-block-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 4px 10px;
+		font-size: 10px;
+		color: var(--subtle);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+	.harness-run-block-head button {
+		display: grid;
+		place-items: center;
+		background: transparent;
+		border: 0;
+		color: var(--muted);
+		cursor: pointer;
+	}
+	.harness-run-block-head button:hover {
+		color: var(--ink);
+	}
+	.harness-run-block pre {
+		margin: 0;
+		padding: 8px 12px 10px;
+		font: 11.5px/1.55 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		color: var(--ink);
+		max-height: 360px;
+		overflow: auto;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+	.harness-run-empty {
+		color: var(--muted);
+		font-style: italic;
+	}
+	.harness-run-foot {
+		display: flex;
+		gap: 4px;
+		font-size: 10.5px;
+		color: var(--subtle);
+	}
+	.harness-run-foot code {
+		font: 10.5px/1 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		max-width: 60%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.harness-model-strip {
 		width: min(800px, 100%);
 		margin: 0 auto 7px;

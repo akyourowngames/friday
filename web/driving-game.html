@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Friday 2D Driving Game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', sans-serif;
+    color: #eee;
+  }
+  h1 { margin-bottom: 8px; font-size: 22px; }
+  #hint { margin-bottom: 12px; font-size: 14px; color: #aaa; }
+  canvas {
+    background: #2e7d32;
+    border: 4px solid #fff;
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  }
+  #hud {
+    margin-top: 10px;
+    font-size: 16px;
+    display: flex;
+    gap: 24px;
+  }
+  .key { color: #ffd54f; font-weight: bold; }
+</style>
+</head>
+<body>
+  <h1>🚗 Friday 2D Driving Game</h1>
+  <div id="hint">Use <span class="key">↑</span> accelerate, <span class="key">↓</span> brake/reverse, <span class="key">← →</span> steer</div>
+  <canvas id="game" width="800" height="500"></canvas>
+  <div id="hud">
+    <span>Speed: <b id="speed">0</b></span>
+    <span>Time: <b id="time">0.0</b>s</span>
+    <span>Laps: <b id="laps">0</b></span>
+  </div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// --- Input ---
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', e => keys[e.key] = false);
+
+// --- Car ---
+const car = {
+  x: 120, y: 250,
+  angle: 0,          // facing right (radians)
+  speed: 0,
+  maxSpeed: 5,
+  accel: 0.12,
+  brake: 0.18,
+  friction: 0.04,
+  turnSpeed: 0.045,
+  width: 24, height: 12
+};
+
+// --- Track: a simple oval loop (checkpoints for lap counting) ---
+// Inner & outer boundary rectangles defining a rounded loop
+const track = {
+  outerX: 80, outerY: 60, outerW: 640, outerH: 380,
+  innerX: 180, innerY: 140, innerW: 440, innerH: 220
+};
+
+// Checkpoints (crossing the finish line counts a lap)
+let lapStartX = 130; // left straight
+let passedMid = false;
+let laps = 0;
+let startTime = null;
+
+function isOnTrack(x, y) {
+  const onOuter = x > track.outerX && x < track.outerX + track.outerW &&
+                  y > track.outerY && y < track.outerY + track.outerH;
+  const onInnerHole = x > track.innerX && x < track.innerX + track.innerW &&
+                      y > track.innerY && y < track.innerY + track.innerH;
+  return onOuter && !onInnerHole;
+}
+
+// --- Drawing ---
+function drawTrack() {
+  // grass already via canvas bg, draw asphalt
+  ctx.fillStyle = '#444';
+  ctx.fillRect(track.outerX, track.outerY, track.outerW, track.outerH);
+  ctx.fillStyle = '#2e7d32';
+  ctx.fillRect(track.innerX, track.innerY, track.innerW, track.innerH);
+  // center line dashes
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([15, 15]);
+  ctx.strokeRect(
+    track.outerX + 35, track.outerY + 35,
+    track.outerW - 70, track.outerH - 70
+  );
+  ctx.setLineDash([]);
+  // finish line
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(lapStartX - 4, track.outerY, 8, 30);
+}
+
+function drawCar() {
+  ctx.save();
+  ctx.translate(car.x, car.y);
+  ctx.rotate(car.angle);
+  // body
+  ctx.fillStyle = '#e53935';
+  ctx.fillRect(-car.width/2, -car.height/2, car.width, car.height);
+  // windshield
+  ctx.fillStyle = '#90caf9';
+  ctx.fillRect(car.width/2 - 8, -car.height/2 + 2, 5, car.height - 4);
+  // wheels
+  ctx.fillStyle = '#222';
+  ctx.fillRect(-car.width/2 + 2, -car.height/2 - 3, 6, 3);
+  ctx.fillRect(-car.width/2 + 2, car.height/2, 6, 3);
+  ctx.fillRect(car.width/2 - 8, -car.height/2 - 3, 6, 3);
+  ctx.fillRect(car.width/2 - 8, car.height/2, 6, 3);
+  ctx.restore();
+}
+
+// --- Update ---
+function update() {
+  if (startTime === null) startTime = performance.now();
+
+  // acceleration
+  if (keys['ArrowUp']) car.speed += car.accel;
+  else if (keys['ArrowDown']) car.speed -= car.brake;
+  else {
+    // friction
+    if (car.speed > 0) car.speed = Math.max(0, car.speed - car.friction);
+    if (car.speed < 0) car.speed = Math.min(0, car.speed + car.friction);
+  }
+  car.speed = Math.max(-car.maxSpeed/2, Math.min(car.maxSpeed, car.speed));
+
+  // steering (only when moving)
+  if (Math.abs(car.speed) > 0.1) {
+    const dir = car.speed > 0 ? 1 : -1;
+    if (keys['ArrowLeft']) car.angle -= car.turnSpeed * dir;
+    if (keys['ArrowRight']) car.angle += car.turnSpeed * dir;
+  }
+
+  // move
+  car.x += Math.cos(car.angle) * car.speed;
+  car.y += Math.sin(car.angle) * car.speed;
+
+  // off-track = slow down + bounce back slightly
+  if (!isOnTrack(car.x, car.y)) {
+    car.speed *= 0.5;
+    car.x -= Math.cos(car.angle) * car.speed;
+    car.y -= Math.sin(car.angle) * car.speed;
+    car.x = Math.max(track.outerX, Math.min(track.outerX + track.outerW, car.x));
+    car.y = Math.max(track.outerY, Math.min(track.outerY + track.outerH, car.y));
+  }
+
+  // lap detection: crossing finish line (x = lapStartX) going right
+  if (car.x < lapStartX && passedMid && car.y > track.outerY && car.y < track.outerY + 60) {
+    laps++;
+    passedMid = false;
+  }
+  if (car.x > W/2) passedMid = true;
+}
+
+// --- HUD ---
+const elSpeed = document.getElementById('speed');
+const elTime = document.getElementById('time');
+const elLaps = document.getElementById('laps');
+
+function updateHUD() {
+  elSpeed.textContent = Math.abs(Math.round(car.speed * 20));
+  elTime.textContent = startTime ? ((performance.now() - startTime)/1000).toFixed(1) : '0.0';
+  elLaps.textContent = laps;
+}
+
+// --- Loop ---
+function loop() {
+  update();
+  ctx.clearRect(0, 0, W, H);
+  drawTrack();
+  drawCar();
+  updateHUD();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

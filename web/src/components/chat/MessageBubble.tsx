@@ -4,6 +4,7 @@ import { Volume2 } from "lucide-react";
 import type { ChatMessage, ToolRun } from "@/lib/types";
 import { ToolCard } from "./ToolCard";
 import { SearchCard } from "./SearchCard";
+import { RunCard } from "./RunCard";
 import { MarkdownView } from "./MarkdownView";
 
 /** Drop duplicate tool cards (defensive — the reducer already dedupes). */
@@ -29,7 +30,32 @@ export function MessageBubble({
 	onSpeak: (text: string) => void;
 }) {
 	const isUser = message.role === "user";
-	const showTyping = !isUser && message.status === "streaming" && !message.text && (message.tools?.length ?? 0) === 0;
+	const isRun = message.role === "run";
+	const showTyping = !isUser && !isRun && message.status === "streaming" && !message.text && (message.tools?.length ?? 0) === 0;
+
+	// Local Quick Run invocation: render the standalone RunCard.
+	if (isRun && message.run) {
+		const r = message.run;
+		return (
+			<article className="harness-message is-run">
+				<div className="harness-message-body">
+					<RunCard
+						command={r.command}
+						cwd={r.cwd}
+						platform={r.platform}
+						shell={r.shell}
+						stdout={r.stdout}
+						stderr={r.stderr}
+						exitCode={r.exitCode}
+						timedOut={r.timedOut}
+						aborted={r.aborted}
+						durationMs={r.durationMs}
+						status="done"
+					/>
+				</div>
+			</article>
+		);
+	}
 
 	return (
 		<article className={`harness-message ${isUser ? "is-user" : ""}`}>

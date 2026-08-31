@@ -72,13 +72,28 @@ export interface ToolRun {
 	searchProvider?: string;
 }
 
+export interface RunResult {
+	command: string;
+	cwd: string;
+	platform: string;
+	shell: string;
+	stdout: string;
+	stderr: string;
+	exitCode: number | null;
+	timedOut: boolean;
+	aborted: boolean;
+	durationMs: number;
+}
+
 export interface ChatMessage {
 	id: string;
-	role: "user" | "assistant";
+	role: "user" | "assistant" | "run";
 	text: string;
 	status: "streaming" | "done";
 	tools: ToolRun[];
 	timestamp?: number;
+	/** Local Quick Run invocation (only set when role === "run"). */
+	run?: RunResult;
 }
 
 export type { AgentMessage as WireMessage } from "@/src/types";

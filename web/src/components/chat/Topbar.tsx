@@ -9,12 +9,14 @@ export function Topbar({
 	onToggleRail,
 	onOpenSettings,
 	themeToggle,
+	extra,
 }: {
 	isStreaming: boolean;
 	activeSessionId: string | null;
 	onToggleRail: () => void;
 	onOpenSettings: () => void;
 	themeToggle: ReactNode;
+	extra?: ReactNode;
 }) {
 	return (
 		<header className="harness-topbar">
@@ -44,6 +46,7 @@ export function Topbar({
 						"Ready"
 					)}
 				</button>
+				{extra}
 				{themeToggle}
 				<button
 					type="button"

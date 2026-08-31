@@ -4,11 +4,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ProviderInfo, SessionMeta, SettingSchema } from "@/lib/types";
 import { useChatSession } from "@/lib/use-chat";
 import { useSessions } from "@/lib/use-sessions";
+import { getWorkspaceInfo } from "@/lib/run-client";
 import { SessionRail } from "@/components/sidebar/SessionRail";
 import { Topbar } from "@/components/chat/Topbar";
 import { MessageList } from "@/components/chat/MessageList";
 import { Composer } from "@/components/chat/Composer";
 import { ModelPicker } from "@/components/chat/ModelPicker";
+import { QuickRunBar } from "@/components/chat/QuickRunBar";
+import { TerminalLauncher } from "@/components/chat/TerminalLauncher";
 import { SettingsModal } from "@/components/settings/SettingsModal";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
@@ -31,6 +34,16 @@ export function ChatApp({ initial }: { initial: ChatAppInitial }) {
 	const [modelOpen, setModelOpen] = useState(false);
 	const [theme, setTheme] = useState<"dark" | "light">("dark");
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+	const [cwd, setCwd] = useState<string>("");
+
+	// Resolve the server's working directory once on mount so the Quick
+	// Run bar knows where to launch commands and the TerminalLauncher
+	// can show the path in its tooltip.
+	useEffect(() => {
+		getWorkspaceInfo()
+			.then((info) => setCwd(info.cwd))
+			.catch(() => undefined);
+	}, []);
 
 	const chat = useChatSession({
 		initialProvider: initial.provider,
@@ -133,6 +146,7 @@ export function ChatApp({ initial }: { initial: ChatAppInitial }) {
 					onToggleRail={() => setRailOpen((v) => !v)}
 					onOpenSettings={() => setSettingsOpen(true)}
 					themeToggle={<ThemeToggle theme={theme} onChange={setTheme} />}
+					extra={<TerminalLauncher />}
 				/>
 				<MessageList
 					messages={chat.messages}
@@ -152,6 +166,11 @@ export function ChatApp({ initial }: { initial: ChatAppInitial }) {
 							setModelOpen(false);
 						}}
 						onToggle={() => setModelOpen((v) => !v)}
+					/>
+					<QuickRunBar
+						cwd={cwd}
+						disabled={chat.isStreaming}
+						onRun={(result) => chat.appendRun(result)}
 					/>
 					<Composer
 						isStreaming={chat.isStreaming}
