@@ -9,7 +9,9 @@ export async function GET() {
 	return NextResponse.json(
 		sessions.map((s) => ({
 			id: s.id,
-			title: s.title,
+			// Collapse whitespace/escaped newlines so multi-line prompts render
+			// as a clean one-line title in the session rail.
+			title: s.title.replace(/\\n/g, " ").replace(/\s+/g, " ").trim(),
 			updatedAt: s.updatedAt,
 			messageCount: s.messageCount,
 			provider: s.provider,

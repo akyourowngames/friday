@@ -31,7 +31,8 @@ export default async function Page() {
 		settingSchema: listSettings(),
 		sessions: sessions.map((s) => ({
 			id: s.id,
-			title: s.title,
+			// Same title sanitizing as /api/sessions — collapse newlines.
+			title: s.title.replace(/\\n/g, " ").replace(/\s+/g, " ").trim(),
 			updatedAt: s.updatedAt,
 			messageCount: s.messageCount,
 			provider: s.provider,

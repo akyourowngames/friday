@@ -418,7 +418,7 @@
 		flex: 1;
 		overflow-y: auto;
 		scroll-behavior: smooth;
-		padding: 16px 12vw 206px;
+		padding: 16px 12vw 24px;
 	}
 	.harness-thread {
 		max-width: 800px;
@@ -801,12 +801,9 @@
 
 	/* Composer */
 	.harness-composer-wrap {
-		position: absolute;
-		bottom: 0;
-		left: 0;
-		right: 0;
+		position: relative;
+		flex-shrink: 0;
 		padding: 0 12vw 19px;
-		pointer-events: none;
 		display: flex;
 		flex-direction: column;
 		gap: 7px;
@@ -1613,7 +1610,7 @@
 		display: none;
 	}
 	.harness-conversation {
-		padding: 15px 16px 192px;
+		padding: 15px 16px 20px;
 	}
 	.harness-composer-wrap {
 		padding: 0 14px 14px;

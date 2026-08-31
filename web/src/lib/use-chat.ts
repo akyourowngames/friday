@@ -214,7 +214,14 @@ export function useChatSession(opts: UseChatSessionOptions): UseChatSessionResul
 
 /** Reduce a single AgentEvent into a new transcript. */
 export function reduceEvent(current: ChatMessage[], event: AgentEvent, assistantId: string): ChatMessage[] {
-	const next = current.slice();
+	// Deep-ish clone: React StrictMode double-invokes state updaters in dev.
+	// If we mutated a shared message object, every delta would be appended
+	// TWICE ("GGoott iitt——sstteeeerrriinngg"). Cloning up front keeps this
+	// reducer pure and idempotent under double invocation.
+	const next = current.map((m) => ({
+		...m,
+		tools: (m.tools ?? []).map((t) => ({ ...t })),
+	}));
 	const index = next.findIndex((m) => m.id === assistantId);
 
 	switch (event.type) {
