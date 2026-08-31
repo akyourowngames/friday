@@ -1,41 +1,45 @@
 import "server-only";
 import { Type } from "typebox";
 import { bashTool, editTool, globTool, grepTool, multiEditTool, readTool, writeTool } from "@/src/tools/shell";
-import { websearchTool } from "@/src/tools/websearch";
+import { websearchToolWith, type WebsearchConfig } from "@/src/tools/websearch";
 import type { Model, Tool } from "@/src/types";
 
 /** Tools the chat exposes to the agent. Mirrors src/web-server.ts:55. */
-export const defaultTools: Tool[] = [
-	bashTool,
-	readTool,
-	writeTool,
-	editTool,
-	multiEditTool,
-	globTool,
-	grepTool,
-	websearchTool,
-	// Lightweight arithmetic helper — safe to expose, gives the model a
-	// zero-cost way to do math without shelling out.
-	{
-		name: "calculator",
-		description: "Evaluate a simple arithmetic expression and return the result.",
-		parameters: Type.Object({ expression: Type.String({ description: "Arithmetic expression" }) }),
-		execute: async (_id, params) => {
-			try {
-				const expression = String((params as { expression?: unknown }).expression ?? "");
-				// `Function` is acceptable here: the expression is provided by the
-				// model in an isolated process step, not a user-typed string.
-				const result = Function(`"use strict"; return (${expression})`)() as number;
-				return { content: [{ type: "text", text: String(result) }], details: { result } };
-			} catch (error) {
-				return {
-					content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-					isError: true,
-				};
-			}
+export function defaultTools(searchConfig: WebsearchConfig = {}): Tool[] {
+	return [
+		bashTool,
+		readTool,
+		writeTool,
+		editTool,
+		multiEditTool,
+		globTool,
+		grepTool,
+		// Bind the user's Tavily key / SearXNG URL into the tool so the
+		// agent gets paid-provider + metasearch results when configured.
+		websearchToolWith(searchConfig),
+		// Lightweight arithmetic helper — safe to expose, gives the model a
+		// zero-cost way to do math without shelling out.
+		{
+			name: "calculator",
+			description: "Evaluate a simple arithmetic expression and return the result.",
+			parameters: Type.Object({ expression: Type.String({ description: "Arithmetic expression" }) }),
+			execute: async (_id, params) => {
+				try {
+					const expression = String((params as { expression?: unknown }).expression ?? "");
+					// `Function` is acceptable here: the expression is provided by the
+					// model in an isolated process step, not a user-typed string.
+					const result = Function(`"use strict"; return (${expression})`)() as number;
+					return { content: [{ type: "text", text: String(result) }], details: { result } };
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+						isError: true,
+					};
+				}
+			},
 		},
-	},
-];
+	];
+}
 
 export function buildModel(provider: { id: string; defaultBaseUrl: string; defaultContextWindow: number; defaultMaxTokens: number }, modelId: string): Model {
 	return {

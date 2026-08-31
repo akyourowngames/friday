@@ -22,6 +22,7 @@ export type {
 	UserMessage,
 } from "@/src/types";
 export type { SettingValue } from "@/src/settings";
+export type { SearchHit, ProviderSource } from "@/src/tools/websearch";
 
 export interface ProviderInfo {
 	id: string;
@@ -48,6 +49,8 @@ export interface SettingSchema {
 	options?: readonly string[];
 	min?: number;
 	max?: number;
+	group?: string;
+	hintUrl?: string;
 }
 
 /** UI representation of a tool call currently in flight or just finished. */
@@ -59,6 +62,14 @@ export interface ToolRun {
 	status: "running" | "done" | "error";
 	category: "shell" | "file" | "search" | "other";
 	expanded?: boolean;
+	/** For websearch: the synthesized answer returned by the tool. */
+	searchAnswer?: string;
+	/** For websearch: the structured results so the UI can render citation cards. */
+	searchResults?: Array<{ title: string; url: string; snippet: string }>;
+	/** For websearch: per-provider results table, for the "Sources consulted" footer. */
+	searchSources?: Array<{ provider: string; status: string; latencyMs?: number; hitCount?: number; error?: string }>;
+	/** For websearch: provider id that produced the answer (if any). */
+	searchProvider?: string;
 }
 
 export interface ChatMessage {

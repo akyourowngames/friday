@@ -69,11 +69,21 @@ export async function POST(req: Request) {
 			authToken: config.providers[providerId]?.authToken,
 		});
 		const settings = new SettingsStore({ config });
+		// Pull the user's web-search keys (Tavily) and the SearXNG instance
+		// URL out of the persisted settings store. Brave is wired into the
+		// provider list but not yet wired into the tool — exposed in the
+		// UI so the user can store the key now and pick it up later.
+		const tavilyApiKey = (settings.get("tavilyApiKey") as string | null) || undefined;
+		const searxngUrl = (settings.get("searxngUrl") as string | null) || undefined;
+		const searchConfig = {
+			...(tavilyApiKey ? { tavilyApiKey } : {}),
+			...(searxngUrl ? { searxngUrl } : {}),
+		};
 		agent = new Agent({
 			sessionId: session.id,
 			initialState: {
 				systemPrompt: session.systemPrompt,
-				tools: defaultTools,
+				tools: defaultTools(searchConfig),
 				model: buildModel(provider, modelId),
 				messages: loaded?.messages ?? [],
 			},

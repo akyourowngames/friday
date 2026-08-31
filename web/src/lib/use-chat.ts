@@ -275,6 +275,21 @@ export function reduceEvent(current: ChatMessage[], event: AgentEvent, assistant
 				tool.output = renderResult(result);
 				if (event.type === "tool_execution_end") {
 					tool.status = event.isError ? "error" : "done";
+					// For websearch: capture the structured results + sources so
+					// the UI can render a citation card instead of dumping the
+					// raw "Summary: ... References: ..." blob.
+					if (tool.name === "websearch" && result && !event.isError) {
+						const details = (result.details ?? {}) as {
+							results?: Array<{ title: string; url: string; snippet: string }>;
+							answer?: string;
+							sources?: Array<{ provider: string; status: string; latencyMs?: number; hitCount?: number; error?: string }>;
+							provider?: string;
+						};
+						if (Array.isArray(details.results)) tool.searchResults = details.results;
+						if (typeof details.answer === "string") tool.searchAnswer = details.answer;
+						if (Array.isArray(details.sources)) tool.searchSources = details.sources as ToolRun["searchSources"];
+						if (typeof details.provider === "string") tool.searchProvider = details.provider;
+					}
 				}
 			}
 			break;

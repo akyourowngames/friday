@@ -3,6 +3,7 @@
 import { Volume2 } from "lucide-react";
 import type { ChatMessage, ToolRun } from "@/lib/types";
 import { ToolCard } from "./ToolCard";
+import { SearchCard } from "./SearchCard";
 import { MarkdownView } from "./MarkdownView";
 
 /** Drop duplicate tool cards (defensive — the reducer already dedupes). */
@@ -46,13 +47,21 @@ export function MessageBubble({
 						<MarkdownView source={message.text} className="harness-md" />
 					)
 				)}
-				{dedupeToolsById(message.tools).map((tool) => (
-					<ToolCard
-						key={`${message.id}::${tool.id}`}
-						tool={tool}
-						onToggle={() => onToggleTool(message.id, tool.id)}
-					/>
-				))}
+				{dedupeToolsById(message.tools).map((tool) =>
+					tool.name === "websearch" ? (
+						<SearchCard
+							key={`${message.id}::${tool.id}`}
+							tool={tool}
+							onToggle={() => onToggleTool(message.id, tool.id)}
+						/>
+					) : (
+						<ToolCard
+							key={`${message.id}::${tool.id}`}
+							tool={tool}
+							onToggle={() => onToggleTool(message.id, tool.id)}
+						/>
+					),
+				)}
 				{showTyping && (
 					<div className="harness-typing">
 						<i />

@@ -15,7 +15,7 @@ import type { FridConfig } from "./config.ts";
 
 export type SettingValue = string | number | boolean | string[] | null;
 
-export type SettingType = "string" | "number" | "boolean" | "enum" | "stringList";
+export type SettingType = "string" | "number" | "boolean" | "enum" | "stringList" | "secret" | "url";
 
 export interface SettingSchema {
 	/** Stable key (used as the JSON property name). */
@@ -33,6 +33,10 @@ export interface SettingSchema {
 	/** For `number`: the inclusive range. */
 	min?: number;
 	max?: number;
+	/** Group/category for the settings UI (e.g. "API keys"). */
+	group?: string;
+	/** Optional URL the user can click to learn more / sign up. */
+	hintUrl?: string;
 }
 
 /** The default settings schema. New settings can be registered at runtime. */
@@ -95,12 +99,48 @@ const DEFAULT_SETTINGS: Record<string, SettingSchema> = {
 	},
 	compactAt: {
 		key: "compactAt",
-		label: "Compact at",
+		label: "Auto-compact at",
 		description: "Auto-compact the session when the transcript reaches roughly N tokens (0 = off).",
 		type: "number",
 		defaultValue: 0,
 		min: 0,
 		max: 1000000,
+	},
+	tavilyApiKey: {
+		key: "tavilyApiKey",
+		label: "Tavily API key",
+		description: "Required for the Tavily web-search provider (free tier at tavily.com). Leave empty to use the keyless DuckDuckGo / SearXNG providers.",
+		type: "secret",
+		defaultValue: null,
+		group: "API keys",
+		hintUrl: "https://tavily.com",
+	},
+	braveApiKey: {
+		key: "braveApiKey",
+		label: "Brave Search API key",
+		description: "Required for the Brave web-search provider (free tier: 2000 queries/month).",
+		type: "secret",
+		defaultValue: null,
+		group: "API keys",
+		hintUrl: "https://brave.com/search/api/",
+	},
+	searxngUrl: {
+		key: "searxngUrl",
+		label: "SearXNG instance URL",
+		description: "Public or self-hosted SearXNG instance used as a keyless metasearch backend. Format: https://your-instance.example",
+		type: "url",
+		defaultValue: null,
+		group: "API keys",
+		hintUrl: "https://searxng.org",
+	},
+	websearchRecency: {
+		key: "websearchRecency",
+		label: "Web search recency",
+		description: "Default recency filter for the websearch tool (any / day / week / month / year).",
+		type: "enum",
+		options: ["any", "day", "week", "month", "year"],
+		defaultValue: "any",
+		group: "API keys",
 	},
 };
 
@@ -217,6 +257,8 @@ export function validateValue(def: SettingSchema, value: SettingValue): boolean 
 	if (value === null) return true;
 	switch (def.type) {
 		case "string":
+		case "secret":
+		case "url":
 			return typeof value === "string";
 		case "number":
 			if (typeof value !== "number" || !Number.isFinite(value)) return false;

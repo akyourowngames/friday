@@ -1064,9 +1064,178 @@
 		font-size: 11px;
 		outline: none;
 	}
+	.harness-settings-group {
+		padding: 6px 0 14px;
+	}
+	.harness-settings-group-title {
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--subtle);
+		margin: 12px 0 4px;
+	}
+	.harness-settings-group-hint {
+		font-size: 11px;
+		color: var(--muted);
+		margin: 0 0 8px;
+		line-height: 1.5;
+	}
+	.harness-settings-group-hint code {
+		font: 11px/1 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		background: rgba(0, 0, 0, 0.18);
+		padding: 1px 5px;
+		border-radius: 3px;
+		color: var(--ink);
+	}
+	.light .harness-settings-group-hint code {
+		background: rgba(25, 28, 42, 0.08);
+	}
+	.harness-setting-control {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.harness-setting-input-wrap {
+		position: relative;
+		display: flex;
+		align-items: center;
+	}
+	.harness-setting-input-wrap input {
+		width: 220px;
+		padding-right: 30px;
+		font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		font-size: 11px;
+	}
+	.harness-setting-eye {
+		position: absolute;
+		right: 4px;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 24px;
+		height: 24px;
+		display: grid;
+		place-items: center;
+		background: transparent;
+		border: 0;
+		color: var(--muted);
+		border-radius: 5px;
+	}
+	.harness-setting-eye:hover {
+		color: var(--ink);
+		background: rgba(0, 0, 0, 0.18);
+	}
+	.harness-setting-hint {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		margin-top: 4px;
+		font-size: 11px;
+		color: var(--violet);
+		text-decoration: none;
+	}
+	.harness-setting-hint:hover {
+		text-decoration: underline;
+	}
 	.light .harness-setting-row input,
 	.light .harness-setting-row select {
 		background: rgba(255, 255, 255, 0.7);
+	}
+
+	/* Search result card (rendered in chat when websearch runs). */
+	.harness-search-card {
+		margin: 12px 0 6px;
+		border: 1px solid var(--line);
+		border-left: 2px solid var(--violet);
+		background: rgba(167, 139, 250, 0.06);
+		border-radius: 9px;
+		padding: 10px 14px;
+		max-width: 690px;
+	}
+	.harness-search-card-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		font-size: 10px;
+		color: var(--subtle);
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		margin-bottom: 6px;
+	}
+	.harness-search-card-query {
+		font-weight: 600;
+		color: var(--ink);
+		font-size: 12px;
+		letter-spacing: 0;
+		text-transform: none;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 60%;
+	}
+	.harness-search-card-summary {
+		font-size: 13px;
+		color: var(--ink);
+		line-height: 1.6;
+		margin: 0 0 8px;
+	}
+	.harness-search-card-list {
+		display: grid;
+		gap: 8px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.harness-search-card-item {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 6px 8px;
+		border-radius: 6px;
+		background: rgba(0, 0, 0, 0.16);
+	}
+	.light .harness-search-card-item {
+		background: rgba(25, 28, 42, 0.05);
+	}
+	.harness-search-card-title {
+		display: flex;
+		gap: 6px;
+		align-items: baseline;
+		font-size: 12px;
+		color: var(--ink);
+		text-decoration: none;
+		font-weight: 600;
+	}
+	.harness-search-card-title:hover {
+		color: var(--violet);
+	}
+	.harness-search-card-index {
+		color: var(--violet);
+		font-variant-numeric: tabular-nums;
+	}
+	.harness-search-card-url {
+		font: 10.5px/1.4 "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+		color: var(--subtle);
+		text-decoration: none;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.harness-search-card-url:hover {
+		color: var(--muted);
+		text-decoration: underline;
+	}
+	.harness-search-card-snippet {
+		font-size: 11.5px;
+		color: var(--muted);
+		line-height: 1.5;
+	}
+	.harness-search-card-foot {
+		margin-top: 8px;
+		font-size: 10px;
+		color: var(--subtle);
+		letter-spacing: 0.04em;
 	}
 	.harness-switch {
 		position: relative;
