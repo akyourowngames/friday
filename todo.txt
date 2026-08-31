@@ -1,10 +1,48 @@
-Ho gaya chacha, khul gaya hoga browser! 😄 (command thoda hang kiya but start ne file open kar di hogi).
 
-Agar nahi khuli toh ek kaam kar — ye command chal le:
+C:\Users\anime\Desktop>cd friday-ng
 
-start "" "C:\Users\anime\Desktop\friday-ng\web\driving-game.html"
-Ya directly file pe double-click maar de. Agar abhi bhi nahi khuli toh bata, aur check karta hoon ki file sahi jagah toh hai. Game khel aur bata kaisa laga! 🚗
+C:\Users\anime\Desktop\friday-ng>npm run web:dev
+npm notice run friday-ng@0.3.1 web:dev
+npm notice run npm --prefix web run dev
+npm notice run friday-ng-web@0.3.1 dev
+npm notice run next dev -p 4317
+   ▲ Next.js 15.5.24
+   - Local:        http://localhost:4317
+   - Network:      http://192.168.1.33:4317
+
+ ✓ Starting...
+ ✓ Ready in 4.6s
+ ○ Compiling / ...
+ ✓ Compiled / in 3.4s (763 modules)
+ GET / 200 in 6451ms
+ ○ Compiling /api/workspace/cwd ...
+ReferenceError: module is not defined
+    at file:///C:/Users/anime/Desktop/friday-ng/web/tailwind.config.js:2:1
+    at ModuleJobSync.runSync (node:internal/modules/esm/module_job:543:37)
+    at ModuleLoader.importSyncForRequire (node:internal/modules/esm/loader:350:47)
+    at loadESMFromCJS (node:internal/modules/cjs/loader:1673:24)
+    at Module._compile (node:internal/modules/cjs/loader:1836:5)
+    at Object..js (node:internal/modules/cjs/loader:1985:10)
+    at Module.load (node:internal/modules/cjs/loader:1577:32)
+    at Module._load (node:internal/modules/cjs/loader:1379:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.<anonymous> (node:internal/modules/cjs/loader:1600:12)
+    at mod.require (C:\Users\anime\Desktop\friday-ng\web\node_modules\next\dist\server\require-hook.js:68:28)
+    at require (node:internal/modules/helpers:153:16)
+    at C:\Users\anime\Desktop\friday-ng\web\node_modules\tailwindcss\lib\lib\load-config.js:51:20
+    at loadConfig (C:\Users\anime\Desktop\friday-ng\web\node_modules\tailwindcss\lib\lib\load-config.js:55:6)
+    at getTailwindConfig (C:\Users\anime\Desktop\friday-ng\web\node_modules\tailwindcss\lib\lib\setupTrackingContext.js:74:116)
+    at C:\Users\anime\Desktop\friday-ng\web\node_modules\tailwindcss\lib\lib\setupTrackingContext.js:103:92
+    at C:\Users\anime\Desktop\friday-ng\web\node_modules\tailwindcss\lib\processTailwindFeatures.js:46:11
+    at plugins (C:\Users\anime\Desktop\friday-ng\web\node_modules\tailwindcss\lib\plugin.js:38:69)
+    at LazyResult.runOnRoot (C:\Users\anime\Desktop\friday-ng\web\node_modules\next\node_modules\postcss\lib\lazy-result.js:329:16)
+    at LazyResult.runAsync (C:\Users\anime\Desktop\friday-ng\web\node_modules\next\node_modules\postcss\lib\lazy-result.js:258:26)
+    at LazyResult.async (C:\Users\anime\Desktop\friday-ng\web\node_modules\next\node_modules\postcss\lib\lazy-result.js:160:30)
+    at LazyResult.then (C:\Users\anime\Desktop\friday-ng\web\node_modules\next\node_modules\postcss\lib\lazy-result.js:404:17)
 
 
-hey this is response of the our harnesss so i want yu to like add in build cmd runner means i can click run cmd and o run icon it runs and one more things double clicking on the 
-cmd opens the cmd in the new cmd in the dir it is running respsectively
+C:\Users\anime\Desktop\friday-ng>
+
+
+
+

@@ -1,0 +1,14 @@
+npm notice run friday-ng-web@0.3.1 dev
+npm notice run next dev -p 4317
+   ▲ Next.js 15.5.24
+   - Local:        http://localhost:4317
+   - Network:      http://192.168.1.33:4317
+
+ ✓ Starting...
+ ✓ Ready in 3.9s
+ ○ Compiling /api/health ...
+ ✓ Compiled /api/health in 1965ms (297 modules)
+ GET /api/health 200 in 2356ms
+ ○ Compiling / ...
+ ✓ Compiled / in 4.5s (810 modules)
+ GET / 200 in 5515ms
