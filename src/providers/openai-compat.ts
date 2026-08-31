@@ -182,11 +182,22 @@ function openAICompatToStream(
 					for (const contentPart of delta.content) {
 						const text = typeof contentPart === "string" ? contentPart : (contentPart as any).text;
 						if (text) {
-							partialMessage = pushTextDelta(partialMessage, text);
+							// Guard against endpoints that send the FULL text so far
+							// in each chunk instead of just the new fragment. Appending
+							// those yields stretched, repeated output ("heeyyyyyyy").
+							// Detect a chunk that extends the accumulated text from
+							// position 0 and treat it as cumulative: replace, not append.
+							const lastTextBlock = partialMessage.content[partialMessage.content.length - 1];
+							const accumulated =
+								lastTextBlock && lastTextBlock.type === "text" ? lastTextBlock.text : "";
+							const isCumulative =
+								text.startsWith(accumulated) && text.length > accumulated.length;
+							const deltaText = isCumulative ? text.slice(accumulated.length) : text;
+							partialMessage = pushTextDelta(partialMessage, deltaText);
 							stream.push({
 								type: "text_delta",
 								contentIndex: 0,
-								delta: text,
+								delta: deltaText,
 								partial: partialMessage,
 							});
 						}

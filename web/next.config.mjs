@@ -2,6 +2,8 @@
 const nextConfig = {
 	output: "standalone",
 	reactStrictMode: true,
+	// node-pty is a native addon — keep it external to the server bundle.
+	serverExternalPackages: ["node-pty"],
 	// Allow the Next app to import directly from the parent friday-ng core
 	// (../src/*). The aliases are also declared in tsconfig.json for typecheck.
 	outputFileTracingRoot: process.cwd(),

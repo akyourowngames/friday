@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
+import { History, TerminalSquare } from "lucide-react";
 import type { ProviderInfo, SessionMeta, SettingSchema } from "@/lib/types";
 import { useChatSession } from "@/lib/use-chat";
 import { useSessions } from "@/lib/use-sessions";
@@ -14,8 +16,15 @@ import { QuickRunBar } from "@/components/chat/QuickRunBar";
 import { TerminalLauncher } from "@/components/chat/TerminalLauncher";
 import { SettingsModal } from "@/components/settings/SettingsModal";
 import { CommandPalette } from "@/components/palette/CommandPalette";
+import { TimeTravelPanel } from "@/components/chat/TimeTravelPanel";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
 import { Menu } from "lucide-react";
+
+// The terminal panel touches xterm.js and node-pty-backed SSE — client-only.
+const TerminalPanel = dynamic(
+	() => import("@/components/chat/TerminalPanel").then((mod) => mod.TerminalPanel),
+	{ ssr: false },
+);
 
 export interface ChatAppInitial {
 	provider: string;
@@ -35,6 +44,8 @@ export function ChatApp({ initial }: { initial: ChatAppInitial }) {
 	const [theme, setTheme] = useState<"dark" | "light">("dark");
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 	const [cwd, setCwd] = useState<string>("");
+	const [terminalOpen, setTerminalOpen] = useState(false);
+	const [timeTravelOpen, setTimeTravelOpen] = useState(false);
 
 	// Resolve the server's working directory once on mount so the Quick
 	// Run bar knows where to launch commands and the TerminalLauncher
@@ -146,7 +157,29 @@ export function ChatApp({ initial }: { initial: ChatAppInitial }) {
 					onToggleRail={() => setRailOpen((v) => !v)}
 					onOpenSettings={() => setSettingsOpen(true)}
 					themeToggle={<ThemeToggle theme={theme} onChange={setTheme} />}
-					extra={<TerminalLauncher />}
+					extra={
+						<>
+							<button
+								type="button"
+								className="harness-icon-button"
+								onClick={() => setTimeTravelOpen(true)}
+								title="Time travel — restore workspace checkpoints"
+								aria-label="Time travel"
+							>
+								<History size={17} />
+							</button>
+							<button
+								type="button"
+								className={`harness-icon-button ${terminalOpen ? "is-active" : ""}`}
+								onClick={() => setTerminalOpen((v) => !v)}
+								title="Toggle embedded terminal"
+								aria-label="Toggle terminal"
+							>
+								<TerminalSquare size={17} />
+							</button>
+							<TerminalLauncher />
+						</>
+					}
 				/>
 				<MessageList
 					messages={chat.messages}
@@ -154,6 +187,9 @@ export function ChatApp({ initial }: { initial: ChatAppInitial }) {
 					onToggleTool={chat.toggleTool}
 					onPickStarter={pickStarter}
 				/>
+				{terminalOpen && (
+					<TerminalPanel cwd={cwd} onClose={() => setTerminalOpen(false)} />
+				)}
 				<div className="harness-composer-wrap">
 					<ModelPicker
 						open={modelOpen}
@@ -198,8 +234,13 @@ export function ChatApp({ initial }: { initial: ChatAppInitial }) {
 						newSession: handleNewSession,
 						openSettings: () => setSettingsOpen(true),
 						toggleTheme: () => setTheme(theme === "dark" ? "light" : "dark"),
+						toggleTerminal: () => setTerminalOpen((v) => !v),
+						openTimeTravel: () => setTimeTravelOpen(true),
 					}}
 				/>
+			)}
+			{timeTravelOpen && (
+				<TimeTravelPanel sessionId={activeSessionId} onClose={() => setTimeTravelOpen(false)} />
 			)}
 		</main>
 	);

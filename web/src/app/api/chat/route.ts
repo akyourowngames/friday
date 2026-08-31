@@ -9,6 +9,13 @@ import { buildSystemPrompt } from "@/src/system-prompt";
 import { buildModel, defaultTools } from "@/server/route-helpers";
 import { createSseStream } from "@/server/sse-write";
 import { getAgent, registerAgent } from "@/server/agent-registry";
+import {
+	createCheckpoint,
+	discardCheckpoint,
+	finalizeCheckpoint,
+	type CheckpointManifest,
+} from "@/src/checkpoints.ts";
+import { isDangerousShellCommand } from "@/src/tools/shell";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,6 +69,7 @@ export async function POST(req: Request) {
 	// Reuse a live agent for this session, or construct a fresh one
 	let agent = getAgent(session.id);
 	if (!agent) {
+		const pendingCheckpoints = new Map<string, CheckpointManifest>();
 		const streamFn = await buildStreamFunction(providerId, {
 			model: modelId,
 			apiKey: config.providers[providerId]?.apiKey ?? "",
@@ -91,6 +99,63 @@ export async function POST(req: Request) {
 			toolExecution: "sequential",
 			maxTokens: Number(settings.get("maxTokens")) || undefined,
 			temperature: Number(settings.get("temperature")) >= 0 ? Number(settings.get("temperature")) : undefined,
+			// Time-travel safety net (mirrors the TUI): snapshot the workspace
+			// before any mutating tool call, then finalize the snapshot on
+			// success / discard it on error. If snapshotting fails we let the
+			// tool run anyway — the web UI has no blocking confirm dialog.
+			beforeToolCall: async ({ toolCall, args, context }) => {
+				const values = ((args ?? {}) as Record<string, unknown>);
+				if (toolCall.name === "bash" && isDangerousShellCommand(String(values.command ?? ""))) {
+					return { block: true, reason: "dangerous shell command denied" };
+				}
+				if (!["write", "edit", "multi_edit", "bash"].includes(toolCall.name)) return undefined;
+				const workspace =
+					toolCall.name === "bash"
+						? String(values.cwd ?? process.cwd())
+						: String(values.root ?? process.cwd());
+				const files =
+					toolCall.name === "multi_edit"
+						? (((values.edits as Array<{ path?: unknown }> | undefined) ?? []).map((edit) =>
+								String(edit.path ?? ""),
+							))
+						: toolCall.name === "bash"
+							? undefined
+							: [String(values.path ?? "")];
+				try {
+					const checkpoint: CheckpointManifest = await createCheckpoint({
+						sessionId: session.id,
+						workspace,
+						files,
+						workspaceSnapshot: toolCall.name === "bash",
+						exclude: [".friday-ng", ".commandcode", ".cache", ".next", ".turbo"],
+						maxFiles: 10_000,
+						maxBytes: 100 * 1024 * 1024,
+						toolCallId: toolCall.id,
+						toolName: toolCall.name,
+						transcript: context.messages.slice(0, -1),
+					});
+					pendingCheckpoints.set(toolCall.id, checkpoint);
+				} catch {
+					// No checkpoint — still allow the tool to run.
+				}
+				return undefined;
+			},
+			afterToolCall: async ({ toolCall, result, isError }) => {
+				const checkpoint = pendingCheckpoints.get(toolCall.id);
+				if (checkpoint) {
+					try {
+						if (isError || result.isError) {
+							await discardCheckpoint(checkpoint.sessionId, checkpoint.id);
+						} else {
+							await finalizeCheckpoint(checkpoint.sessionId, checkpoint.id);
+						}
+					} catch {
+						// best-effort bookkeeping
+					}
+					pendingCheckpoints.delete(toolCall.id);
+				}
+				return undefined;
+			},
 		});
 		registerAgent(session.id, agent);
 	}

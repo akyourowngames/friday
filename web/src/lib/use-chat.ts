@@ -247,7 +247,17 @@ export function reduceEvent(current: ChatMessage[], event: AgentEvent, assistant
 				next.push(target);
 			}
 			if (inner.type === "text_delta") {
-				target.text = (target.text ?? "") + inner.delta;
+				const current = target.text ?? "";
+				// Some OpenAI-compatible endpoints send the FULL text so far in
+				// each chunk instead of just the new part. Appending those
+				// produces the "heeyyyyyyy immmmmm" stretch glitch. If the
+				// incoming chunk extends the accumulated text from position 0,
+				// treat it as cumulative and REPLACE instead of append.
+				if (inner.delta.startsWith(current) && inner.delta.length > current.length) {
+					target.text = inner.delta;
+				} else {
+					target.text = current + inner.delta;
+				}
 			} else if (inner.type === "text_end") {
 				target.text = inner.content;
 			}

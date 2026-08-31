@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, Search, Settings2, Sun, Terminal as TerminalIcon } from "lucide-react";
+import { History, Plus, Search, Settings2, Sun, Terminal as TerminalIcon } from "lucide-react";
 import { revealInTerminal } from "@/lib/run-client";
 import { toast } from "sonner";
 
@@ -14,6 +14,8 @@ export function CommandPalette({
 		newSession: () => void;
 		openSettings: () => void;
 		toggleTheme: () => void;
+		toggleTerminal?: () => void;
+		openTimeTravel?: () => void;
 	};
 }) {
 	const [query, setQuery] = useState("");
@@ -39,6 +41,12 @@ export function CommandPalette({
 		{ label: "New session", icon: Plus, run: actions.newSession },
 		{ label: "Open settings", icon: Settings2, run: actions.openSettings },
 		{ label: "Open terminal", icon: TerminalIcon, run: openTerminal },
+		...(actions.toggleTerminal
+			? [{ label: "Toggle embedded terminal", icon: TerminalIcon, run: actions.toggleTerminal }]
+			: []),
+		...(actions.openTimeTravel
+			? [{ label: "Time travel (restore checkpoints)", icon: History, run: actions.openTimeTravel }]
+			: []),
 		{ label: "Toggle theme", icon: Sun, run: actions.toggleTheme },
 	];
 	const filtered = items.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()));
