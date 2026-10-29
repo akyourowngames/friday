@@ -33,6 +33,20 @@
 
 ---
 
+## 📸 Screenshots
+
+<p align="center">
+  <img src="desktop.png" alt="Ares desktop voice assistant" width="46%" />
+  <img src="desktop_check.png" alt="Ares desktop control panel" width="46%" />
+</p>
+<p align="center"><sub>Left: desktop voice assistant · Right: desktop control panel with tool activity</sub></p>
+
+**Install:** `git clone https://github.com/akyourowngames/friday.git && cd friday && pip install -e . && python -m ares` — first run opens `/setup` (full steps, including Windows PowerShell, in [Quick Start](#-quick-start) below).
+
+> 💡 Want richer visuals? Record a short GIF of "Hey Jarvis" in action and open a PR — it makes the project far more compelling to newcomers.
+
+---
+
 ## 🚀 Why Ares?
 
 > **One tool-using agent. Six surfaces. Your data stays yours.**
@@ -59,18 +73,6 @@ Ares is a **local-first** personal AI assistant that unifies memory, tools, skil
 | Built-in tools + reusable skills + stdio/SSE/HTTP MCP. | Allowlisted Telegram bot, Android bridge, Twilio voice gateway. | End-to-end report generation: retrieval, summarization, BI charts, PDF. |
 | 👁️ **Local vision** | 🖱️ **Semantic computer control** | 🎛️ **Model selection** |
 | OCR, object/scene detection, comparisons, verified watches (opt-in). | UI element recognition + Windows MCP for reliable desktop automation. | Streamlined provider/model switching with automatic endpoint alignment. |
-
----
-
-## 📸 Screenshots
-
-<p align="center">
-  <img src="desktop.png" alt="Ares desktop voice assistant" width="46%" />
-  <img src="desktop_check.png" alt="Ares desktop control panel" width="46%" />
-</p>
-<p align="center"><sub>Left: desktop voice assistant · Right: desktop control panel with tool activity</sub></p>
-
-> 💡 Want richer visuals? Record a short GIF of "Hey Jarvis" in action and open a PR — it makes the project far more compelling to newcomers.
 
 ---
 
